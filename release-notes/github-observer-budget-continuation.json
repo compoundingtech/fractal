@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub repository observers retain completed reads when a local request budget cuts a poll short, resuming without sending the completed request prefix again. Partial facts remain private until the complete observation is ready.",
+  "replay": {"status": "none", "detail": "No claims are replayed or rewritten."},
+  "schema": {"status": "none", "detail": "No table or wire schema change. The existing private plugin cursor may contain an unfinished poll journal, limited to 1 MiB and two hours."},
+  "rules": {"status": "none", "detail": "Admission limits and scheduling ownership are unchanged."},
+  "compatibility": {"status": "none", "detail": "No new observer state. Local refusal remains an error, not a successful observation. Other errors discard staged progress and retain the last completed cursor. Oversized journals keep the previous cursor; expired journals restart from the last completed cursor."},
+  "downtime": {"status": "none", "detail": "No startup work."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "An older build ignores the journal fields and refills from GitHub. Rollback can repeat requests but does not publish staged facts."}
+}

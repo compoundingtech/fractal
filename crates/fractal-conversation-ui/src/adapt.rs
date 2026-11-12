@@ -228,9 +228,16 @@ fn conversation_with_output_mode(
                     message.message_id
                 ));
             }
-            let from = message.from.as_deref().unwrap_or_default();
-            let body = if from == "daemon/runtime" {
-                // Step-ready pings are graph events, not conversation.
+            // The writer: `author` (conversation-message-participants.v1) before the legacy
+            // `from`. A daemon's wake has author `daemon/runtime` and never a `from`; a read
+            // without participants drops both, leaving a recipient and no writer: Fractal too.
+            let from = message
+                .author
+                .as_deref()
+                .or(message.from.as_deref())
+                .unwrap_or_default();
+            let body = if from.starts_with("daemon/") || (from.is_empty() && message.to.is_some()) {
+                // Step-ready pings and restart handoffs are graph events, not conversation.
                 Body::Event(
                     message
                         .title
@@ -1228,6 +1235,7 @@ fn ping_id(line: &str) -> Option<&str> {
 /// person, and that a message was dictated. The earlier sentence stays recognized for agents that
 /// still carry it in their history.
 const ST_DELIVERY_NOTES: &[&str] = &[
+    "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
     "Answer the person in this conversation; people have no inbox, so do not reply with st.",
     "The person reads replies in st, not in the agent's session.",
     "(dictated by voice; it may contain transcription mistakes)",

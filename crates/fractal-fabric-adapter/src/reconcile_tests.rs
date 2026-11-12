@@ -4,6 +4,65 @@ use tokio::net::UnixListener;
 const FLEET: &str = "test-fleet";
 const OWNER: &str = "st/fleet/test-fleet";
 
+#[tokio::test]
+async fn renamed_owner_revocation_and_residuals_never_grant_pty() {
+    let root = tempfile::tempdir().unwrap();
+    let renamed = "fractal/fleet/test-fleet";
+    let removed = vec![peer("gone", OWNER, &["st3-client-v0"]), peer("gone", renamed, &["fractal-client-v0"])];
+    let (socket, server) = serve(root.path(), vec![
+            Some(list(removed, 7)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![peer("gone", renamed, &["fractal-client-v0"])], 8)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![peer("gone", "static", &["fractal-client-v0"])], 9)),
+    ]);
+    assert_eq!(withdraw(root.path(), &socket, FLEET).await.unwrap().state, "residual_access");
+    let requests = server.await.unwrap();
+    for (index, owner) in [(1, OWNER), (3, renamed)] {
+        assert_eq!(requests[index]["request"]["owner"], owner);
+        assert_eq!(
+            requests[index]["request"]["operations"],
+            json!([{"op":"remove_peer","node_id":"gone"}])
+        );
+    }
+}
+
+#[test]
+fn renamed_owner_reduction_and_recovered_batches_are_reader_only() {
+    let renamed = "fractal/fleet/test-fleet";
+    let services = ["fractal/fleet/test-fleet", "fractal-client-v0", "fractal/pty/test-fleet"];
+    let records = vec![peer("peer-node", renamed, &services), peer("old-node", renamed, &["st3-client-v0"])];
+    let snapshot: Snapshot = serde_json::from_value(list(records, 7)["reply"]["snapshot"].clone()).unwrap();
+    let desired = DesiredPolicy::from([(
+        "peer-node".into(),
+        BTreeSet::from(["st3/fleet/test-fleet".into()]),
+    )]);
+    let retained = retained_policy(&snapshot, renamed, &desired, &Expiries::new());
+    let operations = plan(&snapshot, renamed, &retained, &Expiries::new());
+    assert_eq!(
+        operations[0],
+        json!({"op":"remove_peer","node_id":"old-node"})
+    );
+    assert_eq!(operations[1], json!({"op":"remove_peer","node_id":"peer-node"}));
+    let mut pending = uncertain_add();
+    pending.request["owner"] = json!(renamed);
+    pending.request["operations"][1]["grants"] = json!(["fractal/fleet/test-fleet"]);
+    assert!(!pending_matches_desired(&pending, &desired, &Expiries::new()));
+    pending.request["operations"][1]["grants"] = json!(["fractal/pty/test-fleet"]);
+    assert!(!pending_matches_desired(&pending, &desired, &Expiries::new()));
+}
+
+#[tokio::test]
+async fn renamed_pending_addition_is_observed_never_sent() {
+    let root = tempfile::tempdir().unwrap();
+    let mut pending = uncertain_add();
+    pending.request["owner"] = json!(format!("{RENAMED_OWNER_PREFIX}{FLEET}"));
+    let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
+    complete_pending(&socket, &pending, pending_matches_desired(&pending,
+        &DesiredPolicy::from([("peer-node".into(), grants(FLEET))]), &Expiries::new())).await.unwrap();
+    assert_eq!(server.await.unwrap()[0]["request"]["operation"], "cancellation");
+}
+
 fn member(name: &str, key: &str, node: &str, state: &str) -> MemberView {
     MemberView {
         name: name.into(),
@@ -106,6 +165,26 @@ fn signed_current_members_only_and_local_retirement_withdraws_everything() {
     );
     view.anchor = None;
     assert!(desired(&view, "own-key", FLEET, &BTreeSet::new()).is_err());
+}
+
+#[test]
+fn endpoint_protocol_accepts_both_names_only_for_this_fleet() {
+    for (protocol, accepted) in [
+        ("st3/fleet/test-fleet", true),
+        ("fractal/fleet/test-fleet", true),
+        ("st3/fleet/other-fleet", false),
+        ("fractal/fleet/other-fleet", false),
+        ("other/fleet/test-fleet", false),
+        ("fractal/pty/test-fleet", false),
+    ] {
+        let mut view = view();
+        view.members[1].endpoints[0]["protocol"] = json!(protocol);
+        let result = desired(&view, "own-key", FLEET, &BTreeSet::new());
+        assert_eq!(result.is_ok(), accepted, "{protocol}");
+        if accepted {
+            assert_eq!(result.unwrap(), BTreeSet::from(["peer-node".into()]));
+        }
+    }
 }
 
 #[test]
@@ -1095,4 +1174,52 @@ fn own_metadata_and_noncurrent_members_never_authorize_overlap_or_receipts() {
     let (expiries, receipts) = rotations(&view, "own-key", &mut policy, 1000).unwrap();
     assert!(expiries.is_empty());
     assert!(receipts.is_empty());
+}
+
+#[tokio::test]
+async fn rekey_recovery_under_both_owners_never_reauthorizes_renamed_records() {
+    let deadline = (now_ms() / 1000) as u64 + 300;
+    let renamed = "fractal/fleet/test-fleet";
+    for recovered_owner in [OWNER, renamed] {
+        let root = tempfile::tempdir().unwrap();
+        let mut pending = uncertain_add();
+        pending.request["owner"] = json!(recovered_owner);
+        pending.request["operations"] = json!([
+            {"op":"add_peer","node_id":"next-node"},
+            {"op":"set_grants","node_id":"next-node","grants":["st3-client-v0","st3/fleet/test-fleet"]},
+            {"op":"set_expiry","node_id":"next-node","expires_at":deadline}
+        ]);
+        save_journal(root.path(), &Journal {
+            pending: Some(pending),
+            ..Journal::default()
+        }).await.unwrap();
+        let old = peer("peer-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
+        let next = peer("next-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
+        let renamed_old = peer("peer-node", renamed, &["fractal-client-v0", "fractal/fleet/test-fleet"]);
+        let before = vec![old, expiring_peer("next-node", deadline), renamed_old.clone()];
+        let primary_committed = vec![expiring_peer("peer-node", deadline), next.clone(), renamed_old];
+        let committed = vec![expiring_peer("peer-node", deadline), next];
+        let (socket, server) = serve(root.path(), vec![
+            Some(mutation(vec![], "complete")),
+            Some(list(before, 7)),
+            Some(mutation(vec![], "complete")),
+            Some(list(primary_committed, 8)),
+            Some(mutation(vec![], "complete")),
+            Some(list(committed.clone(), 9)),
+            Some(list(committed, 9)),
+        ]);
+        let membership = rotation_view("committed", deadline);
+        assert_eq!(reconcile(root.path(), &socket, FLEET, "own-key", &membership, &BTreeSet::new())
+            .await.unwrap().state, "applied");
+        // A second poll represents restart after the journaled commit.
+        assert_eq!(reconcile(root.path(), &socket, FLEET, "own-key", &membership, &BTreeSet::new())
+            .await.unwrap().state, "applied");
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0]["request"]["operation"], "cancellation");
+        assert_eq!(requests[2]["request"]["owner"], OWNER);
+        assert_eq!(requests[4]["request"]["owner"], renamed);
+        assert_eq!(requests[4]["request"]["operations"],
+            json!([{"op":"remove_peer","node_id":"peer-node"}]));
+        assert!(load_journal(root.path()).await.unwrap().pending.is_none());
+    }
 }

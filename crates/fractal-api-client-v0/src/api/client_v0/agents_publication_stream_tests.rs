@@ -203,16 +203,16 @@ async fn revisioned_agents_cached_bytes_revalidate_grant_expiry_revocation_and_s
                 "scopes":scopes,
             })).unwrap(), evidence:Vec::new(), expected_subject:None, idempotency_key:None,
         };
-        let paired = state.store.append_claim(&pairing(u64::MAX, vec!["read.projections"])).unwrap();
+        let paired = state.store.append_client_operation_claim(&pairing(u64::MAX, vec!["read.projections"])).unwrap();
         let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
         publish(&state, 1, vec![row(0, "initial")]);
         let (mut socket, _server) = connect(state.clone(), session.clone()).await;
         subscribe(&mut socket).await;
         assert_eq!(frame(&mut socket).await["kind"], "snapshot");
         match denied {
-            "expired" => { state.store.append_claim(&pairing(1, vec!["read.projections"])).unwrap(); }
-            "ungranted" => { state.store.append_claim(&pairing(u64::MAX, Vec::new())).unwrap(); }
-            _ => { state.store.append_claim(&ClaimInput {
+            "expired" => { state.store.append_client_operation_claim(&pairing(1, vec!["read.projections"])).unwrap(); }
+            "ungranted" => { state.store.append_client_operation_claim(&pairing(u64::MAX, Vec::new())).unwrap(); }
+            _ => { state.store.append_client_operation_claim(&ClaimInput {
                 subject:"custom/client/stream-test".into(),kind:"custom.client.pairing-revoked".into(),
                 actor:Some("person/ada".into()),fields:Default::default(),evidence:Vec::new(),
                 expected_subject:None,idempotency_key:None,
@@ -292,11 +292,15 @@ async fn revisioned_agents_non_reader_times_out_releases_retired_roster_and_does
     held.release.notify_one();
     let (mut healthy, _healthy_server) = connect(state.clone(), ClientSession::local(None).unwrap()).await;
     subscribe(&mut healthy).await;
-    let snapshot = tokio::time::timeout(Duration::from_millis(200), frame(&mut healthy)).await
-        .expect("a blocked socket must not delay a healthy socket");
+    // Order, not wall time: a healthy socket the non-reader held back would get its snapshot only once
+    // the non-reader's send timeout had closed it and released the retired publication.
+    let snapshot = frame(&mut healthy).await;
     assert_eq!(snapshot["publication"]["revision"], current.metadata().revision);
-    assert!(retired.upgrade().is_some(), "the non-reader must still pin its blocked in-flight target");
-    tokio::time::timeout(COLLECTION_SEND_TIMEOUT + Duration::from_secs(1), async {
+    assert!(retired.upgrade().is_some(),
+        "a blocked socket must not delay a healthy socket: the non-reader must still pin its blocked in-flight target");
+    // This bound only catches a release that never comes: a loaded host can take well over a second
+    // past the send timeout to close the socket, and the elapsed check below proves it was the timeout.
+    tokio::time::timeout(COLLECTION_SEND_TIMEOUT * 4, async {
         while retired.upgrade().is_some() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

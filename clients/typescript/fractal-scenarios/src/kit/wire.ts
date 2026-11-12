@@ -20,6 +20,9 @@ export type WireDefinition =
   | 'Capabilities'
   | 'ErrorEnvelope'
   | 'SyncPeer'
+  | 'SloList'
+  | 'SloHistory'
+  | 'UsagePeriod'
 
 export interface WireValue {
   /** JSON pointer from the slice file root (`/state/...` or `/timeline/...`). */
@@ -75,6 +78,11 @@ export const wireValues = (slice: AnySlice): WireValue[] => {
       break
     case 'sync':
       if (slice.state.capabilities !== undefined) out.push({ pointer: '/state/capabilities', definition: 'Capabilities', value: slice.state.capabilities })
+      break
+    case 'objectives':
+      out.push({ pointer: '/state/list', definition: 'SloList', value: slice.state.list })
+      list('/state/histories', slice.state.histories, 'SloHistory')
+      out.push({ pointer: '/state/usage', definition: 'UsagePeriod', value: slice.state.usage })
       break
   }
   slice.timeline.forEach((event, index) => {

@@ -1,5 +1,5 @@
 import { FractalClient } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import { Context, DateTime, Duration, Effect, Layer, Option, Schema } from 'effect'
 
 import {
@@ -106,8 +106,8 @@ export const gatewayStSessionTraceFactsLayer = (client: FractalClient) => Layer.
           const period = yield* Effect.tryPromise({
             try: () => client.usagePeriod({ since_ms: until_ms - rangeMs[query.range], until_ms }),
             catch: () => ({ _tag: 'Unknown' as const, reason: 'failed' as const, detail: 'Session usage could not be read' }),
-          }).pipe(Effect.flatMap((envelope) => Schema.decodeUnknownEffect(Native.UsagePeriod)(envelope.value)),
-            Effect.catch(() => Effect.succeed(undefined)))
+          }).pipe(Effect.flatMap((envelope) => Schema.decodeEffect(Native.UsagePeriod)(envelope.value)),
+            Effect.orElseSucceed(() => undefined))
           if (period === undefined) {
             const failed: TraceUnknown = { _tag: 'Unknown', reason: 'failed', detail: 'Session usage is unavailable' }
             return { usage: failed, row: failed, selfOnlySpend: failed, freshness: failed }

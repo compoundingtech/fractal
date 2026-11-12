@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The legacy st and st3 executable names warn on stderr that they will be removed on 2026-11-16; use fractal instead",
+  "replay": {
+    "status": "none",
+    "detail": "No claims, projections or caches change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Command behavior and exit status are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Deprecation: Run `fractal` instead of `st`/`st3`; the aliases are removed on 2026-11-16. Alias invocations add one stderr warning, except shell-completion callbacks and explicitly suppressed internal launches; stdout is unchanged. Set FRACTAL_SUPPRESS_DEPRECATION=1 to preserve legacy stderr temporarily."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Prefer fractal. Scripts parsing legacy stderr can match diagnostic lines or set FRACTAL_SUPPRESS_DEPRECATION=1 until migrated."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback removes the deprecation warning; no state repair is needed."
+  }
+}

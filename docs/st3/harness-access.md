@@ -4,16 +4,28 @@ The install's `config.toml` selects `access_mode = "auto"` or `"bypass"`.
 Service installation writes `auto` when creating a new config. An existing config
 without this key means `bypass`; installing again preserves its bytes. Home Manager
 keeps its existing default and accepts `services.smalltalk.accessMode = "auto"`
-for a new installation. Restart the daemon after changing the mode; `st doctor`
+for a new installation. Restart the daemon after changing the mode; `fractal doctor`
 shows the mode that daemon actually started with.
 
 Auto is not a security boundary. It reduces accidents; it does not isolate seats.
 Codex hook trust is bypassed in both modes.
 
+## Seat temporary files
+
+Newly started seats receive `TMPDIR=/var/tmp` when the login-shell environment has
+no TMPDIR or an empty one. On Linux an inherited TMPDIR on tmpfs is replaced too,
+including a path through a symlink. This keeps large session scratch files off a
+RAM-backed `/tmp`. An inherited TMPDIR on disk is preserved, and a seat's explicit
+`env { TMPDIR "/chosen/scratch"; }` declaration takes precedence.
+
+Running seats keep their existing environment. This does not sweep session scratch
+from ended sessions or remove files earlier launches left in `/tmp`; existing host
+cleanup still governs those files.
+
 ## Choosing and changing the mode
 
 This section is written for a person's own agent to read and act on at their request. The
-`st` skill (`st skill`) carries the same steps.
+`st` skill (`fractal skill`) carries the same steps.
 
 - **What the modes mean.** Auto keeps the provider's permission checks on. Codex runs in the
   `st-managed` profile described below: it writes the seat's workspace and temporary
@@ -41,11 +53,11 @@ This section is written for a person's own agent to read and act on at their req
   bypass; running seats keep their permissions until restarted) and wait for the person's yes
   before editing `config.toml`.
 - **How to change it.** Set `access_mode = "auto"` or `access_mode = "bypass"` in that file
-  (add the line when it is missing, leave the other keys alone), run `st service restart`
+  (add the line when it is missing, leave the other keys alone), run `fractal service restart`
   (the daemon adopts live seats; see [upgrading Fractal](../site/guides/upgrading.md#install-and-restart-deliberately)),
-  and run `st doctor`: its `harness-access-mode` check names the mode the daemon started with.
+  and run `fractal doctor`: its `harness-access-mode` check names the mode the daemon started with.
   Seats already running keep the permissions they started with until
-  `st agents restart AGENT --as PERSON` restarts them.
+  `fractal agents restart AGENT --as PERSON` restarts them.
 - **What to tell the person.** Auto is not a security boundary: it reduces accidents and does
   not isolate seats. Bypass is not one either. Say so, then let the person choose.
 
@@ -54,11 +66,11 @@ This section is written for a person's own agent to read and act on at their req
 | bypass, including a missing key | `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust` | `--dangerously-skip-permissions` |
 | auto | Named `st-managed` profile extending `:workspace`, the seat's workspace root, networking enabled (also through `sandbox_workspace_write.network_access`), and the daemon socket explicitly allowed; live web search; `on-request` approval with `auto_review`; `--dangerously-bypass-hook-trust` | `--permission-mode auto` with the Read rules below |
 
-These are driver defaults for st-launched seats. They do not modify the provider's
+These are driver defaults for Fractal-launched seats. They do not modify the provider's
 account settings or change a manually launched provider. Authored permission options
 and Codex config profiles remain authoritative, including old bypass arguments.
 The daemon supplies the resolved mode through `ST_ACCESS_MODE`, including `bypass`
-for an existing config without the key. Hand-run `st driver` commands without this
+for an existing config without the key. Hand-run `fractal driver` commands without this
 environment value preserve their provider arguments; they can set it explicitly
 to use the install policy.
 New seat and planner declarations omit permission arguments. An automatically resumed
@@ -110,7 +122,7 @@ It is off by default, applies only to auto-mode Codex seats (Claude's classifier
 unaffected), and an unknown permission name fails the launch. It sets `auto_review.extra_policy` to a text
 that says, for these actions only, the operator is the user: committing in the workspace, pushing the
 branch the seat created for its assigned step to the workspace's own `origin`, and opening or updating that
-branch's pull request with `gh`; a st-delivered mission step counts as that authorization for exactly
+branch's pull request with `gh`; a Fractal-delivered mission step counts as that authorization for exactly
 those actions and nothing else. It names what stays unauthorized: the default branch, another seat's
 branch, deleting remote branches, merging or closing pull requests, and any other remote or repository.
 With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
@@ -160,6 +172,33 @@ branch checked out for review, must not be a seat workspace; the same goes for a
 (`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
 visible after the fact.
 
+The driver resolves `claude` once, on the seat's own PATH, and uses that path both for the plugin check
+(`claude plugin marketplace list`, `claude plugin list`) and to launch Claude, so the two cannot mean
+different Claudes. When the approved plugin cannot be used, the seat still starts on Claude's development
+channel, whose consent Fractal accepts; the check's error is kept in the attachment diagnostic's cause
+(below) rather than only printed on a screen Claude repaints.
+
+A Claude seat's channel is judged from Claude's own start, not the driver's. On a loaded host the driver's
+preparation (the plugin check and the workspace's admission) took up to half a minute and Claude about
+another half minute to bring its channel server up. Until Claude's first native hook (its SessionStart)
+the seat is `starting`; a Claude that has not reached it within 5 minutes of the driver's start is
+reported `stalled`. After SessionStart, the channel has 60 seconds to initialize before the seat is
+`blocked` (`ST3_CLAUDE_ATTACH_WINDOW_MS` and `ST3_CLAUDE_START_BOUND_MS` can only shorten these). Both
+publish `claude-channel-unattached`; every member folds a status other than `starting` to blocked. The
+reason ends with the cause as JSON after ` cause=`: its kind (`channel-not-initialized` or
+`claude-not-started`), the route the driver chose (`approved-plugin`, `plugin-development-consent`,
+`inline-development`), the plugin check's error and time, whether the workspace declares its own project
+server named `st`, and when the driver started, launched Claude and saw SessionStart.
+
+Automatic channel recovery restarts a blocked seat and parks it after 3 attempts within 6 hours. Only a
+new channel failure spends that budget. A `stalled` seat, or one blocked again for the cause the last
+charged attempt named (the same kind, route, plugin error and project server, whatever the times), is
+restarted without charging it, on a long backoff of 5 minutes that doubles to at most 30. After 3 such
+restarts in a row for one cause, an operational fault names the seat and the cause, so it is seen; it
+clears when the channel attaches.
+An explicit restart of the seat starts a new budget. The incarnation it replaces is not charged to
+that budget while the restart is in flight; if the restart fails and leaves it running, it is.
+
 A Claude seat in auto mode also gets Read rules in its settings, merged with any authored settings. Auto
 mode's classifier treats a read in another repository as scope escalation and asks a person, which stalls
 an unattended seat on "Read outside the working directories" (a release builder reading a sibling worktree
@@ -177,8 +216,9 @@ Managed Claude runs with `DISABLE_AUTOUPDATER=1`; pi and omp already disable the
 startup update checks. When a recognized update menu still appears, the daemon
 records a `harness.diagnostic` with code `provider-update-available`, status
 `available`, provider, incarnation, and the observed notice. Its evidence points
-to the retained startup-prompt diagnostic. It remains after the prompt is resolved
-and can be read through the seat's trace. Operations owns provider upgrades.
+to the retained startup-prompt diagnostic. It is an observability code: it stays in
+the local observation log of the seat's host, after the prompt is resolved, and
+goes to OpenTelemetry when a collector is configured. Operations owns provider upgrades.
 
 Skipping a Codex update requires the complete recognized menu,
 a fresh screen and the same incarnation. Failed input, changed screens and a menu

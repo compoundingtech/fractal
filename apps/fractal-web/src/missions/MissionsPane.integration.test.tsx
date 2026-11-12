@@ -3,21 +3,24 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 import { DateTime, Option } from 'effect'
+import type { MissionEta } from '@fractal/ui/assistant-ui/shell'
 
-const data = vi.hoisted(() => ({ missions: { _tag: 'Waiting' } as unknown, agents: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, attention: { _tag: 'Observed', value: [], freshness: 'live' } as unknown }))
+const data = vi.hoisted(() => ({ missions: { _tag: 'Waiting' } as unknown, agents: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, attention: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, missionsDecode: { undecodable: [], decodeStale: false } as unknown }))
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'test-animation', props: () => ({}) }))
 vi.mock('@effect/atom-react', () => ({ useAtomValue: (atom: unknown) => atom }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({ missions: data.missions, agents: data.agents, attention: data.attention }),
+  useMissionsDecode: () => data.missionsDecode,
   useNow: () => Date.parse('2026-10-14T12:00:00Z'),
 }))
 
 import { MissionsPane } from './MissionsPane.tsx'
+import { credentialExpiredMessage, unavailable } from '../data/source.ts'
 
 const at = DateTime.makeUnsafe('2026-10-14T11:00:00Z')
 const mission = (id: string, title: string, state: string, steps: unknown[], fields: Record<string, unknown> = {}) => ({
   id, kind: 'mission', title, state, runs: [`${id}/run`], updated_at: at,
-  run_details: [{ id: `${id}/run`, status: state === 'completed' ? 'completed' : 'running', steps: Option.some(steps), outcome: Option.none() }],
+  run_details: [{ id: `${id}/run`, status: state === 'completed' ? 'completed' : 'running', steps: Option.some(steps), outcome: Option.none(), completed_at: Option.none(), eta: Option.none<MissionEta>() }],
   ...fields,
 })
 const step = (path: string, state: string, claimant?: string) => ({
@@ -52,6 +55,53 @@ it('lists missions by word with who must act, folds away Fractal\'s own, and ope
   expect(detail.textContent).toContain('Do parse')
   await act(async () => [...detail.querySelectorAll('button')].find((each) => each.textContent === 'builder')!.click())
   expect(onOpenAgent).toHaveBeenCalledWith('agent/example/builder')
+  const eta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000,
+    basis: { method: 'critical-path' as const, samples: 12 }, as_of: Date.parse('2026-10-14T11:58:00Z') }
+  const served = mission('mission/example/eta', 'Estimated mission', 'running', [])
+  served.run_details[0]!.eta = Option.some(eta)
+  data.missions = { _tag: 'Observed', freshness: 'live', value: [served] }
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('~12–18 min left')
+  served.run_details[0]!.eta = Option.some({ ...eta, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method: 'critical-path', samples: 0 } })
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('Finishing')
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('No remaining steps')
+  expect(container.querySelector('[data-mission-eta]')?.textContent).not.toContain('0 retained samples')
+  served.run_details[0]!.status = 'completed'
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')).toBeNull()
+  data.missions = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+  await act(async () => root.render(<MissionsPane />))
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+  expect(container.querySelector('[role="alert"]')).toBeNull()
+  expect(container.textContent).not.toMatch(/private diagnostic|Retry/)
+  act(() => root.unmount())
+  container.remove()
+})
+
+it('heads observed missions with one notice counting rejected rows, never degraded ones, naming them only under Details', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.body.appendChild(document.createElement('div')), root = createRoot(container)
+  data.missionsDecode = { decodeStale: false, undecodable: [
+    { _tag: 'Rejected', id: 'mission/example/broken', path: 'run_details', reason: 'Expected array' },
+    { _tag: 'Rejected', path: 'id', reason: 'Expected string' },
+    { _tag: 'Degraded', id: 'mission/example/build', path: 'run_details.eta', reason: 'Unrecognized leaf value' },
+  ] }
+  data.missions = { _tag: 'Waiting' }
+  await act(async () => root.render(<MissionsPane />))
+  expect(container.querySelector('[data-wf-missions-decode]')).toBeNull()
+  data.missions = { _tag: 'Observed', freshness: 'live', value: [mission('mission/example/build', 'Build the site', 'running', [])] }
+  await act(async () => root.render(<MissionsPane />))
+  const notice = container.querySelector<HTMLElement>('header [data-wf-missions-decode="partial"]')!
+  const status = notice.querySelector('[role="status"]')!.textContent
+  expect(status).toBe('2 missions could not be shown · their data does not match the expected format')
+  expect(status).not.toContain('mission/example/broken')
+  await act(async () => [...notice.querySelectorAll('button')].find((each) => each.textContent === 'Details')!.click())
+  const list = notice.querySelector('[aria-label="Missions that could not be shown"]')!
+  expect([...list.querySelectorAll('[data-wf-decode-path]')].map((row) => row.getAttribute('data-wf-decode-path'))).toEqual(['run_details', 'id'])
+  expect(list.textContent).not.toContain('mission/example/build')
+  expect(container.textContent).toContain('Build the site')
+  data.missionsDecode = { undecodable: [], decodeStale: false }
   act(() => root.unmount())
   container.remove()
 })

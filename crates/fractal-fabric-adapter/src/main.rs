@@ -82,11 +82,105 @@ fn home() -> Result<PathBuf> {
     ))
 }
 fn default_st_socket() -> Result<PathBuf> {
-    Ok(PathBuf::from(
+    let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR")
             .context("XDG_RUNTIME_DIR is unset; pass --st-socket")?,
-    )
-    .join("st3.sock"))
+    );
+    Ok(default_st_socket_in(&runtime))
+}
+
+fn default_st_socket_in(runtime: &Path) -> PathBuf {
+    let primary = runtime.join("fractal.sock");
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+    let legacy = runtime.join("st3.sock");
+    if !unix_socket_answers(&primary) && unix_socket_answers(&legacy) {
+        return legacy;
+    }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    primary
+}
+
+fn unix_socket_answers(socket: &Path) -> bool {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if std::os::unix::net::SocketAddr::from_pathname(socket).is_err() {
+        return false;
+    }
+    // Discovery runs before async transport deadlines: a full backlog must never block it.
+    #[cfg(target_os = "linux")]
+    let flags = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::SOCK_STREAM;
+    // SAFETY: socket returns a new descriptor, owned here until every return path drops it.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, flags, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: fd is a valid, uniquely owned descriptor from socket.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: these commands set flags on our valid descriptor without pointer arguments.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            return false;
+        }
+    }
+    // SAFETY: an all-zero sockaddr_un is valid to initialize before setting its fields.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket.as_os_str().as_bytes();
+    for (destination, source) in address.sun_path.iter_mut().zip(path) {
+        *destination = *source as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = length as u8;
+    }
+    // SAFETY: address contains a validated, NUL-terminated path and length fits sockaddr_un.
+    let result = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            std::ptr::from_ref(&address).cast(),
+            length as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        return true;
+    }
+    // macOS also refuses full backlogs: both aliases serve one daemon, so refused aliases keep the primary.
+    let error = std::io::Error::last_os_error().raw_os_error();
+    error == Some(libc::EAGAIN)
+        || error == Some(libc::EWOULDBLOCK)
+        || error == Some(libc::EINPROGRESS)
+}
+
+fn default_state_dir(home: &Path) -> Result<PathBuf> {
+    let legacy = home.join(".local/state/st-fabric-adapter");
+    let renamed = home.join(".local/state/fractal-fabric-adapter");
+    // Retain the existing authority; never combine two independently populated homes.
+    let populated = |path: &Path| -> Result<bool> {
+        match std::fs::read_dir(path) {
+            Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let legacy_populated = populated(&legacy)?;
+    let renamed_populated = populated(&renamed)?;
+    ensure!(
+        !(legacy_populated && renamed_populated),
+        "conflicting adapter state in {} and {}; pass --state-dir explicitly",
+        legacy.display(), renamed.display()
+    );
+    Ok(if renamed_populated || (!legacy.try_exists()? && renamed.try_exists()?) {
+        renamed
+    } else {
+        legacy
+    })
 }
 
 /// Durable before any external mutation, including ownership discovery on first use.
@@ -182,9 +276,11 @@ async fn poll(
         );
         bytes.extend_from_slice(&chunk);
     }
-    let mut snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
-        "read st leave-state contract; upgrade st to a version supporting local adapters",
-    )?;
+    let mut snapshot = serde_json::from_slice::<smallclaims::sync::PeerResponse<LeaveSnapshot>>(&bytes)
+        .context(
+            "read st leave-state contract; upgrade st to a version supporting local adapters",
+        )?
+        .value;
     ensure!(
         snapshot.persistence_error.is_none(),
         "st leave state is not durable: {}",
@@ -267,7 +363,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let state = match args.state_dir {
         Some(path) => path,
-        None => home()?.join(".local/state/st-fabric-adapter"),
+        None => default_state_dir(&home()?)?,
     };
     if args.status {
         let status: Status = serde_json::from_slice(
@@ -291,6 +387,10 @@ async fn main() -> Result<()> {
         None => default_st_socket()?,
     };
     let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-st3-client"),
+            reqwest::header::HeaderValue::from_static(concat!("fractal-fabric-adapter ", env!("CARGO_PKG_VERSION"))),
+        )]))
         .no_proxy()
         .unix_socket(st_socket)
         .timeout(Duration::from_secs(10))
@@ -337,6 +437,154 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_discovery_never_blocks_on_a_full_backlog_and_keeps_refused_primary() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fractal.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let legacy = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&legacy).unwrap());
+        // SAFETY: listener owns a valid listening socket; reduce its queue to the minimum.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        // SAFETY: zero initialization is valid before populating the Unix address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = socket.as_os_str().as_bytes();
+        assert!(std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok());
+        for (destination, source) in address.sun_path.iter_mut().zip(path) {
+            *destination = *source as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        let mut clients = Vec::new();
+        let mut backlog_error = None;
+        for _ in 0..1024 {
+            // SAFETY: socket creates a descriptor that is immediately given a unique owner.
+            let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0);
+            // SAFETY: fd is valid and has no other owner.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            // SAFETY: set nonblocking mode before connecting, even when the queue is full.
+            assert_eq!(
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+                0
+            );
+            // SAFETY: address and length describe the validated socket path.
+            let result = unsafe {
+                libc::connect(
+                    fd.as_raw_fd(),
+                    std::ptr::from_ref(&address).cast(),
+                    length as libc::socklen_t,
+                )
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            clients.push(fd);
+            if result < 0 {
+                assert!(
+                    error == Some(libc::EAGAIN)
+                        || error == Some(libc::EWOULDBLOCK)
+                        || error == Some(libc::EINPROGRESS)
+                        || (cfg!(target_os = "macos") && error == Some(libc::ECONNREFUSED)),
+                    "{error:?}"
+                );
+                backlog_error = error;
+                break;
+            }
+        }
+        assert!(
+            backlog_error.is_some(),
+            "listener backlog did not fill after 1024 nonblocking connects"
+        );
+        let start = Instant::now();
+        assert_eq!(
+            unix_socket_answers(&socket),
+            backlog_error != Some(libc::ECONNREFUSED)
+        );
+        assert_eq!(default_st_socket_in(root.path()), socket);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(clients);
+        drop(listener);
+        assert!(socket.exists());
+        assert!(!unix_socket_answers(&socket));
+        assert!(!unix_socket_answers(&legacy));
+        assert_eq!(default_st_socket_in(root.path()), socket);
+    }
+
+    #[test]
+    fn socket_discovery_prefers_primary_and_falls_back_to_live_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("fractal.sock");
+        let legacy = root.path().join("st3.sock");
+        assert_eq!(default_st_socket_in(root.path()), primary);
+        let _legacy = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        assert_eq!(default_st_socket_in(root.path()), legacy);
+        let _primary = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+        assert_eq!(default_st_socket_in(root.path()), primary);
+    }
+
+    #[test]
+    fn socket_probe_rejects_unaddressable_paths_without_panicking() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let long = PathBuf::from("x".repeat(256));
+        let nul = Path::new(std::ffi::OsStr::from_bytes(b"invalid\0socket"));
+        assert!(!unix_socket_answers(&long));
+        assert!(!unix_socket_answers(nul));
+        assert_eq!(default_st_socket_in(&long), long.join("fractal.sock"));
+    }
+
+    #[test]
+    fn state_home_reads_both_names_and_refuses_conflicting_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join(".local/state/st-fabric-adapter");
+        let renamed = root.path().join(".local/state/fractal-fabric-adapter");
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+        std::fs::create_dir_all(&renamed).unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), renamed);
+        for path in [&legacy, &renamed] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+        std::fs::write(renamed.join("owners.json"), b"[\"fleet\"]").unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), renamed);
+        std::fs::write(legacy.join("owners.json"), b"[\"fleet\"]").unwrap();
+        assert!(default_state_dir(root.path()).is_err());
+        std::fs::remove_file(renamed.join("owners.json")).unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+    }
+
+    pub(crate) fn envelope(value: serde_json::Value) -> serde_json::Value {
+        serde_json::to_value(smallclaims::sync::PeerResponse::new("fixture", 127, value)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_leave_state_envelope_is_idle() {
+        let body = serde_json::from_str(
+            r#"{"api_version":"st3.v1","request_id":"…","snapshot_host":"dev4","store_index":127,"value":{"fleet_id":null,"own_member_key":null,"membership":{"anchor":null,"members":[],"legacy_removed":[]},"members":[],"persistence_error":null}}"#,
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("st.sock");
+        let server = local_api(&socket, "200 OK", body).await;
+        let client = reqwest::Client::builder()
+            .unix_socket(socket)
+            .build()
+            .unwrap();
+        let (fleet, status) = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
+            .await
+            .unwrap();
+        assert!(fleet.is_none());
+        assert_eq!(status.state, "idle");
+        server.await.unwrap();
+    }
     #[test]
     fn carrier_retention_is_bounded_and_confirmation_specific() {
         let mut snapshot = LeaveSnapshot {
@@ -403,26 +651,34 @@ mod tests {
 
     #[tokio::test]
     async fn failed_snapshot_never_withdraws_known_owner() {
-        let tmp = tempfile::tempdir().unwrap();
-        let socket = tmp.path().join("st.sock");
-        let known = BTreeSet::from(["fleet-before".to_owned()]);
-        save(&tmp.path().join("owners.json"), &known).unwrap();
-        let server = local_api(
-            &socket,
-            "503 Service Unavailable",
-            serde_json::json!({"error":"worker unavailable"}),
-        )
-        .await;
-        let client = reqwest::Client::builder()
-            .unix_socket(socket)
-            .build()
-            .unwrap();
-        let error = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("503"));
-        assert_eq!(owners(&tmp.path().join("owners.json")).unwrap(), known);
-        server.await.unwrap();
+        for (status, body, expected) in [
+            (
+                "503 Service Unavailable",
+                serde_json::json!({"error":"worker unavailable"}),
+                "503",
+            ),
+            (
+                "200 OK",
+                envelope(serde_json::json!({"fleet_id":null})),
+                "read st leave-state contract",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let socket = tmp.path().join("st.sock");
+            let known = BTreeSet::from(["fleet-before".to_owned()]);
+            save(&tmp.path().join("owners.json"), &known).unwrap();
+            let server = local_api(&socket, status, body).await;
+            let client = reqwest::Client::builder()
+                .unix_socket(socket)
+                .build()
+                .unwrap();
+            let error = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected));
+            assert_eq!(owners(&tmp.path().join("owners.json")).unwrap(), known);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -432,10 +688,10 @@ mod tests {
         let server = local_api(
             &socket,
             "200 OK",
-            serde_json::json!({
+            envelope(serde_json::json!({
                 "fleet_id":null, "own_member_key":null, "membership":FleetView::default(),
                 "members":[], "persistence_error":null
-            }),
+            })),
         )
         .await;
         let client = reqwest::Client::builder()

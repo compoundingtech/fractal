@@ -10,11 +10,12 @@ use super::*;
 pub(super) struct Native {
     client: Client,
     node: String,
+    launchd_domain: Option<String>,
 }
 
 impl Native {
     pub fn new(endpoint: Endpoint, node: String) -> Self {
-        Self { client: Client::new(endpoint), node }
+        Self { client: Client::new(endpoint), node, launchd_domain: None }
     }
 
     fn output(program: &str, arguments: &[&str]) -> Result<Output> {
@@ -70,14 +71,14 @@ impl Native {
     }
 
     #[cfg(target_os = "macos")]
-    fn domain() -> String { format!("gui/{}", unsafe { libc::getuid() }) }
+    fn domain(&self) -> Result<&str> { self.launchd_domain.as_deref().context("launchd domain has not been bound") }
 
     #[cfg(target_os = "macos")]
-    fn launchd(name: &str, base: &Path) -> Result<Unit> {
-        let target = format!("{}/{name}", Self::domain());
+    fn launchd(&self, name: &str, base: &Path) -> Result<Unit> {
+        let target = format!("{}/{name}", self.domain()?);
         let output = Self::output("launchctl", &["print", &target])?;
         ensure!(output.status.success() || output.status.code() == Some(113), "cannot inspect {target}: {}", String::from_utf8_lossy(&output.stderr));
-        let disabled = Self::output("launchctl", &["print-disabled", &Self::domain()])?;
+        let disabled = Self::output("launchctl", &["print-disabled", self.domain()?])?;
         ensure!(disabled.status.success(), "cannot inspect launchd disabled state");
         let disabled = String::from_utf8_lossy(&disabled.stdout).lines().find_map(|line| {
             let (key, value) = line.trim().split_once(" => ")?;
@@ -101,6 +102,17 @@ fn linux_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
         &["st3.service", "smalltalk.service"],
         &[(&["st3-replication.service", "smalltalk-replication.service"], "fractal-replication.service"), (&["smalltalk-apply.service"], "fractal-apply.service")],
         "fractal.service",
+        probe,
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
+    inspect_services(
+        &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
+        &[(&["com.compoundingtech.st3.replication", "org.nix-community.home.smalltalk-replication"], "com.compoundingtech.fractal.replication"),
+            (&["org.nix-community.home.smalltalk-apply"], "com.compoundingtech.fractal-apply")],
+        "com.compoundingtech.fractal",
         probe,
     )
 }
@@ -141,6 +153,16 @@ fn inspect_services(
 
 impl Manager for Native {
     fn kind(&self) -> &'static str { if cfg!(target_os = "linux") { "systemd-user" } else { "launchd-user" } }
+    fn domain(&self) -> Option<&str> { self.launchd_domain.as_deref() }
+    fn bind_domain(&mut self, recorded: Option<&str>, recovery: bool) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        { self.launchd_domain = Some(super::launchd::resolve(unsafe { libc::getuid() }, recorded, recovery, |domain| {
+            super::launchd::probe(domain, Self::output("launchctl", &["print", domain])?)
+        })?); }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (recorded, recovery);
+        Ok(())
+    }
 
     fn inspect(&mut self) -> Result<Services> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME not set")?);
@@ -152,12 +174,7 @@ impl Manager for Native {
         #[cfg(target_os = "macos")]
         {
             let base = home.join("Library/LaunchAgents");
-            inspect_services(
-                &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
-                &[(&["com.compoundingtech.st3.replication"], "com.compoundingtech.fractal.replication"), (&["org.nix-community.home.smalltalk-apply"], "com.compoundingtech.fractal-apply")],
-                "com.compoundingtech.fractal",
-                |name| Self::launchd(name, &base),
-            )
+            macos_services(|name| self.launchd(name, &base))
         }
     }
 
@@ -172,7 +189,7 @@ impl Manager for Native {
         }
         #[cfg(target_os = "macos")]
         {
-            let target = format!("{}/{}", Self::domain(), unit.name);
+            let target = format!("{}/{}", self.domain()?, unit.name);
             let output = Self::output("launchctl", &["bootout", &target])?;
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
@@ -192,11 +209,11 @@ impl Manager for Native {
         #[cfg(target_os = "macos")]
         {
             self.enable(unit, true)?;
-            let target = format!("{}/{}", Self::domain(), unit.name);
+            let target = format!("{}/{}", self.domain()?, unit.name);
             let loaded = Self::output("launchctl", &["print", &target])?;
             if !loaded.status.success() {
                 ensure!(loaded.status.code() == Some(113), "cannot inspect {target} before bootstrap");
-                Self::command("launchctl", &["bootstrap", &Self::domain(), unit.file.to_str().context("non-UTF8 launchd plist path")?])?;
+                Self::command("launchctl", &["bootstrap", self.domain()?, unit.file.to_str().context("non-UTF8 launchd plist path")?])?;
             }
             Self::command("launchctl", &["kickstart", &target])?;
         }
@@ -218,7 +235,7 @@ impl Manager for Native {
             }
         }
         #[cfg(target_os = "macos")]
-        Self::command("launchctl", &[if enabled { "enable" } else { "disable" }, &format!("{}/{}", Self::domain(), unit.name)])?;
+        Self::command("launchctl", &[if enabled { "enable" } else { "disable" }, &format!("{}/{}", self.domain()?, unit.name)])?;
         Ok(())
     }
 
@@ -288,6 +305,60 @@ mod tests {
             running: running.contains(&name),
             enabled: installed.contains(&name) && !name.starts_with("fractal"),
         }))
+    }
+
+    fn macos_plan(installed: &[&str], running: &[&str]) -> Result<Services> {
+        macos_services(|name| Ok(Unit {
+            name: name.into(),
+            file: Path::new("/Users/example/Library/LaunchAgents").join(format!("{name}.plist")),
+            installed: installed.contains(&name),
+            running: running.contains(&name),
+            enabled: installed.contains(&name) && !name.starts_with("com.compoundingtech.fractal"),
+        }))
+    }
+
+    #[test]
+    fn discovers_both_replication_aliases_through_native_macos_plan() -> Result<()> {
+        for (daemon, worker) in [
+            ("org.nix-community.home.smalltalk", "org.nix-community.home.smalltalk-replication"),
+            ("com.compoundingtech.st3", "com.compoundingtech.st3.replication"),
+        ] {
+            let services = macos_plan(
+                &[daemon, worker, "com.compoundingtech.fractal", "com.compoundingtech.fractal.replication"],
+                &[daemon, worker],
+            )?;
+            assert_eq!(services.legacy.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(), [daemon, worker]);
+            assert_eq!(services.target.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(),
+                ["com.compoundingtech.fractal", "com.compoundingtech.fractal.replication"]);
+            assert!(services.legacy.iter().all(|unit| unit.running));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn installed_macos_replication_aliases_are_ambiguous_even_when_stopped() {
+        let error = macos_plan(
+            &["org.nix-community.home.smalltalk", "com.compoundingtech.st3.replication", "org.nix-community.home.smalltalk-replication"],
+            &[],
+        ).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy definitions exist for com.compoundingtech.fractal.replication; resolve which owns the worker before host cutover");
+    }
+
+    #[test]
+    fn running_macos_target_replication_is_retained_once_without_legacy_worker() -> Result<()> {
+        let services = macos_plan(&["org.nix-community.home.smalltalk", "com.compoundingtech.fractal.replication"],
+            &["com.compoundingtech.fractal.replication"])?;
+        assert_eq!(services.target.iter().filter(|unit| unit.name == "com.compoundingtech.fractal.replication").count(), 1);
+        assert!(services.target.iter().find(|unit| unit.name == "com.compoundingtech.fractal.replication").unwrap().running);
+        Ok(())
+    }
+
+    #[test]
+    fn both_macos_legacy_daemon_aliases_remain_a_hard_error() {
+        let error = macos_plan(&["com.compoundingtech.st3", "org.nix-community.home.smalltalk"], &[]).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy daemon definitions exist; resolve which owns the default state before host cutover");
     }
 
     #[test]

@@ -153,8 +153,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
@@ -165,14 +178,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-perf-cache restore
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -272,8 +289,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
@@ -284,14 +314,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-perf-cache restore
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -348,17 +382,34 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}

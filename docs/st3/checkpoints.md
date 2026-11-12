@@ -1,6 +1,6 @@
 # Checkpoints and trimming
 
-`st replication checkpoint status` shows each participant's `machine_version` advertised at
+`fractal replication checkpoint status` shows each participant's `machine_version` advertised at
 its last daemon start, including its source revision and dirty marker. This is startup metadata,
 which may differ from the build that produced a checkpoint seal. A daemon republishes its version
 on every start; status selects its latest own-origin `daemon.started` claim in canonical order.
@@ -48,7 +48,7 @@ older checkpoint that never became stable is abandoned, because the newer sealed
 **Who must agree.** Every participant. A participant is every writer this node has ever heard of:
 the writer of any envelope or tombstone it holds, its configured peers, every member of the
 membership fold, and every writer named in a checkpoint claim. Two kinds of writer are not
-participants: one that left the fleet (`st fleet leave` drains everything the writer wrote to a
+participants: one that left the fleet (`fractal fleet leave` drains everything the writer wrote to a
 member first), and one a person excused (below). Removing a machine does not take it out. A
 checkpoint is not stable until every one of those writers has verified, however many of them are
 away.
@@ -93,6 +93,10 @@ lifecycle dependencies and the shared reverse-edge projection to proof/replay. A
 hidden memberships and folder tombstones remain retained: no ordered-membership drop rule exists.
 Retiring a member changes visibility, not its retained pair position; redeclaring a reusable stable
 identity can restore that position.
+Version 26 (following version 25) distinguishes explicit placement migration: the arrangement witness includes its
+retained authority marker/source heads and membership witnesses include the original placement
+winner bytes/revisions plus live/lifecycle projections. Replay translates retained legacy claims
+without fresh winners. No additional claim-drop rule is introduced.
 Repairing a retained member's selected claim refreshes its lifecycle dependency from
 unrepaired authority in the repair transaction, so incremental and replay witnesses agree.
 Local membership repair watermarks survive projection rebuilds but are excluded from
@@ -122,7 +126,7 @@ reader's bounded history items during the proof and discarded afterward.
 the same participants and carries identical digests. Stability is a pure function of claims, like
 the membership fold: no clock, no order, so every node that holds the same claims reaches the same
 answer. If two nodes planned different drops, their digests differ and the checkpoint never becomes
-stable; the next day's checkpoint tries again. `st replication checkpoint status` names the digest
+stable; the next day's checkpoint tries again. `fractal replication checkpoint status` names the digest
 that differs.
 
 **Trim.** Only a stable checkpoint is trimmed, and each node trims the same checkpoints in the same
@@ -175,7 +179,8 @@ These claims are never dropped, whatever a rule says:
 - a claim whose record is not valid: invalid, unknown or repaired, or the replacement of a repair;
 - a claim a projection row references by ID: desired state, mission definitions and revisions,
   document bindings;
-- a claim another claim in the sealed set cites as evidence, or that a mission run pins as an input;
+- a claim another claim in the sealed set cites as evidence, that a mission run pins as an input,
+  or that a mission request names as its discovery;
 - a claim held in two envelopes, and a claim sharing an operation with a kept claim, so an
   operation is wholly kept or wholly dropped;
 - each writer's newest envelope in the sealed set, because sequence numbers and heads read it;
@@ -199,19 +204,19 @@ agree on a checkpoint only when they run the same rules. In summary:
 
 | Kind | Slot | Kept |
 |---|---|---|
-| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode |
+| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode and the credential report that ended the one before (rules version 24); the newest `working` claim and the newest `ended` claim (rules version 25) |
 | observed seat status history (`harness.observed` transitions and runtime resets) | seat | the last 200 transitions and runtime resets within seven days before the cut, ignoring stamped heartbeats; for each incarnation the transition before its first visible one, even when older; the start of the current state |
 | `harness.timeline` | subject, incarnation | the newest; only claims dated at least five days before the cut go |
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
 | `subscription.mission-deferred` | subject, request | every claim while the request is open; once a start, failure, cancellation or release closes it, the newest |
 | `observer.observed`, `daemon.diagnostic`, `transport.observed` | subject (and code, or origin) | the newest |
-| `resource.observed` written by an observer | subject | the newest |
+| `resource.observed` written by an observer | subject | the newest; the newest of each `attribution_only` value; the earliest that names an opener; for a pull request, every observation back to and including the newest one that is not open outside the merge queue, or the newest 400 when there is none, and any accepted at the same time as that one (the merge-queue check walks back that far); every observation of a resource any of them describes in flat facts (rules version 23) |
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
-| `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
+| `harness.todo.observed` | subject | the newest |
 | `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
-| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut; the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |
@@ -379,7 +384,7 @@ transaction of a trim moves the committed index forward by one.
 **If a deletion would change the graph.** Every chunk checks, in its own transaction, that the
 graph generation did not move. If it did, the chunk is rolled back and the checkpoint is marked
 `graph-changed`. The node writes a `checkpoint-trim-graph-changed` diagnostic and seals nothing more
-until a person runs `st replication checkpoint resume --reason ...`. The proof makes this
+until a person runs `fractal replication checkpoint resume --reason ...`. The proof makes this
 impossible for a correct rule, so it signals a bug, not a condition to retry.
 
 **A node that did not verify.** A node that joined after the checkpoint, or came back after an
@@ -393,7 +398,7 @@ and replicates as usual.
 ## Excusing an unreachable member
 
 A checkpoint waits for every participant, so a machine that is away, or whose build predates
-checkpoints, holds up trimming for the whole fleet. `st replication checkpoint status` names who has
+checkpoints, holds up trimming for the whole fleet. `fractal replication checkpoint status` names who has
 sealed and who has not, with the build each last sealed with.
 
 Three days after a checkpoint's due date without it becoming stable, the participant that sorts
@@ -401,7 +406,7 @@ first among those that have sealed asks the fleet's person, through attention, t
 
 - **Bring the machine back.** Nothing else is needed.
 - **Upgrade it,** if it runs a build without checkpoints.
-- **Excuse it:** `st replication checkpoint excuse NAME --reason "..." --as person/NAME`. The claim
+- **Excuse it:** `fractal replication checkpoint excuse NAME --reason "..." --as person/NAME`. The claim
   is a person's, and a node cannot excuse itself.
 
 Excusing takes the writer out of the participant set, so the others can reseal without it. It
@@ -410,7 +415,7 @@ person's or a mission's claims dated before a cut; those are late envelopes, kep
 claim cannot make any drop visible (see witnesses above). The returning machine adopts the
 checkpoints that became stable without it, and its first seal ends the excusal by itself.
 
-`st fleet remove` is not an excusal. Removing a machine fences writes nobody else holds, which is
+`fractal fleet remove` is not an excusal. Removing a machine fences writes nobody else holds, which is
 right only when its storage is gone, and it never makes a checkpoint stable on its own: the removed
 machine must also be excused.
 

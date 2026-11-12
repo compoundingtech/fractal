@@ -14,7 +14,7 @@ SOURCE = 'a' * 40
 TARGETS = ('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')
 
 
-def archive(root, prefix, target, *, source=SOURCE, binary=b'cli', alias='st3'):
+def archive(root, prefix, target, *, source=SOURCE, binary=b'cli', alias='fractal'):
     package = f'{prefix}-{target}'
     with tarfile.open(root / f'{package}.tar.gz', 'w:gz') as output:
         def add(name, data=b'', mode=0o755, link=None):
@@ -27,10 +27,10 @@ def archive(root, prefix, target, *, source=SOURCE, binary=b'cli', alias='st3'):
                 member.size = len(data)
                 output.addfile(member, io.BytesIO(data))
         add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-        add('bin/st3', binary)
+        add('bin/fractal', binary)
         add('bin/pty', b'pty')
         add('bin/st', link=alias)
-        add('bin/fractal', link=alias)
+        add('bin/st3', link=alias)
         add('share/fractal-web/index.html', b'web', 0o644)
         add('install.sh')
         add('install-macos.py')
@@ -59,7 +59,7 @@ class Manifest(unittest.TestCase):
 
     def test_invalid_source_alias_and_divergent_compatibility_copy_are_refused(self):
         for mutation, message in (({'source': 'b' * 40}, 'different source'),
-                                  ({'alias': 'fractal'}, 'relative st3 symlink'),
+                                  ({'alias': 'st3'}, 'relative fractal symlink'),
                                   ({'binary': b'different'}, 'legacy archive differs')):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)

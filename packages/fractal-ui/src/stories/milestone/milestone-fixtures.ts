@@ -5,12 +5,11 @@ import type { DiffFile } from '../../assistant-ui/composition/DiffPanel'
 import type { SidebarAgentRow } from '../../assistant-ui/sidebar/model'
 import type { ResourceData } from '../../assistant-ui/resources/resource-model'
 import { workLogTurnFromItems, type WorkLogTurn } from '../../assistant-ui/taste/work-log'
+import type { RosterFolder } from './MilestoneSidebar'
 
 export const milestoneNow = Date.parse('2026-10-17T09:30:00.000Z')
 const iso = (secondsAgo: number) => new Date(milestoneNow - secondsAgo * 1000).toISOString()
 
-/** Roster: the same folder → agent → subagent shape the TUI uses; subagents start collapsed. */
-export interface RosterFolder { readonly id: string; readonly label: string; readonly rows: readonly SidebarAgentRow[] }
 
 const base = {
   harness: 'seat-1', freshness: 'live', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [],

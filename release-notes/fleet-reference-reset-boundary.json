@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Complete the current fleet file and reset reference.",
+  "replay": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Documents the existing fleet secret encoding, maintained local membership fields and destructive service-reset boundary. No reset, leave, join, secret generation or state mutation is performed by this documentation change; no schema, authority, protocol or runtime behavior changes."
+  }
+}

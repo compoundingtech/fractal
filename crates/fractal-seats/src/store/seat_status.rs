@@ -4,7 +4,7 @@ use super::*;
 pub use fractal_missions::store::seat_status::*;
 pub use fractal_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
 
-pub const STALE_MS: u128 = 90_000;
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 
 pub trait SeatStatusStore {
     /// Freshness is a read-time fact, never part of the replicated projection digest.
@@ -72,7 +72,14 @@ impl SeatStatusStore for Store {
                 .min(accepted);
             observed = observed.max(at);
         }
-        Ok(if now.saturating_sub(observed) > STALE_MS {
+        // On another member, the seat's host's latest answer about when it heard the seat.
+        if let Some(at) = self
+            .extension::<fractal_store::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id)
+        {
+            observed = observed.max(at);
+        }
+        Ok(if now.saturating_sub(observed) > HARNESS_OBSERVATION_FRESHNESS.as_millis() {
             "stale"
         } else {
             "current"
@@ -282,13 +289,13 @@ mod tests {
         let index = store.index().unwrap();
         assert_eq!(
             store
-                .seat_observation_at("agent/cedar", Some(&harness), index, at + 90_002)
+                .seat_observation_at("agent/cedar", Some(&harness), index, at + 2 + HARNESS_OBSERVATION_FRESHNESS.as_millis())
                 .unwrap(),
             "current"
         );
         assert_eq!(
             store
-                .seat_observation_at("agent/cedar", Some(&harness), index, at + 90_003)
+                .seat_observation_at("agent/cedar", Some(&harness), index, at + 3 + HARNESS_OBSERVATION_FRESHNESS.as_millis())
                 .unwrap(),
             "stale"
         );

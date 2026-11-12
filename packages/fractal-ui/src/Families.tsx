@@ -1,7 +1,18 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { lightTheme } from './assistant-ui/composition-theme'
-import { Badge, Button, Checkbox, CheckIcon, CodeBlock, CommandMenu, ContextCard, CopyIcon, Description, EmptyState, Entity, Input, Kbd, MenuTrigger, Modal, Note, Pill, Progress, Spinner, StatusDot, Table, Tabs, Toggle, Tooltip, XCircleIcon, type CommandGroup, type Theme } from './kit'
+import { Badge, Button, Checkbox, CheckIcon, CodeBlock, CommandMenu, CopyIcon, Description, EmptyState, Entity, Input, Kbd, MenuTrigger, Modal, Note, Pill, Progress, Spinner, StatusDot, Table, Tabs, Toggle, Tooltip, XCircleIcon, type CommandGroup, type Theme } from './kit'
+import type { DiffFile } from './assistant-ui/composition/DiffPanel'
+import { HoverCard } from './assistant-ui/entity/HoverCard'
+import { ResourceEntityCard } from './assistant-ui/entity/ResourceCard'
+
+export interface FamiliesProps extends Theme {
+  readonly changedFiles: readonly (Pick<DiffFile, 'path' | 'added' | 'removed'> & { readonly id: string; readonly status: React.ComponentProps<typeof StatusDot> })[]
+  readonly worktree: string
+  readonly actors: readonly React.ComponentProps<typeof Entity>[]
+  readonly actorStates: readonly React.ComponentProps<typeof StatusDot>[]
+  readonly onThemeChange?: (change: Partial<Theme>) => void
+}
 
 const familyLabel = 'text-[10px] font-semibold uppercase tracking-widest text-muted mb-3'
 function Family({ name, note, children }: { name: string; note?: string; children: React.ReactNode }) {
@@ -18,18 +29,14 @@ const tableColumns = [
   { id: 'change', label: 'Change', render: (row: { id: string; file: string; change: React.ReactNode; state: React.ReactNode }) => <span className="font-mono tabular">{row.change}</span> },
   { id: 'state', label: 'State', render: (row: { id: string; file: string; change: React.ReactNode; state: React.ReactNode }) => row.state },
 ] as const
-const tableRows = [
-  { id: 'one', file: 'src/one.ts', change: <span><span className="text-good">+4</span> <span className="text-danger">−1</span></span>, state: <StatusDot state="ready" label="Ready" /> },
-  { id: 'two', file: 'src/long-filename-that-truncates-in-narrow-panes.test.ts', change: <span className="text-good">+12</span>, state: <StatusDot state="building" label="Checking" /> },
-  { id: 'three', file: 'src/three.ts', change: <span className="text-danger">−8</span>, state: <StatusDot state="error" label="Failed" /> },
-] as const
 
 /** Every inventory family on one canvas, under the active direction and density. */
-export function Families({ direction = 'folio', scheme = 'light', density = 'comfortable', onThemeChange }: Theme & { onThemeChange?: (change: Partial<Theme>) => void }) {
+export function Families({ direction = 'folio', scheme = 'light', density = 'comfortable', onThemeChange, changedFiles, worktree, actors, actorStates }: FamiliesProps) {
   const theme = { direction, scheme, density }
   const [tab, setTab] = React.useState<React.Key>('editor')
   const [input, setInput] = React.useState('')
   const [toggle, setToggle] = React.useState(true)
+  const tableRows = changedFiles.map(file => ({ id: file.id, file: file.path, change: <>{file.added > 0 && <span className="text-good">+{file.added}</span>}{file.added > 0 && file.removed > 0 ? ' ' : undefined}{file.removed > 0 && <span className="text-danger">−{file.removed}</span>}</>, state: <StatusDot {...file.status} /> }))
   return <div data-workshop data-direction={direction} data-scheme={scheme} data-density={density} className={['min-h-screen bg-canvas p-4 font-sans text-chrome text-ink md:p-7', stylex.props(scheme === 'light' && lightTheme).className].filter(Boolean).join(' ')}>
     <header className="mx-auto max-w-[1400px] border-b border-line pb-5">
       <p className="mb-2 text-[10px] uppercase tracking-[.2em] text-muted">Fractal UI / component families</p>
@@ -50,8 +57,8 @@ export function Families({ direction = 'folio', scheme = 'light', density = 'com
         <div className="mt-3 flex flex-wrap gap-2"><Pill>queued</Pill><Pill tone="good">ready</Pill><Pill tone="warning">needs decision</Pill><Pill tone="danger">failed</Pill></div>
       </Family>
       <Family name="StatusDot / Spinner / Progress">
-        <div className="flex flex-wrap gap-x-5 gap-y-2"><StatusDot state="ready" /><StatusDot state="building" /><StatusDot state="queued" /><StatusDot state="error" /><StatusDot state="canceled" /></div>
-        <div className="mt-3"><Spinner label="Fetching preview" /></div>
+        <div className="flex flex-wrap gap-x-5 gap-y-2">{actorStates.map((state, index) => <StatusDot key={index} {...state} />)}</div>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2"><Spinner label="Fetching preview" /><Spinner label="Fetching preview" size="sm" /></div>
         <div className="mt-3 space-y-3"><Progress label="Checks" value={4} maxValue={6} tone="warning" /><Progress label="Upload" value={100} tone="good" size="sm" /></div>
       </Family>
       <Family name="CodeBlock" note="Plain text and JSON with filename plus copy; language chip; horizontal scroll for long lines.">
@@ -60,14 +67,14 @@ export function Families({ direction = 'folio', scheme = 'light', density = 'com
       <Family name="CommandMenu" note="Grouped items with description and keywords; keyboard-first; honest empty state.">
         <CommandMenu groups={commandGroups} placeholder="Search everything…" />
       </Family>
-      <Family name="ContextCard" note="Preview appears on hover or keyboard focus after a 350 ms intent delay.">
-        <ContextCard title="Why synthetic" preview={<>Fixtures are authored, not captured. No live session, host or credential can leak into a story.</>}>
-          <div className="flex items-center justify-between"><span className="font-semibold">Fixture policy</span><StatusDot state="ready" label="Clean" /></div>
-        </ContextCard>
+      <Family name="Entity hover card" note="The canonical passive card opens after pointer rest or keyboard focus.">
+        <HoverCard content={() => <ResourceEntityCard id="document/fixture-policy" title="Why synthetic" kind="Document" text="Fixtures are authored, not captured. No live session, host or credential can leak into a story." />}>
+          <Button>Fixture policy</Button>
+        </HoverCard>
       </Family>
       <Family name="Description / Entity" note="Metadata pairs and named actors with stable identity chips.">
-        <Description items={[['Worktree', <span className="font-mono">isolated/example</span>], ['Started', <span className="tabular">09:14</span>], ['Model', 'fixture · unlabeled'], ['Cost', <span className="text-muted">unavailable</span>]]} />
-        <div className="mt-4 flex flex-col items-start gap-2.5"><Entity name="Atlas" detail="review lane · 2 files" /><Entity name="Birch" detail="idle · waiting for input" tone="warning" /></div>
+        <Description items={[['Worktree', <span className="font-mono">{worktree}</span>], ['Started', <span className="tabular">09:14</span>], ['Model', 'fixture · unlabeled'], ['Cost', <span className="text-muted">unavailable</span>]]} />
+        <div className="mt-4 flex flex-col items-start gap-2.5">{actors.map((actor, index) => <Entity key={index} {...actor} />)}</div>
       </Family>
       <Family name="Input / Kbd / Toggle / Checkbox" note="Controlled input with slash-focus hint and Escape clear; opt-in checkboxes with honest disabled reasons.">
         <Input label="Filter" value={input} onChange={setInput} placeholder="Filter files…" />

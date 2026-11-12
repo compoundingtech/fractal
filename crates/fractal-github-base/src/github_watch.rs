@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::github_http::GithubAuth;
 use smallclaims::hash::canonical_hash;
 
-use crate::model::{MessageView, ObserverSpec, St3Error, WatchSpec};
+use crate::model::{MessageView, ObserverSpec, FractalError, WatchSpec};
 
 /// Standing observers poll immediately after restart, then every three minutes while active.
 /// Quiet polls back off to six then ten minutes; any observed fact change resets three minutes.
@@ -53,9 +53,9 @@ pub struct ThreadRef {
 
 impl ThreadRef {
     /// Read `OWNER/REPO#N` or a GitHub issue, pull request or comment URL.
-    pub fn parse(text: &str) -> Result<Self, St3Error> {
+    pub fn parse(text: &str) -> Result<Self, FractalError> {
         let invalid = || {
-            St3Error::new(
+            FractalError::new(
                 "invalid-github-thread",
                 format!("`{text}` is not OWNER/REPO#NUMBER or a GitHub issue or pull request URL"),
             )
@@ -428,6 +428,39 @@ pub fn open_outside_merge_queue(facts: &Value) -> bool {
         && !in_merge_queue(facts)
 }
 
+/// How many of a thread's newest observations a merge-queue check reads at most. A thread is
+/// observed only when it changes. A checkpoint keeps what such a check can read.
+pub const THREAD_SCAN: u32 = 400;
+
+/// When a pull request left the merge queue, from its observations newest first: each one's
+/// facts, accepted time, and whether it is a receipt, which the walk skips. While the pull
+/// request is open outside the queue, the oldest such observation is when it left, and the one
+/// before that must have it queued; it counts only if it left after `after_unix_ms`. `None`
+/// when the observations run out before they decide.
+pub fn merge_queue_exit<E>(
+    history: impl IntoIterator<Item = Result<(Value, u128, bool), E>>,
+    after_unix_ms: u128,
+) -> Result<Option<Option<u128>>, E> {
+    let mut left = None::<u128>;
+    for row in history {
+        let (facts, at, receipt) = row?;
+        if receipt {
+            continue;
+        }
+        if left.is_none() && !open_outside_merge_queue(&facts) {
+            return Ok(Some(None));
+        }
+        if in_merge_queue(&facts) {
+            return Ok(Some(left.filter(|left| *left > after_unix_ms)));
+        }
+        if !open_outside_merge_queue(&facts) || at <= after_unix_ms {
+            return Ok(Some(None));
+        }
+        left = Some(at);
+    }
+    Ok(None)
+}
+
 /// One wake: its message subject, the key it was decided by, title, content and tags.
 pub struct Wake {
     pub subject: String,
@@ -447,14 +480,14 @@ pub fn wake(
     event: &WatchEvent,
     observation: &str,
     posted_by: Option<&str>,
-) -> Result<Wake, St3Error> {
+) -> Result<Wake, FractalError> {
     let delivery_key = canonical_hash(&(
         WATCH_TAG,
         watch_subject,
         watch.since_unix_ms.to_string(),
         event.key(observation),
     ))
-    .map_err(|error| St3Error::new("internal-error", error.to_string()))?;
+    .map_err(|error| FractalError::new("internal-error", error.to_string()))?;
     let pull = facts.get("head_sha").is_some()
         || facts
             .get("url")
@@ -592,14 +625,14 @@ pub fn deadline_wake(
     watch_subject: &str,
     watch: &WatchSpec,
     thread: &ThreadRef,
-) -> Result<Wake, St3Error> {
+) -> Result<Wake, FractalError> {
     let delivery_key = canonical_hash(&(
         WATCH_TAG,
         watch_subject,
         watch.since_unix_ms.to_string(),
         "deadline",
     ))
-    .map_err(|error| St3Error::new("internal-error", error.to_string()))?;
+    .map_err(|error| FractalError::new("internal-error", error.to_string()))?;
     let until = watch.until_unix_ms.map(rfc3339).unwrap_or_default();
     Ok(Wake {
         subject: format!("message/watch-{}", &delivery_key[..20]),
@@ -1263,6 +1296,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
         };
         assert_eq!(
             named_object(&message),
@@ -1349,6 +1383,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
         };
         let post = PostInFlight::begin("agent/example.planner", &thread);
         assert!(post_in_flight(

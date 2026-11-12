@@ -1,6 +1,7 @@
+import type { PtySocket, PtySocketFactory } from '@fractal/sdk/pty'
 /** W3C propagation at the browser HTTP and WebSocket transport edges. */
 import type { CollectionSocket, CollectionSocketFactory, TraceContext } from '@fractal/client'
-import { isValidTraceparent, validTraceContext } from '@fractal/sdk/effect'
+import { isValidTraceparent, validTraceContext } from '@fractal/sdk/read'
 
 /**
  * A `fetch` that adds the callback's context to each request to `baseUrl`'s origin when it starts;
@@ -32,8 +33,10 @@ export const wrapTraceFetch = ({
 }
 
 /** A browser `WebSocket` behind the generated client's socket surface. */
-export const browserSocket: CollectionSocketFactory = (url, protocols) => {
-  const socket = new WebSocket(url, protocols)
+export const browserSocket: CollectionSocketFactory = (url, protocols, headers) => {
+  const target = new URL(url)
+  if (headers['x-st3-client'] !== undefined) target.searchParams.set('client', headers['x-st3-client'])
+  const socket = new WebSocket(target.toString(), protocols)
   const wrapped: CollectionSocket = {
     onopen: null,
     onmessage: null,
@@ -47,6 +50,25 @@ export const browserSocket: CollectionSocketFactory = (url, protocols) => {
   socket.onmessage = (event) => wrapped.onmessage?.({ data: event.data })
   socket.onclose = (event) => wrapped.onclose?.({ code: event.code, reason: event.reason })
   socket.onerror = (event) => wrapped.onerror?.(event)
+  return wrapped
+}
+
+/** Raw PTY sockets use the same display-only proxy metadata as collection sockets. */
+export const browserPtySocket = (client: string | undefined): PtySocketFactory => (url, protocols) => {
+  const target = new URL(url)
+  if (client !== undefined) target.searchParams.set('client', client)
+  const socket = new WebSocket(target.toString(), [...protocols])
+  socket.binaryType = 'arraybuffer'
+  const wrapped: PtySocket = {
+    binaryType: 'arraybuffer',
+    onopen: null, onmessage: null, onclose: null, onerror: null,
+    send: data => socket.send(data),
+    close: (code, reason) => socket.close(code, reason),
+  }
+  socket.onopen = event => wrapped.onopen?.(event)
+  socket.onmessage = event => wrapped.onmessage?.({ data: event.data })
+  socket.onclose = event => wrapped.onclose?.({ code: event.code, reason: event.reason })
+  socket.onerror = event => wrapped.onerror?.(event)
   return wrapped
 }
 

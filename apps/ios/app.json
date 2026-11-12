@@ -24,6 +24,7 @@
       "supportsTablet": true,
       "infoPlist": {
         "UIViewControllerBasedStatusBarAppearance": true,
+        "NSCameraUsageDescription": "Scan a pairing QR code shown by fractal devices pair.",
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "100.64.0.0/10": {

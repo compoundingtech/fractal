@@ -4,7 +4,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as Atom from 'effect/reactivity/Atom'
 import { RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { decodeResourceRows, openAgent } from '@fractal/sdk/effect'
+import { decodeResourceRows, openAgent } from '@fractal/sdk/read'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
@@ -80,6 +80,7 @@ export const scenarioExemptions: readonly string[] = [
   'DrawersFlow:contract-fixture',
   'DrawersLight:contract-fixture',
   'DrawersOpen:contract-fixture',
+  'S1FixDockedFocus:contract-fixture',
   'SidebarDragUnmountCleanup:contract-fixture',
   'SidebarShortcutFocusReturn:contract-fixture',
   'TerminalToggle:contract-fixture',
@@ -114,11 +115,12 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull()
   await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Actions for WorkbenchShell' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Toggle terminal drawer' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'More actions' })).toBeVisible()
+  await expect(header.getByRole('heading', { name: 'WorkbenchShell' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'Show terminal' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
-  await expect(header.queryByRole('button', { name: 'Terminal' })).toBeNull()
+  await expect(header.queryByRole('button', { name: 'Show conversation' })).toBeNull()
 }
 /**
  * The inspector is a lazy chunk whose loading fallback carries the same "Agent inspector" landmark, so its own tab
@@ -127,7 +129,7 @@ const assertWide = async (canvasElement: HTMLElement) => {
 const loadedInspector = async (scope: HTMLElement) => {
   const views = await within(scope).findByRole('tablist', { name: 'Agent inspector views' }, { timeout: 15000 })
   const inspector = views.closest<HTMLElement>('aside[aria-label="Agent inspector"]')!
-  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name }) }
+  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name: name === 'Changes' ? /^Changes(?:, \d+)?$/ : name }) }
 }
 /** The docked inspector opens on Details; its separator names the visible view and follows the tab selection. */
 const openWideDetails = async (canvasElement: HTMLElement) => {
@@ -143,17 +145,17 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
   await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
   await expect(canvas.queryByRole('separator', { name: 'Resize Details' })).toBeNull()
   await expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull()
-  // A remounted inspector starts on Details again, and so does its separator.
+  // A remounted inspector remembers its selected view, and its separator follows it.
   await userEvent.click(within(inspector).getByRole('button', { name: 'Close agent inspector' }))
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
   await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
   const reopened = await loadedInspector(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
-  await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
+  await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
 }
 
 /**
- * The phone header's four controls in order (the conversation actions between the chevron and Agent details; Terminal
+ * The phone header's three controls in order (the unified overflow between the chevron and Agent details; Terminal
  * lives in the tab row). Each is a visible 44×44px target inside the window, clear of the breadcrumb and of each other;
  * the breadcrumb keeps at least a quarter of the window, and the header never scrolls sideways.
  */
@@ -161,8 +163,10 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const node = within(canvasElement).getByTestId('thread-header')
   const header = within(node)
   const buttons = header.getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', `Actions for ${agentName}`, 'Conversation menu', 'Agent details'])
-  for (const name of ['Resources', 'View KDL', 'Terminal', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
+  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'More actions', 'Agent details'])
+  // The pane owns the phone's thread heading; the header breadcrumb still identifies the selected agent.
+  await expect(within(header.getByRole('navigation', { name: 'Breadcrumb' })).getByText(agentName, { exact: true })).toBeVisible()
+  for (const name of ['Resources', 'View KDL', 'Show terminal', 'Show conversation', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
   await expect(lane.right).toBeLessThanOrEqual(window.innerWidth)
@@ -181,7 +185,7 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const crumb = breadcrumb.getBoundingClientRect()
   await expect(crumb.left).toBeGreaterThanOrEqual(rects[0]!.right)
   await expect(crumb.right).toBeLessThanOrEqual(rects[1]!.left)
-  // With four controls the host / agent breadcrumb keeps a readable share of the row.
+  // With three controls the host / agent breadcrumb keeps a readable share of the row.
   await expect(crumb.width).toBeGreaterThanOrEqual(window.innerWidth / 4)
   return { header, breadcrumb }
 }
@@ -193,8 +197,8 @@ const assertPhoneTabRow = async (canvasElement: HTMLElement) => {
   const canvas = within(canvasElement)
   const list = canvas.getByRole('tablist', { name: 'Workspace views' })
   const row = list.parentElement!
-  const terminal = within(row).getByRole('button', { name: 'Terminal' })
-  await expect(canvas.getAllByRole('button', { name: 'Terminal' })).toEqual([terminal])
+  const terminal = within(row).getByRole('button', { name: /^Show (terminal|conversation)$/ })
+  await expect(canvas.getAllByRole('button', { name: /^Show (terminal|conversation)$/ })).toEqual([terminal])
   await expect(list.contains(terminal)).toBe(false)
   // The Terminal toggle's visible label carries its meaning; touch has no hover tooltip.
   await expect(terminal).toBeVisible()
@@ -242,18 +246,18 @@ export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixtur
   await assertPhoneHeader(canvasElement)
   const { terminal } = await assertPhoneTabRow(canvasElement)
   // The fixture roster reports no runtime for this agent: the toggle stays, disabled and described by why.
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await expect(terminal).toHaveAccessibleName('Show terminal')
   await expect(terminal).toHaveAttribute('aria-disabled', 'true')
   await expect(terminal).toHaveAccessibleDescription('This agent has no terminal.')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   // Pressing it paints the reason in a popover instead of toggling; Escape returns focus to the toggle.
   await userEvent.click(terminal)
   const reason = await within(document.body).findByRole('dialog', { name: 'Terminal unavailable' })
   await expect(reason).toHaveTextContent('This agent has no terminal.')
   // The popover mounts at the start of its entrance transition (opacity 0) and is painted once it settles.
   await waitFor(() => expect(reason).toBeVisible())
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(terminal).toHaveAccessibleName('Show terminal')
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Terminal unavailable' })).toBeNull())
   await waitFor(() => expect(terminal).toHaveFocus())
@@ -261,9 +265,9 @@ export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixtur
 } }
 export const DrawersLight: Story = { ...Drawers, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Light deterministic workspace feeds pin responsive drawer routing, header controls and unavailable-terminal copy.' } }, args: { scheme: 'light' } }
 
-/** Decode evidence stays between the retained roster and footer in either real sidebar host. */
+/** Decode evidence stays after the retained roster in either real sidebar host. */
 export const DecodeStaleSidebarHosts: Story = {
-  tags: ['critical'],
+  tags: ['critical', 'both-widths'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic stale roster decoding proves the notice remains visible in both responsive sidebar hosts.' } },
   args: { decodeStale: true },
   play: async ({ canvasElement }) => {
@@ -277,10 +281,8 @@ export const DecodeStaleSidebarHosts: Story = {
     await expect(notice).toHaveAttribute('data-wf-roster-decode', 'stale')
     await expect(host.querySelector('[data-wf-roster-stale]')).toHaveAttribute('data-wf-roster-stale', 'decode')
     const roster = within(host).getByRole('navigation', { name: 'Agent roster' })
-    const footer = host.querySelector('footer')!
     await expect(roster.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await expect(notice.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await expect(within(notice).getByRole('status')).toHaveTextContent('this view is older than the daemon')
+    await expect(within(notice).getByRole('status')).toHaveTextContent('their data does not match the expected format')
   },
 }
 
@@ -295,7 +297,7 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   return { canvas, sheet, opener, ...inspector }
 }
 /** The right sheet holds the agent inspector: Details first, Changes one tab away; the conversation actions stay in the header. */
-export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin Details-first inspector routing and the Changes tab inside the phone sheet.' } }, play: async ({ canvasElement }) => {
+export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin initial Details routing, Changes inside the phone sheet, and remembered inspector selection after reopening.' } }, play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
   const { canvas, sheet, inspector, views, tab, opener } = await openDetailsSheet(canvasElement)
@@ -304,10 +306,10 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
   await expect(within(sheet).queryByRole('button', { name: 'Close agent inspector' })).toBeNull()
   await expect(within(sheet).queryByRole('toolbar', { name: 'Agent actions' })).toBeNull()
-  for (const name of ['Actions for WorkbenchShell', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
+  for (const name of ['More actions', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
   await expect(canvas.queryByRole('separator', { name: /^Resize / })).toBeNull()
   const tabs = within(views).getAllByRole('tab')
-  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Changes', 'Details'])
+  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Details', 'Changes', 'Resources'])
   for (const node of tabs) {
     const rect = node.getBoundingClientRect()
     await expect(rect.width).toBeGreaterThanOrEqual(44)
@@ -324,12 +326,67 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   const headerTop = capturedHeader.getBoundingClientRect().top
   for (const row of rows) await expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(headerTop)
   await expect(changes.getBoundingClientRect().width).toBeLessThanOrEqual(sheet.getBoundingClientRect().width)
-  // A reopened sheet mounts a fresh inspector on Details.
+  // A reopened sheet remembers the selected Changes view.
   await userEvent.click(within(sheet).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
   const reopened = await openDetailsSheet(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
 } }
+/**
+ * Explicitly closing the docked inspector unmounts the focused control; focus returns to the header's Toggle right
+ * panel, by pointer, by keyboard and by Enter on the dock separator. The inspector is nonmodal, so Escape inside it does
+ * not close it, and a passive close (switching agents) leaves focus where the person put it. Below the breakpoint the
+ * inspector is a modal sheet whose Escape closes it back to its opener.
+ */
+export const S1FixDockedFocus: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The real workspace over deterministic feeds pins focus return to the header opener after every explicit docked-inspector close, nonmodal Escape and passive-close focus ownership.' } }, play: restoringStoryUrl(async ({ canvasElement }) => {
+  const { canvas, narrow, header } = await workspace(canvasElement)
+  if (narrow) {
+    const { opener } = await openDetailsSheet(canvasElement)
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
+    await waitFor(() => expect(opener).toHaveFocus())
+    return
+  }
+  await assertWide(canvasElement)
+  const toggle = header.getByRole('button', { name: 'Toggle right panel' })
+  const closed = async () => {
+    await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await expect(toggle).toHaveFocus()
+  }
+  // Pointer: the close button is the focused control the close unmounts.
+  await userEvent.click(toggle)
+  const pointer = await loadedInspector(canvasElement)
+  await userEvent.click(within(pointer.inspector).getByRole('button', { name: 'Close agent inspector' }))
+  await closed()
+  // Keyboard: the toggle reopens, focus moves to the close button, Enter closes back to the toggle.
+  await userEvent.keyboard('{Enter}')
+  const keyboard = await loadedInspector(canvasElement)
+  within(keyboard.inspector).getByRole('button', { name: 'Close agent inspector' }).focus()
+  await userEvent.keyboard('{Enter}')
+  await closed()
+  // Enter on the dock separator is the other explicit close.
+  await userEvent.keyboard('{Enter}')
+  await loadedInspector(canvasElement)
+  canvas.getByRole('separator', { name: 'Resize Details' }).focus()
+  await userEvent.keyboard('{Enter}')
+  await closed()
+  // Nonmodal: Escape inside the docked inspector neither closes it nor moves focus.
+  await userEvent.keyboard('{Enter}')
+  const nonmodal = await loadedInspector(canvasElement)
+  nonmodal.tab('Details').focus()
+  await userEvent.keyboard('{Escape}')
+  await nextFrame()
+  await nextFrame()
+  await expect(canvas.getByRole('complementary', { name: 'Agent inspector' })).toBe(nonmodal.inspector)
+  await expect(nonmodal.tab('Details')).toHaveFocus()
+  // Passive: switching agents closes the inspector without pulling focus to the toggle.
+  await userEvent.click(await within(canvas.getByRole('complementary', { name: 'Agents' })).findByRole('row', { name: /^MissionsUi,/ }))
+  await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
+  await nextFrame()
+  await expect(header.getByRole('button', { name: 'Toggle right panel' })).not.toHaveFocus()
+}) }
 /** Collapse removes the real dock separator mid-drag; its Escape listener must leave with it. */
 export const SidebarDragUnmountCleanup: Story = {
   tags: ['critical'],
@@ -382,8 +439,10 @@ export const SidebarDragUnmountCleanup: Story = {
       await expect(held).toBe(false)
       await expect(removedKeys).toEqual(dragKeys)
       await expect(activeKeys.size).toBe(0)
-      await user.click(canvas.getByRole('button', { name: 'Conversation menu' }))
-      await expect(await canvas.findByRole('menu')).toBeVisible()
+      await user.click(canvas.getByRole('button', { name: 'More actions' }))
+      const menu = await canvas.findByRole('menu', { name: 'More actions' })
+      await expect(menu).toBeVisible()
+      await expect(within(menu).getByRole('menuitem', { name: 'View KDL, read its whole declaration' })).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
       await user.keyboard('{Control>}b{/Control}')
@@ -443,7 +502,7 @@ export const DrawersFlow: Story = { parameters: { scenario: { _tag: 'contract-fi
   await waitFor(() => expect(chevron).toHaveFocus())
   // Choosing an agent closes the sheet on its thread.
   await userEvent.keyboard('{Enter}')
-  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('row', { name: /^MissionsUi,/ }))
+  await userEvent.click(await within(await canvas.findByRole('dialog', { name: 'Agents' })).findByRole('row', { name: /^MissionsUi,/ }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
   // Agent details, from the right.
@@ -476,28 +535,33 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
   if (narrow) await assertPhoneHeader(canvasElement)
-  const terminal = narrow ? (await assertPhoneTabRow(canvasElement)).terminal : header.getByRole('button', { name: 'Toggle terminal drawer' })
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  const terminal = narrow ? (await assertPhoneTabRow(canvasElement)).terminal : header.getByRole('button', { name: 'Show terminal' })
+  await expect(terminal).not.toHaveAttribute('aria-pressed')
   await expect(terminal).not.toHaveAttribute('aria-disabled')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   const thread = canvasElement.querySelector<HTMLElement>('[data-testid="conversation-history-host"]')
   await expect(thread).not.toBeNull()
   await userEvent.click(terminal)
-  await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'true'))
-  // The terminal opens as a drawer under the thread, which keeps its node and stays on screen.
-  await expect(await canvas.findByRole('region', { name: 'Terminal drawer' }, { timeout: 15000 })).toBeVisible()
+  await waitFor(() => expect(terminal).toHaveAccessibleName('Show conversation'))
+  // The terminal replaces the conversation, which keeps its node behind it, out of the accessibility tree.
+  await expect(await canvas.findByRole('region', { name: 'Terminal' }, { timeout: 15000 })).toBeVisible()
   await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
-  await expect(thread!.getBoundingClientRect().height).toBeGreaterThan(0)
-  if (narrow) { await assertPhoneHeader(canvasElement); await assertPhoneTabRow(canvasElement) }
+  await expect(thread!.closest('[aria-hidden]')).toHaveAttribute('aria-hidden', 'true')
+  await expect(canvas.queryByRole('toolbar', { name: 'Workspace views' })).toBeNull()
+  // The shown view is not one of the workspace tabs, so only the way back stays in the row.
+  if (narrow) { await assertPhoneHeader(canvasElement); await expect(canvas.queryByRole('tablist', { name: 'Workspace views' })).toBeNull(); await expect(terminal).toBeVisible() }
   terminal.focus()
   await userEvent.keyboard('{Enter}')
-  await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'false'))
-  await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull())
-  await waitFor(() => expect(terminal).toHaveFocus())
+  await waitFor(() => expect(terminal).toHaveAccessibleName('Show terminal'))
+  await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull())
+  await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
+  // A phone keeps focus on its toggle so the switch raises no keyboard; a wide window moves it to an enabled composer.
+  const composer = canvasElement.querySelector<HTMLTextAreaElement>('[data-wf-shown-pane] textarea:not(:disabled)')
+  await waitFor(() => narrow || composer === null ? expect(terminal).toHaveFocus() : expect(composer).toHaveFocus())
   if (!narrow) return
   await assertPhoneHeader(canvasElement)
   await assertPhoneTabRow(canvasElement)
-  // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside four controls.
+  // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside three controls.
   await userEvent.click(header.getByRole('button', { name: 'Expand sidebar' }))
   const agents = await canvas.findByRole('dialog', { name: 'Agents' })
   await userEvent.click(await within(agents).findByRole('row', { name: new RegExp(`^${longName},`) }))
@@ -511,11 +575,11 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   const longTerminal = (await assertPhoneTabRow(canvasElement)).terminal
   await expect(longTerminal).not.toHaveAttribute('aria-disabled')
   await userEvent.click(longTerminal)
-  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'true'))
+  await waitFor(() => expect(longTerminal).toHaveAccessibleName('Show conversation'))
   await assertPhoneHeader(canvasElement, longName)
-  await assertPhoneTabRow(canvasElement)
+  await expect(canvas.queryByRole('tablist', { name: 'Workspace views' })).toBeNull()
   await userEvent.click(longTerminal)
-  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'false'))
+  await waitFor(() => expect(longTerminal).toHaveAccessibleName('Show terminal'))
   await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }
@@ -695,8 +759,8 @@ const breakpointDensityPlay: NonNullable<Story['play']> = async ({ canvasElement
   const controls = [...brand!.querySelectorAll<HTMLElement>('button')]
   await expect(controls[0]).toHaveAccessibleName(narrow ? 'Close agents' : 'Collapse agents')
   await expect(brand!.querySelector('strong')).toHaveTextContent('Fractal')
-  // Everything after the wordmark is the alerts count, as in the dock.
-  for (const control of controls.slice(1)) await expect(control.getAttribute('aria-label')).toMatch(/alert/i)
+  // Everything after the wordmark is the Settings control, as in the dock.
+  for (const control of controls.slice(1)) await expect(control).toHaveAccessibleName('Settings')
   for (const control of controls) {
     const box = control.getBoundingClientRect()
     if (coarse) { await expect(box.height).toBeGreaterThanOrEqual(43.5); await expect(box.width).toBeGreaterThanOrEqual(43.5) }
@@ -733,7 +797,7 @@ export const DrawerFocusReturn: Story = {
     const { canvas, narrow, header } = await workspace(canvasElement)
     if (!narrow) return assertWide(canvasElement)
     const toggle = header.getByRole('button', { name: 'Expand sidebar' })
-    const terminal = canvas.getByRole('button', { name: 'Terminal' })
+    const terminal = canvas.getByRole('button', { name: 'Show terminal' })
     for (const dismiss of ['scrim', 'escape'] as const) {
       terminal.focus()
       await expect(terminal).toHaveFocus()

@@ -7,6 +7,8 @@ import type { ConversationPage, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 
 // Node rendering exercises the real kit composition, not the CSS compiler.
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const source = vi.hoisted(() => ({
@@ -25,6 +27,8 @@ vi.mock('../data/react.tsx', async () => {
   useConversation: (ref: string) => { source.conversation(ref); return source.feed },
   useConversationSync: (ref: string) => { source.conversationSync(ref); return source.sync },
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
@@ -250,7 +254,7 @@ describe('ConversationPane kit composition', () => {
     expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
-    expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')
+    expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={view} hidden={narrow && selectedPane === \'changes\'} focusShownView={focusShownView} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={ref => select(ref, \'thread\')} onFocusMission={focusMission} alertControls={{ onOpenAlert: openAlert, onOpenRef: ref => { if (ref.startsWith(\'agent/\')) select(ref, \'thread\'); else open({ ref }) }, onClose: () => navigate(current), onBack: () => showSidebarTab(\'alerts\') }} ux={ux} /></RegisteredPortal>')
     expect(workspace).toContain("hiddenPane: { contentVisibility: 'hidden'")
     expect(workspace).toContain('<ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />')
     expect(workspace).not.toContain('This subject has no available native view.')

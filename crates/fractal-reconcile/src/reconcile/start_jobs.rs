@@ -75,6 +75,11 @@ pub enum StartCompletion {
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(false);
+        }
         let failed_start = self.store.runtime_start_for(&prepared.subject.subject)?;
         let recovery_lock = if let Some(pending) = &failed_start {
             if prepared.request.is_none() {
@@ -213,8 +218,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(())
             };
             let mut backend_entered = false;
+            let mut contract = None;
             let result = caught(|| {
                 guard()?;
+                if prepared.subject.kind == "agent" {
+                    contract = Some(runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?);
+                }
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
@@ -247,6 +256,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "verification_error": verification_error})
                 },
             };
+            result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());
             result["subject"] = Value::from(subject.clone());
             result["origin"] = Value::from(store.origin());
@@ -362,6 +372,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(());
+        }
         let current =
             self.store.selected_desired_token(&operation.subject)? == prepared.selected_token;
         if !current || !prepared.requests_retained(&self.store)? {
@@ -471,7 +486,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Some(error) => Err(anyhow::anyhow!(error.to_owned())),
                     None => Ok(result["incarnation"].as_str().map(str::to_owned)),
                 };
-                let completed = self.finish_start(&operation.id, &prepared, outcome)?;
+                let completed = self.finish_start(
+                    &operation.id, &prepared, outcome, result.get("launch_contract").filter(|value| !value.is_null()),
+                )?;
                 if let StartCompletion::Applied(Some(error)) = &completed {
                     if let Some(request) = &prepared.request
                         && self.store.runtime_start_request_retained(request)?
@@ -609,6 +626,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             exec_observation = self.runtime.observe_exec(&member.runtime_id)?;
             exec_observation.as_ref()
         };
+        let evidence = RuntimeStopEvidence {
+            caller: RuntimeStopCaller::RevokedStartCleanup,
+            subject: &operation.subject,
+            runtime_id: &member.runtime_id,
+            terminal: member.terminal,
+            operation_id: Some(&operation.id),
+            expected_incarnation: prepared.expected_incarnation.as_deref(),
+            observation,
+        };
         // A retained terminal registry row without an incarnation is not evidence
         // about this operation: it may belong to an older launch. As with an
         // absent row, only operation-fenced producer/work-scope closure can retire it.
@@ -623,20 +649,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .runtime
                     .start_operation_closed(&prepared.launch_member)?
             {
+                evidence.record("retain_producer_closed", "allow_finished_producer_closed", true);
                 self.store
                     .retain_runtime_start_producer_closed(&operation.id)?;
                 self.start_changed(&operation.subject);
             } else if operation.finished {
+                evidence.record("retire_revoked_start", "skip_producer_closure_unverified", false);
                 self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
                     ("severity".into(), Value::String("error".into())),
                     ("code".into(), Value::String("start-revocation-unverified".into())),
                     ("reason".into(), Value::String("the revoked backend returned without proof that its producer cannot publish later".into())),
                 ]))?;
             }
+            if !operation.finished {
+                evidence.record("retire_revoked_start", "skip_absent_unfinished_producer", false);
+            }
             return Ok(());
         }
         let observation = observation.expect("observed runtime required after absence cleanup");
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            evidence.record("retire_revoked_start", "skip_missing_incarnation", false);
             self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
                 ("severity".into(), Value::String("error".into())),
                 ("code".into(), Value::String("start-revocation-unverified".into())),
@@ -656,6 +688,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             exec_provenance.as_deref()
         };
         if provenance != Some(operation.id.as_str()) {
+            evidence.record("retire_revoked_start", "skip_operation_provenance_mismatch", false);
+            tracing::debug!(
+                caller = ?RuntimeStopCaller::RevokedStartCleanup,
+                subject = %operation.subject,
+                runtime_id = %member.runtime_id,
+                operation_id = %operation.id,
+                observed_operation_id = provenance.unwrap_or("unavailable"),
+                expected_incarnation = prepared.expected_incarnation.as_deref().unwrap_or("unavailable"),
+                observed_incarnation = incarnation,
+                guard_decision = "skip_operation_provenance_mismatch",
+                "revoked start provenance guard"
+            );
             self.record_once(
                 &operation.subject,
                 "harness.diagnostic",
@@ -685,6 +729,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .runtime
                 .start_operation_closed(&prepared.launch_member)?
             {
+                evidence.record("retain_runtime_start_ended", "allow_finished_ended_producer_closed", true);
                 self.store.retain_runtime_start_ended(
                     &operation.id,
                     incarnation,
@@ -696,11 +741,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             // An ended PTY daemon can leave a live tree or work scope. Route it
             // through exact native retirement rather than certifying absence.
             if !member.terminal {
+                evidence.record("retire_revoked_start", "skip_ended_exec_producer_unverified", false);
                 return Ok(());
             }
         }
         // The pass evidence identifies a candidate, not permission to signal a name.
         // Exact native retirement rechecks the incarnation against fresh runtime state.
+        evidence.record("retire_revoked_start", "allow_exact_operation_provenance", true);
         self.reconcile_runtime_stop_inner(
             &operation.subject,
             &member.runtime_id,
@@ -709,6 +756,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             member.shutdown_timeout_ms,
             Some(observation),
             operation.finished.then_some(operation.id.as_str()),
+            RuntimeStopCaller::RevokedStartCleanup,
+            Some(&operation.id),
         )?;
         Ok(())
     }

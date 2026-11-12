@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rebuild workspace crates after restoring CI dependency caches so generated-client checks use current source",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Dependency cache restoration discards workspace fingerprints and outputs while retaining third-party dependencies. Exact-source build snapshots use a new cache namespace to exclude previously cached stale workspace outputs."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "A missing exact-source build snapshot rebuilds workspace crates rather than trusting dependency-cache timestamps."}
+}

@@ -20,6 +20,9 @@
 //! [`GROWTH`] times its work at the smaller, after dividing by how much larger its answer grew: a
 //! list that answers ten times more rows may read ten times more, and a request that answers the
 //! same must read about the same. Small differences under [`SLACK`] steps pass.
+//! Cold search index construction visits every local conversation, including those without
+//! searchable text. Its separate row normalizes by that conversation count and strictly caps
+//! per-conversation VM/full-scan work growth at 1.5x; warm search requests retain their flat bound.
 //!
 //! Additive work/mission `progress_at` serialization uses timestamps already hydrated by these
 //! routes; lightweight mission cards return null and do not add summary reads.
@@ -44,6 +47,8 @@
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
+
+mod assistant_admission;
 
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
@@ -121,12 +126,11 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Checkpoint status walks the sealed set (9.8x).
-    ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
     ("GET /v1/internal/fleet/status", 15.0),
+    ("GET /v1/fleet/status", 15.0),
     ("GET /v1/replication/status", 15.0),
     // Outcome history reads every finished step to page them (8.3x).
     ("GET /v1/outcome-history", 12.5),
@@ -139,6 +143,42 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/source-blobs/{hash}",
+        "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
+    ),
+    (
+        "GET /v1/custom/decision-inputs",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests",
+        "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/{id}/redeem",
+        "one-use interactive redemption requires a receipt-authenticated request and its exact answered native person ask, absent from generated cost stores; browser_pairing_tests covers pending, deny, expiry, exact scopes and single use; request, answer and completion lookups are subject-keyed, but receipt and completion write costs are not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/revoke-current",
+        "browser self-revocation requires its real paired bearer and operation receipts, absent from generated cost stores; browser_pairing_tests covers authenticated revocation; subject-keyed completion and request reads plus the revocation write are not measured here",
+    ),
+    (
+        "POST /v1/fleet/admission-override",
+        "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
+    ),
+    (
+        "GET /v1/fleet/anchor",
+        "one fleet metadata key lookup, independent of claim history; fleet::rename_proofs_export_over_cli_and_verify_without_daemon_or_config covers the real public API read through the CLI",
+    ),
+    (
+        "POST /v1/agents/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests covers real signed agent exports; evidence export intentionally reads the complete proven declaration, rename, actor and membership history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/missions/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests::real_mission_rename_proves_published_declaration covers signed mission export; complete proof-history growth is not measured here",
+    ),
     (
         "GET /v1/client/private-notes/{*uri}",
         "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
@@ -157,15 +197,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
-        "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
+        "the scan the daemon runs at startup and hourly, off the request path, for doctor's fleet-admission check, in pages that each take their own read snapshot; st fleet wait reads it once as it ends",
+    ),
+    (
+        "GET /v1/fleet/admission-residue",
+        "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/pairings/renewals/stage", "explicit operator replacement staging; bounded source lookup and one append, no history-growing scan; covered by device renewal route tests"),
+    ("POST /v1/client/pairings/renewals/pending", "explicit key-bound pending lookup; capped current-stage scan and bounded challenge append, covered by device renewal route tests"),
+    ("POST /v1/client/pairings/renewals/complete", "explicit one-use replacement completion; transactionally rechecks source, stage and consumption before one grant, covered by device renewal route tests"),
     ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
     // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
     // and one operation lookup.
     (
         "GET /v1/harness-prompts/state",
         "one newest harness.observed read by its subject index and one answer read by its operation index",
+    ),
+    (
+        "GET /v1/client/attention-budget",
+        "ordinary read probes use a raw Unix person header, which this recipient-authenticated route rejects; the paired push fixture does not seed scaling mission/person native asks and lineage; attention_budget API tests cover scoped admission, recipient revalidation and text-free reports, but populated report cost is not measured here",
     ),
     // Aliases: the same handler as a measured route under the name a person reads.
     (
@@ -305,6 +356,28 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/worker-status",
         "updates host-local worker memory; no store read or graph write",
     ),
+    // The messages shard: nothing writes to it before the stream writer, so a generated store
+    // holds an empty shard. The writer's change measures export, receive and wake.
+    (
+        "GET /v1/internal/replication/shard/{shard}/peers",
+        "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/export",
+        "pages the messages shard like the graph export; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/receive",
+        "admits a peer's messages shard exchange; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/peer-failure",
+        "records a transport failure; no store read",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/wake",
+        "drains the messages shard backlog; the shard stays empty until the stream writer",
+    ),
     // Checkpoints: the trim is measured directly, per deleted row.
     (
         "POST /v1/checkpoint/plan",
@@ -313,6 +386,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
+    ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -328,6 +402,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/internal/replication/answers-check",
         "records a daily answers check; writes only when a fault opens or ends",
+    ),
+    (
+        "POST /v1/internal/seat-freshness",
+        "records a peer's seat freshness push in memory: one declarations read, no write",
+    ),
+    (
+        "POST /v1/internal/seat-freshness/reads",
+        "answers a peer's read about this node's seats: one declarations read and at most 512 messages' marks, no write",
     ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
@@ -374,6 +456,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
     ),
     ("POST /v1/agents/restart", "restarts a live seat"),
+    ("POST /v1/agents/lane/burst", "raises a live seat's lane slice"),
+    ("DELETE /v1/agents/lane/burst", "lowers a live seat's lane slice"),
     (
         "POST /v1/agents/rollout",
         "requires a running source-fenced native seat",
@@ -401,6 +485,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",
@@ -413,6 +501,34 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
     ),
     (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
@@ -551,6 +667,9 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
+    get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
+    get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
     post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
@@ -636,6 +755,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/arrangements?person=person%2Fada",
     ),
     get(
+        "GET /v1/client/read-positions",
+        "/v1/client/read-positions?person=person%2Fada",
+    ),
+    get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
@@ -654,6 +777,8 @@ const PROBES: &[Probe] = &[
     post("POST /v1/sets/apply", "/v1/sets/apply", |_, attempt| {
         owned_set_request(&format!("apply-{attempt}"))
     }),
+    get("GET /v1/source/status", "/v1/source/status"),
+    get("GET /v1/source-maps", "/v1/source-maps?subject=agent/bench/cost/fixture&texts=true"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -718,6 +843,36 @@ const PROBES: &[Probe] = &[
             .map(|ended| json!({"ended": ended}))
             .map_err(|error| error.message)
     }),
+    // The GitHub plugin's reads: which member polls the repository, then, answering from this
+    // member's graph, its recorded items or events. The mirror is the poller's own file.
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", None)
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/events", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .github_events("resource/github/acme/garden", None, 50)
+            .map(|events| json!(events.len()))
+            .map_err(|error| error.to_string())
+    }),
     get("GET /v1/health", "/v1/health"),
     get("GET /v1/schema", "/v1/schema"),
     get("GET /v1/client/capabilities", "/v1/client/capabilities"),
@@ -743,6 +898,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/document-references?subject=message/{sent}",
     ),
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
+    // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
+    get("GET /v1/client/quota", "/v1/client/quota"),
+    // The unconfigured usage hub returns disabled locally without an external request.
+    get("GET /v1/client/usage/quota", "/v1/client/usage/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -751,6 +910,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/client/publication-definition",
         "/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover",
+    ),
+    get(
+        "GET /v1/client/mission-declaration",
+        "/v1/client/mission-declaration?mission={mission}",
     ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
@@ -813,6 +976,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/agent-workspaces/{*id}",
         "/v1/client/agent-workspaces/{agent}",
     ),
+    get("GET /v1/agents/lane", "/v1/agents/lane?agent={seat}"),
     get(
         "GET /v1/client/status-history/{*id}",
         "/v1/client/status-history/{agent}",
@@ -825,6 +989,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/agent-queues/{*id}",
         "/v1/client/agent-queues/{agent}",
     ),
+    get("GET /v1/client/agent-related-runs/{*id}", "/v1/client/agent-related-runs/{agent}"),
     get("GET /v1/client/lanes", "/v1/client/lanes"),
     get("GET /v1/client/lanes/{*id}", "/v1/client/lanes/{lane}"),
     get("GET /v1/client/history", "/v1/client/history"),
@@ -929,6 +1094,9 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get("GET /v1/desired", "/v1/desired?subject={seat}"),
+    // Sparse kind selection must not walk every unrelated desired declaration.
+    get("GET /v1/desired", "/v1/desired?kind=mission&limit=1"),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
@@ -963,9 +1131,22 @@ const PROBES: &[Probe] = &[
         "/v1/internal/fleet/membership",
     ),
     get("GET /v1/internal/fleet/status", "/v1/internal/fleet/status"),
+    get("GET /v1/fleet/status", "/v1/fleet/status"),
+    get("GET /v1/fleet/membership", "/v1/fleet/membership"),
+    get("GET /v1/fleet/invites", "/v1/fleet/invites"),
     get(
         "GET /v1/internal/fleet/invites",
         "/v1/internal/fleet/invites",
+    ),
+    // The generated store has a member signing key; each sample appends a real attributed
+    // announcement without changing transport settings or contacting a replication worker.
+    post(
+        "POST /v1/fleet/transports",
+        "/v1/fleet/transports",
+        |_, attempt| json!({
+            "actor":"person/bench-operator", "mutation_id":format!("cost-fleet-transports-{attempt}"),
+            "mode":"listening", "endpoints":[],
+        }),
     ),
     get("GET /v1/evals/{*run}", "/v1/evals/{run}"),
     get(
@@ -1186,6 +1367,45 @@ const PROBES: &[Probe] = &[
             .map(|(record, _)| serde_json::to_value(record).unwrap())
             .map_err(|error| error.message)
     }),
+    // Like harness-events, admission requires a live native wrapper absent from
+    // generated stores. Measure the actual Store path, not its HTTP refusal.
+    // Each sample opens AND closes a fresh native call, covering both ingest kinds
+    // without accidentally timing only an idempotent replay.
+    direct("POST /v1/harness-questions/native", |store, fixture, attempt| {
+        use fractal_schema::harness_questions::{Question, Status, native_id_digest, subject};
+        let agent = &fixture.subjects.seats[0];
+        let session = "cost-native-question-session";
+        let native_id = native_id_digest(&format!("cost-native-question-{attempt}"));
+        let id = subject(agent, session, &native_id);
+        assert!(store.harness_question_held(&id).map_err(|error| error.message)?.is_none());
+        let generation = fractal_daemon::store::harness_questions::QuestionGeneration {
+            question: id.clone(), agent: agent.clone(), session: session.into(),
+            runtime_incarnation: SEAT_RUNTIME.into(), owner_session: "cost-owner".into(),
+            owner_sequence: 1,
+            witness: fractal_daemon::store::harness_questions::QuestionWitness {
+                runtime_name: "cost-runtime".into(), created_at: "cost-generation".into(),
+                daemon: (1, 1), terminal: (2, 2), wrapper: (2, 2), bound: false,
+            },
+        };
+        store.retain_harness_question_generation(&generation).map_err(|error| error.message)?;
+        store.observe_harness_question_digest(
+            &fractal_daemon::store::harness_questions::QuestionObservation {
+                agent: agent.clone(), session: session.into(), native_id,
+                runtime_incarnation: SEAT_RUNTIME.into(),
+                questions: vec![Question { id: "q0".into(), options: 2,
+                    multi: false, required: true }],
+            },
+        ).map_err(|error| error.message)?;
+        let current = store.harness_question_held(&id).map_err(|error| error.message)?
+            .expect("the open observation must be persisted");
+        store.retain_harness_question_generation(&generation).map_err(|error| error.message)?;
+        let (question, written) = store.resolve_harness_question(
+            &id, Status::AnsweredElsewhere, &current.revision, &BTreeMap::new(), None,
+        ).map_err(|error| error.message)?;
+        assert!(written, "measure native close, not a replay");
+        store.forget_harness_question_generation(&generation).map_err(|error| error.to_string())?;
+        Ok(json!({"question":question.id}))
+    }),
     // Replication, as the worker calls it: an in-step peer asks for a summary, and each side
     // answers the other's summary with what it lacks, here a few new claims.
     post(
@@ -1255,6 +1475,11 @@ const SEAT_RUNTIME: &str = "cost-seat-0-runtime";
 
 /// The same agent list, after one seat changes at each scale.
 const COLD_AGENTS: &str = "GET /v1/client/agents (after harness observation)";
+/// First native search through worker completion, normalized by local conversations.
+const COLD_SEARCH: &str = "conversation search cold build";
+/// Indexing must visit even empty conversations, so indexed bytes are not its work unit.
+/// The 1.5x per-conversation cap permits linear construction, but rejects content × agents.
+const COLD_SEARCH_GROWTH: f64 = 1.5;
 const ARRANGEMENT_OWNER: &str = "person/ada";
 const ARRANGEMENT_SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 const ARRANGEMENT_PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
@@ -1299,6 +1524,23 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
     )
+}
+
+/// Retained advances grow while the projected answer stays one conversation.
+fn seed_read_positions(store: &Store, scale: f64) {
+    for advance in 0..((scale * 10_000.0).round() as u64).max(1) {
+        store.append_claim(&ClaimInput {
+            subject: fractal_schema::read_positions::subject(ARRANGEMENT_OWNER),
+            kind: fractal_schema::read_positions::KIND.into(),
+            actor: Some(ARRANGEMENT_OWNER.into()),
+            fields: BTreeMap::from([
+                ("owner".into(), json!(ARRANGEMENT_OWNER)),
+                ("conversation".into(), json!(ARRANGEMENT_PLACEMENT)),
+                ("at_ms".into(), json!(advance)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).expect("the read-position cost fixture must publish");
+    }
 }
 
 const MEMBERSHIP_OWNER: &str = "person/avery";
@@ -1387,7 +1629,7 @@ struct Cost {
     sorts: u64,
     autoindex_rows: u64,
     statements: u64,
-    /// The answer's size in bytes, or the rows a trim deleted.
+    /// The answer's size in bytes, rows a trim deleted, or local conversations for cold search.
     answer: u64,
     /// How many things the answer returned ([`item_count`]), at least one.
     items: u64,
@@ -1585,6 +1827,176 @@ impl Fixture {
     }
 }
 
+const READY_WORK_COST_ROUTE: &str = "GET /v1/client/ready-work";
+
+#[tokio::test]
+async fn populated_ready_work_cost_by_cohort_size() {
+    use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
+    use tower::ServiceExt;
+
+    async fn measure(
+        app: &axum::Router,
+        store: &Store,
+        cohort: &[String],
+    ) -> Cost {
+        let cut = store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10),
+            fractal_daemon::api::wait_published_lists_at_least(store, cut))
+            .await.expect("ready cost publication reaches graph cut").unwrap();
+        let path = format!("/v1/client/ready-work?cohort={}", urlencoding::encode(&cohort.join(",")));
+        let sample = counted(|| async {
+            let reply = app.clone().oneshot(Request::builder().uri(path)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = reply.status();
+            let body = to_bytes(reply.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(value["snapshot"]["store_index"], cut);
+            assert_eq!(value["value"]["ready_count"], cohort.len() * 2);
+            assert_eq!(value["value"]["coverage"], "local-graph-cut");
+            Ok(value)
+        }).await;
+        assert!(sample.vm_steps > 0 && sample.statements > 0);
+        assert_eq!(sample.fullscan_steps, 0, "ready-work must use indexed lookups: {sample:?}");
+        println!("ready-work cohort={} ready={} vm_steps={} statements={} fullscan_steps={} max_repeat={} shape={}",
+            cohort.len(), cohort.len() * 2, sample.vm_steps, sample.statements,
+            sample.fullscan_steps, sample.max_repeat, sample.top_shape);
+        sample
+    }
+
+    fn append_history(store: &Store, subject: &str, actor: &str, events: std::ops::Range<usize>) {
+        for event in events {
+            let message = format!("message/ready-cost-history-{subject}-{event}");
+            for (kind, fields) in [
+                ("work.released", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_to": actor, "handoff_message": message,
+                })),
+                ("work.progress", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_acknowledged": message,
+                })),
+            ] {
+                store.append_claim(&fractal_daemon::model::ClaimInput {
+                    subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+        }
+    }
+
+    fn assert_within(actual: u64, baseline: u64, growth: usize, label: &str) {
+        assert!(
+            u128::from(actual) * 2 <= u128::from(baseline) * 3 * growth as u128,
+            "{label}: actual={actual}, baseline={baseline}, allowed growth=1.5x{growth}"
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+    let seats: Vec<_> = (0..64).map(|i| format!("bench/ready-cost/{i}")).collect();
+    let mut source = String::from("version 2\n");
+    for seat in &seats {
+        source.push_str(&format!("agent {seat:?} {{ workspace \"/tmp\"; command \"true\" }}\n"));
+    }
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    store.apply_internal(&intent, "ready-cost-seats").unwrap();
+    let cohort: Vec<_> = seats.iter().map(|seat| format!("agent/{seat}")).collect();
+    let mut subjects = Vec::new();
+    for (index, actor) in cohort.iter().enumerate() {
+        for step in 0..2 {
+            let work = store.start_work(&fractal_daemon::model::WorkStartRequest {
+                actor: actor.clone(),
+                title: format!("Ready cost fixture {index}/{step}"),
+                idempotency_key: format!("ready-cost-{index}-{step}"),
+            }).unwrap();
+            subjects.push((work.subject, actor.clone()));
+        }
+    }
+
+    let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
+    fractal_daemon::api::start_published_lists(&state);
+    let app = fractal_daemon::api::router(state);
+    let mut sizes = Vec::new();
+    for size in [1, 8, 32, 64] {
+        let sample = measure(&app, &store, &cohort[..size]).await;
+        // There are two eligible steps/ready rows per seat, so these are both
+        // per-ready-row and per-cohort-step costs, not raw whole-request totals.
+        let rows = (size * 2) as u64;
+        println!("ready-work cohort={size} vm_steps_per_ready_row={} statements_per_cohort_step={}",
+            sample.vm_steps as f64 / rows as f64, sample.statements as f64 / rows as f64);
+        sizes.push((rows, sample));
+    }
+    // SQLite work counters are deterministic, not wall time. A 1.5x allowance
+    // tolerates fixed request overhead and modest plan changes, but not an extra
+    // cohort factor (64x here) or an unrelated-history factor (10x below).
+    // dev5 fixture observation: cohorts 1/8/32/64 yielded ready 2/16/64/128,
+    // VM 247/1458/5610/11146 and statements 13/62/230/454, all with zero scans.
+    let (small_rows, small) = &sizes[0];
+    // Check every cohort: an intermediate non-monotone spike must not hide
+    // behind a cheap largest-cohort sample.
+    for (rows, sample) in &sizes {
+        assert_within(sample.vm_steps * small_rows, small.vm_steps * rows, 1, "VM per ready row");
+        assert_within(sample.statements * small_rows, small.statements * rows, 1, "statements per cohort step");
+    }
+
+    // Keep the measured cohort and answer fixed while growing both event kinds
+    // tenfold on real work subjects assigned only to seats outside that cohort.
+    let unrelated = &subjects[64..];
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 0..4);
+    }
+    let short_unrelated = measure(&app, &store, &cohort[..8]).await;
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 4..40);
+    }
+    let long_unrelated = measure(&app, &store, &cohort[..8]).await;
+    assert_within(long_unrelated.vm_steps, short_unrelated.vm_steps, 1, "unrelated history VM");
+    assert_within(long_unrelated.statements, short_unrelated.statements, 1, "unrelated history statements");
+    // dev5 observation: 4 -> 40 release/progress pairs per unrelated subject
+    // left the fixed 8-seat request unchanged at 1458 VM steps / 62 statements.
+
+    // In contrast, histories on an eligible subject are NOT capped. latest_handoff
+    // SEARCHes subject+kind via claims_subject_kind_index; returned/progress use
+    // claims_subject_kind_accepted_index with the same prefix. The canonical
+    // latest query still uses a temporary ordering B-tree. Thus we allow linear
+    // candidate work, not history-independent VM cost: 10x releases/progress on
+    // ONE eligible subject may cost at most 10x * 1.5 VM steps for this fixed
+    // answer. Statement count must remain within 1.5x, rejecting per-event queries.
+    // Every release has an acknowledgment, so this exercises the progress lookup
+    // without turning the probe into an empty/refused-answer measurement.
+    let (subject, actor) = &subjects[0];
+    append_history(&store, subject, actor, 0..64);
+    let short_subject = measure(&app, &store, &cohort[..1]).await;
+    append_history(&store, subject, actor, 64..640);
+    let long_subject = measure(&app, &store, &cohort[..1]).await;
+    assert_within(long_subject.vm_steps, short_subject.vm_steps, 10, "one-subject history VM");
+    assert_within(long_subject.statements, short_subject.statements, 1, "one-subject history statements");
+    // dev5 observation: 64 -> 640 pairs on one eligible subject grew VM
+    // 5223 -> 49575 (9.49x), with 15 statements and zero scans at both sizes.
+}
+
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
@@ -1618,11 +2030,14 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -1728,10 +2143,12 @@ async fn no_request_does_work_that_grows_with_the_store() {
         } else {
             (after.answer.max(1) as f64 / before.answer.max(1) as f64).max(1.0)
         };
+        let growth_limit = if name == COLD_SEARCH { COLD_SEARCH_GROWTH } else { GROWTH };
         let grew = |field: fn(&Cost) -> u64| {
             let (before, after) = (field(before), field(after));
             let ratio = after as f64 / before.max(1) as f64 / answered;
-            (ratio, ratio > GROWTH && after > before + SLACK)
+            // Cold indexing has a strict per-conversation bound, not the warm-row slack.
+            (ratio, ratio > growth_limit && (name == COLD_SEARCH || after > before + SLACK))
         };
         let (steps, steps_grew) = grew(|cost| cost.vm_steps);
         let (scans, scans_grew) = grew(|cost| cost.fullscan_steps);
@@ -1745,13 +2162,14 @@ async fn no_request_does_work_that_grows_with_the_store() {
             ));
         }
         let summary = format!(
-            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} bytes",
+            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} {}",
             before.vm_steps,
             after.vm_steps,
             before.fullscan_steps,
             after.fullscan_steps,
             before.answer,
-            after.answer
+            after.answer,
+            if name == COLD_SEARCH { "local conversations" } else { "bytes" },
         );
         match KNOWN_GROWTH.iter().find(|(route, _)| route == name) {
             Some((_, limit)) if steps.max(scans) > *limit => failures.push(format!(
@@ -1761,6 +2179,10 @@ async fn no_request_does_work_that_grows_with_the_store() {
                 "{name}: no longer grows with the store; remove it from KNOWN_GROWTH: {summary}"
             )),
             Some(_) => {}
+            None if name == COLD_SEARCH && (steps_grew || scans_grew) => failures.push(format!(
+                "{name}: per-conversation work exceeds {COLD_SEARCH_GROWTH}x \
+                 (VM {steps:.2}x, full-scan {scans:.2}x): {summary}"
+            )),
             None if steps_grew || scans_grew => {
                 failures.push(format!("{name}: work grows with the store: {summary}"))
             }
@@ -1791,6 +2213,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
             "usage_window": {"since_ms": usage_window.0, "until_ms": usage_window.1},
             "claims": [small.claims, large.claims],
             "growth_limit": GROWTH,
+            "cold_search": {"growth_limit": COLD_SEARCH_GROWTH, "normalization": "local conversations"},
             "slack": SLACK,
             "small": small.costs,
             "large": large.costs,
@@ -1912,6 +2335,7 @@ fn the_cost_check_covers_every_route() {
     let measured = PROBES
         .iter()
         .map(|probe| probe.route)
+        .chain([READY_WORK_COST_ROUTE])
         .collect::<BTreeSet<_>>();
     let skipped = NOT_MEASURED
         .iter()
@@ -1998,6 +2422,86 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     );
     assert!(samples[1].vm_steps <= samples[0].vm_steps * 2 + SLACK);
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
+}
+
+/// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
+/// Repeated observations grow the durable log, not the projected credit inventory.
+#[test]
+fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY_MS: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    // Complete initialization outside measured request scopes; joining the worker is deterministic.
+    store.wait_for_usage_credit_backfill().unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
+        store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), json!([{
+                    "account": "digest", "account_ref": "account/one", "provider": "anthropic",
+                    "credit_id": credit_id, "expires_at": time(expires),
+                    "measured_at": time(now - 1_000 + n),
+                    "state": state, "coverage": "reported", "source": "omp-usage", "host": "cost-node",
+                    "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                }])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // An identity not refreshed by any later batch must never vanish from the inventory.
+    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for n in 1..=1_000 {
+        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        if !matches!(n, 100 | 1_000) {
+            continue;
+        }
+        for configured in [true, false] {
+            store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
+            if configured {
+                store.wait_for_usage_credit_backfill().unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..4 {
+                let scope = work::SqliteWorkScope::start();
+                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let spent = scope.finish();
+                if configured {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
+                    assert_eq!(row["status"], "missed");
+                    assert_eq!(row["current"], "1 forfeited window-equivalents");
+                    let evidence = row["evidence"].as_array().unwrap();
+                    assert_eq!(evidence.len(), 2);
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
+                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                }
+                samples.push(spent);
+            }
+            let spent = samples.into_iter().skip(1).min_by_key(|sample| sample.vm_steps).unwrap();
+            if configured { enabled.push(spent); } else { disabled.push(spent); }
+        }
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    }
+    for (configured, samples) in [(true, enabled), (false, disabled)] {
+        let (small, large) = (samples[0], samples[1]);
+        assert!(small.statements > 0, "shared SLO SQL work must be traced");
+        assert!(large.statements <= small.statements + 2,
+            "SLO SQL calls grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.vm_steps <= small.vm_steps + SLACK,
+            "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+            "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
 }
 
 #[test]
@@ -2262,7 +2766,9 @@ fn routes_in(router: &str) -> BTreeSet<String> {
     }
     // The router's last section nests test-only routes in its own tests module.
     routes.retain(|route| {
-        !route.contains("/v1/client/probes") && !route.contains("/v1/client/earlier")
+        !route.contains("/v1/client/probes")
+            && !route.contains("/v1/client/earlier")
+            && !route.contains("/v1/internal/test/")
     });
     routes
 }
@@ -2480,6 +2986,74 @@ fn seed_git_change_reads(store: &Store, scale: f64) {
     }
 }
 
+#[cfg(test)]
+const SERVICE_PROBE_TOKEN: &str = "invented-cost-service-reader";
+
+// This integration-test target alone constructs the disabled Service profile.
+#[cfg(test)]
+fn seed_service_probe(store: &Store) -> String {
+    use fractal_daemon::api::client_v0::{credential_digest, external_grants};
+    const ID: &str = "787878787878787878787878";
+    store.append_claim(&ClaimInput {
+        subject:external_grants::subject(ID).unwrap(),kind:external_grants::GRANTED.into(),
+        actor:Some("person/bench-operator".into()),
+        fields:serde_json::from_value(json!({
+            "profile":"service","principal":"plugin/cost/reader","grant_id":ID,
+            "session_actor":format!("plugin/cost/reader/session/{ID}"),
+            "issuer":"person/bench-operator","expires_at_unix_ms":u64::MAX,
+            "credential_hash":credential_digest(SERVICE_PROBE_TOKEN),
+            "scopes":["read.claims","read.work"],
+        })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"gate-operation/cost/service-read".into(),kind:"gate.result".into(),actor:None,
+        fields:serde_json::from_value(json!({"verdict":"pass"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap().id
+}
+
+#[cfg(test)]
+async fn service_probe(app: &Router, path: &str) -> Result<Value,String> {
+    use axum::{body::Body,http::Request};
+    use tower::ServiceExt as _;
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization",format!("Bearer {SERVICE_PROBE_TOKEN}"))
+        .body(Body::empty()).map_err(|error| error.to_string())?)
+        .await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(),usize::MAX).await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("service read {path} failed: {status}"));
+    }
+    let envelope: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let answer = envelope["value"].clone();
+    if path.starts_with("/v1/client/claims/by-id/") {
+        if answer["body"]["fields"]["verdict"] != "pass" {
+            return Err("service receipt probe must read its populated receipt".into());
+        }
+    } else if path.starts_with("/v1/client/claims?") {
+        if !answer["claims"].as_array().is_some_and(|claims| !claims.is_empty()) {
+            return Err("service page probe must read populated claims".into());
+        }
+    } else if !answer["subject"].as_str().is_some_and(|subject| subject.starts_with("step-run/")) {
+        return Err("service work probe must read a populated work item".into());
+    }
+    Ok(answer)
+}
+
+async fn required_service_probe(app: &Router, path: &str) -> Value {
+    service_probe(app,path).await.unwrap_or_else(|error| {
+        panic!("seeded service probe must succeed before cost aggregation: {error}")
+    })
+}
+
+#[tokio::test]
+#[should_panic(expected = "seeded service probe must succeed before cost aggregation")]
+async fn missing_service_probe_is_fatal_before_cost_aggregation() {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -2606,6 +3180,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -2635,11 +3215,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty,
@@ -2658,6 +3241,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let mut state = state;
     state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
+    let service_claim = seed_service_probe(&store);
+    let mut service_state = state.clone();
+    service_state.owning_person = Some("person/bench-operator".into());
+    let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
@@ -2725,6 +3312,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
@@ -2836,10 +3424,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         publication["revision"].as_str(),
         Some(expected_publication_revision.as_deref().unwrap())
     );
-    client
-        .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
+    // The fixture set carries a source map, so the source-map read probe answers a real claim.
+    let mut fixture_set = owned_set_request("fixture");
+    fixture_set["source_map"] = json!({
+        "schema": "fractal.source-map/v1",
+        "files": [{"repository": "acme/garden", "path": "graph/fixture.ts", "blob": "b".repeat(40),
+            "text": "export default fixture\n"}],
+        "subjects": {"agent/bench/cost/fixture": {"declaration": 0, "inputs": [0]}},
+    });
+    let applied: Value = client
+        .post("/v1/sets/apply", &fixture_set)
         .await
         .expect("the owned-set read fixture must publish");
+    assert_eq!(applied["publication"]["source_maps"]["recorded"], 1, "{applied}");
     let selected: Value = person
         .get("/v1/client/sets/bench/cost/fixture")
         .await
@@ -2866,6 +3463,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = arrangement_person
+        .get("/v1/client/read-positions?person=person%2Fada")
+        .await
+        .expect("the read-position list probe must read the selected owner's projection");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["owner"], ARRANGEMENT_OWNER);
+    assert_eq!(page["items"][0]["conversation"], ARRANGEMENT_PLACEMENT);
     let page: Value = membership_person
         .get(MEMBERSHIP_PATH)
         .await
@@ -2917,6 +3521,59 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
         }
+        if probe.route == "GET /v1/client/conversations/search" {
+            // The cold build owns all SQL work through the worker's explicit completion,
+            // not merely until its first 503 or a quiet interval between reader admissions.
+            let path = fixture.fill(probe.path, 0);
+            smallclaims::sqlite::histogram::take();
+            let before_work = work::total();
+            let before_builds = fractal_daemon::api::managed_owner_map_build_count_for_test();
+            let started = Instant::now();
+            let (indexed_bytes, local_conversations) =
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    if let Err(error) = person.request::<(), Value>("GET", &path, None).await {
+                        assert!(
+                            fractal_daemon::client::api_error_parts(&error).is_some_and(
+                                |(status, code, message, _)| {
+                                    status == 503
+                                        && code == "remote-unavailable"
+                                        && message
+                                            == "conversation search index is being built; retry shortly"
+                                },
+                            ),
+                            "the cold search request failed: {error:#}",
+                        );
+                    }
+                    fractal_daemon::api::client_v0::search::wait_native_index_for_test(
+                        &store, "person/bench-operator",
+                    ).await.expect("the cold search index worker must succeed")
+                })
+                .await
+                .expect("the cold search index worker must finish within 120 seconds");
+            let spent = work::total() - before_work;
+            let owner_map_builds =
+                fractal_daemon::api::managed_owner_map_build_count_for_test() - before_builds;
+            println!(
+                "scale {scale}: {COLD_SEARCH}: {:.3}s, {owner_map_builds} owner-map builds, \
+                 {local_conversations} local conversations, {indexed_bytes} indexed bytes, \
+                 {} VM steps, {} full-scan steps, {} statements",
+                started.elapsed().as_secs_f64(), spent.vm_steps, spent.fullscan_steps,
+                spent.statements,
+            );
+            assert!(
+                owner_map_builds <= local_conversations + 1,
+                "cold search rebuilt the fleet owner map {owner_map_builds} times for \
+                 {local_conversations} local conversations",
+            );
+            assert!(indexed_bytes > 0, "cold search must index the generated content");
+            assert!(local_conversations > 0, "cold search must visit local conversations");
+            let (max_repeat, top_shape) = most_repeated_shape();
+            costs.insert(COLD_SEARCH.to_owned(), Cost {
+                max_repeat,
+                top_shape,
+                ..Cost::from_work(spent, local_conversations as u64, None)
+            });
+        }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
@@ -2941,6 +3598,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
+                let path = fixture.fill(probe.path,attempt);
+                counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {
@@ -2952,7 +3612,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 let client = if path == MEMBERSHIP_PATH {
                     membership_person.clone()
-                } else if path.starts_with("/v1/client/arrangements") {
+                } else if path.starts_with("/v1/client/arrangements") || path.starts_with("/v1/client/read-positions") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
@@ -2979,6 +3639,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "POST /v1/fleet/transports" {
+                                anyhow::ensure!(
+                                    value["published"] == true,
+                                    "the transport cost probe must publish an attributed endpoint announcement",
+                                );
+                            }
+                            if probe.route == "GET /v1/client/quota" {
+                                let source = value.get("value").unwrap_or(&value);
+                                anyhow::ensure!(
+                                    source["state"] == "disabled",
+                                    "quota cost probe must exercise the disabled source"
+                                );
+                            }
                             if matches!(probe.route, "GET /v1/client/usage" | "GET /v1/usage") {
                                 let period = value.get("value").unwrap_or(&value);
                                 anyhow::ensure!(
@@ -3027,7 +3700,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             }),
             ..cost
         };
-        costs.insert(probe.route.to_owned(), cost);
+        // Route coverage deduplicates by route, but both desired selection shapes need
+        // independent cost rows so the all-subject probe cannot hide the named probe.
+        let key = if probe.route == "GET /v1/desired" {
+            format!("{} ({})", probe.route, probe.path)
+        } else {
+            probe.route.to_owned()
+        };
+        costs.insert(key, cost);
     }
     // A real seat update invalidates its card between every read. Count only the read, using
     // the same canonical claim path as a driver; the warm probe above remains unchanged.

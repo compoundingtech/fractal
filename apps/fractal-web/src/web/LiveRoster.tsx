@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import type { Undecodable } from '@fractal/sdk/effect'
+import type { Undecodable } from '@fractal/sdk/read'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { Feed, Fleet, RosterDecode } from '../data/source.ts'
 
@@ -13,7 +13,7 @@ export interface HiddenRoster {
 
 /**
  * Rows count once: a typed identity groups its field failures; an id-less row reports exactly one
- * identity (`id`) or whole-row (`$`) failure. Degraded leaves never count as hidden agents.
+ * identity (`id`) or whole-row (`$`) failure. Degraded leaves never count as hidden rows.
  */
 export const hiddenRoster = ({ decode, shown }: {
   readonly decode: RosterDecode
@@ -31,24 +31,32 @@ export const hiddenRoster = ({ decode, shown }: {
   return { count: count === 0 && failures.length > 0 ? 1 : count, failures }
 }
 
-export const rosterDecodeNotice = (count: number) =>
-  `${count} ${count === 1 ? 'agent' : 'agents'} could not be shown · this view is older than the daemon`
+/** What a feed lists; picks the sentence noun, the test marker and the details label. */
+export type DecodeNoun = 'agent' | 'mission' | 'alert'
+const MARKER = { agent: 'data-wf-roster-decode', mission: 'data-wf-missions-decode', alert: 'data-wf-attention-decode' } as const satisfies Record<DecodeNoun, string>
+const LABEL = { agent: 'Agents', mission: 'Missions', alert: 'Alerts' } as const satisfies Record<DecodeNoun, string>
 
-/** One quiet roster notice; the disclosure carries the SDK's path and reason per failure. */
-export function RosterDecodeNotice({ decode, shown }: {
+export const decodeNotice = (count: number, noun: DecodeNoun) =>
+  `${count} ${count === 1 ? noun : `${noun}s`} could not be shown · their data does not match the expected format`
+
+/** One quiet feed notice; only the disclosure names identifiers, with the SDK's path and reason per failure. */
+export function DecodeNotice({ noun, decode, shown, xstyle }: {
+  readonly noun: DecodeNoun
   readonly decode: RosterDecode
   readonly shown: ReadonlySet<string>
+  readonly xstyle?: stylex.StyleXStyles
 }) {
   const hidden = hiddenRoster({ decode, shown })
   if (hidden.count === 0) return null
+  const marker = { [MARKER[noun]]: decode.decodeStale ? 'stale' : 'partial' }
   return (
-    <div data-wf-roster-decode={decode.decodeStale ? 'stale' : 'partial'} {...stylex.props(styles.notice, styles.decode)}>
+    <div {...marker} {...stylex.props(styles.notice, styles.decode, xstyle)}>
       {/* Polite and atomic: only a changed count is announced, never per-row failures. */}
-      <p role="status" aria-live="polite" aria-atomic="true" {...stylex.props(styles.sentence)}>{rosterDecodeNotice(hidden.count)}</p>
+      <p role="status" aria-live="polite" aria-atomic="true" {...stylex.props(styles.sentence)}>{decodeNotice(hidden.count, noun)}</p>
       <Aria.Disclosure>
         <Aria.Button slot="trigger" {...stylex.props(styles.disclosure)}>Details</Aria.Button>
         <Aria.DisclosurePanel>
-          <ul tabIndex={0} aria-label="Agents that could not be shown" {...stylex.props(styles.failures)}>
+          <ul tabIndex={0} aria-label={`${LABEL[noun]} that could not be shown`} {...stylex.props(styles.failures)}>
             {hidden.failures.map((failure, index) => (
               <li key={`${failure.id ?? ''}:${failure.path}:${index}`} data-wf-decode-path={failure.path}>
                 <span {...stylex.props(styles.identity)}>{failure.id ?? 'Row without a readable id'}</span>

@@ -95,18 +95,17 @@ assert.deepEqual(pingPresentation('No envelope here'), { from: null, text: 'No e
   assert.equal(clientTitle(phone, 'person/robin/session/s1'), 'fractal-ios 1.0 (42) · this phone');
   assert.equal(clientTitle({ ...phone, client: null }, undefined), 'unnamed client');
   assert.equal(clientDetail(phone, now), "person/robin · Robin's phone · gateway · lark · since 12m · follows now, terminal:terminal/agent/lark/planner");
-  const gone = { ...phone, actor: 'person/robin', client: 'stui 0.0.9+77d0a13', device_id: undefined, device_name: undefined, via: 'local', connected: false, last_seen: '2026-09-25T08:22:00Z', follows: [] };
+  const gone = { ...phone, actor: 'person/robin', client: 'fractal-tui 0.0.9+77d0a13', device_id: undefined, device_name: undefined, via: 'local', connected: false, last_seen: '2026-09-25T08:22:00Z', follows: [] };
   assert.equal(clientDetail(gone, now), 'person/robin · local · lark · seen 3m ago');
-  assert.equal(olderThanMember('stui 0.0.9+77d0a13', '0.1.0+1ecae71'), true);
   assert.equal(olderThanMember('st 0.1.0+local.ab12cd3', '0.2.0+1ecae71'), true);
   assert.equal(olderThanMember('fractal 0.1.0+local.ab12cd3', '0.2.0+1ecae71'), true);
   assert.equal(olderThanMember('fractal-tui 0.0.9+77d0a13', '0.1.0+1ecae71'), true);
   assert.equal(olderThanMember('fractal 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('fractal dev', '0.1.0+1ecae71'), false);
-  assert.equal(olderThanMember('stui 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
+  assert.equal(olderThanMember('fractal-tui 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('fractal-ios 0.0.1 (3)', '0.1.0+1ecae71'), false);
-  assert.equal(olderThanMember('stui dev', '0.1.0+1ecae71'), false);
-  assert.equal(olderThanMember('stui 0.0.9+77d0a13', undefined), false);
+  assert.equal(olderThanMember('fractal-tui dev', '0.1.0+1ecae71'), false);
+  assert.equal(olderThanMember('fractal-tui 0.0.9+77d0a13', undefined), false);
 }
 
 // An ask a mission step made names the step that waits and what it is for; a standalone ask names none.

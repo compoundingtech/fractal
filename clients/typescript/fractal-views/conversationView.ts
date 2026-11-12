@@ -261,6 +261,7 @@ export function signatureMark(provenance: unknown): string | undefined {
 
 /** The lines Fractal adds beside a delivery for the agent (fractal-drivers `ding`). */
 const FRACTAL_DELIVERY_NOTES = [
+  'Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.',
   'Answer the person in this conversation; people have no inbox, so do not reply with st.',
   "The person reads replies in st, not in the agent's session.",
   '(dictated by voice; it may contain transcription mistakes)',
@@ -790,31 +791,44 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
   const shown = new Set(timeline.filter(entry => entry.type === 'message').map(entry => str(record(entry.body).message_id) ?? '').filter(id => id.startsWith('message/')));
   const delivered = new Set<string>();
   let mail: Record<string, unknown> | undefined;
+  // Headers by message, for content that names its message: two messages that tie in order can
+  // put both headers before both contents, and adjacency alone would cross them.
+  const headers = new Map<string, Record<string, unknown>>();
   const push = (entry: Entry, id: string, body: Body) => {
     const content = contentReferences(entry.body);
     stamped.push({ id, at: clock(entry.timestamp), timestamp: entry.timestamp, body, ...(content.length ? { content, contentSources: [entry] } : {}) });
   };
   // Entries arrive in Fractal's order (applyConversation keeps them by time, then sequence).
   for (const entry of timeline) {
-    if (!mail && isBookkeeping(entry, filters)) continue;
     const body = record(entry.body);
+    // Content that names its message pairs with that header; older content, with the header before it.
+    const named = entry.type === 'content' ? str(body.message_id) : undefined;
+    const header = named === undefined ? mail : headers.get(named);
+    if (!header && isBookkeeping(entry, filters)) continue;
     if (entry.type === 'message') {
       if (Array.isArray(body.blocks)) for (const block of body.blocks.filter(block => record(block).kind === 'raw_text')) push(entry, str(record(block).id) ?? entry.id, {kind:'event',tone:'quiet',text:`[unreadable message]\n${cleanMessageText(str(record(record(block).payload).text) ?? '', filters)}`});
       // A Fractal message is two entries: who wrote to whom, then what they wrote. Only a
       // graph message, `message/…`, is Fractal; a transcript heads its own turns this way too.
-      mail = (str(body.message_id) ?? '').startsWith('message/') ? body : undefined;
+      const id = str(body.message_id) ?? '';
+      mail = id.startsWith('message/') ? body : undefined;
+      if (mail) headers.set(id, mail);
       continue;
     }
-    if (mail && entry.type === 'content') {
-      const message = mail;
-      mail = undefined;
+    if (header && entry.type === 'content') {
+      const message = header;
+      // Each header pairs once, by name or by adjacency.
+      headers.delete(str(message.message_id) ?? '');
+      if (mail === message) mail = undefined;
       const text = cleanMessageText(contentText(entry.body), filters);
-      const from = str(message.from) ?? '';
-      if (from === 'daemon/runtime') {
-        // Step-ready pings are graph events, not conversation.
+      // The writer: `author` (conversation-message-participants.v1) before the legacy `from`. A daemon's
+      // wake has author `daemon/runtime` and never a `from`; an unnegotiated read drops both, leaving a
+      // recipient and no writer, which is Fractal too.
+      const from = str(message.author) ?? str(message.from) ?? '';
+      const to = str(message.to);
+      if (from.startsWith('daemon/') || (!from && to)) {
+        // Step-ready pings and restart handoffs are graph events, not conversation.
         push(entry, str(message.message_id)!, { kind: 'event', tone: 'quiet', text: str(message.title) ?? text.split('\n')[0] ?? '' });
       } else {
-        const to = str(message.to);
         const images = mailImages(message);
         push(entry, str(message.message_id)!, {
           kind: 'mail',

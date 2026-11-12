@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Render published mission revisions as deterministic redacted KDL, including nested missions, queues, resources and loops.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "Adds a renderer, not a read route. Legacy syntax is marked; URI locators are not reconstructed." },
+  "downtime": { "status": "none", "detail": "No startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

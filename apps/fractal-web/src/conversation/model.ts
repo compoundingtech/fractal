@@ -7,7 +7,7 @@
 // context/agent-ecosystem/03-coding-agents/08-clients/02-webfractal/02-conversation/spec.md#items.
 
 import { Schema } from 'effect'
-import { TimelineBlock } from '@fractal/client/schema'
+import { TimelineBlock } from '@fractal/client/schema/read'
 
 /** Native facts are retained for semantic app adapters and the explicit inspector. */
 const sourceFacts = {
@@ -118,6 +118,16 @@ export const HarnessNotice = Schema.TaggedUnion({
     payload: Schema.String, raw: Schema.String,
   },
   Compaction: { payload: Schema.String, raw: Schema.String },
+  /**
+   * Machine mail that woke the agent (a daemon wake, a restart handoff): one quiet row whose full body
+   * is behind Read message. `payload` is the whole body as Markdown; the row's own text stays bounded.
+   */
+  Delivery: {
+    from: Schema.String, to: Schema.String, subject: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  /** Harness bookkeeping shown only under system events; `payload` is the redacted, capped preview. */
+  SystemRecord: { record: Schema.String, payload: Schema.String, raw: Schema.String },
 })
 export type HarnessNotice = typeof HarnessNotice.Type
 
@@ -149,13 +159,21 @@ export const ConversationItem = Schema.TaggedUnion({
     sender: Schema.optional(Sender),
     sendState: Schema.optional(SendState),
   },
-  /** A Fractal message envelope joined into the conversation (Fractal `message` entry). */
+  /**
+   * A Fractal message joined into the conversation: its header (`message` entry) and, when the window
+   * holds it, its body (the paired `content` entry) as one object. `text` is absent for a header whose
+   * body is not loaded; `id` is the body's entry id when there is one, so a send keeps its identity.
+   */
   Message: {
     ...sourceFacts,
     id: Schema.String,
     messageId: Schema.String,
+    /** Who wrote it (`conversation-message-participants.v1`): `daemon/runtime` for a wake, which has no `from`. */
+    author: Schema.optional(Schema.String),
     from: Schema.optional(Schema.String),
     to: Schema.optional(Schema.String),
+    text: Schema.optional(Schema.String),
+    attachments: Schema.optional(Schema.Array(Attachment)),
     title: Schema.optional(Schema.String),
     replyTo: Schema.optional(Schema.String),
     at: Schema.String,
@@ -223,7 +241,7 @@ export const ConversationItem = Schema.TaggedUnion({
   Event: {
     ...sourceFacts,
     id: Schema.String,
-    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction']),
+    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction', 'delivery', 'system-record']),
     title: Schema.String,
     text: Schema.String,
     sender: Sender,

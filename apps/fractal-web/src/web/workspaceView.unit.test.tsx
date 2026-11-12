@@ -10,26 +10,34 @@ import { paneTabLabel, retainPane, workspaceHref, workspaceView, type RetainedPa
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 describe('workspace body', () => {
-  it('renders the terminal as a drawer beside the shown thread', () => {
+  it('renders the terminal alone, in place of the thread', () => {
     const view = workspaceView({ ref: 'terminal/fixture/one' })
     expect(view).toEqual({ _tag: 'Terminal', ref: 'terminal/fixture/one' })
     const source = fixtureSource({ world: { now: 0, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
     const html = renderToStaticMarkup(createElement(DataSourceProvider, { source, registry: AtomRegistry.make(), children: createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view, agentName: 'Fixture', onOpenTool: vi.fn() }) }))
-    expect(html).toMatch(/<section aria-label="Terminal drawer" data-testid="terminal-pane">/)
+    expect(html).toMatch(/<section aria-label="Terminal" data-testid="terminal-pane" data-terminal-shown="true"/)
     expect(html).toMatch(/data-system-state="loading"[^>]*>.*Loading terminal</)
-    expect(html).toMatch(/aria-label="Transcript"/)
-    expect(html).toMatch(/^<div><div><div style="display:contents" aria-hidden="false">/)
+    expect(html).not.toMatch(/aria-label="Transcript"/)
     expect(html).not.toMatch(/Terminal unavailable/i)
   })
   it('states that any other non-thread view is unavailable', () => {
-    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'monitor/quota' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'unknown/view' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/data-system-state="empty"/)
     expect(html).toMatch(/View not available here\. This web client does not render this view yet</)
   })
   it('opens the Missions screen from its tab', () => {
     expect(workspaceView({ ref: 'missions' })).toEqual({ _tag: 'Missions' })
+    // A mission ref focuses that mission in the screen instead of dead-ending, and its tab never shows a machine title.
+    expect(workspaceView({ ref: 'mission/person-ask/abc' })).toEqual({ _tag: 'Missions', mission: 'mission/person-ask/abc' })
+    expect(paneTabLabel('mission/person-ask/abc', 'person-ask/abc')).toBe('Missions')
     const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'missions' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/data-system-state="loading"[^>]*>.*Loading missions</)
+    expect(html).not.toMatch(/Choose an agent/)
+  })
+  it('opens Usage from the existing sidebar destination without an agent', () => {
+    expect(workspaceView({ ref: 'monitor/quota' })).toEqual({ _tag: 'Usage' })
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'monitor/quota' }), agentName: '', onOpenTool: vi.fn() }))
+    expect(html).toMatch(/Loading usage/)
     expect(html).not.toMatch(/Choose an agent/)
   })
   it('opens a document subject, by name or exact reference, as a document view', () => {

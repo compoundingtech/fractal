@@ -12,6 +12,12 @@
 //!
 //! | Header shape (lowercased token matched) | Class | Source |
 //! | --- | --- | --- |
+//! | `fractal <machine_version>`, `fractal-completion`, `fractal-reader-cache`, `fractal-delivery-probe` | `Cli` | CLI, completion and diagnostic producers |
+//! | `fractal-web` | `Web` | apps/fractal-web |
+//! | `fractal-driver`, `fractal-driver-hook`, `fractal-replication-worker` | `Driver`, `Hook`, `ReplicationWorker` | CLI process entrypoints |
+//! | `fractal-tui` | `Stui` | crates/fractal-tui/src/version.rs |
+//! | `fractal-ios`, `fractal-phone-client`, `fractal-client-tui`, `fractal-chatgpt`, `fractal-discord-bridge` | `App` | first-party apps, examples and adapters |
+//! | `fractal-fabric-adapter` | `Peer` | crates/fractal-fabric-adapter |
 //! | `stui <version>` | `Stui` | crates/fractal-tui/src/version.rs:23-25 (`client_name()`), set at crates/fractal-tui/src/main.rs:663 |
 //! | `st <machine_version>`, `st agents ls`, `st alerts ls`, `st conversations read` | `Cli` | crates/fractal/src/main.rs (`st {machine_version}` and CLI subcommands) |
 //! | `st3 doctor` | `Cli` | crates/fractal/src/main.rs (CLI command family) |
@@ -96,9 +102,35 @@ impl ClientClass {
             return ClientClass::Unknown;
         }
         let name = bounded(name).as_bytes();
-        // Order matters: omp-channel and the hook/worker names must win over the driver
-        // token they contain, and driver over the `st3 ` CLI prefix it starts with.
-        if contains_ascii_ci(name, b"omp-channel") {
+        // Exact first-party product tokens precede legacy substring/prefix rules so a
+        // version or label cannot move a producer into a different telemetry class.
+        if product_is(name, b"fractal-driver-hook") {
+            ClientClass::Hook
+        } else if product_is(name, b"fractal-replication-worker") {
+            ClientClass::ReplicationWorker
+        } else if product_is(name, b"fractal-driver") {
+            ClientClass::Driver
+        } else if product_is(name, b"fractal-tui") {
+            ClientClass::Stui
+        } else if product_is(name, b"fractal-web") {
+            ClientClass::Web
+        } else if product_is(name, b"fractal-ios")
+            || product_is(name, b"fractal-phone-client")
+            || product_is(name, b"fractal-client-tui")
+            || product_is(name, b"fractal-chatgpt")
+            || product_is(name, b"fractal-discord-bridge")
+        {
+            ClientClass::App
+        } else if product_is(name, b"fractal-fabric-adapter") {
+            ClientClass::Peer
+        } else if starts_with_ascii_ci(name, b"fractal ")
+            || product_is(name, b"fractal-completion")
+            || product_is(name, b"fractal-reader-cache")
+            || product_is(name, b"fractal-delivery-probe")
+        {
+            ClientClass::Cli
+            // Legacy omp-channel and hook/worker rules precede the driver and CLI rules.
+        } else if contains_ascii_ci(name, b"omp-channel") {
             ClientClass::OmpChannel
         } else if contains_ascii_ci(name, b"replication-worker") {
             ClientClass::ReplicationWorker
@@ -111,7 +143,11 @@ impl ClientClass {
             || contains_ascii_ci(name, b"relay")
         {
             ClientClass::Peer
-        } else if starts_with_ascii_ci(name, b"stui") {
+        } else if starts_with_ascii_ci(name, b"stui")
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+            || starts_with_ascii_ci(name, b"fractal-tui")
+        // LIVE-MIGRATION END
+        {
             ClientClass::Stui
         } else if starts_with_ascii_ci(name, b"smalltalk-") {
             ClientClass::App
@@ -142,6 +178,12 @@ fn bounded(name: &str) -> &str {
         }
     }
     name
+}
+
+/// Match a complete product token, with an optional version/build following a space.
+fn product_is(name: &[u8], product: &[u8]) -> bool {
+    starts_with_ascii_ci(name, product)
+        && (name.len() == product.len() || name.get(product.len()) == Some(&b' '))
 }
 
 /// Case-insensitive ASCII prefix test. Splitting a multi-byte character cannot fake a match:
@@ -336,6 +378,16 @@ mod tests {
             ClientClass::from_header(Some("stui 0.1.0+a0c135e3")),
             ClientClass::Stui
         );
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        for name in [
+            "fractal-tui",
+            "fractal-tui 0.1.0+a0c135e3",
+            " FRACTAL-TUI dev ",
+        ] {
+            assert_eq!(ClientClass::from_header(Some(name)), ClientClass::Stui);
+        }
+        assert_eq!(ClientClass::Stui.as_str(), "stui");
+        // LIVE-MIGRATION END
         // st3/src/main.rs:4482.
         assert_eq!(
             ClientClass::from_header(Some("st 25.11.0+ab12cd3")),
@@ -369,6 +421,40 @@ mod tests {
             ClientClass::from_header(Some("  ST3 Driver OMP-Channel  ")),
             ClientClass::OmpChannel
         );
+    }
+
+    #[test]
+    fn fractal_product_names_keep_their_existing_classes() {
+        for (product, class) in [
+            ("fractal", ClientClass::Cli),
+            ("fractal-completion", ClientClass::Cli),
+            ("fractal-web", ClientClass::Web),
+            ("fractal-driver", ClientClass::Driver),
+            ("fractal-driver-hook", ClientClass::Hook),
+            ("fractal-replication-worker", ClientClass::ReplicationWorker),
+            ("fractal-tui", ClientClass::Stui),
+            ("fractal-ios", ClientClass::App),
+            ("fractal-phone-client", ClientClass::App),
+            ("fractal-client-tui", ClientClass::App),
+            ("fractal-reader-cache", ClientClass::Cli),
+            ("fractal-chatgpt", ClientClass::App),
+            ("fractal-fabric-adapter", ClientClass::Peer),
+            ("fractal-discord-bridge", ClientClass::App),
+            ("fractal-delivery-probe", ClientClass::Cli),
+        ] {
+            for name in [
+                format!("{product} 0.1.0+build"),
+                format!("  {} 1.0 (42) [hook-web]  ", product.to_ascii_uppercase()),
+            ] {
+                assert_eq!(ClientClass::from_header(Some(&name)), class, "{name}");
+            }
+            // The bare reserved external name keeps its original Fractal class.
+            if product != "fractal" {
+                assert_eq!(ClientClass::from_header(Some(product)), class, "{product}");
+            }
+        }
+        assert_eq!(ClientClass::from_header(Some("fractal")), ClientClass::Fractal);
+        assert_eq!(ClientClass::from_header(Some("fractal-webview 1.0")), ClientClass::Fractal);
     }
 
     /// Absent is Unknown, blank is Unknown (presence discards it), junk is Other.

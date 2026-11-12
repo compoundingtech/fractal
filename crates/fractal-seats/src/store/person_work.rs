@@ -240,8 +240,80 @@ pub mod tests {
             assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().assigned_to.as_deref(), Some("person/avery"), "{fence}");
         }
     }
+    #[test]
+    fn refresh_person_ask_identity_and_answers_survive_seal_and_restart() {
+        for answer_at in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("asks.sqlite3");
+            let (memory, _, _) = fixture();
+            let node = memory.origin.clone();
+            drop(memory);
+            let (store, origin, mut input) = fixture_with_store(Store::open(&path, &node).unwrap());
+            store.set_ask_deadlines(true);
+            input.request = Some(gateway_decision());
+            input.deadline_ms = Some(600_000);
+            let ask = store.ask_person(&input).unwrap();
+            let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            let context = store.work_for_reconcile(&input.actor).unwrap();
+            assert_eq!(context.iter().find(|step| step.subject == origin.subject).unwrap()
+                .blocked_reason.as_deref(), Some(ask.subject.as_str()));
+            let item = store.attention_items(Some(&input.person)).unwrap().into_iter()
+                .find(|item| item.subject == ask.subject).unwrap();
+            assert_eq!(item.request, input.request);
+            let answer = PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
+                summary: String::new(), evidence: vec![], episode: Some(item.episode.clone()),
+                idempotency_key: "refresh-answer".into(),
+                answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
+            };
+            store.append_claim(&ClaimInput {
+                subject: input.actor.clone(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({"status":"running",
+                    "incarnation_id":input.incarnation})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let seal = fractal_store::store::refresh_intake::Seal {
+                operation: "refresh-ask".into(), incumbent: input.incarnation.clone().unwrap(),
+                desired_token: current_desired_row(&store.readers.get(), &input.actor)
+                    .unwrap().unwrap().claim_id,
+                activity_epoch: store.refresh_activity_epoch(&input.actor).unwrap(),
+            };
+            if answer_at == 0 { store.finish_person_step(&answer, false).unwrap(); }
+            assert!(store.prepare_refresh_intake(&input.actor, &seal).unwrap());
+            assert!(store.seal_refresh_intake(&input.actor, &seal).unwrap());
+            if answer_at == 1 { store.finish_person_step(&answer, false).unwrap(); }
+            drop(store);
+            let store = Store::open(&path, &node).unwrap();
+            let retained = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            assert_eq!(retained.id, original.id);
+            assert_eq!(retained.body, original.body, "display, origin, deadline and answer IDs unchanged");
+            assert!(store.unseal_refresh_intake(&input.actor, &seal.operation).unwrap());
+            if answer_at == 2 {
+                let restored = store.attention_items(Some(&input.person)).unwrap().into_iter()
+                    .find(|item| item.subject == ask.subject).unwrap();
+                assert_eq!(restored.episode, item.episode);
+                assert_eq!(restored.request, item.request);
+                store.finish_person_step(&answer, false).unwrap();
+            }
+            // Retrying the same answer after restart neither reposts nor creates a new attempt.
+            store.finish_person_step(&answer, false).unwrap();
+            let resumed = store.work_for_reconcile(&input.actor).unwrap().into_iter()
+                .find(|step| step.subject == origin.subject).unwrap();
+            assert_eq!(resumed.attempt, origin.attempt);
+            assert_eq!(resumed.person_answers.len(), 1);
+            assert_eq!(resumed.person_answers[0].ask, ask.subject);
+            assert_eq!(resumed.person_answers[0].answer.as_ref().unwrap()["id"], "land");
+            drop(store);
+            let store = Store::open(&path, &node).unwrap();
+            assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().person_answers.len(), 1);
+        }
+    }
+
     pub fn fixture() -> (Store, StepRunView, PersonAskRequest) {
-        let store = Store::open_memory("alder").unwrap();
+        fixture_with_store(Store::open_memory("alder").unwrap())
+    }
+
+    fn fixture_with_store(store: Store) -> (Store, StepRunView, PersonAskRequest) {
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
@@ -362,6 +434,11 @@ schedule "intake" {
                 if replay {
                     store.replay_replication_graph().unwrap();
                 }
+                let budget = store
+                    .attention_request_count("child-person-work", "person/avery", now_ms())
+                    .unwrap();
+                assert_eq!(budget.requests, 1);
+                assert_eq!(budget.requests_by_originating_run.get(&origin.run), Some(&1));
                 store.reconcile_person_asks().unwrap();
                 assert_eq!(
                     store.step_run(&ask.subject).unwrap().unwrap().status,
@@ -386,6 +463,13 @@ schedule "intake" {
                 answer: None,
             };
             store.finish_person_step(&response, false).unwrap();
+            assert_eq!(
+                store
+                    .attention_request_count("child-person-work", "person/avery", now_ms())
+                    .unwrap()
+                    .requests,
+                1
+            );
             assert_eq!(
                 store.step_run(&origin.subject).unwrap().unwrap().status,
                 "ready"
@@ -670,10 +754,10 @@ mission "person-work" state="ready" {{
             let mut stranger = input.clone();
             stranger.actor = "agent/alder.other".into();
             stranger.idempotency_key = "stranger".into();
-            assert_eq!(
-                store.ask_person(&stranger).unwrap_err().code,
-                "stale-work-ask"
-            );
+            let error = store.ask_person(&stranger).unwrap_err();
+            assert_eq!(error.code, "stale-work-ask");
+            assert!(error.to_string().contains(&moved.subject));
+            assert!(error.to_string().contains("omit --step"));
         }
     }
 
@@ -711,6 +795,145 @@ mission "person-work" state="ready" {{
             store.step_run(&ask.subject).unwrap().unwrap().status,
             "cancelled"
         );
+    }
+
+    #[test]
+    fn independent_ask_does_not_revive_after_stop_then_redeclare() {
+        let (store, _, mut input) = fixture();
+        input.step = None;
+        let ask = store.ask_person(&input).unwrap();
+        let stop = crate::graph::parse_internal_intent("version 2\nstop \"agent/alder.asker\"", "alder").unwrap();
+        store.apply_internal(&stop, "stop-before-reconcile").unwrap();
+        let redeclare = crate::graph::parse_internal_intent(
+            "version 2\nagent \"alder.asker\" { workspace \"/tmp\"; command \"true\"; restart always; }", "alder").unwrap();
+        store.apply_internal(&redeclare, "redeclare-before-reconcile").unwrap();
+        assert!(!store.attention_items(Some(&input.person)).unwrap().iter()
+            .any(|item| item.subject == ask.subject));
+        store.reconcile_person_asks().unwrap();
+        assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+    }
+
+    #[test]
+    fn named_ask_retries_the_pre_upgrade_subject() {
+        let (store, _, mut input) = fixture();
+        input.step = None;
+        input.new_run = Some("release-question".into());
+        let key = serde_json::to_string(&(&input.actor, "release-question",
+            None::<String>, None::<String>, None::<String>, &input.idempotency_key)).unwrap();
+        let hash = hex::encode(Sha256::digest(key.as_bytes()));
+        let subject = format!("step-run/ask-{}/ask", &hash[..32]);
+        store.connection.batched(|tx| -> Result<()> {
+            let run = format!("mission-run/person-ask/{}", &hash[..32]);
+            let mission_id = format!("person-ask/{}", &hash[..32]);
+            let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
+            let mission = crate::graph::parse_internal_intent(&kdl, "alder").unwrap()
+                .missions.remove(&mission_id).unwrap();
+            let claim = append_claim_tx(tx, "alder", &subject, "work.person-asked", Some(&input.actor),
+                &json!({"fields": {"run": run, "generation": format!("run-generation/ask-{}", &hash[..32]),
+                    "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
+                    "attempt": 1, "status": "ready", "mission_spec": mission, "owner_run": null,
+                    "owner_generation": null, "requester_declaration": null}}), &[], None)?;
+            project(tx, &claim).unwrap();
+            Ok(())
+        }).unwrap().unwrap();
+        assert_eq!(store.ask_person(&input).unwrap().subject, subject);
+        assert_eq!(store.attention_items(Some(&input.person)).unwrap().iter()
+            .filter(|item| item.subject.starts_with("step-run/ask-")).count(), 1);
+    }
+
+    #[test]
+    fn answered_ask_is_not_cancelled_when_origin_is_reclaimed() {
+        let (store, origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-before-reclaim".into(), answer: None,
+        }, false).unwrap();
+        let reclaimed = store.work_action(&origin.subject, "claim", &crate::model::WorkRequest {
+            wait_ms: None, actor: Some(input.actor.clone()), incarnation: input.incarnation.clone(),
+            summary: None, reason: None, evidence: vec![],
+            idempotency_key: "reclaim-after-answer".into(),
+        }).unwrap();
+        assert_eq!(reclaimed.person_answers.len(), 1);
+        assert_eq!(reclaimed.person_answers[0].status, "completed");
+        for replay in [false, true] {
+            if replay { store.replay_replication_graph().unwrap(); }
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+            let parent = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(parent.person_answers.len(), 1);
+            assert_eq!(parent.person_answers[0].status, "completed");
+            let cancelled: bool = store.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-cancelled')",
+                [&ask.subject], |row| row.get(0)).unwrap();
+            assert!(!cancelled);
+            assert!(store.messages(Some(&input.actor), true).unwrap().iter()
+                .all(|message| !message.content.contains("was cancelled")));
+        }
+    }
+
+    #[test]
+    fn independent_asks_leave_claims_and_capacity_unchanged() {
+        let (store, origin, mut input) = fixture();
+        input.step = None;
+        for name in [None, Some("named-question".to_owned())] {
+            input.new_run = name;
+            let ask = store.ask_person(&input).unwrap();
+            assert_ne!(ask.run, origin.run);
+            assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject);
+            let held = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(held.status, "claimed");
+            assert_eq!(held.claimant.as_deref(), Some(input.actor.as_str()));
+            assert_eq!(held.claim_incarnation.as_deref(), Some("asker-one"));
+            let queue = &store.agent_work_queues_for(Some(&input.actor)).unwrap()[&input.actor];
+            assert_eq!(queue.active_work_count, 1);
+            assert_eq!(queue.current_work_ids, [origin.subject.clone()]);
+        }
+        // The same agent can still use --step to explicitly block its held work.
+        input.step = Some(origin.subject.clone());
+        input.new_run = None;
+        store.ask_person(&input).unwrap();
+        let blocked = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(blocked.status, "waiting-person");
+        assert_eq!(blocked.claimant, None);
+    }
+
+    #[test]
+    fn independent_asks_outlive_managed_owner_work_and_redeclaration() {
+        for ending in ["completed", "cancelled", "failed"] {
+            let (store, origin, mut input) = fixture();
+            let mut owned = crate::graph::parse_internal_intent(
+                r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
+                "alder",
+            ).unwrap();
+            let declaration = owned.subjects.get_mut(&input.actor).unwrap();
+            declaration.owner_run = Some(origin.run.clone());
+            declaration.owner_generation = Some(origin.generation.clone());
+            store.apply_internal(&owned, "managed-requester").unwrap();
+            input.step = None;
+            let ask = store.ask_person(&input).unwrap();
+            store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+            assert!(store.attention_items(Some(&input.person)).unwrap().iter()
+                .any(|item| item.subject == ask.subject));
+            // Idle managed agents can also raise another independent question.
+            input.idempotency_key = "after-work-ended".into();
+            let later = store.ask_person(&input).unwrap();
+            store.apply_internal(&owned, "requester-next-turn").unwrap();
+            store.replay_replication_graph().unwrap();
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.ask_person(&input).unwrap().subject, later.subject);
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+            let response = PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: input.actor.clone(),
+                summary: "Withdrawn".into(), evidence: vec![], episode: None,
+                idempotency_key: "withdraw-independent".into(), answer: None,
+            };
+            assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
+        }
     }
 
     #[test]
@@ -791,7 +1014,7 @@ mission "person-work" state="ready" {{
             delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "assistant-projection-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
         // The answer is stored under the assistant principal, so a retry with the same key must
@@ -831,7 +1054,7 @@ mission "person-work" state="ready" {{
             delegation: None, subject: standalone.subject, actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "standalone-notification-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         }, false, Some(&authorization)).unwrap();
         let notification = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
             .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
@@ -897,6 +1120,9 @@ mission "person-work" state="ready" {{
         response.answer = Some(crate::person_request::AnswerInput {
             id: Some("revise-auth".into()),
             text: Some("Pair browsers like the native clients.".into()),
+            option_notes: vec![crate::person_request::OptionNote {
+                id: "land".into(), text: " Keep the current gateway as a fallback. ".into(),
+            }],
         });
         assert_eq!(
             store.finish_person_step(&response, false).unwrap().status,
@@ -907,7 +1133,7 @@ mission "person-work" state="ready" {{
             "completed"
         );
         let mut other = response.clone();
-        other.answer.as_mut().unwrap().id = Some("land".into());
+        other.answer.as_mut().unwrap().id = Some("keep-open".into());
         other.answer.as_mut().unwrap().text = None;
         assert_eq!(
             store.finish_person_step(&other, false).unwrap_err().code,
@@ -915,7 +1141,8 @@ mission "person-work" state="ready" {{
         );
         let expected = json!({
             "type": "decision", "outcome": "request_changes", "id": "revise-auth",
-            "label": "Revise auth and review", "text": "Pair browsers like the native clients."
+            "label": "Revise auth and review", "text": "Pair browsers like the native clients.",
+            "option_notes": [{"id": "land", "text": "Keep the current gateway as a fallback."}]
         });
         let check = |store: &Store| {
             let resumed = store.step_run(&origin.subject).unwrap().unwrap();
@@ -927,13 +1154,20 @@ mission "person-work" state="ready" {{
             assert_eq!(answer.answer.as_ref(), Some(&expected));
             assert_eq!(
                 answer.summary,
-                "Revise auth and review: Pair browsers like the native clients."
+                "Revise auth and review: Pair browsers like the native clients.\nNote on land (not selected): Keep the current gateway as a fallback."
             );
             assert!(resumed.constraints.iter().any(|constraint| constraint
-                == "Person response: Revise auth and review: Pair browsers like the native clients."));
+                == "Person response: Revise auth and review: Pair browsers like the native clients.\nNote on land (not selected): Keep the current gateway as a fallback."));
             let own = store.step_run(&ask.subject).unwrap().unwrap();
             assert_eq!(own.person_answers.len(), 1);
             assert_eq!(own.person_answers[0].answer.as_ref(), Some(&expected));
+            let done: Value = serde_json::from_str(&store.readers.get().query_row(
+                "SELECT body FROM claims WHERE subject=?1 AND kind='work.person-done'",
+                [&ask.subject], |row| row.get::<_, String>(0),
+            ).unwrap()).unwrap();
+            assert_eq!(done["fields"]["answer"], expected);
+            assert!(done["fields"].get("option_notes").is_none(),
+                "notes belong inside the typed answer, not on the record");
         };
         check(&store);
         store.replay_replication_graph().unwrap();
@@ -996,6 +1230,17 @@ mission "person-work" state="ready" {{
     /// applied. A person cannot answer it afterwards.
     #[test]
     fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _reset = ResetClock;
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease and every liveness read use the simulated clock:
+        // batched writes carry it, so an ask accepted at `asked` is in the future at wall time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.title = "Land the browser gateway?".into();
@@ -1010,10 +1255,7 @@ mission "person-work" state="ready" {{
         too_soon.deadline_ms = Some(10_000);
         assert_eq!(store.ask_person(&too_soon).unwrap_err().code, "invalid-ask-deadline");
         input.default_answer = Some("keep-open".into());
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
-        smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
         assert_eq!(deadline, asked + 3_600_000);
@@ -1035,6 +1277,7 @@ mission "person-work" state="ready" {{
 
         let early = store.reconcile_person_asks_at(deadline - 1).unwrap();
         assert_eq!(early, PersonAskPass { changed: false, next_deadline: Some(deadline) });
+        smallclaims::store::set_thread_clock(Some(deadline - 1));
         let item = store
             .attention_items(Some("person/avery"))
             .unwrap()
@@ -1052,6 +1295,7 @@ mission "person-work" state="ready" {{
         let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
         assert!(row.get("deadline_at").is_none() && row.get("default_answer").is_none(), "{row}");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        smallclaims::store::set_thread_clock(Some(deadline));
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
             "the resolved ask leaves the person's home"
@@ -1085,7 +1329,7 @@ mission "person-work" state="ready" {{
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "gateway-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         assert_eq!(store.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
     }
@@ -1094,14 +1338,15 @@ mission "person-work" state="ready" {{
     /// with no answer.
     #[test]
     fn a_plain_ask_times_out_without_an_answer_at_the_fleet_default_deadline() {
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
         store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
         smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -1148,7 +1393,7 @@ mission "person-work" state="ready" {{
             evidence: vec![],
             episode: Some(episode.clone()),
             idempotency_key: key.into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some(id.into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some(id.into()), text: None, option_notes: Vec::new() }),
         };
         // The person answers on the other member before the deadline; the owner, not holding
         // that answer, applies the default at the deadline.
@@ -1193,11 +1438,12 @@ mission "person-work" state="ready" {{
     #[test]
     fn an_answer_stored_at_the_deadline_is_refused_on_another_member() {
         const ASKED: u128 = 1_800_000_000_000;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(ASKED));
         let (owner, _, mut input) = fixture();
         owner.set_ask_deadlines(true);
         input.request = Some(gateway_decision());
         input.deadline_ms = Some(3_600_000);
-        smallclaims::store::set_thread_clock(Some(ASKED));
         let ask = owner.ask_person(&input).unwrap();
         let episode = request(&owner.readers.get(), &ask.subject).unwrap().unwrap().id;
         let other = Store::open_memory("birch").unwrap();
@@ -1215,7 +1461,7 @@ mission "person-work" state="ready" {{
             evidence: vec![],
             episode: Some(episode),
             idempotency_key: "land-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         assert_eq!(other.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
         assert_eq!(other.step_run(&ask.subject).unwrap().unwrap().status, "ready");
@@ -1337,13 +1583,16 @@ mission "person-work" state="ready" {{
                     delegation: None,
                     subject: ask.subject.clone(),
                     actor: "person/avery".into(),
-                    summary: String::new(),
+                    summary: "Review auth first.".into(),
                     evidence: vec![],
                     episode: None,
                     idempotency_key: "gateway-answer".into(),
                     answer: Some(crate::person_request::AnswerInput {
                         id: Some("revise-auth".into()),
                         text: Some("Pair browsers like the native clients.".into()),
+                        option_notes: vec![crate::person_request::OptionNote {
+                            id: "land".into(), text: "Keep the current gateway as a fallback.".into(),
+                        }],
                     }),
                 },
                 false,
@@ -1354,6 +1603,51 @@ mission "person-work" state="ready" {{
         assert!(messages[0].content.contains(
             "Answer: Revise auth and review (revise-auth)\nPair browsers like the native clients."
         ));
+        assert!(messages[0].content.contains(
+            "\n\nNote on land (not selected):\nKeep the current gateway as a fallback."
+        ));
+        store.replay_replication_graph().unwrap();
+        let answer = store.step_run(&ask.subject).unwrap().unwrap().person_answers.remove(0);
+        assert_eq!(answer.answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "land", "text": "Keep the current gateway as a fallback."}]));
+        assert_eq!(answer.summary,
+            "Review auth first.\nNote on land (not selected): Keep the current gateway as a fallback.");
+    }
+
+    #[test]
+    fn custom_and_dismissed_notifications_include_each_option_note_once() {
+        for chosen in [None, Some("dismiss")] {
+            let (store, origin, mut input) = fixture();
+            store.set_step_state(&origin.subject, "completed", None).unwrap();
+            input.step = None;
+            input.new_run = Some("gateway".into());
+            input.request = Some(json!({
+                "version": 1, "type": "choice", "question": "Which route?",
+                "why_person": "Choose the tradeoff.", "custom": true,
+                "answers": [
+                    {"id": "land", "label": "Land", "consequence": "Ship now."},
+                    {"id": "hold", "label": "Hold", "consequence": "Wait."}
+                ]
+            }));
+            let ask = store.ask_person(&input).unwrap();
+            store.finish_person_step(&PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
+                summary: "Use the alternate route.".into(), evidence: vec![], episode: None,
+                idempotency_key: "other-answer".into(),
+                answer: Some(crate::person_request::AnswerInput {
+                    id: chosen.map(str::to_owned), text: Some("Use the alternate route.".into()),
+                    option_notes: vec![crate::person_request::OptionNote {
+                        id: "land".into(), text: "Keep this route available.".into(),
+                    }],
+                }),
+            }, false).unwrap();
+            let messages = store.messages(Some("agent/alder.asker"), true).unwrap();
+            assert_eq!(messages.len(), 1);
+            let content = &messages[0].content;
+            assert_eq!(content.matches("Note on land (not selected)").count(), 1, "{content}");
+            assert_eq!(content.matches("Keep this route available.").count(), 1, "{content}");
+            assert!(!content.contains("Answer:"), "{content}");
+        }
     }
 
     /// An update brings the person what they asked for: the poster keeps working, the update
@@ -1446,10 +1740,7 @@ mission "person-work" state="ready" {{
                     episode: None,
                     idempotency_key: format!("read:{subject}:{answer:?}:{text:?}"),
                     answer: (answer.is_some() || text.is_some()).then(|| {
-                        crate::person_request::AnswerInput {
-                            id: answer.map(str::to_owned),
-                            text: text.map(str::to_owned),
-                        }
+                        crate::person_request::AnswerInput { id: answer.map(str::to_owned), text: text.map(str::to_owned), option_notes: Vec::new() }
                     }),
                 },
                 false,
@@ -1508,11 +1799,19 @@ mission "person-work" state="ready" {{
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "free-text".into(),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("friday".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("friday".into()), text: None, option_notes: Vec::new() }),
         };
+        assert_eq!(
+            store.finish_person_step(&response, false).unwrap_err().code,
+            "invalid-person-answer"
+        );
+        response.answer = Some(crate::person_request::AnswerInput {
+            id: None,
+            text: Some("Friday".into()),
+            option_notes: vec![crate::person_request::OptionNote {
+                id: "friday".into(), text: "No named options exist.".into(),
+            }],
+        });
         assert_eq!(
             store.finish_person_step(&response, false).unwrap_err().code,
             "invalid-person-answer"

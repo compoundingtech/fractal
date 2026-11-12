@@ -205,7 +205,7 @@ export const UploadCancelled: Story = {
     await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
   },
 }
-export const SeveralImages: Story = { tags: ['critical'], play: async ({ canvasElement }) => showSeveralImages(canvasElement) }
+export const SeveralImages: Story = { tags: ['critical', 'both-widths'], play: async ({ canvasElement }) => showSeveralImages(canvasElement) }
 export const SentImage: Story = {
   tags: ['critical'],
   play: async ({ canvasElement }) => showSentImage(canvasElement),
@@ -264,7 +264,7 @@ export const AllStates: Story = {
     const labels = ['Oversize image refusal', 'Image upload in progress', 'Several staged images', 'Sent image']
     const sections = labels.map(name => canvas.getByRole('region', { name }))
     for (const [index, section] of sections.entries()) {
-      await expect(within(section).getByRole('form', { name: `Message composer, ${labels[index]}` })).toBeVisible()
+      await expect(within(section).getByRole('group', { name: `Message composer, ${labels[index]}` })).toBeVisible()
     }
     await refuseOversize(sections[0]!)
     await showUploading(sections[1]!)

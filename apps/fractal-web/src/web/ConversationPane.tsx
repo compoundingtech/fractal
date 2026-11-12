@@ -6,7 +6,7 @@ import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-u
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
-import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
+import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
 import { nativeTurnFooter } from './NativeTurnFooter.tsx'
@@ -18,13 +18,21 @@ import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
+import type { ConversationPage, Feed, Fleet } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
 import type { ToolCallItem } from '../conversation/model.ts'
 import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+import { BrowserPairing } from './BrowserPairing.tsx'
+import { pairingSendRefusal, pairingStoreFor } from './browserPairingState.ts'
+
+/** Roster display names by agent ref: mail headers read names, not graph paths. */
+const selectRosterNames = (feed: Feed<Fleet>): ReadonlyMap<string, string> =>
+  new Map(feed._tag === 'Observed' ? feed.value.agents.map(agent => [agent.ref, agent.name] as const) : [])
+const sameRosterNames = (left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean =>
+  left.size === right.size && [...left].every(([ref, name]) => right.get(ref) === name)
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -84,7 +92,11 @@ const ConversationThreadPane = ({
   // The same last-observed rule as the roster: a stale feed or a connection that is not live.
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const projectTranscript = React.useMemo(createConversationTranscript, [])
-  const state = projectTranscript(feed, { agentName, showSystemEvents })
+  // A stable callback keeps the cached projection; the source reports progress and failure through `page.older`.
+  const onLoadEarlier = React.useMemo(() => source.loadOlder === undefined ? undefined : () => { void source.loadOlder?.(agentRef) }, [source, agentRef])
+  const rosterNames = useFleetSelection({ select: selectRosterNames, equal: sameRosterNames })
+  const names = React.useMemo(() => (ref: string) => rosterNames.get(ref), [rosterNames])
+  const state = projectTranscript(feed, { agentName, showSystemEvents, onLoadEarlier, agentRef, names })
   const observed = state._tag === 'Observed'
   const hasTurns = observed && state.turns.length > 0
   const boundary = React.useRef<HTMLDivElement>(null)
@@ -179,13 +191,16 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     })
   }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
+  // Absent outside the served page: fixtures, replays and hosts without pairing keep the composer as it was.
+  const pairing = source.pairing === undefined ? undefined : pairingStoreFor(source.pairing)
+  const onRefused = React.useMemo(() => pairingSendRefusal(pairing, setRefusal), [pairing])
   const upload = source.attachments?.upload
   const attachmentAdapter = React.useMemo(() => upload === undefined ? undefined : imageUploadAdapter(upload), [upload])
   const binding = composerSendBinding({
     source, agentRef, grants,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
-    refusal, onRefused: setRefusal, attachmentAdapter,
+    refusal, onRefused, attachmentAdapter,
   })
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
@@ -204,6 +219,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     // An answer for an older run must not touch the current run's refusal.
     if (result._tag === 'Refused' && runId !== undefined && currentRun.current === runId) setStopRefusal({ runId, detail: result.detail })
   }, [agentControls, agentRef, runId])
+  // Per-response model, tokens and cost stay out of the reading lane until system events are shown.
+  const showTurnFacts = useAtomValue(systemEventsPreference)
   const retryConversation = source.retryConversation
   // Only a failed (or not-yet-found) read can recover by re-acquiring the follow; refusals cannot.
   const retryUnavailable = state._tag === 'Unavailable' && retryConversation !== undefined && (state.classification === 'failed' || state.classification === 'not-found')
@@ -235,7 +252,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
       renderToolDetail={renderSemanticDetail}
-      renderTurnFooter={nativeTurnFooter}
+      renderTurnFooter={showTurnFacts ? nativeTurnFooter : undefined}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
@@ -250,13 +267,14 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     />}
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
-    {!readOnly && <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />}
+    {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {pairing === undefined ? null : <BrowserPairing store={pairing} messageSend={grants.messageSend} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
@@ -275,6 +293,10 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const now = paused ?? snapshot
   const observation = useConversationSync(agentRef)
   const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
-  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
+  const sync = transcriptSyncStatus(observation, feed, now)
+  // The header says nothing about a healthy or merely stale conversation: the connection band covers stale and
+  // reconnecting, and Details has the full story. Only load progress and a failure with its Retry stay.
+  const headerStatusHost = sync._tag === 'Failed' || sync._tag === 'Progress' ? headerActionsHost : undefined
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerStatusHost} sync={sync} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
 

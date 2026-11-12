@@ -9,18 +9,18 @@ impl Store {
         &self,
         input: &PersonRenameRequest,
         configured_peers: &[String],
-    ) -> Result<PersonRenameReport, St3Error> {
+    ) -> Result<PersonRenameReport, FractalError> {
         for person in [&input.old_person, &input.new_person] {
             validate_claim_subject(person)?;
             if !person.starts_with("person/") || person.matches('/').count() != 1 || person.contains('*') {
-                return Err(St3Error::new("invalid-person-rename", "OLD and NEW must be complete person subjects"));
+                return Err(FractalError::new("invalid-person-rename", "OLD and NEW must be complete person subjects"));
             }
         }
         if input.old_person == input.new_person || input.idempotency_key.trim().is_empty() {
-            return Err(St3Error::new("invalid-person-rename", "a rename needs distinct people and a nonempty idempotency key"));
+            return Err(FractalError::new("invalid-person-rename", "a rename needs distinct people and a nonempty idempotency key"));
         }
         validate_claim_subject(&input.actor)?;
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             identities::check_fleet_registry_conn(
                 tx, &self.origin, configured_peers, &self.fractal.schema_digest(),
             )?;
@@ -34,30 +34,30 @@ impl Store {
                     || receipt.body["fields"]["old_person"] != input.old_person
                     || receipt.body["fields"]["new_person"] != input.new_person
                 {
-                    return Err(St3Error::new("idempotency-conflict", "this rename key already names another request"));
+                    return Err(FractalError::new("idempotency-conflict", "this rename key already names another request"));
                 }
                 if input.actor != input.old_person && input.actor != input.new_person {
-                    return Err(St3Error::new("person-rename-forbidden", "only OLD or NEW may repair their person identity"));
+                    return Err(FractalError::new("person-rename-forbidden", "only OLD or NEW may repair their person identity"));
                 }
                 if winner_person_tx(tx, &input.old_person).map_err(internal)?
                     .is_some_and(|winner| winner != input.new_person)
                 {
-                    return Err(St3Error::new("person-rename-conflict", "this repair lost to another canonical completed repair of OLD"));
+                    return Err(FractalError::new("person-rename-conflict", "this repair lost to another canonical completed repair of OLD"));
                 }
                 return serde_json::from_value(receipt.body["fields"]["report"].clone()).map_err(internal);
             }
             if input.actor != input.old_person && input.actor != input.new_person {
-                return Err(St3Error::new("person-rename-forbidden", "only OLD or NEW may repair their person identity"));
+                return Err(FractalError::new("person-rename-forbidden", "only OLD or NEW may repair their person identity"));
             }
             let competing: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='person.rename.completed'
                  AND json_extract(body,'$.fields.new_person')<>?2)",
                 params![input.old_person, input.new_person], |row| row.get(0)).map_err(internal)?;
             if competing {
-                return Err(St3Error::new("person-rename-conflict", "OLD already has a completed repair to another person"));
+                return Err(FractalError::new("person-rename-conflict", "OLD already has a completed repair to another person"));
             }
             if !known_person_tx(tx, &input.new_person).map_err(internal)? {
-                return Err(St3Error::new("unknown-person", "NEW must already be known from stored person identity or routing evidence"));
+                return Err(FractalError::new("unknown-person", "NEW must already be known from stored person identity or routing evidence"));
             }
             let mut report = PersonRenameReport {
                 old_person: input.old_person.clone(),
@@ -148,7 +148,7 @@ impl Store {
                 &json!({"fields": {"old_person": input.old_person, "new_person": input.new_person, "report": report},
                     "idempotency_key": input.idempotency_key}), &[], None).map_err(claim_append_error)?;
             Ok(report)
-        }).map_err(internal)?
+        })
     }
 }
 

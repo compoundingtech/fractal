@@ -69,7 +69,7 @@ version 2
         }
         step "publish-pre-restart-revision" {
           title "The pre-restart revision is published"
-          goal #"Let SHA be git rev-parse HEAD. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/pre-restart resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=vcs.commit --field state=published --field sha=$SHA. Complete this step after the claim."#
+          goal #"Let SHA be git rev-parse HEAD. Run: fractal claim resource/mission-run/$ST_MISSION_RUN/pre-restart resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=vcs.commit --field state=published --field sha=$SHA. Complete this step after the claim."#
           depends-on { step "process-item-2" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/pre-restart" {
@@ -135,7 +135,7 @@ version 2
         }
         step "publish-batch-revision" {
           title "The complete batch revision is published"
-          goal #"Let SHA be git rev-parse HEAD. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/batch resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=vcs.commit --field state=published --field sha=$SHA. Complete this step after the claim."#
+          goal #"Let SHA be git rev-parse HEAD. Run: fractal claim resource/mission-run/$ST_MISSION_RUN/batch resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=vcs.commit --field state=published --field sha=$SHA. Complete this step after the claim."#
           depends-on { step "verify-complete-batch" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/batch" {
@@ -146,7 +146,7 @@ version 2
         }
         step "report-to-supervisor" {
           title "The worker reports one result to the supervisor"
-          goal #"Send agent/${ST_MISSION_RUN}/rc.sup exactly one Fractal message with the four item commit IDs, the final SHA, the green npm test result, and the clean worktree result. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
+          goal #"Send agent/${ST_MISSION_RUN}/rc.sup exactly one Fractal message with the four item commit IDs, the final SHA, the green npm test result, and the clean worktree result. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: fractal claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
           depends-on { step "publish-batch-revision" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/worker-report" {
@@ -179,7 +179,7 @@ version 2
         }
         step "confirm-requester" {
           title "The requester receives one verified confirmation"
-          goal #"Send person/eval-requester exactly one Fractal message with the restart evidence, duplicate-delivery result, four item commits, final SHA, green tests, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/verification resource.observed --actor agent/${ST_MISSION_RUN}/rc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
+          goal #"Send person/eval-requester exactly one Fractal message with the restart evidence, duplicate-delivery result, four item commits, final SHA, green tests, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: fractal claim resource/mission-run/$ST_MISSION_RUN/verification resource.observed --actor agent/${ST_MISSION_RUN}/rc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
           depends-on { step "verify-ledger-read-only" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/verification" {

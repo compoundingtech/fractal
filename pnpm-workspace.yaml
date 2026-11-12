@@ -5,8 +5,10 @@ packages:
   - apps/fractal-web
   - apps/ios
   - clients/typescript/fractal-client
+  - clients/typescript/fractal-declarations
   - clients/typescript/fractal-scenarios
   - clients/typescript/fractal-views
+  - packages/fractal
   - packages/fractal-sdk
   - packages/fractal-ui
 
@@ -18,6 +20,7 @@ overrides:
   "@overeng/effect-rpc-explorer-react": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-explorer-react"
   "@overeng/effect-rpc-observer": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-observer"
   "@overeng/effect-rust": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust"
+  "@overeng/kdl": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl"
   "@overeng/meters": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters"
   "@overeng/otel-browser": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-browser"
   "@overeng/otel-contract": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract"
@@ -26,7 +29,7 @@ overrides:
   "@overeng/utils": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils"
   "@overeng/utils-dev": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-dev"
   "@overeng/utils-storybook": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-storybook"
-  "@effect/platform-node>@effect/platform-node-shared": 4.0.3
+  "@effect/platform-node>@effect/platform-node-shared": 4.1.0
 
 peerDependencyRules:
   allowedVersions:

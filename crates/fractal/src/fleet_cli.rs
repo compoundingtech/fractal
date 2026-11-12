@@ -73,8 +73,8 @@ fn migration_restart_hint(legacy_toggle: bool, json_output: bool) -> &'static st
     match (legacy_toggle, json_output) {
         (true, true) => "Restart st3 replication-worker for this to take effect.",
         (true, false) => "Restart fractal replication-worker for this to take effect.",
-        (false, true) => "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.",
-        (false, false) => "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.",
+        (false, true) => "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.",
+        (false, false) => "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.",
     }
 }
 
@@ -125,21 +125,14 @@ fn read_code_without_echo() -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
+const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need fractal-fabric-adapter installed and \
      Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
 
-/// The pairing helper beside st, named by ST_FABRIC_ADAPTER, or on PATH. A configured
-/// path that is not a file counts as no helper, so `auto` invitations route around it.
-fn fabric_adapter() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("ST_FABRIC_ADAPTER") {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
-        .filter(|path| path.is_file())
-        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
+/// A configured path that is not a file counts as no helper, so `auto` invitations
+/// route around it. Conflicting environment overrides are errors, not absence.
+fn fabric_adapter() -> Result<Option<PathBuf>> {
+    Ok(fractal_daemon::fleet::transport::resolve_fabric_adapter()?
+        .filter(|path| path.is_file()))
 }
 
 /// The `--via` an invitation is created with. Without the pairing helper, a Fabric endpoint
@@ -479,13 +472,13 @@ async fn bootstrap_fabric_invite(
     {
         return Ok(());
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
     };
     let helper = adapter.context(FABRIC_PAIRING_UNAVAILABLE)?;
     let mut child = tokio::process::Command::new(helper)
         .arg("--st-socket")
-        .arg(socket)
+        .arg(socket.as_ref())
         .arg("pairing-invite")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -505,7 +498,7 @@ async fn bootstrap_fabric_invite(
     let output = child.wait_with_output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "Fabric pairing failed; it needs st-fabric-adapter running on this machine and Fabric \
+        "Fabric pairing failed; it needs fractal-fabric-adapter running on this machine and Fabric \
          running with --runtime-peers"
     );
     #[derive(serde::Deserialize)]
@@ -525,6 +518,13 @@ async fn bootstrap_fabric_invite(
 }
 
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+    // Recording an override only asks this member's daemon; it reads no fleet configuration.
+    let command = match command {
+        FleetCommand::AdmitWithout { peers, reason, actor } => {
+            return admit_without(endpoint, peers, reason, actor, json_output).await;
+        }
+        command => command,
+    };
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
         FleetCommand::Join(args) => !args.no_service,
@@ -550,6 +550,15 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
     let client = Client::new(endpoint.clone());
     match command {
+        FleetCommand::Anchor { command: FleetAnchorCommand::Show } => {
+            let anchor = generated_client(endpoint, None)?.fleet_anchor().await?;
+            if json_output {
+                print_value(&anchor, true)
+            } else {
+                println!("{}", anchor.fleet_anchor);
+                Ok(())
+            }
+        }
         FleetCommand::Create(args) => {
             anyhow::ensure!(
                 fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),
@@ -613,7 +622,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             } else {
                 None
             };
-            let adapter = fabric_adapter();
+            let adapter = fabric_adapter()?;
             let mut via = args.via.clone();
             if adapter.is_none() && !args.migrate {
                 via = invite_via(&via, &member_endpoints(&client, &config.node).await?, false)?;
@@ -697,9 +706,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         }
         FleetCommand::Invites { all, command } => match command {
             None => {
-                let invites: Vec<fractal_daemon::store::FleetInviteView> = client
-                    .get(&format!("/v1/internal/fleet/invites?all={all}"))
-                    .await?;
+                let invites: Vec<fractal_daemon::store::FleetInviteView> = fleet_read(&client, &format!("invites?all={all}")).await?;
                 if json_output {
                     return print_value(&invites, true);
                 }
@@ -745,6 +752,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 Ok(())
             }
         },
+        FleetCommand::AdmitWithout { .. } => unreachable!("handled before configuration is read"),
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
                 let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
@@ -846,8 +854,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 }
             } else if !json_output {
                 println!(
-                    "Start fractal up and fractal replication-worker to begin syncing; fractal fleet wait \
-                     waits for the first sync to end and checks it."
+                    "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; \
+                     fractal fleet wait waits for the first sync to end and checks it."
                 );
             }
             if !json_output {
@@ -896,7 +904,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             // Holding the fleet's envelopes is not enough when this node admitted some the fleet
             // fenced: its claims then differ from every other member's.
             let residue: Vec<smallclaims::store::FleetAdmissionResidue> =
-                client.get("/v1/internal/fleet/admission-residue").await?;
+                fleet_read(&client, "admission-residue").await?;
             if let Some(fenced) = render_fenced_admissions(&residue) {
                 anyhow::bail!("{}\nbut {fenced}", render_first_sync(&first, now_ms()));
             }
@@ -971,7 +979,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             Ok(())
         }
         FleetCommand::Status => {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = fleet_read(&client, "status").await?;
             if json_output {
                 return print_value(&status, true);
             }
@@ -1063,8 +1071,19 @@ async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::Fil
     tokio::task::spawn_blocking(move || fractal_daemon::config::FleetFile::lock_settings(&state_dir)).await?
 }
 
+/// Read a fleet view through its public route, or, from a daemon built before it had one, the
+/// internal route it replaced. Internal routes refuse seat callers; a seat may read these views.
+pub(crate) async fn fleet_read<T: serde::de::DeserializeOwned>(client: &Client, route: &str) -> Result<T> {
+    match client.get(&format!("/v1/fleet/{route}")).await {
+        Err(error) if fractal_daemon::client::is_absent_route(&error) => {
+            client.get(&format!("/v1/internal/fleet/{route}")).await
+        }
+        result => result,
+    }
+}
+
 async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = fleet_read(client, "membership").await?;
     let member = view
         .members
         .iter()
@@ -1078,13 +1097,15 @@ async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
 }
 
 /// Transport changes use mode's atomic settings write and service refresh. They also
-/// publish immediately, so removal is announced before unexposure. The caller holds the
-/// settings lock until publication and unexposure end.
+/// publish immediately, so removal is announced before unexposure. Explicit withdrawal
+/// clears local rekey state in that same publication, including attributed changes.
+/// The caller holds the settings lock until publication and unexposure end.
 async fn save_and_publish_fleet_settings(
     client: &Client,
     config: &Config,
     file: &fractal_daemon::config::FleetFile,
     mut endpoints: Vec<Value>,
+    actor: Option<&str>,
 ) -> Result<()> {
     if file.mode == fractal_daemon::config::FleetMode::DialOut {
         endpoints.clear();
@@ -1102,19 +1123,37 @@ async fn save_and_publish_fleet_settings(
             _ => false,
         });
     }
+    let pending = actor.map(|_| fractal_daemon::config::FleetFile::path(&config.state_dir).with_extension("transport-change.json"));
+    let mut announcement = json!({
+        "mode": file.mode.as_str(),
+        "endpoints": endpoints,
+        "clear_fabric_rekey": file.mode == fractal_daemon::config::FleetMode::DialOut
+            || !file.transports.iter().any(|transport| transport == "fabric"),
+    });
+    let published: Result<Value> = if let Some(path) = &pending {
+        let settings = serde_json::to_value(file)?;
+        let base = serde_json::to_value(fractal_daemon::config::FleetFile::load(&config.state_dir)?)?;
+        let intent: Value = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(error.into()),
+        };
+        let request = if intent["base"] == base && intent["actor"].as_str() == actor && intent["target"] == settings {
+            intent["request"].as_str().context("pending transport change needs its request")?.to_owned()
+        } else {
+            announcement["actor"] = json!(actor);
+            announcement["mutation_id"] = json!(format!("fleet-transports:{}", uuid::Uuid::now_v7()));
+            let request = serde_json::to_string(&announcement)?;
+            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"base": base, "actor": actor, "target": settings, "request": request}))?)?;
+            request
+        };
+        let raw: &serde_json::value::RawValue = serde_json::from_str(&request)?;
+        client.post("/v1/fleet/transports", &raw).await
+    } else {
+        client.post("/v1/internal/fleet/endpoints", &announcement).await
+    };
+    published.context("endpoint publication did not complete; fleet.toml is unchanged")?;
     file.save(&config.state_dir)?;
-    let _: Value = client
-        .post(
-            "/v1/internal/fleet/endpoints",
-            &fractal_daemon::api::FleetEndpointsRequest {
-                mode: file.mode.as_str().into(),
-                endpoints,
-                clear_fabric_rekey: file.mode == fractal_daemon::config::FleetMode::DialOut
-                    || !file.transports.iter().any(|transport| transport == "fabric"),
-            },
-        )
-        .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart fractal daemon and fractal replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
@@ -1127,15 +1166,27 @@ fn refresh_fleet_services(no_service: bool, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_fleet_transports(
+pub(super) async fn run_fleet_transports(
     client: &Client,
     config: &Config,
-    command: FleetTransportsCommand,
+    mut command: FleetTransportsCommand,
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
     if matches!(command, FleetTransportsCommand::Rekey { .. }) {
         return rekey::run(client, config, json_output).await;
+    }
+    let actor = match &mut command {
+        FleetTransportsCommand::Add { actor, .. }
+        | FleetTransportsCommand::Remove { actor, .. }
+        | FleetTransportsCommand::Prefer { actor, .. } => actor.take(),
+        FleetTransportsCommand::Rekey { .. } => unreachable!("rekey dispatched before actor authorization"),
+    };
+    if let Some(actor) = actor.as_deref() {
+        let _: Value = client.post("/v1/fleet/transports", &json!({
+            "actor": actor, "mutation_id": "authorization", "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await?;
     }
     let lock = lock_fleet_settings(&config.state_dir).await?;
     let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -1173,7 +1224,8 @@ async fn run_fleet_transports(
         if *prefer && file.transports.first() != Some(transport) {
             file.transports.retain(|configured| configured != transport);
             file.transports.insert(0, transport.clone());
-            file.save(&config.state_dir)?;
+            let endpoints = member_endpoints(client, &config.node).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
             return refresh_fleet_services(*no_service, json_output);
@@ -1200,6 +1252,7 @@ async fn run_fleet_transports(
         FleetTransportsCommand::Prefer {
             transport,
             no_service,
+            ..
         } => {
             let index = file
                 .transports
@@ -1207,7 +1260,7 @@ async fn run_fleet_transports(
                 .position(|configured| configured == &transport)
                 .expect("preferred transport was checked as enabled");
             file.transports[..=index].rotate_right(1);
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             println!("{transport} is now preferred; transport exposure is unchanged.");
             no_service
         }
@@ -1255,7 +1308,7 @@ async fn run_fleet_transports(
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
             // A lost publication response can follow a committed claim. Keep the exposure
             // reachable and report the incomplete operation rather than undoing that route.
-            save_and_publish_fleet_settings(client, config, &file, endpoints)
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref())
                 .await
                 .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
             println!("Fabric enabled with protocol {protocol}.");
@@ -1295,7 +1348,7 @@ async fn run_fleet_transports(
             );
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
                 Some(program) => Fabric::new(program).unexpose(&protocol).await,
                 None => Err(anyhow::anyhow!("fabric is not installed")),
@@ -1334,10 +1387,11 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon
 
 async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs, json_output: bool) -> Result<()> {
     if args.finish || args.unfinish {
+        let _lock = lock_fleet_settings(&config.state_dir).await?;
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = fleet_read(client, "status").await?;
             let waiting = config
                 .peers
                 .iter()
@@ -1720,8 +1774,8 @@ mod output_tests {
 
     #[test]
     fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
-        assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
-        assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, true), "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, false), "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.");
     }
 }
 
@@ -1822,4 +1876,32 @@ mod invite_route_tests {
         let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
         assert!(error.to_string().contains("stopped"), "{error:#}");
     }
+}
+
+/// Let this member act on its seats' placement without `peers`, for its current daemon start.
+async fn admit_without(
+    endpoint: &Endpoint,
+    peers: Vec<String>,
+    reason: String,
+    actor: String,
+    json_output: bool,
+) -> Result<()> {
+    reject_foreign_agent_actor(&actor)?;
+    let claim: fractal_daemon::model::ClaimRecord = Client::new(endpoint.clone())
+        .post(
+            "/v1/fleet/admission-override",
+            &json!({
+                "actor": actor,
+                "peers": peers,
+                "reason": reason,
+                "idempotency_key": format!("admission-override:{}", uuid::Uuid::now_v7()),
+            }),
+        )
+        .await?;
+    if json_output {
+        println!("{}", serde_json::to_string(&claim)?);
+    } else {
+        println!("admitted without\t{}", peers.join(","));
+    }
+    Ok(())
 }

@@ -2,7 +2,7 @@
 use std::{path::Path, process::Command};
 
 fn history(root: &Path) -> String {
-    let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let output = Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
         .args(["ui", "--slo"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env("HOME", root)
         .env("XDG_CACHE_HOME", root.join("cache"))
@@ -10,9 +10,9 @@ fn history(root: &Path) -> String {
         .env("XDG_CONFIG_HOME", root.join("missing-config"))
         .env("ST3_PERSON", "invalid")
         .env("ST3_ENDPOINT", root.join("missing-endpoint"))
-        .env("STUI_TIMING_LOG", root.join("unexpected-timing"))
-        .env("STUI_OPEN_TRACE_FILE", root.join("unexpected-open-trace"))
-        .env("STUI_OPEN_TRACE_CONVERSATION", "agent/example/observer")
+        .env("FRACTAL_TUI_TIMING_LOG", root.join("unexpected-timing"))
+        .env("FRACTAL_TUI_OPEN_TRACE_FILE", root.join("unexpected-open-trace"))
+        .env("FRACTAL_TUI_OPEN_TRACE_CONVERSATION", "agent/example/observer")
         .output()
         .unwrap();
     assert!(

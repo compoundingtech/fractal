@@ -160,7 +160,6 @@ describe('tail-first transcript mounting', () => {
     await render(transcript(entries))
     expect(lane().scrollHeight).toBeGreaterThan(2 * lane().clientHeight)
     expect(renderedRows(lane()).map(row => row.dataset.itemId)).toEqual(entries.map(turn => turn.id))
-    expect(container.querySelector('[data-testid="transcript-history-earlier"]')).toBeNull()
     expect(container.querySelector('[data-testid="transcript-history-all"]')).toBeNull()
   })
 
@@ -257,26 +256,12 @@ describe('tail-first transcript mounting', () => {
     expect(controls.getAttribute('aria-label')).toBe('Conversation history range')
     expect(controls.closest('[data-testid="transcript-scroll"]')).toBeNull()
     expect(controls.contains(notice!)).toBe(true)
-    const summary = controls.querySelector<HTMLElement>('[data-testid="transcript-history-summary"]')!
-    expect(summary.textContent).toContain('Find: shown only')
-    expect(summary.hidden).toBe(false)
-    expect(summary.closest('[hidden]')).toBeNull()
-    expect(summary.getAttribute('aria-hidden')).toBe('true')
+    // The band is gone: the status is for assistive tech, and the controls take no height.
+    expect(container.querySelector('[data-testid="transcript-history-summary"]')).toBeNull()
     expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
-    const earlier = container.querySelector<HTMLButtonElement>('button[aria-label="Show earlier messages"]')!
+    expect(container.querySelector('button[aria-label="Show earlier messages"]')).toBeNull()
     const all = container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!
-    expect(earlier).toBeDefined()
-    expect(all).toBeDefined()
-    expect(controls.contains(earlier)).toBe(true)
     expect(controls.contains(all)).toBe(true)
-    const count = renderedRows(lane()).length
-    await act(async () => {
-      earlier.focus()
-      earlier.click()
-    })
-    await flushFrames()
-    expect(renderedRows(lane())).toHaveLength(count + 4)
-    expect(document.activeElement).toBe(earlier)
     await act(async () => { all.click() })
     await flushHistory(turns.length)
     expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(turns.length)
@@ -290,19 +275,13 @@ describe('tail-first transcript mounting', () => {
     expect(mountedSourceIds()).toEqual(['huge/prompt', ...all.slice(-6)])
     expect([...container.querySelectorAll<HTMLElement>('[data-testid="user-message"], [data-testid="agent-message"]')].map(row => row.dataset.itemId)).toEqual(['huge/prompt', ...all.slice(-6)])
     const turn = container.querySelector('[data-testid="transcript-turn"]')!
-    const summary = () => container.querySelector('[data-testid="transcript-history-summary"]')?.textContent
     // The pinned prompt counts as a shown entry; totals count every prompt and item.
-    expect(summary()).toContain('7/41 entries')
     expect(container.querySelector('[data-testid="transcript-history-range"]')?.textContent).toBe('Latest 7 of 41 entries shown. Browser Find misses 34 earlier entries until you choose Show all messages.')
     const kept = new Map(mountedSourceIds().map(id => [id, container.querySelector(`[data-item-id="${id}"]`)!]))
     const stable = () => {
       expect(container.querySelector('[data-testid="transcript-turn"]')).toBe(turn)
       for (const [id, row] of kept) expect(container.querySelector(`[data-item-id="${id}"]`)).toBe(row)
     }
-    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show earlier messages"]')!.click() })
-    await flushFrames()
-    expect(mountedSourceIds()).toEqual(['huge/prompt', ...all.slice(-10)])
-    stable()
     await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
     await flushHistory(all.length)
     expect(mountedSourceIds()).toEqual(['huge/prompt', ...all])
@@ -313,7 +292,61 @@ describe('tail-first transcript mounting', () => {
     expect(controls.dataset.state).toBe('complete')
     expect(controls.getAttribute('aria-busy')).toBe('false')
     expect(container.querySelector('[data-testid="transcript-history-all"]')).toBeNull()
-    expect(summary()).toContain('All 41 entries shown')
+  })
+
+  it('times a trigger-led episode from its trigger while the tail window has trimmed it', async () => {
+    const later = new Date(now + 3_600_000).toISOString()
+    const trigger: ConversationItem = { _tag: 'Text', id: 'wake/trigger', role: 'user', text: 'Wake: audit the keys', attachments: [], streaming: false, at: sourceAt }
+    const answers = range('wake', 0, 40).map(id => ({ ...answerRow(id), at: later }))
+    await render(transcript([{ ...sourceTurn('wake-turn', [trigger, ...answers]), triggerId: trigger.id }]))
+    expect(mountedSourceIds()).not.toContain('wake/trigger')
+    const time = () => container.querySelector<HTMLTimeElement>('[data-testid="turn-time"]')!.dateTime
+    expect(time()).toBe(sourceAt)
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(answers.length + 1)
+    expect(mountedSourceIds()).toContain('wake/trigger')
+    expect(time()).toBe(sourceAt)
+  })
+
+  // Construct wall-clock times in the host's local zone, just like the transcript's
+  // day keys and formatter; UTC midnight is not necessarily local midnight.
+  const beforeMidnight = new Date(2026, 9, 17, 23, 59).toISOString()
+  const afterMidnight = new Date(2026, 9, 18, 0, 1).toISOString()
+  const datedTurns = (timestamps: readonly string[]): readonly TranscriptTurn[] => timestamps.map((at, index) => ({
+    ...turns[index]!,
+    prompt: { ...turns[index]!.prompt!, at },
+  }))
+
+  it('renders exactly one day separator at local midnight in the mounted tail', async () => {
+    const entries = datedTurns(turns.map((_, index) => index < turns.length - 2 ? beforeMidnight : afterMidnight))
+    await render(transcript(entries))
+    expect(mountedSourceIds()).toEqual(entries.slice(-6).map(turn => turn.prompt!.id))
+    const separators = [...container.querySelectorAll('[data-testid="transcript-day"]')]
+    expect(separators).toHaveLength(1)
+    expect(separators[0]!.getAttribute('role')).toBe('separator')
+    expect(separators[0]!.closest('[data-testid="transcript-turn"]')?.getAttribute('data-item-id')).toBe(entries.at(-2)!.id)
+    expect(separators[0]!.textContent).toBe(new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date(afterMidnight)))
+  })
+
+  it('adds one day separator when a live tail appends its first episode after local midnight', async () => {
+    const entries = datedTurns([...turns.slice(0, -1).map(() => beforeMidnight), afterMidnight])
+    await render(transcript(entries.slice(0, -1)))
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
+    const retained = container.querySelector(`[data-testid="transcript-turn"][data-item-id="${entries.at(-2)!.id}"]`)
+    await render(transcript(entries))
+    const separators = [...container.querySelectorAll('[data-testid="transcript-day"]')]
+    expect(separators).toHaveLength(1)
+    expect(separators[0]!.closest('[data-testid="transcript-turn"]')?.getAttribute('data-item-id')).toBe(entries.at(-1)!.id)
+    expect(container.querySelector(`[data-testid="transcript-turn"][data-item-id="${entries.at(-2)!.id}"]`)).toBe(retained)
+  })
+
+  it('adds no day separator for same-local-day episodes, including a live append', async () => {
+    const entries = datedTurns(turns.map((_, index) => new Date(2026, 9, 17, 22, index).toISOString()))
+    await render(transcript(entries.slice(0, -1)))
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
+    await render(transcript(entries))
+    expect(mountedSourceIds()).toContain(entries.at(-1)!.prompt!.id)
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
   })
 
   it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
@@ -324,7 +357,7 @@ describe('tail-first transcript mounting', () => {
     // Complete its reasoning without mounting the interleaved tool or earlier prose.
     const reasoningIds = ['early/0', 'early/1', ...range('run', 0, 5)]
     expect(mountedSourceIds()).toEqual([...reasoningIds, ...range('after', 0, 3)])
-    expect(container.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('10/17 entries')
+    expect(container.querySelector('[data-testid="transcript-history-range"]')?.textContent).toContain('Latest 10 of 17 entries shown')
     // Work-log call rows carry data-tool-status, not an item id; this turn has exactly one tool call.
     expect(container.querySelectorAll('[data-testid="work-log"] [data-tool-status]')).toHaveLength(0)
     const thinking = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="thinking-entry"] > button')]
@@ -359,6 +392,9 @@ describe('tail-first transcript mounting', () => {
   it('progressively makes full history available without cancelling the native Find shortcut', async () => {
     await render(transcript())
     expect(container.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(turns.length)
+    const search = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
+    await act(async () => { document.dispatchEvent(search) })
+    expect(search.defaultPrevented).toBe(true)
     const find = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
     await act(async () => { document.dispatchEvent(find) })
     await flushHistory(turns.length)
@@ -379,7 +415,9 @@ describe('tail-first transcript mounting', () => {
     const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
     const top = anchor.getBoundingClientRect().top
     const button = container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!
-    const focused = action === 'Show all messages' ? button : lane()
+    // The first shortcut opens transcript search and takes focus; the second is the one that reaches browser Find.
+    if (action !== 'Show all messages') await act(async () => { lane().focus(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: action === 'Ctrl-F', metaKey: action === 'Cmd-F', bubbles: true, cancelable: true })) })
+    const focused = action === 'Show all messages' ? button : container.querySelector<HTMLInputElement>('[data-testid="transcript-find"] input')!
     let previousCount = renderedRows(lane()).length
     await act(async () => {
       focused.tabIndex = 0
@@ -393,7 +431,6 @@ describe('tail-first transcript mounting', () => {
     expect(controls.closest('[data-testid="transcript-scroll"]')).toBeNull()
     expect(controls.getAttribute('aria-busy')).toBe('true')
     expect(controls.textContent).toContain('Browser Find may miss earlier entries until this finishes.')
-    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
     previousCount = renderedRows(lane()).length
     let chunks = 0
     await flushHistory(entries.length, () => {
@@ -409,7 +446,6 @@ describe('tail-first transcript mounting', () => {
         expect(controls.getAttribute('aria-busy')).toBe('true')
         expect(controls.querySelector('[data-testid="transcript-history-all"]')).toBe(button)
         expect(controls.textContent).toContain('Browser Find may miss earlier entries until this finishes.')
-        expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
       }
       previousCount = count
     })
@@ -419,7 +455,6 @@ describe('tail-first transcript mounting', () => {
     expect(container.querySelector('[data-item-id="long-prompt-0"]')?.textContent).toContain('Long history prompt 0')
     expect(controls.getAttribute('aria-busy')).toBe('false')
     expect(controls.textContent).toContain('Browser Find searches all loaded messages.')
-    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: all loaded')
   }, 30_000)
 
   it('recaptures a new reader anchor after scrolling during preparation and reuses it for the remaining chunks', async () => {
@@ -483,6 +518,9 @@ describe('tail-first transcript mounting', () => {
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))
     })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))
+    })
     await flushHistory(turns.length)
     expect(renderedRows(lane())).toHaveLength(turns.length)
     expect(anchor.getBoundingClientRect().top).toBe(top)
@@ -541,6 +579,9 @@ describe('tail-first transcript mounting', () => {
 
   it('keeps following new rows after native Find is opened and cancelled without navigating', async () => {
     await render(transcript())
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }))
+    })
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }))
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -769,18 +810,153 @@ describe('batched message measurements', () => {
     expect(message.textContent).not.toContain('Show full message')
   })
 
-  it('keeps localized completion times and machine instants when formatting multiple answer rows', async () => {
+  it('keeps localized episode times and machine instants, one per episode, none on its answers', async () => {
     const entries: readonly TranscriptTurn[] = [0, 1].map(index => ({
       ...turns[index]!,
       items: [{ _tag: 'Text', id: `answer-${index}`, role: 'assistant', text: `Answer ${index}`, attachments: [], streaming: false, at: new Date(now + index * 60_000).toISOString() }],
     }))
     await render(transcript(entries))
-    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="message-time"]')]
+    expect(container.querySelectorAll('[data-testid="message-time"]')).toHaveLength(0)
+    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="turn-time"]')]
     expect(times).toHaveLength(2)
     times.forEach((time, index) => {
-      const completed = new Date(now + index * 60_000)
-      expect(time.dateTime).toBe(completed.toISOString())
-      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(completed))
+      const started = new Date(Date.parse(entries[index]!.prompt?.at ?? entries[index]!.items[0]!.at!))
+      expect(time.dateTime).toBe(started.toISOString())
+      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(started))
     })
+  })
+})
+
+describe('following the live end', () => {
+  // A host that appends rows on command, like a conversation receiving messages.
+  let append: () => void = () => {}
+  function Growing() {
+    const [count, setCount] = React.useState(6)
+    append = () => setCount(value => value + 1)
+    const items = rows.slice(0, count)
+    return <EmbraceScrollViewport items={items} data-testid="transcript-scroll">
+      {items.map(row => <div key={row.id} data-test-tail-row data-item-id={row.id}><span data-test-text>{row.id}</span><button aria-expanded="false">Details</button></div>)}
+    </EmbraceScrollViewport>
+  }
+  const distance = () => lane().scrollHeight - lane().clientHeight - lane().scrollTop
+  const jump = () => container.querySelector<HTMLButtonElement>('button[hidden], button:not([aria-expanded])')!
+  const appendRow = async () => {
+    await act(async () => append())
+    await flushFrames()
+  }
+  const dispatch = async (target: EventTarget, event: Event) => {
+    await act(async () => { target.dispatchEvent(event) })
+    await flushFrames()
+  }
+
+  it('keeps following when the reader wheels down at the end, as trackpad momentum does', async () => {
+    await render(<Growing />)
+    expect(distance()).toBe(0)
+    await dispatch(lane(), new WheelEvent('wheel', { deltaY: 120, bubbles: true }))
+    await appendRow()
+    expect(distance()).toBe(0)
+    expect(jump().hidden).toBe(true)
+  })
+
+  it.each([
+    ['a click on message text', () => new MouseEvent('pointerdown', { bubbles: true }), () => lane().querySelector('[data-test-text]')!],
+    ['focus moving into a row', () => new FocusEvent('focusin', { bubbles: true }), () => lane().querySelector('[data-test-text]')!],
+    ['ArrowDown', () => new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }), () => lane()],
+    ['End', () => new KeyboardEvent('keydown', { key: 'End', bubbles: true }), () => lane()],
+  ] as const)('keeps following after %s at the end', async (_, event, target) => {
+    await render(<Growing />)
+    await dispatch(target(), event())
+    // A press holds its row in place until release; following owns the lane again afterwards.
+    await dispatch(document, new MouseEvent('pointerup', { bubbles: true }))
+    await appendRow()
+    expect(distance()).toBe(0)
+  })
+
+  it('stops following on a deliberate scroll up and resumes from the jump control', async () => {
+    await render(<Growing />)
+    await scrollUp(120)
+    await appendRow()
+    expect(lane().scrollTop).toBe(120)
+    expect(jump().hidden).toBe(false)
+    await act(async () => { jump().click() })
+    await flushFrames(20)
+    expect(distance()).toBeLessThanOrEqual(1)
+    await appendRow()
+    expect(distance()).toBe(0)
+  })
+
+  it('stops following on a small upward wheel even within the end band', async () => {
+    await render(<Growing />)
+    await act(async () => {
+      lane().dispatchEvent(new WheelEvent('wheel', { deltaY: -10, bubbles: true }))
+      lane().scrollTop -= 10
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    const top = lane().scrollTop
+    await appendRow()
+    expect(lane().scrollTop).toBe(top)
+  })
+
+  it('stops following on an upward scrollbar drag, which arrives only as scroll events', async () => {
+    await render(<Growing />)
+    await act(async () => {
+      lane().scrollTop = 100
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    await appendRow()
+    expect(lane().scrollTop).toBe(100)
+  })
+
+  it('resumes following once the reader scrolls back within a line of the end', async () => {
+    await render(<Growing />)
+    await scrollUp(100)
+    await act(async () => {
+      lane().dispatchEvent(new WheelEvent('wheel', { deltaY: 400, bubbles: true }))
+      lane().scrollTop = lane().scrollHeight - lane().clientHeight - 30
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    await appendRow()
+    expect(distance()).toBe(0)
+    expect(jump().hidden).toBe(true)
+  })
+
+  it('stops following when the reader expands a row, so the row stays put', async () => {
+    await render(<Growing />)
+    const top = lane().scrollTop
+    await dispatch(lane().querySelector('[aria-expanded]')!, new MouseEvent('pointerdown', { bubbles: true }))
+    await appendRow()
+    expect(lane().scrollTop).toBe(top)
+  })
+
+  it('stops following when assistive tech opens a disclosure with a click alone', async () => {
+    // A real disclosure: activating it renders more of its row. Assistive tech may send only a click: no pointerdown, no keydown.
+    function Disclosure() {
+      const [open, setOpen] = React.useState(false)
+      return <><button aria-expanded={open} onClick={() => setOpen(value => !value)}>Thinking</button>{open && <p data-test-detail>Expanded detail</p>}</>
+    }
+    let appendRows: () => void = () => {}
+    function Host() {
+      const [count, setCount] = React.useState(6)
+      appendRows = () => setCount(value => value + 1)
+      const items = rows.slice(0, count)
+      return <EmbraceScrollViewport items={items} data-testid="transcript-scroll">
+        {items.map((row, index) => <div key={row.id} data-test-tail-row data-item-id={row.id}>{row.id}{index === 4 && <Disclosure />}</div>)}
+      </EmbraceScrollViewport>
+    }
+    await render(<Host />)
+    expect(distance()).toBe(0)
+    const top = lane().scrollTop
+    const disclosure = lane().querySelector<HTMLButtonElement>('[aria-expanded]')!
+    await act(async () => { disclosure.focus() })
+    await act(async () => { disclosure.click() })
+    await flushFrames()
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true')
+    expect(lane().querySelector('[data-test-detail]')).not.toBeNull()
+    await act(async () => appendRows())
+    await flushFrames()
+    expect(lane().scrollTop, 'the lane followed the end instead of holding the opened row').toBe(top)
   })
 })

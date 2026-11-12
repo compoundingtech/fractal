@@ -12,6 +12,7 @@ overrides:
   '@overeng/effect-rpc-explorer-react': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-explorer-react
   '@overeng/effect-rpc-observer': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-observer
   '@overeng/effect-rust': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust
+  '@overeng/kdl': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl
   '@overeng/meters': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters
   '@overeng/otel-browser': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-browser
   '@overeng/otel-contract': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract
@@ -20,7 +21,7 @@ overrides:
   '@overeng/utils': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils
   '@overeng/utils-dev': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-dev
   '@overeng/utils-storybook': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-storybook
-  '@effect/platform-node>@effect/platform-node-shared': 4.0.3
+  '@effect/platform-node>@effect/platform-node-shared': 4.1.0
 
 importers:
 
@@ -29,17 +30,20 @@ importers:
   apps/fractal-web:
     dependencies:
       '@effect/atom-react':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(react@19.2.3)(scheduler@0.27.0)
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(react@19.2.3)(scheduler@0.27.0)
       '@effect/opentelemetry':
-        specifier: 4.0.3
-        version: 4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3)
+        specifier: 4.1.0
+        version: 4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
+      '@effect/platform-browser':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)
       '@effect/platform-node':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
       '@effect/platform-node-shared':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)
       '@fractal/client':
         specifier: file:../../clients/typescript/fractal-client
         version: link:../../clients/typescript/fractal-client
@@ -51,19 +55,19 @@ importers:
         version: link:../../packages/fractal-ui
       '@overeng/devbar':
         specifier: file:../../.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/devbar
-        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/devbar(@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3))(@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.0.3)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))(@stylexjs/stylex@0.19.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/devbar(@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0))(@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.1.0)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))(@stylexjs/stylex@0.19.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       '@overeng/meters':
         specifier: file:../../.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters
-        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters(effect@4.0.3)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters(effect@4.1.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       '@overeng/utils':
         specifier: file:../../.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils
-        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3))(@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.0.3)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
+        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0))(@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.1.0)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
       '@stylexjs/stylex':
         specifier: 0.19.0
         version: 0.19.0
       effect:
-        specifier: 4.0.3
-        version: 4.0.3
+        specifier: 4.1.0
+        version: 4.1.0
       fractional-indexing:
         specifier: 3.2.0
         version: 3.2.0
@@ -84,11 +88,14 @@ importers:
         version: 3.50.0(react@19.2.3)
     devDependencies:
       '@effect/vitest':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
       '@fractal/scenarios':
         specifier: workspace:*
         version: link:../../clients/typescript/fractal-scenarios
+      '@react-aria/optimize-locales-plugin':
+        specifier: 2.1.0
+        version: 2.1.0
       '@stylexjs/unplugin':
         specifier: 0.19.0
         version: 0.19.0(supports-color@8.1.1)(unplugin@2.3.11)
@@ -208,8 +215,8 @@ importers:
   clients/typescript/fractal-client:
     devDependencies:
       effect:
-        specifier: 4.0.3
-        version: 4.0.3
+        specifier: 4.1.0
+        version: 4.1.0
       typescript:
         specifier: 6.0.3
         version: 6.0.3
@@ -218,6 +225,12 @@ importers:
         specifier: 8.22.0
         version: 8.22.0
 
+  clients/typescript/fractal-declarations:
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
   clients/typescript/fractal-scenarios:
     dependencies:
       '@fractal/client':
@@ -225,8 +238,8 @@ importers:
         version: link:../fractal-client
     devDependencies:
       '@effect/vitest':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
       '@storybook/react':
         specifier: 10.6.1
         version: 10.6.1(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(storybook@10.6.1(@types/react@19.2.18)(react@19.2.3))(supports-color@8.1.1)(typescript@6.0.3)
@@ -240,8 +253,8 @@ importers:
         specifier: 19.2.7
         version: 19.2.7(@types/react@19.2.18)
       effect:
-        specifier: 4.0.3
-        version: 4.0.3
+        specifier: 4.1.0
+        version: 4.1.0
       react:
         specifier: 19.2.3
         version: 19.2.3
@@ -265,18 +278,52 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
+  packages/fractal:
+    dependencies:
+      '@noble/hashes':
+        specifier: 2.4.0
+        version: 2.4.0
+      '@overeng/kdl':
+        specifier: file:../../.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl
+        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl(effect@4.1.0)
+      effect:
+        specifier: 4.1.0
+        version: 4.1.0
+    devDependencies:
+      '@effect/platform-node':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+      '@effect/vitest':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+      '@fractal/declarations':
+        specifier: workspace:^
+        version: link:../../clients/typescript/fractal-declarations
+      '@types/node':
+        specifier: 24.10.0
+        version: 24.10.0
+      oxc-parser:
+        specifier: 0.127.0
+        version: 0.127.0
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
+
   packages/fractal-sdk:
     dependencies:
       '@fractal/client':
         specifier: workspace:^
         version: link:../../clients/typescript/fractal-client
       effect:
-        specifier: 4.0.3
-        version: 4.0.3
+        specifier: 4.1.0
+        version: 4.1.0
     devDependencies:
       '@effect/vitest':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
       '@types/node':
         specifier: 24.10.0
         version: 24.10.0
@@ -293,14 +340,17 @@ importers:
         specifier: 0.15.25
         version: 0.15.25(@opentelemetry/api@1.9.1)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(use-sync-external-store@1.7.0(react@19.2.3))
       '@effect/atom-react':
-        specifier: 4.0.3
-        version: 4.0.3(effect@4.0.3)(react@19.2.3)(scheduler@0.27.0)
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(react@19.2.3)(scheduler@0.27.0)
+      '@pierre/highlights':
+        specifier: 0.3.0
+        version: 0.3.0
       '@stylexjs/stylex':
         specifier: 0.19.0
         version: 0.19.0
       effect:
-        specifier: 4.0.3
-        version: 4.0.3
+        specifier: 4.1.0
+        version: 4.1.0
       react:
         specifier: 19.2.3
         version: 19.2.3
@@ -316,9 +366,9 @@ importers:
       react-markdown:
         specifier: 10.1.0
         version: 10.1.0(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1)
-      refractor:
-        specifier: 5.0.0
-        version: 5.0.0
+      react-stately:
+        specifier: 3.50.0
+        version: 3.50.0(react@19.2.3)
       remark-gfm:
         specifier: 4.0.1
         version: 4.0.1(supports-color@8.1.1)
@@ -812,16 +862,16 @@ packages:
   '@dual-bundle/import-meta-resolve@4.2.1':
     resolution: {integrity: sha512-id+7YRUgoUX6CgV0DtuhirQWodeeA7Lf4i2x71JS/vtA5pRb/hIGWlw+G6MeXvsM+MXrz0VAydTGElX1rAfgPg==}
 
-  '@effect/atom-react@4.0.3':
-    resolution: {integrity: sha512-niFAKlL2heOKYfjSaC6nbMBQfxBZRX4LLaSBlnNgLLvamj735aBHTGqejyddMlvAbUYGUV0tD5ov9C9hxFFLJg==}
+  '@effect/atom-react@4.1.0':
+    resolution: {integrity: sha512-PeaBDmwqG9BPQfaPHeWCB2NF4NQaFlI6poKxjlBHMrMjKqV+LVBdryhpDNqSZOhqGgT+qnh9gV+19MYjNOQ+bg==}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
       react: '>=19.0.0 <20.0.0'
       scheduler: '>=0.25.0 <0.29.0'
 
-  '@effect/opentelemetry@4.0.3':
-    resolution: {integrity: sha512-IWZPBb/0BIhg9rYzwc2t0eFC6UPsuC+T/O/os9JPBwg8yvXptvU3HspyvhDs6lsCAxt7Fx6u28Deu8cPOcDe+Q==}
-    engines: {node: '>=18.0.0'}
+  '@effect/opentelemetry@4.1.0':
+    resolution: {integrity: sha512-j9bNzQaoQvcnimBFMG0i3piEW20E8HjkXAQHTJN/XqG2e4uJ9zCv53/HCNzD7+ooFn5S4nwQy/BOXeNReMIe+A==}
+    engines: {node: '>=22.19.0'}
     peerDependencies:
       '@opentelemetry/api': '>=1.9.0 <2.0.0'
       '@opentelemetry/api-logs': '>=0.203.0 <0.300.0'
@@ -832,7 +882,7 @@ packages:
       '@opentelemetry/sdk-trace-node': '>=2.0.0 <3.0.0'
       '@opentelemetry/sdk-trace-web': '>=2.0.0 <3.0.0'
       '@opentelemetry/semantic-conventions': '>=1.33.0 <2.0.0'
-      effect: ^4.0.3
+      effect: ^4.1.0
     peerDependenciesMeta:
       '@opentelemetry/api':
         optional: true
@@ -851,23 +901,28 @@ packages:
       '@opentelemetry/sdk-trace-web':
         optional: true
 
-  '@effect/platform-node-shared@4.0.3':
-    resolution: {integrity: sha512-5srkJfmWklWSgwZwlkMeTXobfNtxuwuTCvY9JWdPXRv/PBXAe5kKSptzRxT778oFFsaE9IMI8X61pvkifT9Eug==}
-    engines: {node: '>=18.0.0'}
+  '@effect/platform-browser@4.1.0':
+    resolution: {integrity: sha512-IEyaPzejKozHDupOUSjQIgQYGv2C0I828up8z7/nvQTHzmQHUS2/tGMEwXX/FwAvnrWZ0H9MhlhTl18ZgCHQiQ==}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
 
-  '@effect/platform-node@4.0.3':
-    resolution: {integrity: sha512-ctvREpC1EzRVsOm0JyIzYHajAQScFaec6Gl+M7TEIpEqdmmx6Ju11Um92EA/CE2KBfY5Fp1QWlqTkK6lOL7tqg==}
-    engines: {node: '>=18.0.0'}
+  '@effect/platform-node-shared@4.1.0':
+    resolution: {integrity: sha512-uYQfFRoxWLo8fIhiSeBcmz/R1ooOfE3HF3cWHFgxz82tZMk2Wn02BGABcdLmaAch9VpDLbtWnuhSxNyBsGMUFg==}
+    engines: {node: '>=22.19.0'}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
+
+  '@effect/platform-node@4.1.0':
+    resolution: {integrity: sha512-v+X7moGVF9k5oMVvz0slA+NgtEod+W+oygeI285MDJgSlUCW3JcqElj+cD3rlijFZtpKhC7RLkU1GuCxjGHTpA==}
+    engines: {node: '>=22.19.0'}
+    peerDependencies:
+      effect: ^4.1.0
       redis: '>=5.0.0 <7.0.0'
 
-  '@effect/vitest@4.0.3':
-    resolution: {integrity: sha512-jsIkpssf0CFuOeycW2sQZkWx0qzlsRv+JIkzd9qQpoFDcHC9JZFSdIjEBAhsdp20pDy4Y/b2vT/ew7wXZxvEig==}
+  '@effect/vitest@4.1.0':
+    resolution: {integrity: sha512-+APF69oTYgGj5WCewowk1/udepH74xz4ONyH7d+UfcK0SrF3osiSwsWEyODUpJvWd6MIk5F5PcFJiE4evMuG2A==}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
       vitest: '>=5.0.0 <6.0.0'
 
   '@emnapi/core@1.11.0':
@@ -1320,10 +1375,15 @@ packages:
   '@overeng/effect-distributed-lock@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock, type: directory}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
 
   '@overeng/effect-rust@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust, type: directory}
+
+  '@overeng/kdl@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl':
+    resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl, type: directory}
+    peerDependencies:
+      effect: ^4.1.0
 
   '@overeng/meters@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters, type: directory}
@@ -1335,7 +1395,7 @@ packages:
   '@overeng/otel-contract@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract, type: directory}
     peerDependencies:
-      effect: ^4.0.3
+      effect: ^4.1.0
 
   '@overeng/stylex-tokens@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/stylex-tokens':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/stylex-tokens, type: directory}
@@ -1345,10 +1405,10 @@ packages:
   '@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils, type: directory}
     peerDependencies:
-      '@effect/opentelemetry': ^4.0.3
-      '@effect/platform-node': ^4.0.3
+      '@effect/opentelemetry': ^4.1.0
+      '@effect/platform-node': ^4.1.0
       '@playwright/test': ^1.64.1
-      effect: ^4.0.3
+      effect: ^4.1.0
 
   '@oxc-parser/binding-android-arm-eabi@0.127.0':
     resolution: {integrity: sha512-0LC7ye4hvqbIKxAzThzvswgHLFu2AURKzYLeSVvLdu2TBOYWQDmHnTqPLeA597BcUCxiLqLsS4CJ5uoI5WYWCQ==}
@@ -1588,6 +1648,9 @@ packages:
     resolution: {integrity: sha512-VPoCAhKvCQTlG7vxqaBXcmuvbh77BfnGXj8g0pbvVXpm1F/R8rDVwqIWcEbMzrI1JvJlm8v7T9uMVQb6UctMRg==}
     cpu: [x64]
     os: [win32]
+
+  '@pierre/highlights@0.3.0':
+    resolution: {integrity: sha512-s6xZ/giPPrSeCO2w254GiysUXD4ditKMTOrl1vHynvPqP7VdlujYi01O9joxJ0T16XkoXGQMN6zkRi9+O8NCzg==}
 
   '@playwright/test@1.64.1':
     resolution: {integrity: sha512-IaYGml/nSOiZWROfPtuIL7neuu9qDOZ3TNvNljUIrhDMxiGTgPjzj/g9p9RxpS2tSepPDRY+UwAaEeiKtUvIAg==}
@@ -2284,6 +2347,9 @@ packages:
   '@radix-ui/rect@1.1.3':
     resolution: {integrity: sha512-JtyZR+mqgBibTo8xea3B6ZRmzZiM/YeVBtUkas6zMuXjAlfIFIW2FgqeM9eLyvEaYX66vr6DJMK+4U6LV0KhNw==}
 
+  '@react-aria/optimize-locales-plugin@2.1.0':
+    resolution: {integrity: sha512-JN8dyMW/9qNbJt08xPDYin4MDe2IntrnCrnAgbmWfi9ob0uQaNv/m1k030kwlep3ip3Xf9DcPSgartxe26nZ/g==}
+
   '@react-native-async-storage/async-storage@2.2.0':
     resolution: {integrity: sha512-gvRvjR5JAaUZF8tv2Kcq/Gbt3JHwbKFYfmb445rhOj6NUMx3qPLixmDx5pZAyb9at1bYvJ4/eTUipU5aki45xw==}
     peerDependencies:
@@ -2920,9 +2986,6 @@ packages:
   '@types/node@26.6.4':
     resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
 
-  '@types/prismjs@1.26.6':
-    resolution: {integrity: sha512-vqlvI7qlMvcCBbVe0AKAb4f97//Hy0EBTaiW8AalRnG/xAN5zOiWWyrNqNXeq8+KAuvRewjCVY1+IPxk4RdNYw==}
-
   '@types/react-dom@19.2.7':
     resolution: {integrity: sha512-I8bPpDLcHBv1qiIiXDCy71Rt8eQDKJP0sMSWJphDdAcdqiJ1sGpZamavoEIRZmYzjia9LuEb2HlYdDpmoENpvQ==}
     peerDependencies:
@@ -3502,8 +3565,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  effect@4.0.3:
-    resolution: {integrity: sha512-LoWn/Uwwx0JjHSDmBAAahx8sB+klzM6vsZovnbYowBNw6B4QScJLRLBByO61plvNiycx7HPN8FnsWUCu0eXW5w==}
+  effect@4.1.0:
+    resolution: {integrity: sha512-lGx2MJJyrXA8RZb2UpQ/0Nkb5Utaimby7oD92+18noBxLPE85IFOvptdzau8dvcxAOwfwHo9iqapbKeFzqQM/Q==}
 
   electron-to-chromium@1.5.444:
     resolution: {integrity: sha512-5ss/uJfoDYDHT0lfJzT6FbcskIzROIOPf0BbbFkGcvDzoJU7i//9GDrwwIHQVmIsrAGiF3ihpADBRIsrEFt1rQ==}
@@ -3819,17 +3882,11 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hast-util-parse-selector@4.0.0:
-    resolution: {integrity: sha512-wkQCkSYoOGCRKERFWcxMVMOcYE2K1AaNLU8DXS9arxnLOUEWbOXKXiJUNzEpqZ3JOKpnha3jkFrumEjVliDe7A==}
-
   hast-util-to-jsx-runtime@2.3.6:
     resolution: {integrity: sha512-zl6s8LwNyo1P9uw+XJGvZtdFF1GdAkOg8ujOw+4Pyb76874fLps4ueHXDhXWdk6YHQ6OgUtinliG7RsYvCbbBg==}
 
   hast-util-whitespace@3.0.0:
     resolution: {integrity: sha512-88JUN06ipLwsnv+dVn+OIYOvAuvBMy/Qoi6O7mQHxdPXpjy+Cd6xRkWwux7DKO+4sYILtLBRIKgsdpS2gQc7qw==}
-
-  hastscript@9.0.1:
-    resolution: {integrity: sha512-g7df9rMFX/SPi34tyGCyUBREQoKkapwdY/T04Qn9TDWfHhAYt4/I0gMVirzK5wEzeUqIjEB+LXC/ypb7Aqno5w==}
 
   hermes-compiler@250829098.0.17:
     resolution: {integrity: sha512-qG1PXzTEtriF6oQLZF3vyHhSMxOdW5h2TqqLri0rdpstPustd2fSvRZQMVAPdlhgFwBfYnj3OUZtiO6LjYsEFw==}
@@ -4892,9 +4949,6 @@ packages:
     resolution: {integrity: sha512-XFQbPie1lGpKeUZ8ySYY43yLnQy/iIQtHNvIr/1XdaABpb96rUSdm3Mfl+98FEVbv9ZJIzINMno5s0Nh8E5LEw==}
     engines: {node: '>= 20.0.0'}
 
-  refractor@5.0.0:
-    resolution: {integrity: sha512-QXOrHQF5jOpjjLfiNk5GFnWhRXvxjUVnlFxkeDmewR5sXkr3iM46Zo+CnRR8B+MDVqkULW4EcLVcRBNOPXHosw==}
-
   regenerate-unicode-properties@10.3.0:
     resolution: {integrity: sha512-9ns8odR8e9q3otKeHj3DE80jZYKg6zVeZKE+zQmRKXFoVUcuiTGeO6iusDhPRoIQQPVPRvH+SfBhrTud4eczuw==}
     engines: {node: '>=4'}
@@ -5291,8 +5345,8 @@ packages:
   undici-types@8.9.0:
     resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
-  undici@8.11.2:
-    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
+  undici@8.12.3:
+    resolution: {integrity: sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw==}
     engines: {node: '>=22.19.0'}
 
   unicode-canonical-property-names-ecmascript@2.0.1:
@@ -6324,51 +6378,55 @@ snapshots:
 
   '@dual-bundle/import-meta-resolve@4.2.1': {}
 
-  '@effect/atom-react@4.0.3(effect@4.0.3)(react@19.2.3)(scheduler@0.27.0)':
+  '@effect/atom-react@4.1.0(effect@4.1.0)(react@19.2.3)(scheduler@0.27.0)':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
       react: 19.2.3
       scheduler: 0.27.0
 
-  '@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3)':
+  '@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)':
     dependencies:
       '@opentelemetry/semantic-conventions': 1.43.0
-      effect: 4.0.3
+      effect: 4.1.0
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
 
-  '@effect/platform-node-shared@4.0.3(effect@4.0.3)':
+  '@effect/platform-browser@4.1.0(effect@4.1.0)':
+    dependencies:
+      effect: 4.1.0
+
+  '@effect/platform-node-shared@4.1.0(effect@4.1.0)':
     dependencies:
       '@types/ws': 8.18.2
-      effect: 4.0.3
+      effect: 4.1.0
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))':
+  '@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@effect/platform-node-shared': 4.0.3(effect@4.0.3)
-      effect: 4.0.3
+      '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
+      effect: 4.1.0
       redis: 6.3.0(@opentelemetry/api@1.9.1)
-      undici: 8.11.2
+      undici: 8.12.3
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/vitest@4.0.3(effect@4.0.3)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
+  '@effect/vitest@4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
       vitest: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
-  '@effect/vitest@4.0.3(effect@4.0.3)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
+  '@effect/vitest@4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
       vitest: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
-  '@effect/vitest@4.0.3(effect@4.0.3)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
+  '@effect/vitest@4.1.0(effect@4.1.0)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
       vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
   '@emnapi/core@1.11.0':
@@ -6959,42 +7017,46 @@ snapshots:
 
   '@overeng/content-address@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/content-address(redis@6.3.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@effect/platform-node': 4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))
+      '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
       '@noble/hashes': 2.4.0
       '@overeng/effect-rust': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust
-      effect: 4.0.3
+      effect: 4.1.0
     transitivePeerDependencies:
       - bufferutil
       - redis
       - utf-8-validate
 
-  '@overeng/devbar@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/devbar(@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3))(@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.0.3)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))(@stylexjs/stylex@0.19.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
+  '@overeng/devbar@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/devbar(@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0))(@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.1.0)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))(@stylexjs/stylex@0.19.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
     dependencies:
       '@overeng/stylex-tokens': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/stylex-tokens(@stylexjs/stylex@0.19.0)
       '@stylexjs/stylex': 0.19.0
       react: 19.2.3
       react-dom: 19.2.3(react@19.2.3)
     optionalDependencies:
-      '@overeng/utils': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3))(@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.0.3)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
+      '@overeng/utils': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0))(@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.1.0)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
-  '@overeng/effect-distributed-lock@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock(effect@4.0.3)':
+  '@overeng/effect-distributed-lock@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock(effect@4.1.0)':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
 
   '@overeng/effect-rust@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
 
-  '@overeng/meters@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters(effect@4.0.3)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
+  '@overeng/kdl@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl(effect@4.1.0)':
     dependencies:
-      effect: 4.0.3
+      effect: 4.1.0
+
+  '@overeng/meters@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters(effect@4.1.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
+    dependencies:
+      effect: 4.1.0
       react: 19.2.3
       react-dom: 19.2.3(react@19.2.3)
 
-  '@overeng/otel-contract@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))':
+  '@overeng/otel-contract@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))':
     dependencies:
       '@overeng/content-address': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/content-address(redis@6.3.0(@opentelemetry/api@1.9.1))
-      effect: 4.0.3
+      effect: 4.1.0
     transitivePeerDependencies:
       - bufferutil
       - redis
@@ -7004,18 +7066,18 @@ snapshots:
     dependencies:
       '@stylexjs/stylex': 0.19.0
 
-  '@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3))(@effect/platform-node@4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.0.3)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))':
+  '@overeng/utils@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils(@effect/opentelemetry@4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0))(@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1)))(@playwright/test@1.64.1)(@types/node@24.10.0)(effect@4.1.0)(esbuild@0.28.2)(jsdom@26.1.0(supports-color@8.1.1))(redis@6.3.0(@opentelemetry/api@1.9.1))(rolldown@1.2.12)(supports-color@8.1.1)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))':
     dependencies:
-      '@effect/opentelemetry': 4.0.3(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.3)
-      '@effect/platform-node': 4.0.3(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))
-      '@effect/vitest': 4.0.3(effect@4.0.3)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+      '@effect/opentelemetry': 4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
+      '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+      '@effect/vitest': 4.1.0(effect@4.1.0)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
       '@noble/hashes': 2.4.0
       '@opentelemetry/api': 1.9.1
-      '@overeng/effect-distributed-lock': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock(effect@4.0.3)
-      '@overeng/otel-contract': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract(effect@4.0.3)(redis@6.3.0(@opentelemetry/api@1.9.1))
+      '@overeng/effect-distributed-lock': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-distributed-lock(effect@4.1.0)
+      '@overeng/otel-contract': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
       '@playwright/test': 1.64.1
       '@stylexjs/unplugin': 0.19.0(supports-color@8.1.1)(unplugin@3.3.0(esbuild@0.28.2)(rolldown@1.2.12)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
-      effect: 4.0.3
+      effect: 4.1.0
       postcss: 8.5.26
       unplugin: 3.3.0(esbuild@0.28.2)(rolldown@1.2.12)(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
       vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
@@ -7175,6 +7237,8 @@ snapshots:
 
   '@oxc-resolver/binding-win32-x64-msvc@11.21.2':
     optional: true
+
+  '@pierre/highlights@0.3.0': {}
 
   '@playwright/test@1.64.1':
     dependencies:
@@ -7931,6 +7995,10 @@ snapshots:
 
   '@radix-ui/rect@1.1.3': {}
 
+  '@react-aria/optimize-locales-plugin@2.1.0':
+    dependencies:
+      unplugin: 2.3.11
+
   '@react-native-async-storage/async-storage@2.2.0(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))':
     dependencies:
       merge-options: 3.0.4
@@ -8522,8 +8590,6 @@ snapshots:
     dependencies:
       undici-types: 8.9.0
 
-  '@types/prismjs@1.26.6': {}
-
   '@types/react-dom@19.2.7(@types/react@19.2.18)':
     dependencies:
       '@types/react': 19.2.18
@@ -9112,7 +9178,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  effect@4.0.3: {}
+  effect@4.1.0: {}
 
   electron-to-chromium@1.5.444: {}
 
@@ -9421,10 +9487,6 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hast-util-parse-selector@4.0.0:
-    dependencies:
-      '@types/hast': 3.0.5
-
   hast-util-to-jsx-runtime@2.3.6(supports-color@8.1.1):
     dependencies:
       '@types/estree': 1.0.9
@@ -9448,14 +9510,6 @@ snapshots:
   hast-util-whitespace@3.0.0:
     dependencies:
       '@types/hast': 3.0.5
-
-  hastscript@9.0.1:
-    dependencies:
-      '@types/hast': 3.0.5
-      comma-separated-tokens: 2.0.3
-      hast-util-parse-selector: 4.0.0
-      property-information: 7.2.0
-      space-separated-tokens: 2.0.2
 
   hermes-compiler@250829098.0.17: {}
 
@@ -11037,13 +11091,6 @@ snapshots:
       - '@node-rs/xxhash'
       - '@opentelemetry/api'
 
-  refractor@5.0.0:
-    dependencies:
-      '@types/hast': 3.0.5
-      '@types/prismjs': 1.26.6
-      hastscript: 9.0.1
-      parse-entities: 4.0.2
-
   regenerate-unicode-properties@10.3.0:
     dependencies:
       regenerate: 1.5.0
@@ -11453,7 +11500,7 @@ snapshots:
 
   undici-types@8.9.0: {}
 
-  undici@8.11.2: {}
+  undici@8.12.3: {}
 
   unicode-canonical-property-names-ecmascript@2.0.1: {}
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Home Manager can upgrade again after a pre-receipt generation replaces its executable but leaves a newer HM ownership receipt behind.",
+  "replay": { "status": "none", "detail": "No claim replay or projection changes." },
+  "schema": { "status": "none", "detail": "No database or installer receipt schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rules change." },
+  "compatibility": { "status": "changed", "detail": "Strict incoming-CLI receipt verification remains first, including acceptance of valid matching receipts from other installers. Only after it fails, HM accepts a digest-mismatched, well-formed schema-1 fractal receipt marked installer hm that is a regular non-symlink finalized file, with no pending receipt or dangling pending link. Both st and st3 must still alias fractal, and the current regular executable, copied or linked, must byte-match oldGenPath/home-path/bin/fractal resolved to an immutable /nix/store path. This trusts same-user previous-generation metadata and intact aliases rather than waiving digest checks generally. Script- or setup-owned mismatches, unknown replacements, missing generation proof, and malformed or symlinked receipts remain rejected." },
+  "downtime": { "status": "none", "detail": "No additional service restart requirement." },
+  "manual": { "status": "changed", "detail": "Reactivate the receipt-aware Home Manager generation through the configuration that owns the service. Preserve the prior active generation and reverse aliases for rollback recovery; without this proof, restore a matching executable and receipt together before reinstalling. Archive and setup installers gain no mismatch exception." },
+  "recovery": { "status": "changed", "detail": "Successful rollback recognition suppresses the initial strict-verification error and proceeds through the existing pending-receipt publication transaction. Failed recognition retains the strict error and reinstall guidance. Publication failure still restores the prior executable inode, finalized receipt, and any pending intent; successful activation writes a receipt for the incoming HM payload." }
+}

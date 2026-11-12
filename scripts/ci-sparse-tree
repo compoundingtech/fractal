@@ -10,7 +10,10 @@ tracked file or a directory; one that matches no tracked file is an error (the l
 During arn:lmig:smalltalk:2026-10-27-dot-fractal-config, a declared pair `.st`, `.fractal` requires at least one layout, not both.
 --link PATH symlinks an untracked directory of the repository into the copy when it exists (the megarepo members under repos/, which the
 tests that run genie import): environment the inputs pin (megarepo.lock, flake.lock), not an input of its own.
+The git-private ci-sparse-origin.json records the originating commit/tree and synthetic HEAD for diagnostic receipts; it is not an input.
 """
+import base64
+import hashlib
 import argparse
 import json
 import os
@@ -88,6 +91,10 @@ def main(argv):
     if unmatched:
         raise SystemExit(f'ci-sparse-tree: inputs of {args.check} that match no tracked file: {", ".join(unmatched)}')
     args.into.mkdir(parents=True, exist_ok=True)
+    origin_head = subprocess.check_output(['git', '-C', str(args.repo), 'rev-parse', 'HEAD'], text=True).strip()
+    origin_tree = subprocess.check_output(['git', '-C', str(args.repo), 'rev-parse', f'{origin_head}^{{tree}}'], text=True).strip()
+    origin_commit = subprocess.check_output(['git', '-C', str(args.repo), 'cat-file', 'commit', origin_head])
+    paths_digest = hashlib.sha256(json.dumps(names, separators=(',', ':')).encode()).hexdigest()
     copy(args.repo, args.into, names)
     for link in args.link:
         source = (args.repo / link).resolve()
@@ -104,7 +111,20 @@ def main(argv):
     # Exactly the selected files (forced: a copied .gitignore must not drop a tracked one), never a linked directory.
     subprocess.run(['git', '--literal-pathspecs', '-C', str(args.into), 'add', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], check=True, env=env, capture_output=True,
                    input='\0'.join(names).encode())
-    subprocess.run(['git', '-C', str(args.into), 'commit', '-q', '-m', f'sparse tree of {args.check}'], check=True, env=env, capture_output=True)
+    message = (f'sparse tree of {args.check}\n\nOrigin-Head: {origin_head}\nOrigin-Tree: {origin_tree}\n'
+               f'Sparse-Paths-SHA256: {paths_digest}')
+    subprocess.run(['git', '-C', str(args.into), 'commit', '-q', '-m', message], check=True, env=env, capture_output=True)
+    sparse_head = subprocess.check_output(['git', '-C', str(args.into), 'rev-parse', 'HEAD'], text=True, env=env).strip()
+    sparse_tree = subprocess.check_output(['git', '-C', str(args.into), 'rev-parse', 'HEAD^{tree}'], text=True, env=env).strip()
+    sparse_commit = subprocess.check_output(['git', '-C', str(args.into), 'cat-file', 'commit', sparse_head], env=env)
+    # Git-private metadata cannot be supplied by a tracked input or alter the sparse input tree.
+    fd = os.open(args.into / '.git/ci-sparse-origin.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        json.dump({
+            'version': 2, 'origin_head': origin_head, 'origin_tree': origin_tree, 'sparse_head': sparse_head, 'sparse_tree': sparse_tree,
+            'origin_commit': base64.b64encode(origin_commit).decode(), 'sparse_commit': base64.b64encode(sparse_commit).decode(),
+            'paths': names, 'paths_sha256': paths_digest}, stream)
+        stream.write('\n')
     print(f'ci-sparse-tree: {len(names)} files of {args.check} in {args.into}')
     return 0
 

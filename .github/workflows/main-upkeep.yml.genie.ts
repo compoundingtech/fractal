@@ -1,6 +1,8 @@
+import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
+import { buildFleetWorkflow } from './fleet.yml.genie.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
   buildEnv,
@@ -24,6 +26,41 @@ import {
   workspacePreparationSteps,
 } from './workspace-ci.ts'
 
+const proofId = (id: string) => `proof-${id}`
+const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
+// The fleet builder includes archive producers before projection, retaining the complete queue graph.
+const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
+// Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
+const proofOmissions: Record<string, string> = {
+  'namespace-capacity': 'The ephemeral queue ref no longer controls landed proof.',
+  'evidence-presign-notice': 'Pre-signing advice applies only to an open PR.',
+}
+// Preserve fleet's dependency identities inside aggregate evidence JSON, while namespacing actual jobs.
+export const proofJobs = Object.fromEntries(Object.entries(fleetWorkflow.jobs).filter(([id]) => !Object.hasOwn(proofOmissions, id)).map(([id, job]) => {
+  const dependencies: string[] = job.needs == null ? [] : typeof job.needs === 'string' ? [job.needs] : job.needs
+  const jsonFormat = `{{${dependencies.map((name, i) => `"${name}":{${i}}`).join(',')}}}`
+  const needsJson = dependencies.length
+    ? `format('${jsonFormat}', ${dependencies.map(name => `toJSON(needs.${proofId(name)})`).join(', ')})`
+    : "'{}'"
+  const expression = (text: string) => text.replaceAll('toJSON(needs)', needsJson)
+    .replace(/\bneeds(?:\.([\w-]+)|\[['"]([\w-]+)['"]\])/g, (whole, dot, bracket) => {
+      const name = dot ?? bracket
+      return Object.hasOwn(fleetWorkflow.jobs, name) ? `needs.${proofId(name)}` : whole
+    }).replaceAll('github.job', `'${id}'`)
+  const rewrite = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(rewrite)
+    if (value !== null && typeof value === 'object')
+      return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+        [key, key === 'if' && typeof entry === 'string' ? expression(entry) : rewrite(entry)]))
+    if (typeof value !== 'string') return value
+    return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, text: string) => '${{' + expression(text) + '}}')
+  }
+  const projected = rewrite(job) as Record<string, unknown>
+  const condition = String(projected.if ?? 'success()').replace(/\$\{\{|\}\}/g, '')
+  return [proofId(id), { ...projected, name: `post-merge ${job.name ?? id}`,
+    needs: ['main-checks', ...dependencies.map(proofId)], if: `\${{ ${proofSelected} && (${condition}) }}` }]
+}))
+
 const missing = "steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true'"
 const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => steps.map((value) => {
   const step = value as Record<string, unknown>
@@ -40,7 +77,8 @@ const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => (
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
   steps: [
-    { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+    // Reuse setup's checkout before probing; a second checkout would clean downloaded compat archives.
+    ...setup.slice(0, 1),
     ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
       ...step,
       if: 'success()',
@@ -57,9 +95,12 @@ if ${nixOnly ? '[ \"$NIX_HIT\" != true ]' : '[ \"$CARGO_HIT\" != true ] || [ \"$
 fi`,
     },
     ...whenMissing([
-      ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
+      ...(stage === 'genie' ? setup.slice(1).filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup.slice(1)),
       ...(stage === 'genie' ? [megarepoApplyStep] : []),
-      nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+      {
+        ...nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+        ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+      },
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
       // protected main fills the shared dependency quota, including after eviction.
@@ -74,15 +115,13 @@ fi`,
   ],
 })
 
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Fill caches for current main; keep pinned manual runs independent. Main pushes share one group
-  // without cancelling: a started cache fill finishes, and GitHub keeps only the newest pending run, so
-  // a burst of merges coalesces into one more run instead of cancelling each one half way.
+  // Every landed tree that skipped queue work needs hosted proof; never coalesce pending main pushes.
   concurrency: {
-    group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}",
+    group: 'main-upkeep-${{ github.run_id }}',
     'cancel-in-progress': false,
   },
   actionlint: {
@@ -95,10 +134,24 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       permissions: { contents: 'read', actions: 'read', checks: 'read' },
+      outputs: { 'evidence-skipped': '${{ steps.queue.outputs.evidence-skipped }}' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-        { name: 'Confirm main retains the queue checks', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
+        { name: 'Confirm main retains the queue checks', id: 'queue', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
       ],
+    },
+    'hosted-proof-failure': {
+      name: 'report red main',
+      needs: Object.keys(proofJobs),
+      if: "always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
+      'runs-on': 'ubuntu-latest',
+      permissions: {},
+      steps: [{
+        name: 'Signal revert needed',
+        run: `echo "::error::Post-merge hosted proof failed for $GITHUB_SHA: main is red; revert the merged change."
+echo "## Revert needed: hosted proof failed for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+exit 1`,
+      }],
     },
     'cache-maintenance': {
       name: 'cache-maintenance',
@@ -137,7 +190,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           name: 'Cache locked TypeScript dependencies', id: 'typescript-cache', uses: 'actions/cache@v5',
           with: {
             path: pnpmStoreEnv.pnpm_config_store_dir,
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}',
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-${{ steps.lockfiles.outputs.hash }}',
+            'restore-keys': 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-',
           },
         },
         {
@@ -174,7 +228,7 @@ fi`,
         },
         ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
-          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
+          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: { path: fractalWebStoreCache.path, key: fractalWebStoreCache.key } },
         ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
         ...[
           {
@@ -195,4 +249,6 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
+
+export default githubWorkflow({ ...upkeepWorkflow, jobs: { ...upkeepWorkflow.jobs, ...proofJobs } })

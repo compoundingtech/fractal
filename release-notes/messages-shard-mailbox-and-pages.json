@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "More of a member's mail readers read its messages shard: a seat's mailbox stream offers its stream items and follows their local receipts; message pages without a recipient and with sender or title filters (and so st conversations thread) list stream items after the graph's mail; a stream item's delivered, custody and delegated transitions follow the graph's rules and are recorded on the member; a handoff note that is a stream item is acknowledged with a local read; and a stream item whose recipient's seat runs on another host has delivery state unknown. The unpaged message lists and waits still read the graph only",
+  "replay": {
+    "status": "none",
+    "detail": "No graph claim, projection or cache changes."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The messages shard (shards/messages/claims.sqlite3) gains two indexes on stream_messages, by sender and in shard order, created with IF NOT EXISTS when the shard opens. The graph database and its storage version are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Nothing writes message.sent to the shard yet, so on a real fleet every reader returns what it did. A staged receipt for a stream item waits for a draining seat rollout, as a graph receipt does."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A lifecycle post for a stream item with acting_for or a delegation proof is now checked by the graph's custody and delegation rules and recorded on the member, instead of being refused with stream-lifecycle-unsupported. A message's delivery (GET /v1/messages/delivery and message resources) gains the state and phase unknown for a stream item whose recipient's seat runs on another host, whose receipts this member cannot see; a client that does not know unknown should show it as not yet known. Mailbox receipts for stream items keep a native receipt's proof in this member's local record. No client-v0 field is added or removed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Creating two indexes on an empty shard is immediate."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back to the previous release is safe: earlier builds ignore the shard, its tables and its indexes, and no graph claim was written for a stream item."
+  }
+}

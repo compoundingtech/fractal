@@ -61,7 +61,84 @@ pub enum ExecObservation {
 pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
-    owned_children: Arc<Mutex<BTreeMap<u32, Child>>>,
+    owned_children: Arc<Mutex<BTreeMap<u32, OwnedChild>>>,
+    unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    scope_join_limit: Duration,
+}
+
+/// A child this runtime started, until its exit is in its record.
+#[derive(Debug)]
+enum OwnedChild {
+    Running(Child),
+    /// Reaped, with its exit not yet written to its record. The record is written outside the
+    /// map's lock, which every exec shares.
+    Exited(std::process::ExitStatus),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExecTeardownCaller {
+    EndIf,
+    SignalIf,
+    EndLeftovers,
+    EndLeftoversLater,
+    SpawnReplacement,
+    Remove,
+}
+
+fn teardown_span(
+    id: &str,
+    caller: ExecTeardownCaller,
+    expected_generation: Option<&str>,
+    observation: Option<&ExecObservation>,
+) -> tracing::Span {
+    let (status, generation) = match observation {
+        Some(ExecObservation::Running(generation)) => ("running", Some(generation)),
+        Some(ExecObservation::Exited(generation)) => ("exited", Some(generation)),
+        Some(ExecObservation::Indeterminate(_)) => ("indeterminate", None),
+        None => ("missing", None),
+    };
+    let span = tracing::info_span!(
+        "exec_teardown",
+        ?caller,
+        runtime_id = id,
+        expected_incarnation = expected_generation.unwrap_or("not_applicable"),
+        observed_incarnation = "unavailable",
+        operation_id = "unavailable",
+        start_operation_id = "unavailable",
+        registry_status = status,
+        registry_pid = tracing::field::Empty,
+        registry_created_at = tracing::field::Empty,
+        registry_exit_code = tracing::field::Empty,
+        registry_exit_signal = tracing::field::Empty,
+        registry_group_exited = tracing::field::Empty,
+        recorded_scope = "unavailable",
+        tagged_scope = "not_applicable",
+        spawn_lock = "not_applicable",
+        start_token = tracing::field::Empty,
+    );
+    if let Some(generation) = generation {
+        span.record("observed_incarnation", generation.generation_id.as_str());
+        span.record("start_operation_id", generation.start_operation.as_deref().unwrap_or("unavailable"));
+        span.record("registry_pid", generation.pid);
+        span.record("registry_created_at", tracing::field::display(generation.created_at_unix_ms));
+        span.record("registry_exit_code", tracing::field::debug(generation.exit_code));
+        span.record("registry_exit_signal", tracing::field::debug(generation.exit_signal));
+        span.record("registry_group_exited", generation.group_exited);
+        span.record("recorded_scope", generation.scope_unit.as_deref().unwrap_or("not_applicable"));
+        span.record("start_token", generation.start_token);
+    } else {
+        for field in [
+            "registry_pid",
+            "registry_created_at",
+            "registry_exit_code",
+            "registry_exit_signal",
+            "registry_group_exited",
+            "start_token",
+        ] {
+            span.record(field, "unavailable");
+        }
+    }
+    span
 }
 
 impl ExecRuntime {
@@ -71,7 +148,21 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
+            unlaned_seat: None,
+            scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_scope_join_limit(mut self, limit: Duration) -> Self {
+        self.scope_join_limit = limit;
+        self
+    }
+
+    /// Set only by the daemon's seat runtime, never inferred from ambient environment.
+    pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
+        self.unlaned_seat = policy;
+        self
     }
 
     pub fn spawn(
@@ -130,7 +221,7 @@ impl ExecRuntime {
         fs::create_dir_all(&self.log_dir)?;
         // What the previous generation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_leftovers(id) {
+        if let Err(error) = self.end_leftovers_for(id, ExecTeardownCaller::SpawnReplacement) {
             eprintln!(
                 "st3: WARN what the last generation of {id} left running did not end: {error:#}"
             );
@@ -186,6 +277,7 @@ impl ExecRuntime {
             &argument_refs,
             Some(&env),
             lane.as_ref(),
+            self.unlaned_seat.as_ref(),
         );
         command
             .current_dir(cwd)
@@ -202,7 +294,17 @@ impl ExecRuntime {
             });
         }
         if let Some(guard) = guard {
-            guard()?;
+            guard().inspect_err(|error| {
+                tracing::debug!(
+                    caller = "spawn_inner",
+                    runtime_id = id,
+                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    guard_decision = "skip",
+                    reason = "spawn_guard_rejected",
+                    %error,
+                    "exec spawn guard rejected"
+                );
+            })?;
         }
         let child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
@@ -230,7 +332,27 @@ impl ExecRuntime {
         self.owned_children
             .lock()
             .expect("exec child mutex poisoned")
-            .insert(pid, child);
+            .insert(pid, OwnedChild::Running(child));
+        // `systemd-run` joins its scope only when the user manager starts it, and runs the task
+        // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
+        // this process only once it has joined.
+        if let Some(unit) = generation.scope_unit.as_deref() {
+            let join = crate::isolate::await_join(unit, pid, self.scope_join_limit, || {
+                process_generation_alive(pid, start_token)
+            });
+            if !matches!(join, Ok(crate::isolate::Join::Joined | crate::isolate::Join::Exited)) {
+                // A failed spawn leaves nothing that could still die with this process. Unjoined,
+                // the leader is still `systemd-run`, alone in the session it started.
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                join.with_context(|| {
+                    format!("the exec's join of its scope {unit} could not be read, so it was ended")
+                })?;
+                anyhow::bail!(
+                    "the exec did not join its scope {unit} within {}ms, so it was ended",
+                    self.scope_join_limit.as_millis()
+                );
+            }
+        }
         Ok(generation)
     }
 
@@ -241,7 +363,7 @@ impl ExecRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let generation: ExecGeneration = match serde_json::from_slice(&bytes) {
+        let mut generation: ExecGeneration = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(error) => return Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         };
@@ -260,8 +382,12 @@ impl ExecRuntime {
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
             return self.observe_exited_group(id, generation).map(Some);
         }
-        if let Some(status) = self.take_owned_exit(generation.pid)? {
-            return self.observe_owned_exit(id, generation, status).map(Some);
+        let running = self.reap_owned(id, &mut generation)?;
+        if generation.group_exited {
+            return Ok(Some(ExecObservation::Exited(generation)));
+        }
+        if !running && (generation.exit_code.is_some() || generation.exit_signal.is_some()) {
+            return self.observe_exited_group(id, generation).map(Some);
         }
         #[cfg(test)]
         BEFORE_IDENTITY.with(|hook| {
@@ -276,10 +402,7 @@ impl ExecRuntime {
             // An owned child that exited after the look above is a zombie until it is reaped,
             // so its status is still there to take.
             Ok((_state, token)) if token == generation.start_token => {
-                match self.take_owned_exit(generation.pid)? {
-                    Some(status) => self.observe_owned_exit(id, generation, status).map(Some),
-                    None => self.observe_exited_group(id, generation).map(Some),
-                }
+                self.observe_exited_group(id, generation).map(Some)
             }
             Ok(_) => Ok(Some(ExecObservation::Exited(generation))),
             Err(error) if process_is_absent(&error) => {
@@ -290,33 +413,60 @@ impl ExecRuntime {
         }
     }
 
-    /// Reaps `pid` if it is a child this runtime started and it has exited.
-    fn take_owned_exit(&self, pid: u32) -> Result<Option<std::process::ExitStatus>> {
-        let mut children = self
-            .owned_children
-            .lock()
-            .expect("exec child mutex poisoned");
-        let status = children
-            .get_mut(&pid)
-            .map(Child::try_wait)
-            .transpose()?
-            .flatten();
-        if status.is_some() {
-            children.remove(&pid);
+    /// Reaps `generation`'s leader if this runtime started it and it has exited, and returns
+    /// whether it is a child of this runtime that is still running. The gate poll and a
+    /// reconcile pass can observe one exec at once. Whichever reaps the child marks it exited
+    /// with its status before it writes the record, and lets the child go only after; an
+    /// observer that finds the mark takes the exit from it, and one that finds no child reads
+    /// the record again. Otherwise an observer that read the record before the exit would find
+    /// the process gone and record the exit without its code.
+    fn reap_owned(&self, id: &str, generation: &mut ExecGeneration) -> Result<bool> {
+        let exited = {
+            let mut children = self
+                .owned_children
+                .lock()
+                .expect("exec child mutex poisoned");
+            match children.get_mut(&generation.pid) {
+                Some(OwnedChild::Running(child)) => {
+                    let Some(status) = child.try_wait()? else {
+                        return Ok(true);
+                    };
+                    children.insert(generation.pid, OwnedChild::Exited(status));
+                    Some(status)
+                }
+                Some(OwnedChild::Exited(status)) => Some(*status),
+                None => None,
+            }
+        };
+        if let Some(status) = exited {
+            generation.exit_code = status.code();
+            generation.exit_signal = exit_signal(&status);
+            #[cfg(test)]
+            BEFORE_EXIT_WRITE.with(|hook| {
+                if let Some(hook) = &*hook.borrow() {
+                    hook(generation.pid);
+                }
+            });
+            // A failed write keeps the mark, so a later observer writes the exit again.
+            self.write_generation(id, generation)?;
+            let mut children = self
+                .owned_children
+                .lock()
+                .expect("exec child mutex poisoned");
+            if matches!(children.get(&generation.pid), Some(OwnedChild::Exited(_))) {
+                children.remove(&generation.pid);
+            }
+            return Ok(false);
         }
-        Ok(status)
-    }
-
-    fn observe_owned_exit(
-        &self,
-        id: &str,
-        mut generation: ExecGeneration,
-        status: std::process::ExitStatus,
-    ) -> Result<ExecObservation> {
-        generation.exit_code = status.code();
-        generation.exit_signal = exit_signal(&status);
-        self.write_generation(id, &generation)?;
-        self.observe_exited_group(id, generation)
+        // The exit was written before its mark was removed, so this read sees it. A record that
+        // no longer reads keeps the copy this observer has.
+        if let Ok(Some(current)) = self.read_generation_path(&self.record_path(id))
+            && current.schema == SCHEMA
+            && current.generation_id == generation.generation_id
+        {
+            *generation = current;
+        }
+        Ok(false)
     }
 
     fn observe_exited_group(
@@ -328,30 +478,14 @@ impl ExecRuntime {
         // child before persisting group completion, including while descendants live.
         // A zombie leader thread can still have live sibling threads: never block
         // waiting for the whole process to exit while holding the child-map mutex.
-        if generation.exit_code.is_none() && generation.exit_signal.is_none() {
-            let owned_exit = {
-                let mut children = self
-                    .owned_children
-                    .lock()
-                    .expect("exec child mutex poisoned");
-                let status = children
-                    .get_mut(&generation.pid)
-                    .map(Child::try_wait)
-                    .transpose()?;
-                if matches!(status, Some(Some(_))) {
-                    children.remove(&generation.pid);
-                }
-                status
-            };
-            match owned_exit {
-                Some(Some(status)) => {
-                    generation.exit_code = status.code();
-                    generation.exit_signal = exit_signal(&status);
-                    self.write_generation(id, &generation)?;
-                }
-                Some(None) => return Ok(ExecObservation::Running(generation)),
-                None => {}
-            }
+        if generation.exit_code.is_none()
+            && generation.exit_signal.is_none()
+            && self.reap_owned(id, &mut generation)?
+        {
+            return Ok(ExecObservation::Running(generation));
+        }
+        if generation.group_exited {
+            return Ok(ExecObservation::Exited(generation));
         }
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
@@ -375,7 +509,10 @@ impl ExecRuntime {
     /// its process group and every process that left that group, so the scope gets the signal
     /// where there is one. Once the group has ended, what it left in its scope ends.
     fn end_if(&self, id: &str, expected_generation: Option<&str>, signal: i32) -> Result<()> {
-        let generation = match self.observe(id)? {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::EndIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let generation = match observation {
             Some(ExecObservation::Running(generation)) => generation,
             Some(ExecObservation::Exited(generation)) => {
                 if let Some(unit) = &generation.scope_unit {
@@ -384,19 +521,40 @@ impl ExecRuntime {
                     } else {
                         crate::SCOPE_GRACE
                     };
+                    tracing::info!(signal, guard_decision = "allow", reason = "exited_generation_leftovers", incarnation_guard = "not_applied_to_exited_generation", "ending exited exec work scope");
                     crate::end_scope(unit, grace)?;
+                } else {
+                    tracing::debug!(signal, guard_decision = "skip", reason = "exited_generation_without_scope", "exec teardown needs no signal");
                 }
                 return Ok(());
             }
-            Some(ExecObservation::Indeterminate(_)) | None => return Ok(()),
+            Some(ExecObservation::Indeterminate(error)) => {
+                tracing::debug!(guard_decision = "skip", reason = "indeterminate_generation", %error, "exec teardown skipped");
+                anyhow::bail!("cannot signal exec `{id}`: generation is indeterminate: {error}");
+            }
+            None => {
+                tracing::debug!(guard_decision = "skip", reason = "missing_generation", "exec teardown skipped");
+                return Ok(());
+            }
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec teardown rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         if let Some(unit) = &generation.scope_unit {
+            // Read before the signal: a leader that has not joined its scope yet is systemd-run,
+            // alone in its group, and the scope's signal reaches nobody, so the group gets it too.
+            // Should the scope start in between, the task keeps the leader's PID and group.
+            let joined = crate::isolate::joined(unit, generation.pid);
+            tracing::info!(signal, joined, guard_decision = "allow", reason = "running_generation_scope", "signalling exec work scope");
             match crate::signal_scope(unit, signal) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
+                Ok(true) if joined => return Ok(()),
+                Ok(true) => {
+                    tracing::debug!(signal, reason = "leader_not_in_scope", "signalling exec process group as well");
+                }
+                Ok(false) => {
+                    tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
+                }
                 Err(error) => eprintln!(
                     "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
@@ -411,10 +569,15 @@ impl ExecRuntime {
         expected_generation: Option<&str>,
         signal: i32,
     ) -> Result<()> {
-        let Some(ExecObservation::Running(generation)) = self.observe(id)? else {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::SignalIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let Some(ExecObservation::Running(generation)) = observation else {
+            tracing::debug!(signal, guard_decision = "skip", reason = "generation_not_running", "exec signal skipped");
             return Ok(());
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec signal rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         signal_group(id, generation.pid, signal)
@@ -440,8 +603,20 @@ impl ExecRuntime {
     /// Ends what an ended exec left running in its work scope. A running exec keeps everything:
     /// [`Self::stop_if`] ends it.
     pub fn end_leftovers(&self, id: &str) -> Result<()> {
-        if let Some(unit) = self.leftover_scope(id)? {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::EndLeftovers)
+    }
+
+    fn end_leftovers_for(&self, id: &str, caller: ExecTeardownCaller) -> Result<()> {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, caller, None, observation.as_ref());
+        let _entered = span.enter();
+        if let Some(ExecObservation::Exited(generation)) = observation
+            && let Some(unit) = &generation.scope_unit
+        {
+            tracing::info!(guard_decision = "allow", reason = "exited_generation_leftovers", "ending exec leftover scope");
+            crate::end_scope(unit, crate::SCOPE_GRACE)?;
+        } else {
+            tracing::debug!(guard_decision = "skip", reason = "no_exited_generation_scope", "exec leftover teardown skipped");
         }
         Ok(())
     }
@@ -449,17 +624,36 @@ impl ExecRuntime {
     /// [`Self::end_leftovers`] on a background worker. A scope already seen empty costs one read
     /// of the exec's record.
     pub fn end_leftovers_later(&self, id: &str) {
-        let Ok(Some(unit)) = self.leftover_scope(id) else {
+        let observation = self.observe(id);
+        let span = teardown_span(id, ExecTeardownCaller::EndLeftoversLater, None, observation.as_ref().ok().and_then(Option::as_ref));
+        if observation.is_err() {
+            span.record("registry_status", "unavailable");
+        }
+        let _entered = span.enter();
+        if let Err(error) = &observation {
+            tracing::debug!(guard_decision = "skip", reason = "generation_observation_failed", %error, "deferred exec leftover observation failed");
+        }
+        let Ok(Some(ExecObservation::Exited(generation))) = observation else {
+            tracing::debug!(guard_decision = "skip", reason = "no_verified_exited_generation", "deferred exec leftover teardown skipped");
+            return;
+        };
+        let Some(unit) = generation.scope_unit else {
+            tracing::debug!(guard_decision = "skip", reason = "no_recorded_scope", "deferred exec leftover teardown skipped");
             return;
         };
         if crate::isolate::has_ended(&unit) {
+            tracing::debug!(guard_decision = "skip", reason = "scope_already_ended", "deferred exec leftover teardown skipped");
             return;
         }
         let id = id.to_owned();
+        let worker_span = span.clone();
         crate::isolate::end_later(unit.clone(), move || {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)
-                .map(|_| ())
-                .with_context(|| format!("end what exec `{id}` left running"))
+            worker_span.in_scope(|| {
+                tracing::info!(guard_decision = "allow", reason = "deferred_exited_generation_leftovers", "ending exec leftover scope");
+                crate::end_scope(&unit, crate::SCOPE_GRACE)
+                    .map(|_| ())
+                    .with_context(|| format!("end what exec `{id}` left running"))
+            })
         });
     }
 
@@ -487,7 +681,7 @@ impl ExecRuntime {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
-        self.end_leftovers(id)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -534,7 +728,10 @@ impl ExecRuntime {
 
     fn write_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
         let path = self.record_path(id);
-        let temporary = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        // Two observers in this process can write one record at once.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = path.with_extension(format!("json.tmp.{}.{write}", std::process::id()));
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -570,13 +767,23 @@ fn observe_exited_group(generation: ExecGeneration) -> Result<ExecObservation> {
 }
 
 fn signal_group(id: &str, group: u32, signal: i32) -> Result<()> {
+    tracing::info!(
+        runtime_id = id,
+        process_group = group,
+        signal,
+        guard_decision = "allow",
+        reason = "signal_process_group",
+        "signalling exec process group"
+    );
     let result = unsafe { libc::kill(-(group as i32), signal) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::debug!(runtime_id = id, process_group = group, signal, %error, "exec process group signal failed");
             return Err(error)
                 .with_context(|| format!("signal {signal} to exec `{id}`'s process group"));
         }
+        tracing::debug!(runtime_id = id, process_group = group, signal, guard_decision = "skip", reason = "process_group_absent", "exec process group already absent");
     }
     Ok(())
 }
@@ -599,11 +806,8 @@ fn process_group_is_live(group: u32) -> Result<bool> {
             if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
                 continue;
             }
-            let stat = match fs::read_to_string(entry.path().join("stat")) {
-                Ok(stat) => stat,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
-                Err(error) => return Err(error.into()),
+            let Some(stat) = read_group_process_stat(&entry.path().join("stat"))? else {
+                continue;
             };
             let Some((_, tail)) = stat.rsplit_once(") ") else {
                 continue;
@@ -631,6 +835,20 @@ fn process_group_is_live(group: u32) -> Result<bool> {
     }
     #[cfg(not(target_os = "linux"))]
     Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn read_group_process_stat(path: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(stat) => Ok(Some(stat)),
+        // A process can be reaped after open succeeds but before the proc inode
+        // is read. Linux reports ESRCH in that window, rather than ENOENT.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn process_is_absent(error: &anyhow::Error) -> bool {
@@ -672,6 +890,27 @@ fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
 #[cfg(target_os = "linux")]
 pub fn process_start_token(pid: u32) -> Result<u64> {
     process_identity(pid).map(|(_, token)| token)
+}
+
+/// Whether this exact captured generation can still execute. Missing/reused/zombie
+/// processes are definitive loss; inaccessible or malformed process evidence is an error.
+pub fn process_generation_alive(pid: u32, token: u64) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // An unavailable procfs mount is not evidence that a particular process died.
+        crate::procfs::require_matching_procfs()?;
+        match process_identity(pid) {
+            Ok((state, current)) => Ok(current == token && !matches!(state, 'Z' | 'X' | 'x')),
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, token);
+        anyhow::bail!("exact process generation liveness is unavailable on this platform")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -718,6 +957,10 @@ thread_local! {
     /// test can make the child exit in that window.
     static BEFORE_IDENTITY: std::cell::RefCell<Option<IdentityHook>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs in `observe` after an owned child is marked exited and before its record is
+    /// written, so a test can observe it in that window.
+    static BEFORE_EXIT_WRITE: std::cell::RefCell<Option<IdentityHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
@@ -732,6 +975,15 @@ fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_exec_runtime_has_no_unlaned_seat_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert!(runtime.unlaned_seat.is_none());
+        let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
+        assert!(configured.unlaned_seat.is_some());
+    }
     use std::thread;
     use std::time::Duration;
 
@@ -929,6 +1181,44 @@ mod tests {
         assert!(process_is_absent(&error));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_reaped_after_its_stat_is_opened_does_not_abort_a_group_scan() {
+        use std::os::fd::AsRawFd as _;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let stat = fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Keep the opened proc inode after reaping, rather than relying on load to
+        // exit between read_to_string's open and read. Reopening it has the same ESRCH.
+        let path = PathBuf::from(format!("/proc/self/fd/{}", stat.as_raw_fd()));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(read_group_process_stat(&path).unwrap(), None);
+        assert!(read_group_process_stat(Path::new("/proc/self")).is_err());
+    }
+
+    #[test]
+    fn an_indeterminate_generation_cannot_certify_a_stop_or_kill() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        fs::create_dir_all(&runtime.state_dir).unwrap();
+        fs::write(runtime.record_path("work"), b"unreadable generation").unwrap();
+
+        assert!(matches!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Indeterminate(_))
+        ));
+        assert!(runtime.stop_if("work", Some("expected-generation")).is_err());
+        assert!(runtime.kill_if("work", Some("expected-generation")).is_err());
+    }
+
     #[test]
     fn a_terminal_record_stays_exited_when_its_pid_is_live() {
         let root = tempfile::tempdir().unwrap();
@@ -1035,6 +1325,100 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn an_exit_reaped_by_a_concurrent_observer_keeps_its_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let go = root.path().join("go");
+        runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "while [ ! -e go ]; do sleep 0.01; done; exit 3".into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // The daemon's gate poll and its reconcile pass observe one exec at once. This observer
+        // read the record and found its child still running; another reaps it before this one
+        // reads its process, which is then gone.
+        let other = runtime.clone();
+        BEFORE_IDENTITY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pid| {
+                fs::write(&go, "").unwrap();
+                for _ in 0..3000 {
+                    if process_identity(pid).unwrap().0 == 'Z' {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let other = other.clone();
+                let reaped = thread::spawn(move || other.observe("work").unwrap())
+                    .join()
+                    .unwrap();
+                assert!(
+                    matches!(&reaped, Some(ExecObservation::Exited(generation)) if generation.exit_code == Some(3)),
+                    "{reaped:?}"
+                );
+            }))
+        });
+        let observed = runtime.observe("work").unwrap();
+        BEFORE_IDENTITY.with(|hook| *hook.borrow_mut() = None);
+        let Some(ExecObservation::Exited(generation)) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(generation.exit_code, Some(3));
+        assert_eq!(wait_for_exit(&runtime, "work").exit_code, Some(3));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_observer_between_a_reap_and_its_record_takes_the_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let launched = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec!["sh".into(), "-c".into(), "exit 3".into()]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        for _ in 0..3000 {
+            if process_identity(launched.pid).unwrap().0 == 'Z' {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // This observer has reaped the child and not yet written its record when another
+        // observes it.
+        let other = runtime.clone();
+        BEFORE_EXIT_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_pid| {
+                let other = other.clone();
+                let between = thread::spawn(move || other.observe("work").unwrap())
+                    .join()
+                    .unwrap();
+                assert!(
+                    matches!(&between, Some(ExecObservation::Exited(generation)) if generation.exit_code == Some(3)),
+                    "{between:?}"
+                );
+            }))
+        });
+        let observed = runtime.observe("work").unwrap();
+        BEFORE_EXIT_WRITE.with(|hook| *hook.borrow_mut() = None);
+        let Some(ExecObservation::Exited(generation)) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(generation.exit_code, Some(3));
+        assert_eq!(wait_for_exit(&runtime, "work").exit_code, Some(3));
+        assert!(runtime.owned_children.lock().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn reaps_an_owned_child_before_committing_its_terminal_record() {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         use std::os::unix::ffi::OsStrExt as _;
@@ -1070,10 +1454,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(&generation.pid)
+                .map(|child| match child {
+                    OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
+                    OwnedChild::Exited(_) => false,
+                })
                 .unwrap()
-                .try_wait()
-                .unwrap()
-                .is_none()
         );
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
         assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
@@ -1166,10 +1551,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(&generation.pid)
+                .map(|child| match child {
+                    OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
+                    OwnedChild::Exited(_) => false,
+                })
                 .unwrap()
-                .try_wait()
-                .unwrap()
-                .is_none()
         );
         let mut release = fs::OpenOptions::new()
             .write(true)
@@ -1306,7 +1692,9 @@ libc.pthread_exit(None)
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 let _ = self.kill();
-                if let Some(mut child) = self.0.owned_children.lock().unwrap().remove(&self.1) {
+                if let Some(OwnedChild::Running(mut child)) =
+                    self.0.owned_children.lock().unwrap().remove(&self.1)
+                {
                     let _ = child.wait();
                 }
             }
@@ -1334,10 +1722,11 @@ libc.pthread_exit(None)
                 .lock()
                 .unwrap()
                 .get_mut(&generation.pid)
-                .unwrap()
-                .try_wait()
-                .unwrap()
-                .is_none(),
+                .map(|child| match child {
+                    OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
+                    OwnedChild::Exited(_) => false,
+                })
+                .unwrap(),
             "the process must not yet be waitable"
         );
         let observing = if adopted {
@@ -1854,6 +2243,174 @@ libc.pthread_exit(None)
             .kill_if("work", Some(&replacement.generation_id))
             .unwrap();
         wait_for_exit(&runtime, "work");
+    }
+
+    /// A oneshot unit that is starting until something is written to `release`, so a scope ordered
+    /// after it waits, loaded and empty. Stopped when dropped.
+    #[cfg(target_os = "linux")]
+    struct StartGate(String);
+
+    #[cfg(target_os = "linux")]
+    impl StartGate {
+        fn new(release: &Path) -> Self {
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::CString::new(release.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+            let unit = format!("st3-test-start-gate-{}-{nanos}.service", std::process::id());
+            let status = std::process::Command::new("systemd-run")
+                .args(["--user", "--quiet", "--no-block", "--collect", "--property=Type=oneshot"])
+                .arg(format!("--unit={unit}"))
+                .args(["sh", "-c", "read line < \"$0\""])
+                .arg(release)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            Self(unit)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for StartGate {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "stop", &self.0])
+                .status();
+        }
+    }
+
+    /// The spawn's own PATH finds a systemd-run that orders the exec's scope after `gate`, so the
+    /// scope starts only when the test releases it.
+    #[cfg(target_os = "linux")]
+    fn gated_environment(root: &Path, gate: &StartGate) -> BTreeMap<String, String> {
+        let mut environment = scope_environment();
+        let systemd_run = crate::resolve_executable("systemd-run", &environment).unwrap();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        crate::test_executable::fake_executable(
+            &bin,
+            "systemd-run",
+            &format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
+        );
+        let path = format!("{}:{}", bin.display(), environment["PATH"]);
+        environment.insert("PATH".into(), path);
+        environment
+    }
+
+    /// Spawns `sleep 600` as `work` on another thread, behind a scope start that waits for `gate`,
+    /// and returns once its record is written and its scope is loaded.
+    #[cfg(target_os = "linux")]
+    fn spawn_behind(
+        runtime: &ExecRuntime,
+        root: &Path,
+        gate: &StartGate,
+    ) -> (thread::JoinHandle<Result<ExecGeneration>>, ExecGeneration) {
+        let environment = gated_environment(root, gate);
+        let spawning = {
+            let runtime = runtime.clone();
+            let root = root.to_owned();
+            thread::spawn(move || {
+                runtime.spawn(
+                    "work",
+                    &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
+                    &root,
+                    &environment,
+                )
+            })
+        };
+        let record = || runtime.read_generation_path(&runtime.record_path("work")).ok().flatten();
+        wait_until("the exec was never recorded", || record().is_some());
+        let recorded = record().unwrap();
+        let unit = recorded.scope_unit.clone().unwrap();
+        wait_until("the exec's scope was never loaded", || {
+            systemctl_show(&unit, "LoadState") == "loaded"
+        });
+        (spawning, recorded)
+    }
+
+    /// The spawn returns only once `systemd-run` has joined the exec's scope. Before that it is in
+    /// the spawning service's cgroup, and a kill of that cgroup would end it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_spawn_returns_once_the_exec_has_joined_its_scope() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        let (spawning, recorded) = spawn_behind(&runtime, root.path(), &gate);
+        let unit = recorded.scope_unit.clone().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(!spawning.is_finished(), "the spawn returned before its exec joined {unit}");
+
+        fs::write(&release, "\n").unwrap();
+        let generation = spawning.join().unwrap().unwrap();
+        assert_eq!(generation, recorded);
+        assert!(crate::isolate::joined(&unit, generation.pid));
+    }
+
+    /// A kill sent before the exec's scope has started ends the exec. `systemd-run` moves into its
+    /// scope when the user manager starts it and only then runs the task, and until then the
+    /// scope is loaded and empty. A kill can come while the spawn waits, or from a daemon that
+    /// restarted while it did.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kill_before_the_exec_has_joined_its_scope_ends_it() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        let (spawning, generation) = spawn_behind(&runtime, root.path(), &gate);
+        let unit = generation.scope_unit.clone().unwrap();
+        assert!(!crate::isolate::joined(&unit, generation.pid));
+
+        runtime
+            .kill_if("work", Some(&generation.generation_id))
+            .unwrap();
+        fs::write(&release, "\n").unwrap();
+
+        // The spawn sees its exec end rather than join.
+        spawning.join().unwrap().unwrap();
+        wait_for_exit(&runtime, "work");
+    }
+
+    /// A user manager that never starts the scope does not hold the spawn: the exec, still
+    /// `systemd-run` in the spawning service's cgroup, ends, and the spawn fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exec_that_never_joins_its_scope_ends_and_fails_its_spawn() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_scope_join_limit(Duration::from_millis(300));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        let environment = gated_environment(root.path(), &gate);
+        let error = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
+                root.path(),
+                &environment,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("did not join its scope"), "{error:#}");
+        // The leader ended as `systemd-run`, so the task never ran.
+        let exited = wait_for_exit(&runtime, "work");
+        assert_eq!(exited.exit_signal, Some(libc::SIGKILL));
     }
 
     #[cfg(target_os = "linux")]

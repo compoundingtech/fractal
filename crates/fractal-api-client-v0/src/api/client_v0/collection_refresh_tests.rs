@@ -215,18 +215,22 @@ impl Fixture {
     }
 
     fn claim(&self, subject: &str, kind: &str, fields: Value) {
-        self.state
-            .store
-            .append_claim(&ClaimInput {
+        let input = ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
-                actor: None,
+                actor: fields.get("person_id").and_then(Value::as_str)
+                    .or((kind == "custom.client.pairing-revoked").then_some("person/ada"))
+                    .map(str::to_owned),
                 fields: serde_json::from_value(fields).unwrap(),
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: None,
-            })
-            .unwrap();
+            };
+        if kind.starts_with("custom.client.pairing") {
+            self.state.store.append_client_operation_claim(&input)
+        } else {
+            self.state.store.append_claim(&input)
+        }.unwrap();
         signal_changed(&self.state);
     }
 }
@@ -490,11 +494,16 @@ fn custom_review_kind(store: &Store) {
 }
 
 fn claim(store: &Store, subject: &str, kind: &str, actor: Option<&str>, fields: Value) {
-    store.append_claim(&ClaimInput {
+    let input = ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: actor.map(str::to_owned),
         fields: serde_json::from_value(fields).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
-    }).unwrap();
+    };
+    if kind.starts_with("custom.client.pairing") {
+        store.append_client_operation_claim(&input)
+    } else {
+        store.append_claim(&input)
+    }.unwrap();
 }
 
 /// Seats, a mission run with a step and review requests for two people.
@@ -739,6 +748,7 @@ async fn clients_inventory_follows_connect_disconnect_and_reconnect() {
         &session,
         &headers,
         client_now_ms(),
+        super::super::client_presence::StreamCategory::Collections,
     );
     let changed = fixture.frame().await;
     assert_eq!(changed["kind"], "changes");
@@ -916,9 +926,23 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
             let _ = self.0.wait();
         }
     }
+    // Other tests' fake harnesses share this host's process table. This unrelated one stands for
+    // them: it is in the first snapshot and exits while the fixture's session is live.
+    let mut unrelated = NativeProcess(
+        std::process::Command::new("bash")
+            .args(["-c", "exec -a codex bash -c 'printf r; read -r value'", "native-inventory-fixture"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    unrelated.0.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).unwrap();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");
     std::fs::create_dir_all(&home).unwrap();
+    // Discovery under this home sees only the processes this fixture marks.
+    let marker = root.path().display().to_string();
+    let _scope = crate::external_sessions::fixture_scope::scope(&home, &marker);
     let mut state = super::tests::test_state_named(root.path(), "sessions-inventory-fixture");
     state.native_session_home = Some(home.clone());
     let mut fixture = Fixture::open(state.clone(), true, None, &["sessions"]).await;
@@ -935,6 +959,7 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
                 "native-inventory-fixture",
             ])
             .arg(&transcript)
+            .env(crate::external_sessions::fixture_scope::MARKER, &marker)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -965,6 +990,7 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
         &changed["order"],
     )
     .await;
+    drop(unrelated);
     drop(fake);
     let changed = fixture.frame().await;
     assert_eq!(changed["kind"], "changes");
@@ -1065,7 +1091,7 @@ async fn idle_inventory_windows_do_not_reread_across_the_old_client_intervals() 
 async fn inventory_pairing_expiry_ends_held_windows_without_a_clock_poll() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "inventory-expiry-fixture");
-    let grant = state.store.append_claim(&ClaimInput {
+    let grant = state.store.append_client_operation_claim(&ClaimInput {
         subject:"custom/client/inventory-expiry".into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
         fields:serde_json::from_value(json!({"session_actor":"person/ada/session/inventory-expiry", "person_id":"person/ada",
             "expires_at_unix_ms":(client_now_ms()+3_000) as u64,"scopes":["read.projections"]})).unwrap(),
@@ -1125,7 +1151,7 @@ async fn devices_inventory_follows_local_push_changes_without_a_graph_claim() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "devices-push-fixture");
     let credential = "push-window-fixture-credential";
-    let grant = state.store.append_claim(&ClaimInput {
+    let grant = state.store.append_client_operation_claim(&ClaimInput {
         subject: "custom/client/push-fixture".into(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/ada".into()),
@@ -1358,7 +1384,7 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
     let state = super::tests::test_state_named(root.path(), "alder");
     ready_work(&state.store);
     let grant = "custom/client/phone-work";
-    let paired = state.store.append_claim(&ClaimInput {
+    let paired = state.store.append_client_operation_claim(&ClaimInput {
         subject: grant.into(), kind: "custom.client.pairing-completed".into(),
         actor: Some("person/avery".into()),
         fields: serde_json::from_value(json!({
@@ -1380,7 +1406,7 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
     fixture.paused_quiet().await;
     assert_eq!(fixture.counts(), counts(&[("work", 2)]));
     // Revoked while it waits: the next recheck ends the window before the work list is read.
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject: grant.into(), kind: "custom.client.pairing-revoked".into(),
         actor: Some("person/avery".into()), fields: BTreeMap::new(),
         evidence: vec![], expected_subject: None, idempotency_key: None,

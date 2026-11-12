@@ -10,6 +10,8 @@ use anyhow::{Context as _, Result, bail};
 /// What the built-in `merged` and `ci-passed` gates read from GitHub.
 pub mod github_gates;
 mod github_repository;
+mod github_poll;
+pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
@@ -32,6 +34,9 @@ pub struct ObservationRequest {
     /// A declared refresh asked for this observation. It revalidates with GitHub instead of
     /// reusing a cached response; a conditional request costs nothing when nothing changed.
     pub refresh: bool,
+    /// A verified webhook delivery refreshed this observer recently, so this poll is a backstop
+    /// and a repository observer waits the settled interval between GraphQL reads.
+    pub webhook_covered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -486,11 +491,12 @@ fn github_cache_for(request: &ObservationRequest) -> Duration {
         .min(GITHUB_CACHE_FOR)
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct GithubPayload {
     value: Value,
     etag: Option<String>,
     next: Option<String>,
+    #[serde(skip, default = "Instant::now")]
     checked_at: Instant,
 }
 
@@ -713,7 +719,7 @@ pub fn github_usage_report() -> GithubUsageReport {
         .report(now)
 }
 
-pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -734,6 +740,21 @@ pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqw
         .record(&spender, status, headers, now);
 }
 
+static GITHUB_RESPONSE_ACCOUNTING: crate::github_http::ResponseObserver =
+    crate::github_http::ResponseObserver::new(record_github_response);
+
+#[cfg(any(test, feature = "test-support"))]
+impl GithubAuth {
+    /// Construct fixture credentials with the same accounting observer as the daemon.
+    pub fn test(token: &str) -> Self {
+        crate::github_http::observe_responses(&GITHUB_RESPONSE_ACCOUNTING).unwrap();
+        Self::Local {
+            token: std::sync::Arc::new(token.into()),
+            cache: None,
+        }
+    }
+}
+
 /// Drop `url`'s cached answer: for a URL read once, whose answer would never be revalidated.
 async fn github_forget(url: &str) {
     // Cache keys qualify the URL with a non-secret authorization principal.
@@ -747,6 +768,16 @@ async fn github_forget(url: &str) {
 /// A URL is fetched at most once per cache interval on this host. A stale entry is revalidated
 /// with its ETag; a 304 keeps the complete prior body, including pagination links.
 async fn github_json(
+    client: &reqwest::Client,
+    url: String,
+    token: &GithubAuth,
+    cache_for: Duration,
+) -> Result<GithubPayload> {
+    let key = format!("REST {} {url}", token.cache_principal());
+    github_poll::read(key, github_json_read(client, url, token, cache_for)).await
+}
+
+async fn github_json_read(
     client: &reqwest::Client,
     url: String,
     token: &GithubAuth,
@@ -909,6 +940,17 @@ async fn github_graphql_with_cache_eligibility(
     query: &str,
     variables: Value,
 ) -> Result<(Value, bool)> {
+    let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
+    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
+}
+
+async fn github_graphql_read(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &GithubAuth,
+    query: &str,
+    variables: Value,
+) -> Result<(Value, bool)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
@@ -936,11 +978,20 @@ async fn github_graphql_with_cache_eligibility(
                 status: 200,
             });
         }
-        let message = errors[0]
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("an unnamed error");
-        bail!("GitHub GraphQL refused the query: {message}");
+        let details = errors.iter().map(|error| {
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("an unnamed error");
+            let kind = error.get("type").and_then(Value::as_str);
+            let path = error.get("path").and_then(Value::as_array).map(|segments|
+                segments.iter().map(|segment| segment.as_str().map_or_else(|| segment.to_string(), str::to_owned))
+                    .collect::<Vec<_>>().join("."));
+            match (kind, path) {
+                (Some(kind), Some(path)) => format!("{message} ({kind} at {path})"),
+                (Some(kind), None) => format!("{message} ({kind})"),
+                (None, Some(path)) => format!("{message} (at {path})"),
+                (None, None) => message.to_owned(),
+            }
+        }).collect::<Vec<_>>().join("; ");
+        bail!("GitHub GraphQL refused the query: {details}");
     }
     let data = body.get("data")
         .filter(|data| !data.is_null())
@@ -956,7 +1007,7 @@ pub use crate::github_http::github_auth;
 /// Select the daemon's GitHub source before its first request. Configuration is immutable
 /// for this process; token-file contents are revalidated when the file changes.
 pub fn configure_github(config: &crate::config::Config) -> Result<()> {
-    crate::github_http::configure(config)
+    crate::github_http::configure(config, &GITHUB_RESPONSE_ACCOUNTING)
 }
 
 /// An st agent on this host and the workspace it works in.
@@ -1231,6 +1282,22 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
+    async fn graphql_refusal_names_error_type_and_field_path() {
+        let fixture = crate::github_http::app_read::tests::server(|_, _, _| {
+            (reqwest::StatusCode::OK, json!({"errors":[{
+                "message":"Resource not accessible by integration",
+                "type":"FORBIDDEN",
+                "path":["repository","pullRequests","nodes",0,"commits"]
+            }]}))
+        }).await;
+        let error = github_graphql_with_cache_eligibility(&reqwest::Client::new(),
+            &fixture.base, &GithubAuth::test("fixture-pat"), "query { repository { id } }",
+            json!({})).await.unwrap_err().to_string();
+        assert!(error.contains("Resource not accessible by integration"));
+        assert!(error.contains("FORBIDDEN at repository.pullRequests.nodes.0.commits"), "{error}");
+    }
+
+    #[tokio::test]
     async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {
         use crate::github_http::app_read::{select, tests::{install, server}};
         let root = tempfile::tempdir().unwrap();
@@ -1328,7 +1395,7 @@ mod tests {
         let auth = crate::github_http::app_read::select(
             Some(&config.state_dir), "redirect-fixture", "gh-ci", &GithubAuth::test("fixture"),
         );
-        crate::github_http::configure(&config).unwrap();
+        configure_github(&config).unwrap();
         let payload = spend_as("observer/redirect-test".into(), github_json(
             &github_client(), std::env::var("OBSERVER_REDIRECT_TEST_URL").unwrap(),
             &auth, Duration::ZERO,
@@ -1426,6 +1493,7 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1471,6 +1539,7 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
             })
             .await
             .unwrap();
@@ -1546,6 +1615,7 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
             })
             .await
             .unwrap();
@@ -1568,6 +1638,7 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
             })
             .await
             .unwrap();
@@ -1622,6 +1693,7 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1657,7 +1729,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1750,6 +1822,7 @@ mod tests {
                     previous_facts: None,
                     every_ms: None,
                     refresh: false,
+                    webhook_covered: false,
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),

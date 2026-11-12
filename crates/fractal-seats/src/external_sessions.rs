@@ -129,7 +129,7 @@ pub fn discover(home: Option<&Path>, include_history: bool) -> Result<ExternalDi
     let discovery = if include_history {
         // Live transcripts are read now; saved history comes from the background inventory,
         // so a cold history tree never holds a request past HISTORY_WAIT.
-        let candidates = platform_processes()?;
+        let candidates = home_processes(home)?;
         let mut files = discover_files(home, false, &candidates)?;
         let live = files
             .iter()
@@ -252,7 +252,7 @@ fn discover_uncached(
     strict_id: Option<&str>,
     include_history: bool,
 ) -> Result<ExternalDiscovery> {
-    let candidates = platform_processes()?;
+    let candidates = home_processes(home)?;
     let files = discover_files(home, include_history, &candidates)?;
     assemble_discovery(files, candidates, strict_id, include_history)
 }
@@ -1840,6 +1840,58 @@ fn unresolved_process(driver: ExternalDriver, process: ExternalProcess) -> Unres
     }
 }
 
+/// The processes discovery considers for sessions under `home`: every harness process on the
+/// host, unless a test fixture has scoped that home to its own processes.
+fn home_processes(home: &Path) -> Result<Vec<ProcessCandidate>> {
+    #[cfg_attr(not(feature = "test-support"), allow(unused_mut))]
+    let mut candidates = platform_processes()?;
+    #[cfg(feature = "test-support")]
+    fixture_scope::retain(home, &mut candidates);
+    #[cfg(not(feature = "test-support"))]
+    let _ = home;
+    Ok(candidates)
+}
+
+/// Other tests' fake harnesses share the host's process table, so a fixture that asserts on the
+/// sessions under its own native home scopes that home to processes carrying its marker in
+/// their environment. Production never registers a scope.
+#[cfg(feature = "test-support")]
+pub mod fixture_scope {
+    use super::*;
+
+    /// The environment variable a scoped fixture's processes carry.
+    pub const MARKER: &str = "FRACTAL_NATIVE_FIXTURE";
+
+    static SCOPES: LazyLock<Mutex<BTreeMap<PathBuf, String>>> = LazyLock::new(Default::default);
+
+    /// Discovery under `home` sees only processes whose environment has [`MARKER`] set to
+    /// `marker`, until the returned guard drops.
+    pub fn scope(home: &Path, marker: &str) -> Scope {
+        SCOPES.lock().expect("fixture process scopes").insert(home.to_owned(), marker.to_owned());
+        Scope(home.to_owned())
+    }
+
+    pub struct Scope(PathBuf);
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            SCOPES.lock().expect("fixture process scopes").remove(&self.0);
+        }
+    }
+
+    pub(super) fn retain(home: &Path, candidates: &mut Vec<ProcessCandidate>) {
+        let Some(marker) = SCOPES.lock().expect("fixture process scopes").get(home).cloned() else {
+            return;
+        };
+        let entry = format!("{MARKER}={marker}");
+        candidates.retain(|candidate| {
+            fs::read(format!("/proc/{}/environ", candidate.process.pid)).is_ok_and(|environment| {
+                environment.split(|byte| *byte == 0).any(|value| value == entry.as_bytes())
+            })
+        });
+    }
+}
+
 fn platform_processes() -> Result<Vec<ProcessCandidate>> {
     #[cfg(target_os = "linux")]
     {
@@ -2764,6 +2816,101 @@ mod tests {
     use fractal_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
     #[cfg(target_os = "linux")]
     use fractal_store::external_sessions::shared_tests_seats::path_executable;
+
+    #[test]
+    fn native_session_discovery_is_instance_scoped() {
+        use fractal_kernel::instance;
+        const CHILD: &str = "FRACTAL_TEST_NATIVE_INSTANCE_HOME";
+        if let Ok(case) = std::env::var(CHILD) {
+            let login_home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let write_session = |home: &Path, id: &str| {
+                let directory = home.join(".codex/sessions/2026/11/10");
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(
+                    directory.join(format!("rollout-{id}.jsonl")),
+                    format!("{}\n", json!({"type":"session_meta", "payload":{"id":id, "cwd":home}})),
+                ).unwrap();
+            };
+            write_session(&login_home, "login-only");
+            let write_omp = |profile: &Path, id: &str| {
+                let directory = profile.join("sessions/project");
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join(format!("{id}.jsonl")),
+                    format!("{}\n", json!({"type":"session", "id":id, "cwd":login_home}))).unwrap();
+            };
+            write_omp(&login_home.join(".omp/agent"), "login-omp");
+            if case == "instance" {
+                // SAFETY: isolated single-test subprocess; no runtime or other readers exist.
+                let selected = unsafe { instance::activate("trial") }.unwrap();
+                let native = instance::native_session_home().unwrap().unwrap();
+                assert_eq!(native, selected.native_session_home());
+                fs::create_dir_all(selected.codex_home()).unwrap();
+                write_session(&native, "instance-only");
+                let home = Some(native.as_path());
+                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home.clone()));
+                let profile = PathBuf::from(std::env::var_os("PI_CODING_AGENT_DIR").unwrap());
+                assert_eq!(profile, selected.pi_agent_dir());
+                write_omp(&profile, "instance-omp");
+                assert_eq!(instance::current(), Some(selected.clone()));
+                assert_eq!(PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()), selected.codex_home());
+                assert_eq!(fs::canonicalize(native.join(".codex")).unwrap(), fs::canonicalize(selected.codex_home()).unwrap());
+                assert_eq!(fs::read_link(native.join(".claude")).unwrap(), selected.claude_config_dir());
+                assert_eq!(fs::read_link(native.join(".omp/agent")).unwrap(), selected.pi_agent_dir());
+                assert!(!native.join(".local/share").exists());
+                // Repeated activation leaves shell-tool HOME and profile selection unchanged.
+                unsafe { instance::activate("trial") }.unwrap();
+                assert_eq!(instance::current(), Some(selected));
+                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home));
+                // Inventory and search use these discovery entrypoints, including the cached history.
+                for discovery in [
+                    crate::external_sessions::discover_fresh(home, true).unwrap(),
+                    crate::external_sessions::discover(home, true).unwrap(),
+                ] {
+                    assert_eq!(discovery.sessions.len(), 2);
+                    assert!(discovery.sessions.iter().any(|session| session.native_id == "instance-only"));
+                    assert!(discovery.sessions.iter().any(|session| session.native_id == "instance-omp"
+                        && session.driver == ExternalDriver::Omp));
+                }
+                let login_id = crate::external_sessions::external_session_id(
+                    crate::external_sessions::ExternalDriver::Codex, "login-only",
+                );
+                assert!(crate::external_sessions::find_conversation(home, &login_id).unwrap().is_none());
+            } else {
+                assert!(instance::current().is_none());
+                let native = instance::native_session_home().unwrap().unwrap();
+                assert_eq!(native, login_home);
+                assert_eq!(std::env::var_os("PI_CODING_AGENT_DIR"),
+                    Some(login_home.join("ambient-profile").into_os_string()));
+                let discovery = crate::external_sessions::discover_fresh(Some(&native), true).unwrap();
+                assert_eq!(discovery.sessions.len(), 2);
+                assert!(discovery.sessions.iter().any(|session| session.native_id == "login-only"));
+                assert!(discovery.sessions.iter().any(|session| session.native_id == "login-omp"));
+            }
+            return;
+        }
+        for case in ["default", "instance"] {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "external_sessions::tests::native_session_discovery_is_instance_scoped", "--nocapture", "--test-threads=1"])
+                .env(CHILD, case)
+                .env("HOME", home.path())
+                .env("PI_CODING_AGENT_DIR", home.path().join("ambient-profile"))
+                .env_remove("ST_INSTANCE")
+                .env_remove("FRACTAL_INSTANCE")
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    #[test]
+    fn instance_native_discovery_rejects_conflicting_alias() {
+        let home = tempfile::tempdir().unwrap();
+        let instance = fractal_kernel::instance::Instance::new(home.path(), "trial").unwrap();
+        let conflicting = instance.native_session_home().join(".claude");
+        fs::create_dir_all(&conflicting).unwrap();
+        let error = instance.prepare_native_session_home().unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("read native session alias {}", conflicting.display())));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -3831,7 +3978,7 @@ mod tests {
             crate::native_resume::pi_family_argv("omp", argv, &managed, id, Some(&transcript))
                 .unwrap_err()
                 .code,
-            "transcript-header-mismatch"
+            "transcript-missing"
         );
     }
 

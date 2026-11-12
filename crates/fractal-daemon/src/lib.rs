@@ -13,6 +13,8 @@ mod ci_test_paths;
 pub use fractal_kernel::accounts;
 pub mod api;
 pub mod web;
+/// Verified GitHub webhook deliveries ask the observers of their repository to poll now.
+pub mod github_webhook;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
@@ -24,7 +26,7 @@ pub use fractal_github::changes;
 pub use fractal_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use fractal_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
 pub use fractal_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, DeclarationsStore, DelegationStore, LanesStore, MissionEligibilityStore, MissionListStore, MissionsStore, MissionsStoreCore, PersonWorkStore, WorkListStore};
-pub use fractal_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
+pub use fractal_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore, ReadPositionsStore};
 pub use fractal_attention::{AttentionListStore, AttentionSnapshotStore, AttentionStore, ClientSummaryStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SummaryListStore};
 pub use fractal_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use fractal_api_mailbox::claude_channel;
@@ -71,8 +73,10 @@ pub use fractal_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
+pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
+pub use fractal_api_mailbox::readiness_slo;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -134,6 +138,7 @@ mod telemetry_tests;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub use fractal_kernel::terminal_binding;
+pub use fractal_kernel::program_journal;
 pub use fractal_kernel::waiting_on;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
 pub use fractal_store::tile_registry;
@@ -146,4 +151,4 @@ pub(crate) use fractal_store::checkout;
 pub(crate) use fractal_seats::external_sessions;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
-pub use model::{NormalizedIntent, St3Error};
+pub use model::{NormalizedIntent, FractalError};

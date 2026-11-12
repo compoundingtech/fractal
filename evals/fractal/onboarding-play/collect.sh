@@ -46,7 +46,7 @@ demo_agent_exists=false
 demo_mission_state="$("$st" missions ls --all --json 2>/dev/null \
   | jq -r '[.. | objects | select((.id? // "") | test("st/onboarding-demo"))] | first | .status // .state // empty' || true)"
 welcome_bytes=0
-# `st agents new st/demo` with no workspace works in its own folder inside the work folder.
+# `fractal agents new st/demo` with no workspace works in its own folder inside the work folder.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 demo_workspace="${FRACTAL_WORK_ROOT-${ST_WORK_ROOT:-$HOME/st}}/agents/st/demo"
 [ -f "$demo_workspace/welcome.md" ] && welcome_bytes="$(wc -c <"$demo_workspace/welcome.md" | tr -d ' ')"

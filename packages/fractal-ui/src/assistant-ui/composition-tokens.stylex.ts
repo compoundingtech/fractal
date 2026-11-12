@@ -112,6 +112,9 @@ export const spaceVars = stylex.defineVars({
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
 })
 
+/** Shared by the row's CSS and its exact virtualizer layout. */
+export const sidebarRowSize = 48
+
 /** Fixed geometry: band heights, lane widths, control sizes, gutters. */
 export const geometryVars = stylex.defineVars({
   band: '52px',
@@ -130,11 +133,12 @@ export const geometryVars = stylex.defineVars({
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
-  sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
+  gutter40: '40px', icon: '16px', status: '14px', statusSm: '12px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
-  /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
-  workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',
+  /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */
+  workRowColumns: '16px 16px minmax(0, 1fr) minmax(80px, auto)',
+  /** Kept for the package's consumers; work rows size their metadata column through workRowColumns. */
   durationColumn: '80px', statusWordMax: '20ch',
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px', railInset: '7.5px',
@@ -147,6 +151,8 @@ export const geometryVars = stylex.defineVars({
   /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
   attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
   detailsValueMin: '120px',
+  /** The widest a line of supporting prose runs inside a wider card. */
+  readingMeasure: '68ch',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',

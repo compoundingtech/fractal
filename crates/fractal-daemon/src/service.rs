@@ -25,6 +25,8 @@ pub use lookup::ConflictingServices;
 mod stage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use stage::stage_fractal;
+#[cfg(unix)]
+pub mod launchd_domain;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
@@ -443,7 +445,7 @@ fn validate_reset_target(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Stop the PTY runtimes this daemon owns, as `st3 service reset` does.
+/// Stop the PTY and exec runtimes this daemon owns, as `st3 service reset` does.
 pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
     let pty_root = config
         .pty_root
@@ -489,17 +491,35 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
             .collect::<Vec<_>>();
         ids.sort();
         ids.dedup();
-        for id in &ids {
-            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
-                exec.stop_if(id, Some(&generation.generation_id))?;
+        let mut errors = Vec::new();
+        for (hard, signal) in [(false, "SIGTERM"), (true, "SIGKILL")] {
+            if hard {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            for id in &ids {
+                let result = exec.observe(id).and_then(|observation| match observation {
+                    Some(fractal_runtime::ExecObservation::Running(generation)) => {
+                        if hard {
+                            exec.kill_if(id, Some(&generation.generation_id))
+                        } else {
+                            exec.stop_if(id, Some(&generation.generation_id))
+                        }
+                    }
+                    Some(fractal_runtime::ExecObservation::Indeterminate(reason)) => {
+                        anyhow::bail!("exec generation is indeterminate: {reason}")
+                    }
+                    _ => Ok(()),
+                });
+                if let Err(error) = result {
+                    errors.push(format!("{signal} exec {id}: {error:#}"));
+                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        for id in &ids {
-            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
-                exec.kill_if(id, Some(&generation.generation_id))?;
-            }
-        }
+        anyhow::ensure!(
+            errors.is_empty(),
+            "exec shutdown failed:\n{}",
+            errors.join("\n")
+        );
     }
     Ok(())
 }
@@ -596,7 +616,7 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-/// Whether `argv` is a st3 daemon: the program is `st3` or `st` and one of its arguments is `up`.
+/// Whether `argv` is a Fractal daemon (including transitional names) started with `up`.
 fn is_daemon_argv(argv: &[String]) -> bool {
     let Some(program) = argv.first() else {
         return false;
@@ -605,57 +625,92 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    // The test-only CLI runs this same daemon entry point without a build stamp.
+    let daemon_name = matches!(name, "fractal" | "st3" | "st")
+        || (cfg!(feature = "test-support") && name == "fractal-unstamped");
+    daemon_name && argv[1..].iter().any(|argument| argument == "up")
+}
+
+/// Whether this pid currently names a live Fractal daemon.
+/// Callers must verify its identity again before signalling it.
+pub fn is_daemon_process(pid: u32) -> bool {
+    process_identity(pid).is_some_and(|identity| !identity.ended && is_daemon_argv(&identity.argv))
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
 /// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
-/// that holds its startup lock) is signalled, and only when it is a st3 daemon; a signal goes to
+/// that holds its startup lock) is signalled, and only when it is a Fractal daemon; a signal goes to
 /// the process whose start time was read first, never to a later process that reused its pid.
-/// Returns whether such a daemon was found and has ended.
-pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
+/// Returns whether such a daemon was found and has ended, after both state locks are released.
+pub fn stop_daemon_at(socket: &Path, state_dir: &Path, grace: std::time::Duration) -> Result<bool> {
     let pid = socket_owner_pid(socket).or_else(|| crate::startup::read(socket).map(|r| r.pid));
     let Some(pid) = pid.filter(|pid| *pid != std::process::id()) else {
+        crate::node_identity::wait_for_release(
+            state_dir,
+            std::time::Instant::now() + grace + std::time::Duration::from_secs(5),
+        )?;
         return Ok(false);
     };
-    stop_daemon_process(pid, grace, std::time::Duration::from_secs(5))
+    stop_daemon_process(pid, state_dir, grace, std::time::Duration::from_secs(5))
 }
 
-fn stop_daemon_process(
+/// Stop a verified daemon and then prove release of its state-directory lock.
+/// Both signal escalation and inherited-descriptor closure share one deadline.
+pub fn stop_daemon_process(
     pid: u32,
+    state_dir: &Path,
     grace: std::time::Duration,
     kill_wait: std::time::Duration,
 ) -> Result<bool> {
+    let started = std::time::Instant::now();
+    let deadline = started + grace + kill_wait;
+    let released = || {
+        crate::node_identity::wait_for_release(state_dir, deadline)?;
+        Ok(true)
+    };
     let target = libc::pid_t::try_from(pid).context("the daemon's pid is out of range")?;
-    let Some(identity) = process_identity(pid) else {
-        anyhow::bail!("the process on the daemon socket (pid {pid}) is gone; try again");
+    let identity = match process_identity(pid) {
+        Some(identity) if !identity.ended => identity,
+        Some(_) => return released(),
+        None => {
+            // An unreadable identity is not proof of exit. Only ESRCH establishes
+            // that the leader is gone; signal zero does not change the process.
+            let gone = unsafe { libc::kill(target, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            anyhow::ensure!(gone, "cannot read the daemon's identity (pid {pid}); not stopping it");
+            return released();
+        }
     };
     anyhow::ensure!(
-        !identity.ended && is_daemon_argv(&identity.argv),
+        is_daemon_argv(&identity.argv),
         "the process on the daemon socket (pid {pid}, {}) is not a Fractal daemon; not stopping it",
         identity.argv.join(" ")
     );
     let still_running =
         || process_identity(pid).is_some_and(|now| now.start == identity.start && !now.ended);
-    for (signal, wait) in [(libc::SIGTERM, grace), (libc::SIGKILL, kill_wait)] {
+    for (signal, phase_deadline) in [(libc::SIGTERM, started + grace), (libc::SIGKILL, deadline)] {
         // Re-check just before each signal: the daemon may have ended and its pid been reused.
         if !still_running() {
-            return Ok(true);
+            return released();
         }
         if unsafe { libc::kill(target, signal) } != 0
-            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("signal the Fractal daemon (pid {pid})"));
         }
-        let deadline = std::time::Instant::now() + wait;
-        while still_running() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        while still_running() && std::time::Instant::now() < phase_deadline {
+            std::thread::sleep(
+                phase_deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_millis(50)),
+            );
         }
         if !still_running() {
-            return Ok(true);
+            return released();
         }
     }
+    crate::node_identity::wait_for_release(state_dir, deadline)?;
     Ok(false)
 }
 
@@ -1140,6 +1195,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
+Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n\
 {instance_environment}{cache_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
@@ -1162,7 +1218,12 @@ fn systemd_instance_environment() -> String {
 fn systemd_environment_lines(variables: &[(String, String)]) -> String {
     variables
         .iter()
-        .map(|(name, value)| format!("Environment={}\n", systemd_quote_arg(&format!("{name}={value}"))))
+        .map(|(name, value)| {
+            format!(
+                "Environment={}\n",
+                systemd_quote_arg(&format!("{name}={value}"))
+            )
+        })
         .collect()
 }
 
@@ -1194,6 +1255,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
+Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n\
 {instance_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
@@ -1205,6 +1267,50 @@ MemoryMax={}M\n\
 WantedBy=default.target\n",
         spec.memory_max_mb,
     )
+}
+
+/// Observe the worker through its supervisor, never through caller-supplied argv.
+pub(crate) fn replication_worker_pid() -> Result<u32> {
+    let service = lookup::native()?.replication;
+    #[cfg(target_os = "linux")]
+    let output = host_command("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
+        .output()?;
+    #[cfg(target_os = "macos")]
+    let output = host_command("launchctl")
+        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+    let text = std::str::from_utf8(&output.stdout)?;
+    #[cfg(target_os = "linux")]
+    let pid = text.trim().parse::<u32>()?;
+    #[cfg(target_os = "macos")]
+    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+        .context("replication worker has no supervised PID")?.parse::<u32>()?;
+    anyhow::ensure!(pid != 0, "replication worker is not running");
+    Ok(pid)
+}
+
+pub(crate) fn daemon_is_service_managed() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // A foreground fixture can inherit its runner's unrelated service cgroup.
+        Ok(daemon_service_cgroup(&fs::read_to_string("/proc/self/cgroup")?))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd directly owns the daemon; a reparented foreground process also fails closed.
+        Ok(unsafe { libc::getppid() } == 1)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_service_cgroup(groups: &str) -> bool {
+    let old = service_name();
+    let new = old.replacen("st3", "fractal", 1);
+    groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.trim_end_matches('/').rsplit('/').next())
+        .any(|unit| unit == old || unit == new || unit == "smalltalk.service")
 }
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
@@ -1252,6 +1358,8 @@ fn render_launchd_program_plist(
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
     let mut environment = crate::instance::service_environment();
+    // current_exe() resolves aliases to the physical st3 image for native services.
+    environment.push(("FRACTAL_SUPPRESS_DEPRECATION".to_owned(), "1".to_owned()));
     if process_type == "Interactive"
         && let Some(kib) = spec.read_cache_kib
     {
@@ -1286,7 +1394,13 @@ fn plist_environment(variables: &[(String, String)]) -> String {
     }
     let entries = variables
         .iter()
-        .map(|(name, value)| format!("<key>{}</key><string>{}</string>", xml_escape(name), xml_escape(value)))
+        .map(|(name, value)| {
+            format!(
+                "<key>{}</key><string>{}</string>",
+                xml_escape(name),
+                xml_escape(value)
+            )
+        })
         .collect::<String>();
     format!("  <key>EnvironmentVariables</key><dict>{entries}</dict>\n")
 }
@@ -1328,12 +1442,131 @@ mod tests {
     use super::*;
     use crate::config::PeerConfig;
 
+    #[cfg(target_os = "linux")]
+    fn shutdown_with_unreadable_first_exec(indeterminate: bool) -> Result<()> {
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir()?;
+        let runtime =
+            fractal_runtime::ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        struct Cleanup {
+            runtime: fractal_runtime::ExecRuntime,
+            records: Vec<(String, PathBuf, Vec<u8>, String)>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for (id, path, bytes, generation) in &self.records {
+                    if path.is_dir() {
+                        let _ = fs::remove_dir(path);
+                    }
+                    let _ = fs::write(path, bytes);
+                    let _ = self.runtime.kill_if(id, Some(generation));
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        if matches!(
+                            self.runtime.observe(id),
+                            Ok(Some(fractal_runtime::ExecObservation::Exited(_)))
+                        ) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut cleanup = Cleanup {
+            runtime: runtime.clone(),
+            records: Vec::new(),
+        };
+        let mut generations = Vec::new();
+        for id in ["a-unreadable", "b-live"] {
+            let generation = runtime.spawn(
+                id,
+                &fractal_runtime::Launch::Shell(format!(
+                    "trap '' TERM; echo ready > {id}.ready; while :; do sleep 60; done"
+                )),
+                root.path(),
+                &env::vars().collect(),
+            )?;
+            let path = root.path().join("exec").join(format!("{id}.json"));
+            cleanup.records.push((
+                id.into(),
+                path.clone(),
+                fs::read(&path)?,
+                generation.generation_id.clone(),
+            ));
+            generations.push(generation);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !["a-unreadable.ready", "b-live.ready"]
+            .iter()
+            .all(|name| root.path().join(name).exists())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the TERM-resistant execs did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let first = &cleanup.records[0].1;
+        if indeterminate {
+            fs::write(first, b"unreadable generation")?;
+        } else {
+            // EISDIR makes observe itself fail, before a signal guard can run.
+            fs::remove_file(first)?;
+            fs::create_dir(first)?;
+        }
+        let config = Config {
+            state_dir: root.path().into(),
+            pty_root: None,
+            ..Config::default()
+        };
+        let error = stop_owned_runtimes(&config).expect_err("unreadable evidence must remain an error");
+        assert!(fractal_runtime::process_generation_alive(
+            generations[0].pid,
+            generations[0].start_token
+        )?);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let ended = loop {
+            if let Some(fractal_runtime::ExecObservation::Exited(generation)) =
+                runtime.observe("b-live")?
+            {
+                break generation;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the later exec did not receive SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ended.exit_signal, Some(libc::SIGKILL));
+        assert!(ended.group_exited);
+        let message = format!("{error:#}");
+        for signal in ["SIGTERM", "SIGKILL"] {
+            assert!(message.contains(&format!("{signal} exec a-unreadable")), "{message}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn indeterminate_exec_does_not_block_later_shutdown_signals() -> Result<()> {
+        shutdown_with_unreadable_first_exec(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_observation_error_does_not_block_later_shutdown_signals() -> Result<()> {
+        shutdown_with_unreadable_first_exec(false)
+    }
+
     #[cfg(unix)]
     #[test]
     fn stopping_a_daemon_refuses_a_process_that_is_not_one() -> Result<()> {
         let mut other = std::process::Command::new("sleep").arg("60").spawn()?;
         let error = stop_daemon_process(
             other.id(),
+            tempfile::tempdir()?.path(),
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
         )
@@ -1347,8 +1580,42 @@ mod tests {
     }
 
     #[test]
-    fn a_daemon_is_st3_or_st_started_with_up() {
+    fn stop_waits_for_inherited_state_lock() -> Result<()> {
+        use crate::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let state = tempfile::tempdir()?;
+        for (ignore_term, legacy_only) in [(false, false), (true, false), (false, true)] {
+            let test = "service::tests::stop_waits_for_inherited_state_lock";
+            let mut fixture = if legacy_only {
+                RetainedLock::spawn_legacy(test, state.path())?
+            } else {
+                RetainedLock::spawn(test, state.path(), ignore_term)?
+            };
+            let error = stop_daemon_process(
+                fixture.leader.id(),
+                state.path(),
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(100),
+            )
+            .expect_err("leader exit is not lock closure");
+            fixture.assert_held_error(&error)?;
+            fixture.release()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_daemon_is_fractal_or_a_transitional_name_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
+        assert!(!is_daemon_argv(&argv("fractal agents ls")));
+        #[cfg(feature = "test-support")]
+        {
+            assert!(is_daemon_argv(&argv("/opt/example/bin/fractal-unstamped up")));
+            assert!(!is_daemon_argv(&argv("fractal-unstamped agents ls")));
+        }
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));
@@ -1365,7 +1632,7 @@ mod tests {
         assert!(render_systemd_user_unit(&spec)
             .contains("Environment=SMALLCLAIMS_READ_CACHE_KIB=1024\n"));
         assert!(render_launchd_plist(&spec).contains(
-            "<key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string></dict>"
+            "<key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string>"
         ));
         assert!(!render_systemd_replication_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
         assert!(!render_launchd_replication_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
@@ -1382,6 +1649,9 @@ mod tests {
         let arguments = spec.program_arguments();
         assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
         assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--client-gateway-socket" && pair[1].ends_with("/fractal-client.sock")));
+        assert!(render_systemd_user_unit(&spec).contains("fractal-client.sock"));
+        assert!(render_launchd_plist(&spec).contains("fractal-client.sock"));
         assert!(spec.replication_program_arguments().contains(&"--config".into()));
         Ok(())
     }
@@ -1393,8 +1663,8 @@ mod tests {
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
             shared_secret_file: Some("/var/lib/st3/fleet/secret".into()),
             state_dir: "/var/lib/st3".into(),
-            socket: "/run/user/1000/st3.sock".into(),
-            client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+            socket: "/run/user/1000/fractal.sock".into(),
+            client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
             peer_listen: Some("127.0.0.1:31313".into()),
             peers: vec![PeerConfig {
                 name: "node-b".into(),
@@ -1431,19 +1701,29 @@ mod tests {
     #[test]
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
+        quota_source: None,
+        usage_limits: None,
+        host_envelope_file: None,
+        usage_hub: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
+        worker_ingress_generation_check: None,
         seat_priority: None,
+        unlaned_seat: None,
+        seat_admission: None,
         lanes: None,
         person: None,
+        browser_pairing_login: None,
+        pairing_legacy_allowances: Vec::new(),
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
         store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
-        socket: "/run/user/1000/st3.sock".into(),
-        client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+        socket: "/run/user/1000/fractal.sock".into(),
+        socket_is_explicit: true,
+        client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
         peer_listen: Some("0.0.0.0:31313".into()),
         work_root: None,
         peer_listen_allow_plain_http: true,
@@ -1452,13 +1732,20 @@ mod tests {
             url: "http://127.0.0.1:31314".into(),
         }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
         github: crate::config::GithubConfig::default(),
+        agent_population_enabled: false,
+        agent_population_repositories: Vec::new(),
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
+        logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
+        wait_for_peers_after_start: None,
+        readiness_slo: None,
+        agents_request_slo_fault: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);
@@ -1466,11 +1753,12 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/bin/st3 up --node node-a"));
         assert!(unit.contains("--state-dir /var/lib/st3"));
         assert!(unit.contains("--pty-root /var/lib/pty"));
-        assert!(unit.contains("--client-gateway-socket /run/user/1000/st3-client.sock"));
+        assert!(unit.contains("--client-gateway-socket /run/user/1000/fractal-client.sock"));
         assert!(unit.contains("--peer node-b=http://127.0.0.1:31314"));
         assert!(unit.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(unit.contains("MemoryMax=1024M"));
         assert!(unit.contains("Environment=MALLOC_ARENA_MAX=2"));
+        assert!(unit.contains("Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("Nice=0"));
         assert!(unit.contains("CPUWeight=1000\nIOWeight=1000\n"));
@@ -1484,6 +1772,7 @@ mod tests {
         assert!(!replication.contains("IOWeight"));
         assert!(replication.contains("KillMode=control-group"));
         assert!(replication.contains("Environment=MALLOC_ARENA_MAX=2"));
+        assert!(replication.contains("Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n"));
         assert!(replication.contains("--fleet-id 1f91ca65-7793-48cc-866e-ac15690130e1"));
         assert!(replication.contains("--shared-secret-file /var/lib/st3/fleet.secret"));
         Ok(())
@@ -1517,13 +1806,18 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
-        assert!(!plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string></dict>"
+        ));
         assert!(plist.contains("<key>NumberOfFiles</key><integer>8192</integer>"));
         assert!(plist.contains("st3.stdout.log"));
         assert!(plist.contains("Application Support/st3"));
 
         let replication = render_launchd_replication_plist(&spec);
         assert!(replication.contains("<key>ProcessType</key><string>Background</string>"));
+        assert!(replication.contains(
+            "<key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string></dict>"
+        ));
         Ok(())
     }
 
@@ -1672,4 +1966,14 @@ mod tests {
         assert_eq!(service_label(), "com.compoundingtech.st3");
         assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn foreground_worker_enrollment_distinguishes_daemon_and_runner_services() {
+    assert!(daemon_service_cgroup("0::/user.slice/st3.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/fractal.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/smalltalk.service"));
+    assert!(!daemon_service_cgroup("0::/system.slice/actions.runner.service"));
+    assert!(!daemon_service_cgroup("0::/user.slice/fractal-test.scope"));
 }

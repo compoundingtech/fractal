@@ -70,7 +70,9 @@ pub fn world() -> World {
         behind: Vec::new(),
         missions_followed: true,
         settled: true,
+        unread: Default::default(),
         active_missions: None,
+        inbox_alerts: None,
         attention: Load::Ready(attention()),
         agents: Load::Ready(agents()),
         missions: Load::Ready(missions()),
@@ -101,9 +103,10 @@ pub fn world() -> World {
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
         slo_stale: None,
+        slo_otel_url: Some("https://otel.example.test/d/slo".into()),
         clients: Load::Ready(vec![
             Connected {
-                client: s("stui 0.1.0+1ecae71"),
+                client: s("fractal-tui 0.1.0+1ecae71"),
                 who: s("person/robin"),
                 device: None,
                 member: s("lark"),
@@ -125,7 +128,7 @@ pub fn world() -> World {
                 older: false,
             },
             Connected {
-                client: s("stui 0.0.9+77d0a13"),
+                client: s("fractal-tui 0.0.9+77d0a13"),
                 who: s("person/robin"),
                 device: None,
                 member: s("lark"),
@@ -156,6 +159,10 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(status),
         resets_at_unix_ms: None,
         measured_at_unix_ms: None,
+        tone: None,
+        forecast_used_percent: None,
+        forecast_basis_minutes: None,
+        runs_out_at_unix_ms: None,
         explain: s(explain),
     };
     let budget = |id: &str, account: &str, about: &str, current: &str, window: &str, left: f64, resets: u64| fractal_client::SloRow {
@@ -170,9 +177,13 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(if left > 0.0 { "met" } else { "missed" }),
         resets_at_unix_ms: Some(now + resets),
         measured_at_unix_ms: Some(now - 180_000),
+        tone: None,
+        forecast_used_percent: None,
+        forecast_basis_minutes: None,
+        runs_out_at_unix_ms: None,
         explain: format!("{about}. It resets on its own; when it is spent, seats on this account wait."),
     };
-    vec![
+    let mut rows = vec![
         objective(
             "request-latency",
             "Client reads answer quickly",
@@ -220,7 +231,28 @@ fn slo() -> Vec<fractal_client::SloRow> {
             94.0,
             6 * 86_400_000,
         ),
-    ]
+    ];
+    // What the daemon adds from its history: the weekly budget runs out before it resets, the
+    // 5-hour one ends the window well inside its allowance.
+    for row in &mut rows {
+        match row.id.as_str() {
+            "anthropic-weekly" => {
+                row.forecast_used_percent = Some(100.0);
+                row.forecast_basis_minutes = Some(1_440);
+                row.runs_out_at_unix_ms = Some(now + 20 * 3_600_000 + 60_000);
+            }
+            "anthropic-5-hour" => {
+                row.forecast_used_percent = Some(72.0);
+                row.forecast_basis_minutes = Some(60);
+            }
+            "openai-weekly" => {
+                row.forecast_used_percent = Some(18.0);
+                row.forecast_basis_minutes = Some(1_440);
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// The demo's charts: the request objective recovering, the weekly budget spent a little more
@@ -400,6 +432,7 @@ fn attention() -> Vec<Attention> {
     vec![
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -436,6 +469,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -467,6 +501,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -532,6 +567,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -557,6 +593,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -587,6 +624,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),
@@ -637,6 +675,7 @@ fn agent(
         terminal: !matches!(state, AgentState::Stopped),
         subagents: Vec::new(),
         reported: None,
+        last_prose_ms: None,
     }
 }
 
@@ -766,6 +805,7 @@ fn agents() -> Vec<Agent> {
         terminal: false,
         subagents: Vec::new(),
         reported: None,
+        last_prose_ms: None,
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {

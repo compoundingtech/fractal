@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -79,7 +80,7 @@ def fixed(home):
 
 
 def binaries(app):
-    return {name: Path(app) / 'Contents/MacOS' / name for name in ['st3']}
+    return {'fractal': Path(app) / 'Contents/MacOS/fractal'}
 
 
 # The terminal client's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
@@ -170,7 +171,7 @@ def prepare(home, job, built):
     payload = {name: sha(path) for name, path in built.items() if name != HELPER}
     # Archive installs carry the embedded web UI beside bin/. Source-only callers
     # may not have built it; include it whenever present, before signing the app.
-    web = Path(built['st3']).parent.parent / 'share/fractal-web'
+    web = Path(built['fractal']).parent.parent / 'share/fractal-web'
     if web.is_dir():
         for path in sorted(web.rglob('*')):
             if path.is_file():
@@ -190,7 +191,7 @@ def prepare(home, job, built):
         make_web_assets_writable(app)
         shutil.rmtree(app)
     paths = binaries(app)
-    paths['st3'].parent.mkdir(parents=True)
+    paths['fractal'].parent.mkdir(parents=True)
     resources = app / 'Contents/Resources'
     resources.mkdir()
     for name, path in paths.items():
@@ -198,7 +199,7 @@ def prepare(home, job, built):
     if web.is_dir():
         shutil.copytree(web, app / 'Contents/share/fractal-web')
         make_web_assets_writable(app)
-    info = {'CFBundleIdentifier': IDENTIFIER, 'CFBundleExecutable': 'st3', 'CFBundleName': 'St3',
+    info = {'CFBundleIdentifier': IDENTIFIER, 'CFBundleExecutable': 'fractal', 'CFBundleName': 'Fractal',
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'LSUIElement': True}
     if HELPER in built:
         # macOS asks on behalf of the outermost app, so its name and usage strings are the ones shown.
@@ -224,16 +225,63 @@ def prepare(home, job, built):
     return app, dict(identity, payload_unchanged=False), payload
 
 
-def owns_fractal(path):
-    return path.is_symlink() and os.readlink(path) in ('st3', str(path.parent / 'st3'))
+def read_install_receipt(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('receipt must be a regular non-symlink file')
+        value = json.load(stream)
+    if type(value.get('schema')) is not int or value['schema'] != 1 or value.get('name') != 'fractal':
+        raise ValueError('invalid receipt identity')
+    return value
 
-def foreign_fractal_on_path(destination):
+
+def physical_digest(path):
+    descriptor = os.open(path.resolve(strict=True), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('executable must be a regular file')
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(65536), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def owns_fractal(path, home, check_receipt=True):
+    receipt = path.parent / '.fractal-install.json'
+    pending = path.parent / '.fractal-install.json.pending'
+    candidates = [candidate for candidate in (receipt, pending)
+                  if candidate.exists() or candidate.is_symlink()]
+    if check_receipt and candidates:
+        try:
+            values = [read_install_receipt(candidate) for candidate in candidates]
+            if not path.exists() and not path.is_symlink() and candidates == [pending]:
+                return True
+            digest = physical_digest(path)
+            if not any(value.get('sha256') == digest for value in values):
+                raise ValueError('receipt does not match the installed executable')
+            return True
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            raise RuntimeError(f'invalid install receipt {receipt}; reinstall Fractal: {error}') from error
+    # Match only our stable app path or the historical alias forms, never an
+    # arbitrary executable with the right basename. Do not resolve through st3:
+    # it becomes a reverse alias during this transaction and may form a cycle.
+    return path.is_symlink() and os.readlink(path) in (
+        str(binaries(fixed(home))['fractal']), 'st3', str(path.parent / 'st3'))
+
+def foreign_fractal_on_path(destination, home):
+    # Instance activation preserves PATH, including the default login command.
+    # install() independently checks ownership of this instance's destination.
+    if INSTANCE:
+        return False
     for directory in os.environ.get('PATH', '').split(os.pathsep):
         candidate = Path(directory or '.').absolute() / 'fractal'
         if candidate.parent.resolve() == destination.parent.resolve():
             continue
         if candidate.exists() or candidate.is_symlink():
-            if not (candidate.is_symlink() and os.readlink(candidate) == str(destination.parent / 'st3')):
+            if not (candidate.is_symlink() and os.readlink(candidate) in (
+                    str(binaries(fixed(home))['fractal']), str(destination.parent / 'st3'),
+                    str(destination))):
                 return True
     return False
 
@@ -287,10 +335,10 @@ def backup(home, job, stage_fractal=False):
     entries = {}
     previous_bin = Path(job) / 'previous-bin'
     previous_bin.mkdir(exist_ok=True)
-    for name in ['st3', 'stui', 'st', 'fractal']:
+    for name in ['st3', 'stui', 'st', 'fractal', '.fractal-install.json', '.fractal-install.json.pending']:
         path = bin_dir(home) / name
         # A foreign fractal command is outside this transaction, including rollback.
-        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path, home):
             continue
         if path.is_symlink():
             entries[name] = {'link': os.readlink(path)}
@@ -339,6 +387,13 @@ def swap(app, home, job, suffix, expected=None):
 
 
 def install(app, home, job, stage_fractal=False):
+    canonical = bin_dir(home) / 'fractal'
+    receipt = canonical.parent / '.fractal-install.json'
+    pending = canonical.parent / '.fractal-install.json.pending'
+    if ((canonical.exists() or canonical.is_symlink() or receipt.exists() or receipt.is_symlink()
+         or pending.exists() or pending.is_symlink()) and not owns_fractal(canonical, home)
+            or foreign_fractal_on_path(canonical, home)):
+        raise RuntimeError('refusing to replace foreign fractal command at destination or on PATH')
     if stage_fractal:
         if INSTANCE:
             raise RuntimeError('--stage-fractal supports only the default host, not --instance')
@@ -352,15 +407,28 @@ def install(app, home, job, stage_fractal=False):
             if not path.exists():
                 continue
             plist = plistlib.loads(path.read_bytes())
-            if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
+            if point_direct_service_at_app(plist, str(binaries(fixed(home))['fractal'])):
                 require_unloaded(label)
     retired = bin_dir(home) / 'stui'
     if retired.is_dir():
         raise RuntimeError('refusing to remove directory: ' + str(retired))
+    # Capture identity from the incoming signed app, never the destination app.
+    identity = json.loads(command([binaries(app)['fractal'], '--version', '--json']))
+    if not all(isinstance(identity.get(field), str) and identity[field] for field in ('machine_version', 'commit')):
+        raise RuntimeError('incoming Fractal --version --json must provide machine_version and commit')
+    intent = {'schema': 1, 'name': 'fractal', 'sha256': physical_digest(binaries(app)['fractal']),
+              'installer': 'script', 'version': identity['machine_version'], 'commit': identity['commit']}
+    write_atomic(pending, json.dumps(intent).encode())
+    directory = os.open(pending.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     swap(app, home, job, 'install')
     links = dict(binaries(fixed(home)))
     # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    links['st'] = Path('st3')
+    links['st'] = Path('fractal')
+    links['st3'] = Path('fractal')
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     for name, path in links.items():
         link = bin_dir(home) / name
@@ -368,25 +436,15 @@ def install(app, home, job, stage_fractal=False):
         staged = link.parent / ('.' + name + '-' + Path(job).name)
         staged.unlink(missing_ok=True); staged.symlink_to(path); os.replace(staged, link)
     retired.unlink(missing_ok=True)
-    alias = bin_dir(home) / 'fractal'
-    if owns_fractal(alias):
-        staged = alias.parent / ('.fractal-' + Path(job).name)
-        staged.unlink(missing_ok=True)
-        staged.symlink_to('st3')
-        os.replace(staged, alias)
-    else:
-        try:
-            if foreign_fractal_on_path(alias):
-                raise FileExistsError('foreign fractal on PATH')
-            alias.symlink_to('st3')
-        except FileExistsError:
-            print('install: leaving fractal unchanged: destination ' + str(alias) + ' or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.', file=sys.stderr)
+    if physical_digest(canonical) != intent['sha256']:
+        raise RuntimeError(f'pending install receipt {pending} does not match executable; reinstall Fractal')
+    os.replace(pending, receipt)
     for service in ([] if stage_fractal else service_labels()):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if not path.exists():
             continue
         plist = plistlib.loads(path.read_bytes())
-        if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
+        if point_direct_service_at_app(plist, str(binaries(fixed(home))['fractal'])):
             write_atomic(path, plistlib.dumps(plist))
     command([LSREGISTER, '-f', fixed(home)])
     if stage_fractal:
@@ -395,7 +453,7 @@ def install(app, home, job, stage_fractal=False):
         command(['/usr/bin/env', 'HOME=' + str(home),
                  'XDG_CONFIG_HOME=' + str(home / '.config'),
                  'XDG_STATE_HOME=' + str(home / '.local/state'),
-                 binaries(fixed(home))['st3'], 'service', 'install', '--stage-fractal'])
+                 binaries(fixed(home))['fractal'], 'service', 'install', '--stage-fractal'])
 
 
 def restore(home, job, had_app):
@@ -434,7 +492,7 @@ def restore(home, job, had_app):
 
     for name, prior in json.loads((Path(job) / 'previous-bin.json').read_text()).items():
         path = bin_dir(home) / name
-        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path, home, check_receipt=False):
             continue
         if prior is None:
             path.unlink(missing_ok=True)
@@ -510,7 +568,7 @@ def main():
             return
         if args.source is None:
             parser.error('--from is required')
-        built = {name: args.source / name for name in ['st3']}
+        built = {'fractal': args.source / 'fractal'}
         for path in built.values():
             if not path.is_file() or not os.access(path, os.X_OK):
                 parser.error('missing executable: ' + str(path))

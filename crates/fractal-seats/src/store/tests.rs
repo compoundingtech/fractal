@@ -314,7 +314,7 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
     let path = directory.path().join("graph.db");
     let store = Store::open(&path, "node").unwrap();
     let append = |subject: &str, kind: &str| {
-        store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -322,7 +322,12 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        }).unwrap()
+        };
+        if kind.starts_with("custom.client.terminal") {
+            store.append_client_operation_claim(&input)
+        } else {
+            store.append_claim(&input)
+        }.unwrap()
     };
     let attached = append("custom/client/attachment-a", "custom.client.terminal-attached");
     append("custom/client/decoy", "custom.client.other");
@@ -355,8 +360,13 @@ proptest! {
         copies in 1usize..3,
     ) {
         let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet(TEST_FLEET).unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
         let append = |subject: &str, kind: &str, hash: &str| {
-            source.append_claim(&ClaimInput {
+            source.append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
                 actor: None,
@@ -374,6 +384,8 @@ proptest! {
         let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&index| (ranks[index], index));
         let target = Store::open_memory("birch").unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
         for chunk in order.chunks(width) {
             let envelopes = chunk.iter().flat_map(|&index|
                 std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
@@ -1179,6 +1191,44 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
+fn notice_terminal_resources_keep_native_owners_and_strip_reserved_rows() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/notice-terminal";
+    observe_runtime(&store, subject, "running", "one");
+    let clean_cut = store.index().unwrap();
+    // Seed an old-peer-shaped row below current custom-subject admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
+            &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9e9e37dcf663 owner=fractal_seats::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    let cut = store.index().unwrap();
+    let names = BTreeSet::from([subject.to_owned()]);
+    let raw = store.agent_card_status_at(Some(&names), cut, false).unwrap();
+    assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+    let clean = store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap();
+    for history in [false, true] {
+        for owner in [None, Some(subject)] {
+            let visible = store.terminal_resource_status_at(owner, cut, history).unwrap();
+            assert_eq!(visible.subjects.len(), 1);
+            assert_eq!(visible.subjects[0].actual.as_ref().unwrap()["incarnation_id"], "one");
+            assert_eq!(visible.subjects[0].claims, clean.subjects[0].claims);
+            let shown = serde_json::to_string(&visible).unwrap();
+            assert!(!shown.contains("notice-secret"));
+            assert!(!shown.contains(&hidden.id));
+        }
+    }
+    assert_eq!(store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap().subjects.len(), 1);
+    assert!(store.claim_by_id(&hidden.id).unwrap().is_some());
+    assert_eq!(store.status_history(Some(subject), None, Some(cut)).unwrap().subjects.len(), 1);
+}
+
+#[test]
 fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
     let store = Store::open_memory("node").unwrap();
     // Keep the selected set below the parallel reduction threshold so the existing
@@ -1401,6 +1451,14 @@ fn a_late_claim_about_a_delivered_run_rebuilds_its_part_and_matches_a_replay() {
 fn late_claims_about_asks_owned_by_the_root_and_by_a_child_match_a_replay() {
     for owned_by_root in [true, false] {
         let shapes = tree_shapes();
+        for store in [&shapes.controller, &shapes.worker] {
+            let budget = store
+                .attention_request_count("front-desk", "person/test", now_ms())
+                .unwrap();
+            assert_eq!(budget.requests, 2);
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.root.subject), Some(&1));
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.children[0].subject), Some(&1));
+        }
         let ask = if owned_by_root { &shapes.root_ask } else { &shapes.child_ask };
         let ask = ask.subject.clone();
         let parts = late_claim_matches_a_replay(&shapes, |controller| {
@@ -1547,8 +1605,8 @@ version 2
 
   mission "lease" state="ready" {
     goal "Complete mission lease."
-    step "work" { assigned-to "agent/worker" }
-    step "other" { assigned-to "agent/worker" }
+    step "work" { assigned-to "agent/node.worker" }
+    step "other" { assigned-to "agent/node.worker" }
   }
 
 "#,
@@ -1657,6 +1715,12 @@ version 2
     store
         .populate_work_wake_for_reconcile(&mut lean, now_ms())
         .unwrap();
+    assert_eq!(
+        wake.asks.messages,
+        ["message/correct-recipient"],
+        "a wake not yet consumed asks its seat's host about its own message, not another's"
+    );
+    assert!(!wake.asks.delivery_acknowledges, "no harness works in the wake's incarnation");
     assert_eq!(lean.wake, Some(wake));
     for (kind, status) in [
         ("message.delivered", "delivered"),
@@ -1683,6 +1747,7 @@ version 2
         Some("consumed"),
         "a closed wake must not leave an overdue reconcile deadline"
     );
+    assert!(lean.wake.as_ref().unwrap().asks.messages.is_empty(), "a consumed wake asks nothing");
     let request = |incarnation: &str, key: &str| WorkRequest {
         wait_ms: None,
         actor: Some("agent/node.worker".into()),

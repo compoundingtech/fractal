@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refine dormant review checks for raw claims and carried-source requesters",
+  "replay": {"status": "none", "detail": "Reads existing projections and history; no replay changes."},
+  "schema": {"status": "none", "detail": "No storage or wire changes."},
+  "rules": {"status": "none", "detail": "Internal helpers only; public parsers still reject agent review."},
+  "compatibility": {"status": "none", "detail": "Raw steps preserve historical claimants after termination or supersession; absent claim history fails closed. Active expired leases also exclude the available pool, using the effective-state expiry predicate. Cross-run carries include source-run requesters and reject missing source headers. Supersedes the prior terminal pooled-step caveat; start/reassignment remains unavailable."},
+  "downtime": {"status": "none", "detail": "No production caller or runtime effect."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert unused preparation; no data recovery."}
+}

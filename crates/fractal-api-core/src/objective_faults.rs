@@ -1,6 +1,6 @@
 //! A missed CI objective is a fault for the fleet's fault agent.
 //!
-//! The objectives `slo/targets.toml` declares for CI (each `[[duration]]` and `[[count]]`) are
+//! The objectives `slo/objectives.kdl` ships for CI (each `ci-duration` and `ci-count`) are
 //! read from the rows the SLO history samples once a minute. An objective whose row is missed
 //! opens one `operational.failure` on this member's `daemon/NODE` subject, addressed to the fleet
 //! fault agent and never to a person; it stays one episode until the row is met again, when an
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
-use crate::model::{ClaimInput, St3Error};
+use crate::model::{ClaimInput, FractalError};
 use smallclaims::error::internal;
 use crate::store::Store;
 
@@ -67,7 +67,22 @@ pub fn check(
     store: &Store,
     rows: &[Value],
     objectives: &BTreeSet<String>,
-) -> Result<ObjectiveFaults, St3Error> {
+) -> Result<ObjectiveFaults, FractalError> {
+    check_with_response(store, rows, objectives, None)
+}
+
+pub(crate) struct ObjectiveResponse<'a> {
+    pub reviewer: &'a str,
+    pub condition: &'a str,
+    pub title: &'a str,
+}
+
+pub(crate) fn check_with_response(
+    store: &Store,
+    rows: &[Value],
+    objectives: &BTreeSet<String>,
+    response: Option<ObjectiveResponse<'_>>,
+) -> Result<ObjectiveFaults, FractalError> {
     let mut check = ObjectiveFaults::default();
     let read: Vec<(&str, bool, &Value)> = rows
         .iter()
@@ -114,7 +129,13 @@ pub fn check(
             continue;
         }
         if fault_agent.is_none() {
-            fault_agent = Some(store.fleet_fault_agent().map_err(internal)?);
+            fault_agent = Some(match &response {
+                Some(response) => store
+                    .fault_reviewer_is_declared(response.reviewer)
+                    .map_err(internal)?
+                .then(|| response.reviewer.to_owned()),
+                None => store.fleet_fault_agent().map_err(internal)?,
+            });
         }
         let Some(Some(agent)) = &fault_agent else {
             check.unowned += 1;
@@ -127,10 +148,11 @@ pub fn check(
             actor: Some("daemon/runtime".into()),
             fields: BTreeMap::from([
                 ("episode".into(), json!(episode)),
-                ("condition".into(), json!(CONDITION)),
+                ("condition".into(), json!(response.as_ref().map_or(CONDITION, |response| response.condition))),
                 ("reviewer".into(), json!(agent)),
                 ("title".into(), json!(format!(
-                    "CI objective missed: {id} is {} against {}",
+                    "{} objective missed: {id} is {} against {}",
+                    response.as_ref().map_or("CI", |response| response.title),
                     row["current"].as_str().unwrap_or_default(),
                     row["target"].as_str().unwrap_or_default(),
                 ))),

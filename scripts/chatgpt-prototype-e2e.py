@@ -52,7 +52,7 @@ def ready(predicate, process):
     raise RuntimeError('readiness deadline exceeded; see '+str(STATE))
 
 def cli(*args):
-    output=subprocess.run([str(BIN/'st3'),'--endpoint',str(STATE/'st3.sock'),'--json',*args],env=ENV,text=True,capture_output=True)
+    output=subprocess.run([str(BIN/'fractal'),'--endpoint',str(STATE/'st3.sock'),'--json',*args],env=ENV,text=True,capture_output=True)
     if output.returncode: raise RuntimeError(output.stderr)
     return json.loads(output.stdout)
 
@@ -120,7 +120,7 @@ try:
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
     endpoint='http://127.0.0.1:'+str(port)+'/mcp'
-    adapter_args=[str(BIN/'st-chatgpt'),'--socket',str(STATE/'st3-client.sock'),'--credential-file',str(credential)]
+    adapter_args=[str(BIN/'fractal-chatgpt'),'--socket',str(STATE/'st3-client.sock'),'--credential-file',str(credential)]
     adapter=start(adapter_args+['--listen','127.0.0.1:'+str(port)],'adapter.log')
     def listening():
         try:

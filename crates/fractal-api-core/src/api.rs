@@ -17,6 +17,7 @@ use crate::SeatStatusStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::SubagentsStore;
+use crate::StopDeferralStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -28,6 +29,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -83,15 +85,17 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
 use crate::store::Store;
+use crate::store::local_commits;
 
 pub mod wire_names;
+pub mod seat_freshness;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -106,12 +110,15 @@ pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
+mod agents_request_slo;
 #[cfg(test)]
 mod harness_health_controls;
 #[cfg(test)]
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod exec_only;
+mod github_plugin;
 mod github_watch;
 pub mod harness_events;
 mod harness_questions;
@@ -120,12 +127,17 @@ pub use harness_questions::{
 };
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod message_reads;
+pub mod relayed_close_maintenance;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
+pub mod population_metrics;
+pub mod population_attention;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
+mod source_maps;
 pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
@@ -145,6 +157,7 @@ mod directive_notes;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
+pub mod client_commands;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
@@ -175,7 +188,10 @@ pub mod launches;
 pub mod messages;
 pub mod operations;
 pub mod records;
+mod write_principal;
+mod native_delivery;
 pub mod replication;
+mod replication_replay;
 mod runs;
 pub mod sessions;
 pub mod work;
@@ -235,12 +251,18 @@ pub fn claude_channel_attachment(
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    pub browser_pairing_login: Option<String>,
     pub store: Arc<Store>,
+    /// Process-local seat admission observations, never replicated as graph claims.
+    pub seat_admission: Arc<fractal_runtime::seat_admission_status::Status>,
     pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
     pub state_dir: std::path::PathBuf,
+    /// Configured API socket, including its instance-specific basename.
+    pub api_socket: std::path::PathBuf,
     pub pty_root: std::path::PathBuf,
     pub pty_binary: std::path::PathBuf,
     pub fleet_id: Option<String>,
@@ -255,8 +277,9 @@ pub struct AppState {
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
-pub const CLIENT_API_VERSION: &str = "st3.client.v0";
+pub const CLIENT_API_VERSION: &str = "fractal.client.v0";
+/// Frozen hash input; changing it invalidates issued preview tokens.
+const LAUNCH_PREVIEW_HASH_API_VERSION: &str = "st3.client.v0";
 pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
@@ -331,7 +354,7 @@ pub struct ClientListQuery {
     /// when the latest roster refresh failed and none is in flight.
     #[serde(default)]
     pub fresh: bool,
-    /// Agents: wait for publication of this host-local mutation store_index, not the head.
+    /// Agents and current work: wait for this host-local cut instead of sampling a newer head.
     pub min_cut: Option<u64>,
 }
 
@@ -355,6 +378,10 @@ pub struct ClientPageCursor {
     pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_index: Option<u64>,
+    /// The stream items the first page could see: the shard index the stream mirror had passed
+    /// (fractal-store stream_mirror.rs), as `before_index` is for graph messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_stream_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
@@ -380,9 +407,19 @@ pub fn signal_changed(state: &AppState) {
     signal_visible_change(state);
 }
 
-/// The reconciler reads a message only when it is a work wake, tagged `st3-work:`.
+/// The reconciler reads a message only when it carries a work-wake tag.
 pub fn is_work_wake(tags: &[String]) -> bool {
-    tags.iter().any(|tag| tag.starts_with("st3-work:"))
+    crate::silent::message_tag_values(tags.iter().map(String::as_str), "work:")
+        .next()
+        .is_some()
+}
+
+#[test]
+fn work_wake_prefixes() {
+    for prefix in ["st3-", "fractal-"] {
+        assert!(is_work_wake(&[format!("{prefix}work:step-run/r/s@1@1@x")]));
+    }
+    assert!(!is_work_wake(&["fractal-work-handoff:r/s".into()]));
 }
 
 /// A message write wakes the reconciler only for a work wake, since the reconciler reads no other
@@ -437,7 +474,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn bad(error: St3Error) -> Self {
+    pub fn bad(error: FractalError) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "identity-cycle"
@@ -445,6 +482,8 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "retire-revision-mismatch"
+            | "retire-incarnation-mismatch"
             | "custody-pending"
             | "stale-subject"
             | "stale-fence"
@@ -495,15 +534,15 @@ impl ApiError {
             return error;
         }
         if smallclaims::read_budget::check().is_err() {
-            return Self::bad(St3Error::new("read-deadline", "the read exceeded its deadline or was cancelled"));
+            return Self::bad(FractalError::new("read-deadline", "the read exceeded its deadline or was cancelled"));
         }
-        let store_error = typed.downcast_ref::<St3Error>().or_else(|| {
+        let store_error = typed.downcast_ref::<FractalError>().or_else(|| {
             typed
                 .downcast_ref::<anyhow::Error>()
-                .and_then(|error| error.downcast_ref::<St3Error>())
+                .and_then(|error| error.downcast_ref::<FractalError>())
         });
         if let Some(error) = store_error {
-            return Self::bad(St3Error {
+            return Self::bad(FractalError {
                 code: error.code,
                 message: error.message.clone(),
                 details: error.details.clone(),
@@ -526,17 +565,29 @@ impl ApiError {
         }
     }
 }
+/// Carried through JSON framing so telemetry counts the typed refusal, never a parsed body.
+#[derive(Clone, Copy)]
+struct RunProjectionDrainRefusal;
+
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier" | "agent-charter-feature-barrier") {
+            body["applied"] = json!("none");
+        }
         if let Some(applied) = body["details"].get("applied").cloned() {
             body["applied"] = applied;
         }
         let mut response = (self.status, Json(body)).into_response();
         if self.code == "read-deadline" {
             response.extensions_mut().insert(crate::otel::ReadDeadline);
+        }
+        if self.code == "database-busy"
+            && self.details.get("reason").and_then(Value::as_str) == Some("run-projection-drain")
+        {
+            response.extensions_mut().insert(RunProjectionDrainRefusal);
         }
         response
     }
@@ -552,6 +603,29 @@ pub fn router(state: AppState) -> Router {
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
+
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMessageMark {
+    message: String,
+    kind: String,
+    consumer: String,
+}
+
+/// Test support: record a consumer's local mark of a graph message, as 4b-2's consumers will.
+#[cfg(feature = "test-support")]
+async fn test_record_message_mark(
+    State(state): State<AppState>,
+    Json(mark): Json<TestMessageMark>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let store = state.store.clone();
+    let (receipt, _) = blocking_action(move || {
+        crate::store::message_marks::record(&store, &mark.message, &mark.kind, &mark.consumer)
+    })
+    .await?;
+    signal_visible_change(&state);
+    Ok(Json(receipt))
+}
 
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
@@ -594,6 +668,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_documents::document_get))
         .route("/v1/client/documents", get(client_documents::documents_list))
+        .route("/v1/client/claims", get(records::client_list_claims))
+        .route("/v1/client/claims/by-id/{id}", get(records::client_get_claim))
+        .route("/v1/client/work-items/{*subject}", get(work::client_get_work))
         .route("/v1/client/document-references", get(client_documents::document_references))
         .route("/v1/client/push-registration", post(client_push::register)
             .delete(client_push::unregister)
@@ -634,6 +711,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/launches/{id}", get(client_reads::client_launches_detail))
         .route("/v1/client/work", get(client_reads::client_work))
+        .route(
+            "/v1/client/ready-work",
+            // Axum otherwise runs GET for HEAD, which does not pass the paired GET scope gate.
+            get(client_reads::client_ready_work).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
         .route("/v1/client/change", get(changes::show))
@@ -659,24 +741,35 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/custom/reply", post(custom::reply))
         .route("/v1/custom/basis", get(custom::basis))
+        .route("/v1/custom/decision-inputs", get(custom::decision_inputs))
         .route("/v1/client/custom-subjects", get(custom::list))
         .route("/v1/client/custom-subjects/{*id}", get(custom::read))
         .route("/v1/intent/mission", post(launches::mission))
         .route("/v1/gate-checks", post(runs::start_gate_check))
         .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
-        .route("/v1/sets/apply", post(owned_sets::apply))
-        .route("/v1/intent/apply", post(launches::apply_with_bound))
+        .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
+        .route("/v1/source/status", get(owned_sets::source_status))
+        .route("/v1/source-maps", get(source_maps::get))
+        .route("/v1/source-blobs/{hash}", get(source_maps::blob))
+        .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
+        .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
+        .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
+        .route("/v1/fleet/admission-override", post(fleet::admission_override))
+        .route("/v1/fleet/transports", post(fleet::change_transports))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
+        .route("/v1/agents/lane", get(agents::agent_lane))
+        .route("/v1/agents/lane/burst", post(agents::hold_lane_burst).delete(agents::release_lane_burst))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -761,6 +854,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
@@ -773,11 +867,13 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records", get(replication::replication_records))
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
+        .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
         .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
+        .route("/v1/faults/dismiss", post(records::dismiss_fault))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -806,6 +902,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
+        // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
+        .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
+        // crate::peer::SEAT_FRESHNESS_READS_INTERNAL_PATH, written out for the same reason.
+        .route("/v1/internal/seat-freshness/reads", post(seat_freshness::seat_freshness_read))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -826,6 +926,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(fleet::fleet_admission_residue),
         )
         .route("/v1/internal/fleet/status", get(fleet::fleet_status))
+        // Fleet views a seat may read: internal routes refuse seat callers.
+        .route("/v1/fleet/status", get(fleet::fleet_status))
+        .route("/v1/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/fleet/admission-residue", get(fleet::fleet_admission_residue))
+        .route("/v1/fleet/invites", get(fleet::fleet_invite_list))
         .route(
             "/v1/internal/fleet/invites",
             get(fleet::fleet_invite_list).post(fleet::fleet_invite_create),
@@ -848,6 +953,26 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(fleet::fleet_fabric_rekey),
         )
         .route("/v1/internal/replication-wake", post(replication::replication_wake))
+        .route(
+            "/v1/internal/replication/shard/{shard}/peers",
+            get(replication::shard_replication_peers),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/export",
+            post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/receive",
+            post(replication::shard_replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/peer-failure",
+            post(replication::shard_replication_peer_failure),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/wake",
+            post(replication::shard_replication_wake),
+        )
         .route(
             crate::peer::CLIENT_READ_FORWARD_PATH,
             post(forward_client_read).layer(DefaultBodyLimit::max(16_384)),
@@ -904,6 +1029,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/github/watches", get(github_watch::watches))
         .route("/v1/github/comment", post(github_watch::comment))
         .route("/v1/github/own", post(github_watch::own))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls", get(github_plugin::pulls))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
@@ -937,6 +1066,18 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    // Tests reach the messages shard before anything in the product writes to it.
+    #[cfg(feature = "test-support")]
+    let app = app
+        .route(
+            "/v1/internal/test/messages-shard",
+            get(replication::test_shard_items).post(replication::test_shard_append),
+        )
+        // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
+        // Nothing records a message mark until consumers switch (4b-2); tests record one here.
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -969,8 +1110,10 @@ struct RequestDuration<'a> {
 
 impl Drop for RequestDuration<'_> {
     fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        agents_request_slo::record(self.method, self.route, self.outcome, elapsed);
         crate::otel::record_http_request_duration(
-            self.method, self.route, self.client_class, self.outcome, self.started.elapsed(),
+            self.method, self.route, self.client_class, self.outcome, elapsed,
         );
     }
 }
@@ -994,6 +1137,9 @@ pub async fn response_envelope(
     };
     let response = read_deadline::envelope(state, request, next).await;
     duration.outcome = crate::otel::RequestOutcome::from_response(Some(&response));
+    if response.extensions().get::<RunProjectionDrainRefusal>().is_some() {
+        crate::otel::record_run_projection_drain_refusal(duration.method, duration.route);
+    }
     response
 }
 
@@ -1040,6 +1186,14 @@ async fn response_envelope_unbounded(
         request.extensions_mut().insert(ClientMessageRequestId(request_id.clone()));
     }
     let request_path = request.uri().path().to_owned();
+    let receive_correlation = (request_path == "/v1/internal/replication/receive").then(|| {
+        let id = replication::receive_correlation(request.headers());
+        request.headers_mut().insert(
+            "x-fractal-exchange-id",
+            axum::http::HeaderValue::from_str(&id.to_string()).expect("a UUID is a valid header"),
+        );
+        id
+    });
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
     let served_remote = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1083,7 +1237,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration" | "/v1/replication/replay");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
@@ -1206,6 +1360,17 @@ async fn response_envelope_unbounded(
         roster: request_route == "/v1/client/agents",
     };
     request.extensions_mut().insert(envelope_context.clone());
+    let (request, write_error) = if fabric_boundary_error.is_none() && client_authentication.is_ok() {
+        match write_principal::bind_request(&state, request).await {
+            Ok(request) => (Some(request), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (Some(request), None)
+    };
+    let fabric_boundary_error = fabric_boundary_error.or(write_error);
+    // A refused request never reaches a handler; retain an empty body for response dispatch.
+    let request = request.unwrap_or_else(|| Request::new(Body::empty()));
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1388,6 +1553,7 @@ async fn response_envelope_unbounded(
         Served {
             long_poll,
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
+            receive_correlation,
         },
     );
     finish_request_trace(otel, status);
@@ -1493,12 +1659,12 @@ pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
-/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+/// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
-/// Every target's live windows, and every path's: see `slo/targets.toml`.
+/// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
@@ -1508,8 +1674,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
 }
 
-/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
-/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// Close each UTC minute of the member's CPU as it ends, for the `cpu` objective in
+/// `slo/objectives.kdl`: read the daemon's CPU at the boundary beside the newest reading each of
 /// the `workers` replication workers this member runs has sent, note a replication catch-up, and
 /// check the seats of the minute closed one boundary earlier, once every harness observation
 /// stamped inside it has committed. The first boundary is this daemon's start.
@@ -1565,6 +1731,8 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     }
 }
 
+pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo, stop_before_listener_drop};
+
 pub use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
@@ -1581,6 +1749,7 @@ fn asks_to_wait(query: &str) -> bool {
 pub struct Served {
     long_poll: bool,
     remote: bool,
+    receive_correlation: Option<uuid::Uuid>,
 }
 
 /// A client collections socket's subscription sent its first snapshot or screen.
@@ -1715,7 +1884,11 @@ fn record_request_latency(
     // Request latency is an operational sample, not a graph change. Publishing a
     // claim here causes replication and reconciliation on every node, including
     // during the contention that made the request slow in the first place.
-    eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    if let Some(correlation_id) = served.receive_correlation {
+        eprintln!("st3: slow request {path} correlation_id={correlation_id} took {} ms", elapsed.as_millis());
+    } else {
+        eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    }
 }
 
 pub use crate::model::new_request_id;
@@ -1812,7 +1985,7 @@ pub fn client_host_id(node: &str) -> String {
 pub fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
     let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": request_id,
         "code": client_error_code(raw.get("code").and_then(Value::as_str)),
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
@@ -1847,6 +2020,9 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-membership-member" | "invalid-membership-bucket"
         | "invalid-membership-key" | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor" | "membership-collection-changed"
+        | "membership-frontier-reset" | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
     )) { return false; }
     matches!(
         code,
@@ -1882,10 +2058,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "retire-revision-mismatch"
+        | "retire-incarnation-mismatch"
         | "invalid-custody-successor"
         | "custody-pending"
+        | "set-managed-subject"
         | "not-found"
         | "forbidden"
+        | "pairing-origin-required"
+        | "pairing-restart-required"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"
@@ -1921,6 +2102,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-membership-key"
         | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor"
+        | "membership-collection-changed"
+        | "membership-frontier-reset"
+        | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -1928,6 +2114,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "cursor-gap"
         | "page-cursor-expired"
         | "agent-roster-not-ready"
+        | "ready-work-unavailable"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -1962,6 +2149,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "response-budget-exceeded"
         | "content-not-text"
         | "invalid-document-reference"
+        | "invalid-declared-admission"
+        | "declared-admission-feature-barrier"
+        | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
@@ -2071,6 +2261,39 @@ pub fn client_page_expired(message: impl Into<String>) -> ApiError {
         message: message.into(),
         details: Box::default(),
     }
+}
+
+/// Launch page hashes retain their original visualization bytes independently of wire names.
+fn client_items_digest(collection: &str, items: &[Value]) -> anyhow::Result<String> {
+    use serde::ser::{SerializeMap as _, SerializeSeq as _, Serializer as _};
+    struct HashValue<'a> { value: &'a Value, visualization: bool }
+    impl Serialize for HashValue<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let Some(object) = self.value.as_object() else { return self.value.serialize(serializer); };
+            let mut map = serializer.serialize_map(Some(object.len()))?;
+            for (key, value) in object {
+                if self.visualization && key == "version" && value == "fractal.visualization.v0" {
+                    // Frozen cache/cursor hash input, not an emitted version.
+                    map.serialize_entry(key, "st3.visualization.v0")?;
+                } else if !self.visualization && key == "visualization" {
+                    map.serialize_entry(key, &HashValue { value, visualization: true })?;
+                } else {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            map.end()
+        }
+    }
+    let bytes = if collection == "launches" || (collection.starts_with("launches/") && collection.ends_with("/variants")) {
+        let mut serializer = serde_json::Serializer::new(Vec::with_capacity(128));
+        let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+        for value in items { sequence.serialize_element(&HashValue { value, visualization: false })?; }
+        serde::ser::SerializeSeq::end(sequence)?;
+        serializer.into_inner()
+    } else {
+        serde_json::to_vec(items)?
+    };
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 pub fn client_page(
@@ -2227,9 +2450,7 @@ fn client_page_read_projected(
             cursor.expires_at_unix_ms,
         )
     } else {
-        let items_digest = hex::encode(Sha256::digest(
-            serde_json::to_vec(&items).map_err(ApiError::internal)?,
-        ));
+        let items_digest = client_items_digest(collection, &items).map_err(ApiError::internal)?;
         let cached = client_page_cache()
             .lock()
             .expect("client page cache poisoned")
@@ -2287,6 +2508,7 @@ fn client_page_read_projected(
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -2621,11 +2843,11 @@ pub fn client_work_resources(
         // that chooses its next work and wake.
         let seat_ready = match actor {
             Some(actor) => {
-                let seat = if actor.contains('/') {
-                    actor.to_owned()
-                } else {
-                    format!("agent/{actor}")
-                };
+                // Queue lookup uses the same canonical actor as the shared seat selector,
+                // including when persisted steps still use a legacy spelling.
+                let actor = smallclaims::store::normalize_actor(actor, "agent");
+                let seat = fractal_schema::canonical_agent_actor(&actor)
+                    .unwrap_or(std::borrow::Cow::Borrowed(&actor));
                 let order = store.seat_run_order(&seat)?;
                 let steps = work
                     .iter()
@@ -2795,11 +3017,13 @@ fn client_work_values(
                     .into_iter()
                     .flat_map(|summaries| summaries.iter().copied()),
             );
+            let spec = work
+                .agentless
+                .then(|| step_specs.get(&work.run).and_then(|steps| steps.get(&work.step)))
+                .flatten();
             let gate_kind = if work.agentless {
-                let spec = step_specs
-                    .get(&work.run)
-                    .and_then(|steps| steps.get(&work.step));
                 match spec {
+                    Some(spec) if spec.program.is_some() => Some("program"),
                     Some(spec) if spec.after_run.is_some() => Some("run"),
                     Some(spec) if spec.gates.is_empty() => Some("watch"),
                     Some(spec)
@@ -2843,6 +3067,21 @@ fn client_work_values(
             } else {
                 None
             };
+            // What a program step runs now: its innermost open key, from the newest entries.
+            let program = spec
+                .and_then(|spec| spec.program.as_ref())
+                .map(|program| -> anyhow::Result<Value> {
+                    let journal = store.program_journal(&work.subject, work.attempt, crate::program_journal::SUMMARY_ENTRIES)?;
+                    let open = journal.innermost();
+                    Ok(json!({
+                        "open_key": open.map(|entry| &entry.key),
+                        "open_since_unix_ms": open.and_then(|entry| entry.started_at_unix_ms),
+                        "child": open.and_then(|entry| entry.child.as_ref()),
+                        "last_entry_at_unix_ms": journal.last_entry_at_unix_ms,
+                        "stalled_after_ms": crate::program_journal::stalled_after_ms(program),
+                    }))
+                })
+                .transpose()?;
             Ok(json!({
                 "id": work.subject,
                 "kind": "work",
@@ -2854,21 +3093,23 @@ fn client_work_values(
                 "definition_id": work.definition_hash,
                 "path": work.step,
                 "title": work.title,
-                "assigned_to": work.assigned_to,
+                "assigned_to": work.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "last_progress": work.progress_summary,
                 "progress_at": work.progress_at_unix_ms.map(client_timestamp),
                 "state": state,
                 "agentless": work.agentless,
                 "gate_kind": gate_kind,
+                "program": program,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
-                "claimant": work.claimant,
+                "claimant": work.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "claim_incarnation": work.claim_incarnation,
                 "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
@@ -3030,7 +3271,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3134,11 +3375,13 @@ pub fn client_agent_cards_selected(
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
     };
-    if chunk {
-        store.cached_agent_resources_chunk(index, history, selected, build)
-    } else {
-        store.cached_agent_resources_for(index, history, Some(selected), build)
-    }
+    pinned_unless_enclosed(store, || {
+        if chunk {
+            store.cached_agent_resources_chunk(index, history, selected, build)
+        } else {
+            store.cached_agent_resources_for(index, history, Some(selected), build)
+        }
+    })
 }
 
 fn client_agent_cards_from_cached(
@@ -3197,6 +3440,53 @@ pub fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow
     })
 }
 
+/// Repository evidence belongs to the off-request population fold, not card presentation.
+/// Only positively identified canonical names enter the deployment allowlist comparison.
+fn overlay_population_repositories(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
+    let subjects = items.iter().filter_map(|item| item["id"].as_str()).collect::<Vec<_>>();
+    let observations = store.latest_workspace_observations(&subjects)?;
+    for item in items {
+        if let Some(repository) = item["checkout"]["repository"].as_str() {
+            item["checkout"]["repository"] = canonical_population_repository(repository)
+                .map_or(Value::Null, Value::String);
+        }
+        item.as_object_mut().expect("agent resource").remove("observed_repository");
+        if let Some(observation) = observations.get(item["id"].as_str().unwrap_or_default()) {
+            let fields = &observation.body["fields"];
+            if fields["workspace"] == item["workspace"]
+                && fields["host"].as_str().map(client_host_id).as_deref() == item["host_id"].as_str()
+            {
+                // A matching observation without an identifiable repository explicitly
+                // clears declaration-only attribution, rather than guessing a checkout.
+                item["observed_repository"] = fields["repository"].as_str()
+                    .and_then(canonical_population_repository).map_or(Value::Null, Value::String);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_population_repository(value: &str) -> Option<String> {
+    let name = if value.starts_with('/') {
+        if value.split('/').any(|part| matches!(part, "." | "..")) { return None; }
+        let (_, tail) = value.split_once("/github.com/")?;
+        let (owner, tail) = tail.split_once('/')?;
+        let (repository, suffix) = tail.split_once('/').unwrap_or((tail, ""));
+        if !suffix.is_empty() && suffix != "refs" && !suffix.starts_with("refs/") { return None; }
+        [owner, repository]
+    } else {
+        let (owner, repository) = value.split_once('/')?;
+        [owner, repository]
+    };
+    if name.iter().any(|part| part.is_empty() || *part == "." || *part == ".."
+        || part.ends_with(".git")
+        || !part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    {
+        return None;
+    }
+    Some(format!("{}/{}", name[0].to_ascii_lowercase(), name[1].to_ascii_lowercase()))
+}
+
 /// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
 /// clients may print it as it is.
 pub const AUTHORITY_INDETERMINATE_REASON: &str =
@@ -3217,10 +3507,15 @@ fn overlay_agent_resources_at(
 ) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
+        let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let subject_refs = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subject_refs)?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
+            // Raw runtime evidence is an internal input, never a client-v0 agent field.
+            item.as_object_mut().expect("agent resource").remove("_runtime_state");
             let source = item
                 .as_object_mut()
                 .unwrap()
@@ -3230,15 +3525,14 @@ fn overlay_agent_resources_at(
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            // The seat's host also hears the re-stamps that stay local, in one seek per card.
-            let heard_at = match &harness {
-                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness)?),
-                None => None,
-            };
+            // The seat's host also hears the re-stamps that stay local, read for every card at once.
+            let heard_at = harness
+                .as_ref()
+                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness));
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
-                Some(age) if age > 90_000 => "stale",
+                Some(age) if u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis() => "stale",
                 Some(_) => "current",
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
@@ -3272,12 +3566,31 @@ fn overlay_agent_resources_at(
     })
 }
 
-/// When this node last heard the seat's harness: its replicated report, or on the seat's host the
-/// newest local re-stamp of the same incarnation, whichever is later. Re-stamps that change nothing
-/// stay in the host's local log, so without it the host's own cards read a resting seat stale.
+/// When this node last heard the seat's harness: its replicated report; on the seat's host the
+/// newest local re-stamp of the same incarnation; elsewhere the seat's host's latest answer about
+/// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
+/// local log, so without them a resting seat reads stale.
 pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
-    let local = store.local_harness_observed_at(subject, &harness.incarnation_id)?;
-    Ok(local.map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)))
+    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness))
+}
+
+/// The local log's newest harness report of many seats, read in one statement, so a roster's
+/// cards cost one query rather than one per card.
+pub struct HeardSeats(std::collections::HashMap<String, (String, u128)>);
+
+impl HeardSeats {
+    pub fn read(store: &Store, subjects: &[&str]) -> anyhow::Result<Self> {
+        Ok(Self(store.local_harness_newest_many(subjects)?))
+    }
+
+    /// [`heard_at`] from the seats read here.
+    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> u128 {
+        let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
+        let relayed = store
+            .extension::<crate::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id);
+        harness.observed_at_unix_ms.max(local.unwrap_or(0)).max(relayed.unwrap_or(0))
+    }
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -3300,9 +3613,9 @@ fn overlay_declaration_restart(item: &mut Value, now: u128) {
 /// How long a declared seat may take to show a running session before it is called down.
 pub const LAUNCH_WINDOW_MS: u64 = 120_000;
 
-/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
-/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
-/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+/// How old a harness report may be and still show that the seat's driver is alive. This is a
+/// liveness grace period, not observation freshness: two five-minute refresh intervals and
+/// a minute of slack avoid calling a seat down after one missed report.
 pub const HEARTBEAT_MS: u64 = 661_000;
 
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
@@ -3328,7 +3641,7 @@ pub fn overlay_down(
     if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
         && !matches!(reported, None | Some("starting" | "ended" | "failed"))
     {
-        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        let lapsed = report_age_ms.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis());
         item["state"] = json!(match reported {
             Some("working") => "running",
             Some("ready" | "idle") if !lapsed => "running",
@@ -3480,7 +3793,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3496,14 +3809,16 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
-        changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    ))?;
-    client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    pinned_unless_enclosed(store, || {
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
+            changed.map(|(subjects, _)| subjects), snapshot_index, history,
+        ))?;
+        client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    })
 }
 
-/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
-/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// Every agent card at `snapshot_index` of a quiet store, with no enclosing read snapshot
+/// and no retained cards, as at a daemon start. The selected fold pins its own snapshot.
 /// For load measurements; it returns how many cards it folded.
 #[doc(hidden)]
 pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {
@@ -3584,8 +3899,9 @@ fn client_agent_cards_presented(
         .map(|subject| subject.subject.clone())
         .collect::<Vec<_>>();
     // Declarations, usage and faults of the listed agents only, not of every subject.
-    let desired_agents = store
-        .desired_subjects_named(&agent_subjects)?
+    let desired = store.desired_subjects_named(&agent_subjects)?;
+    let exec_cards = exec_only::cards(store, &desired, snapshot_index)?;
+    let desired_agents = desired
         .into_iter()
         .filter_map(|desired| {
             let member = desired.member?;
@@ -3603,7 +3919,7 @@ fn client_agent_cards_presented(
     )?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "read-deadline") => None,
         Err(error) => return Err(error),
     };
     store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
@@ -3662,9 +3978,11 @@ fn client_agent_cards_presented(
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
+            let exec_card = exec_cards.get(&subject.subject);
             let fields = subject
                 .actual
                 .as_ref()
+                .filter(|_| exec_card.is_none())
                 .map(|actual| actual.get("fields").unwrap_or(actual));
             let observed = fields
                 .and_then(|fields| fields.get("status"))
@@ -3685,6 +4003,15 @@ fn client_agent_cards_presented(
                     .harness
                     .as_ref()
                     .map(|harness| harness.incarnation_id.as_str()),
+            )?;
+            // The agent's own newest words, for clients' "new since you last looked".
+            let last_prose_at = store.agent_last_prose_at(
+                &subject.subject,
+                subject
+                    .harness
+                    .as_ref()
+                    .map(|harness| harness.incarnation_id.as_str()),
+                snapshot_index,
             )?;
             let silent_since = if harness_state.as_deref() == Some("working") {
                 let working_since = match subject.harness.as_ref() {
@@ -3756,6 +4083,7 @@ fn client_agent_cards_presented(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
+            let state = exec_card.map_or(state, |card| card.state);
             // When a seat that has no running session began waiting for one.
             let launch_since_ms = (matches!(state, "desired" | "starting")
                 && !matches!(observed, Some("running" | "ready" | "working" | "idle")))
@@ -3819,12 +4147,26 @@ fn client_agent_cards_presented(
             let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
+            // A stop is declared but the process still runs: it ends once the mail and other
+            // runs' work it held at the stop are gone (#4500). Say why it is still running.
+            let stopping = (subject.kind.as_deref() == Some("stop")
+                && matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| -> anyhow::Result<Value> {
+                let incarnation = fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+                let held = store.latest_stop_deferral(&subject.subject)?.filter(|diagnostic| {
+                    diagnostic.body["fields"]["code"] == "stop-deferred"
+                        && diagnostic.body["evidence"][0].as_str() == subject.desired_token.as_deref()
+                        && diagnostic.body["fields"]["incarnation_id"].as_str() == incarnation
+                }).and_then(|diagnostic| diagnostic.body["fields"]["reason"].as_str().map(str::to_owned));
+                Ok(json!({"held": held}))
+            })
+            .transpose()?;
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
-            let runtime_ids = runtime_id
-                .map(|runtime| vec![format!("runtime/{runtime}")])
-                .unwrap_or_default();
+            let primary_runtime_ids = runtime_id.filter(|_| exec_card.is_none())
+                .map(|runtime| vec![format!("runtime/{runtime}")]).unwrap_or_default();
+            let runtime_ids = exec_card.map_or(primary_runtime_ids.as_slice(), |card| card.runtime_ids.as_slice());
             let incarnation_id = fields
                 .filter(|_| !moving)
                 .and_then(|fields| fields.get("incarnation_id"))
@@ -3865,7 +4207,9 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = if exec_card.is_some() { None } else {
+                end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at)
+            };
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -3886,6 +4230,7 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_runtime_state": observed,
                 "_restart_underlying_state": restart_underlying_state,
                 "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
@@ -3910,10 +4255,13 @@ fn client_agent_cards_presented(
                     .as_ref()
                     .filter(|harness| harness.reason.as_deref() == Some("compaction"))
                     .map(|_| "compacting"),
-                "host_id": desired_agents.get(&subject.subject).map(|(host, _, _)| host),
-                "workspace": desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace),
+                "host_id": exec_card.map(|card| card.host.as_ref())
+                    .unwrap_or_else(|| desired_agents.get(&subject.subject).map(|(host, _, _)| host)),
+                "workspace": exec_card.map(|card| &card.workspace)
+                    .or_else(|| desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace)),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
                 "last_activity_at": last_activity_at.map(client_timestamp),
+                "last_prose_at": last_prose_at.map(client_timestamp),
                 "silent_since": silent_since.map(client_timestamp),
                 "fault": fault,
                 "incarnation_id": incarnation_id,
@@ -3930,12 +4278,16 @@ fn client_agent_cards_presented(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
+                "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
                     crate::rollout::status(store, &subject.subject)?
                 } else {
                     None
                 },
             });
+            if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
+                value["declared_admission"] = serde_json::to_value(admission)?;
+            }
             // Fold the point read into a cached card. Presentation of a warm roster page
             // must not repeat one retirement query for every retired row.
             if state == "retired"
@@ -3967,6 +4319,141 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Project already-normalized declaration data without revalidating future enum strings.
+pub fn client_declared_admission(desired: &Value) -> Option<crate::model::DeclaredAdmission> {
+    fn child<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+        node.get("children")?.as_array()?.iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some(name))
+    }
+    fn argument(node: &Value) -> Option<&Value> {
+        node.get("arguments")?.as_array()?.first()
+    }
+    let priority = child(desired, "declared-priority").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "background" => crate::model::DeclaredPriority::Background,
+            "normal" => crate::model::DeclaredPriority::Normal,
+            raw => crate::model::DeclaredPriority::Unknown(raw.to_owned()),
+        });
+    let lane = child(desired, "declared-lane").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "check" => crate::model::DeclaredLane::Check,
+            "build" => crate::model::DeclaredLane::Build,
+            raw => crate::model::DeclaredLane::Unknown(raw.to_owned()),
+        });
+    let budgets = child(desired, "declared-budgets").map(|node| crate::model::DeclaredBudgets {
+        cpu_seconds: child(node, "cpu-seconds").and_then(argument).and_then(Value::as_u64),
+        memory_max: child(node, "memory-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        disk_max: child(node, "disk-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        token_budget: child(node, "token-budget").and_then(argument).and_then(Value::as_u64),
+        attention: node.get("children").and_then(Value::as_array).into_iter().flatten()
+            .filter(|child| child.get("name").and_then(Value::as_str) == Some("attention"))
+            .filter_map(|node| Some(crate::model::DeclaredAttentionBudget {
+                person: argument(node)?.as_str()?.to_owned(),
+                asks: node.get("properties")?.get("asks")?.as_u64()?,
+            })).collect(),
+    });
+    crate::model::DeclaredAdmission::from_declaration(priority.as_ref(), lane.as_ref(), budgets.as_ref())
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn declared_admission_barrier_refusal_has_no_write_envelope() {
+        let response = ApiError::bad(FractalError::new(
+            "declared-admission-feature-barrier",
+            "upgrade every active member before publication",
+        )).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "declared-admission-feature-barrier");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+    }
+
+    #[tokio::test]
+    async fn declared_admission_refusal_keeps_stable_envelope_fields() {
+        let error = ApiError::bad(FractalError::new(
+            "invalid-declared-admission",
+            "agent 'agent/example' declared_budgets.cpu_seconds cpu-seconds is allowed on missions only",
+        ).with_detail("subject", "agent/example")
+            .with_detail("field", "declared_budgets.cpu_seconds"));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let response = error.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "invalid-declared-admission");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+        assert_eq!(envelope["details"]["subject"], "agent/example");
+        assert_eq!(envelope["details"]["field"], "declared_budgets.cpu_seconds");
+    }
+
+    #[test]
+    fn desired_projection_omits_empty_and_retains_future_enums() {
+        assert!(client_declared_admission(&json!({})).is_none());
+        assert!(client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": []}
+        ]})).is_none());
+        // Read projection must retain historical agent numeric budgets, even though
+        // new agent declarations can no longer author these mission-only fields.
+        let desired = json!({"children": [
+            {"name": "declared-priority", "arguments": ["future-level"]},
+            {"name": "declared-lane", "arguments": ["future-lane"]},
+            {"name": "declared-budgets", "children": [
+                {"name": "cpu-seconds", "arguments": [300]},
+                {"name": "memory-max", "arguments": ["8G"]},
+                {"name": "disk-max", "arguments": ["20G"]},
+                {"name": "token-budget", "arguments": [100000]}
+            ]}
+        ]});
+        let admission = client_declared_admission(&desired).unwrap();
+        assert_eq!(admission.priority, Some(crate::model::DeclaredPriority::Unknown("future-level".into())));
+        assert_eq!(admission.lane, Some(crate::model::DeclaredLane::Unknown("future-lane".into())));
+        assert_eq!(serde_json::to_value(admission).unwrap(), json!({
+            "priority": "future-level", "lane": "future-lane",
+            "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+        }));
+        assert_eq!(serde_json::to_value(client_declared_admission(&json!({"children": [
+            {"name": "declared-priority", "arguments": ["background"]},
+            {"name": "declared-lane", "arguments": ["build"]},
+            {"name": "declared-budgets", "children": []}
+        ]})).unwrap()).unwrap(), json!({"priority": "background", "lane": "build"}));
+    }
+
+    #[test]
+    fn attention_projection_preserves_authored_order_and_round_trips() {
+        let admission = client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": [
+                {"name": "attention", "arguments": ["person/reviewer"], "properties": {"asks": 3}},
+                {"name": "attention", "arguments": ["person/owner"], "properties": {"asks": 1}}
+            ]}
+        ]})).unwrap();
+        let value = serde_json::to_value(&admission).unwrap();
+        assert_eq!(value, json!({"budgets": {"attention": [
+            {"person": "person/reviewer", "asks": 3},
+            {"person": "person/owner", "asks": 1}
+        ]}}));
+        assert_eq!(serde_json::from_value::<crate::model::DeclaredAdmission>(value.clone()).unwrap(), admission);
+        let wire: fractal_client::DeclaredAdmission = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(wire).unwrap(), value);
+        let empty: fractal_client::DeclaredBudgets = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.attention.is_empty());
+        assert_eq!(serde_json::to_value(empty).unwrap(), json!({}));
+        for invalid in [
+            json!({"attention": [{"person": "person/owner", "asks": 1, "extra": true}]}),
+            json!({"unknown": 1}),
+        ] {
+            assert!(serde_json::from_value::<fractal_client::DeclaredBudgets>(invalid).is_err());
+        }
+    }
 }
 
 /// Read-only edges with an explicit authored kind and URI resolution state.
@@ -4019,22 +4506,94 @@ pub fn managed_session_id(owner: &str, identity: &str) -> String {
 
 pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 
+#[cfg(test)]
+thread_local! {
+    static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static MANAGED_OWNER_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static MANAGED_OWNER_MAP_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Process-wide counter for the isolated daemon cost harness, including index workers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn managed_owner_map_build_count_for_test() -> usize {
+    MANAGED_OWNER_MAP_BUILD_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn managed_owner_after_pin() {
+    MANAGED_OWNER_AFTER_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() { hook(); }
+    });
+}
+
 pub fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
-        for owner in owners.values() {
-            let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
-                continue;
-            };
-            if managed_session_id(&owner.subject, identity) == session_id {
-                return Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())));
+    // Pin identity/repair state; the memo belongs to this SQLite snapshot, not its cut
+    // or pooled connection. A repair may rebuild a shared logical-cut cache concurrently.
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        let owners = store.readers.pinned_memo(snapshot_index, || {
+            #[cfg(test)]
+            MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+            #[cfg(any(test, feature = "test-support"))]
+            MANAGED_OWNER_MAP_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let connection = store.readers.get();
+            let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
+            let mut sessions = std::collections::HashMap::with_capacity(owners.len());
+            for (_, owner) in owners {
+                let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+                    continue;
+                };
+                // Preserve subject order for ambiguous owner:identity concatenations.
+                sessions.entry(managed_session_id(&owner.subject, identity))
+                    .or_insert_with(Vec::new)
+                    .push((owner.subject, owner.incarnation, owner.origin));
+            }
+            Ok(sessions)
+        })?;
+        let Some(candidates) = owners.get(session_id) else {
+            return Ok(None);
+        };
+        for owner in candidates {
+            // Visibility belongs to the lookup, not the snapshot's shared routing memo.
+            if store.generic_status_subject_visible_at(&owner.0, snapshot_index)? {
+                return Ok(Some(owner.clone()));
             }
         }
         Ok(None)
+    }))
+}
+
+/// Resolve an inventory's subject again on the page reader's own snapshot. Only an
+/// unambiguous owner:incarnation encoding may bypass the generic candidate scan.
+pub fn managed_session_owner_for_timeline_at(
+    store: &Store,
+    snapshot_index: u64,
+    session_id: &str,
+    subject: &str,
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
+    store.read_snapshot(|_| {
+        if let Some(owner) = managed_session_owner_for_subject_at(
+            store, snapshot_index, session_id, subject,
+        )? {
+            // More than one ':' admits alternative owner/identity splits. Runtime-only
+            // owners also use the generic path because the tuple omits their runtime ID.
+            if !owner.0.contains(':')
+                && owner.1.as_deref().is_some_and(|identity| !identity.contains(':'))
+            {
+                return Ok(Some(owner));
+            }
+        }
+        // Missing, hidden, stale or ambiguous subjects cannot shortcut authorization.
+        managed_session_owner_at(store, snapshot_index, session_id)
     })
 }
 
@@ -4044,7 +4603,12 @@ pub fn managed_session_owner_for_subject_at(
     session_id: &str,
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4056,7 +4620,7 @@ pub fn managed_session_owner_for_subject_at(
             return Ok(None);
         }
         Ok(Some((owner.subject, owner.incarnation, owner.origin)))
-    })
+    }))
 }
 
 
@@ -4185,7 +4749,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -4352,6 +4916,55 @@ fn insert_attention_target_states(
         .collect::<Vec<_>>();
     if !states.is_empty() {
         resource.insert("target_states".into(), Value::Array(states));
+    }
+    Ok(())
+}
+
+/// Raise the `target_states` of messages whose seat's host keeps their receipts by what that
+/// host says, within a second, as a message view does: a fault about mail another host delivered,
+/// read or closed shows it so. Patched at serve time, after any cached or stored row, and never
+/// part of a revision: a client sees the host's answer on its next read.
+pub async fn relay_attention_target_states(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let messages = items
+        .iter()
+        .flat_map(|item| item["target_states"].as_array().into_iter().flatten())
+        .filter_map(|target| target["id"].as_str().filter(|id| id.starts_with("message/")).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::MessageView>> {
+        let mut views = Vec::new();
+        for message in messages {
+            views.extend(store.message(&message)?);
+        }
+        Ok(views)
+    })
+    .await??;
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    for target in items
+        .iter_mut()
+        .flat_map(|item| item["target_states"].as_array_mut().into_iter().flatten())
+    {
+        let Some(message_reads::Relayed::Answered { status: Some(status), latest, .. }) =
+            target["id"].as_str().and_then(|id| relayed.get(id))
+        else {
+            continue;
+        };
+        if crate::store::message_marks::rank(status)
+            > crate::store::message_marks::rank(target["state"].as_str().unwrap_or_default())
+        {
+            target["state"] = json!(status);
+            match latest {
+                Some((_, at)) => target["since"] = json!(client_timestamp(u128::from(*at))),
+                None => {
+                    if let Some(target) = target.as_object_mut() {
+                        target.remove("since");
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4565,7 +5178,9 @@ fn client_message_resource(
 ) -> anyhow::Result<Value> {
     let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
     let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
-    let reasons = if message.status == "closed" {
+    // A close the seat's host relayed is history too, though the message's own status is this
+    // member's records until the host answers again.
+    let reasons = if message.status == "closed" || metadata["closed"] == true {
         vec!["closed"]
     } else if !current {
         vec!["superseded"]
@@ -4583,7 +5198,7 @@ fn client_message_resource(
         "title": message.title,
         "content": message.content,
         "state": message.status,
-        "delivery": message_delivery_for(store, &message, sent_at, now)?,
+        "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
         "sent_at": client_timestamp(sent_at),
         "session_id": metadata["session_id"],
         "in_reply_to": message.in_reply_to,
@@ -4597,6 +5212,111 @@ fn client_message_resource(
         resource["body_bytes"] = json!(bytes);
     }
     Ok(resource)
+}
+
+/// Take the answers of the hosts that keep these messages' receipts into their client resources
+/// (db break-up step 4b). `state` is the further of this member's records and the host's
+/// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
+/// and a message its host closed is history, as a message this member closed is. The answer never
+/// feeds `revision` or `updated_at`: a client takes a revision as monotonic, and a host that falls
+/// silent would move it back. A client sees the host's answer on its next read.
+/// `views` are the messages, each with its sent time. Answers the messages the host closed: a
+/// list of current messages leaves them out, as it leaves out those this member closed.
+pub async fn relay_client_messages<'a>(
+    state: &AppState,
+    items: impl IntoIterator<Item = &'a mut Value>,
+    views: Vec<(crate::model::MessageView, u128)>,
+    now: u128,
+) -> anyhow::Result<BTreeSet<String>> {
+    let messages = views.iter().map(|(message, _)| message.clone()).collect::<Vec<_>>();
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    let mut closed = BTreeSet::new();
+    if relayed.is_empty() {
+        return Ok(closed);
+    }
+    let store = state.store.clone();
+    let patches = tokio::task::spawn_blocking(move || -> anyhow::Result<BTreeMap<String, Value>> {
+        let mut patches = BTreeMap::new();
+        for (mut message, sent_at) in views {
+            let Some(answer) = relayed.get(&message.subject) else {
+                continue;
+            };
+            message_reads::take_in(&mut message, answer);
+            let delivery = message_delivery_for(&store, &message, sent_at, now, Some(answer))?;
+            let patch = json!({
+                "state": message.status, "status_from": message.status_from, "delivery": delivery,
+            });
+            patches.insert(message.subject.clone(), patch);
+        }
+        Ok(patches)
+    })
+    .await??;
+    for item in items {
+        let Some(patch) = item.get("id").and_then(Value::as_str).and_then(|id| patches.get(id)) else {
+            continue;
+        };
+        for field in ["state", "status_from", "delivery"] {
+            if let Some(value) = patch.get(field) {
+                item[field] = value.clone();
+            }
+        }
+        if patch["state"] == "closed" {
+            item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });
+            closed.extend(item.get("id").and_then(Value::as_str).map(str::to_owned));
+        }
+    }
+    Ok(closed)
+}
+
+/// [`relay_client_messages`] for resources read without their messages, such as a detail or a
+/// page cut from a materialized collection: each message and its sent time are read again. With
+/// `drop_closed`, the messages the host closed leave `items`.
+pub async fn relay_client_message_items(
+    state: &AppState,
+    items: &mut Vec<Value>,
+    now: u128,
+    drop_closed: bool,
+) -> anyhow::Result<()> {
+    let ids = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let views = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+        let mut views = Vec::new();
+        for id in ids {
+            let Some(message) = store.message(&id)? else {
+                continue;
+            };
+            let sent_at = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                stream_sent_at(&store, &id)?
+            } else {
+                store
+                    .latest_claim(&id, Some("message.sent"))?
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default()
+            };
+            views.push((message, sent_at));
+        }
+        Ok(views)
+    })
+    .await??;
+    let closed = relay_client_messages(state, items.iter_mut(), views, now).await?;
+    if drop_closed {
+        items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
+    }
+    Ok(())
+}
+
+/// A stream item's sent time, as its client metadata reads it.
+fn stream_sent_at(store: &Store, subject: &str) -> anyhow::Result<u128> {
+    Ok(store
+        .stream_message_metadata(subject)?
+        .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or_default())
 }
 
 pub fn client_message_resources(
@@ -4630,27 +5350,47 @@ fn client_message_resources_at(
         if peer.is_some_and(|peer| message.from != peer && message.to != peer) {
             continue;
         }
-        let claims = store.claims_for(&message.subject, None)?;
-        let first = claims.first();
-        let last = claims.last();
-        let sent_at = first
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        let updated_at = last
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or(sent_at);
-        let session_id = first
-            .and_then(|claim| {
-                claim
-                    .body
-                    .get("fields")
-                    .unwrap_or(&claim.body)
-                    .get("session_id")
-            })
-            .cloned()
-            .unwrap_or(Value::Null);
+        let (sent_at, updated_at, revision, session_id) = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            // A stream item has no graph claims: the mirror and the shard carry what they would.
+            let Some(metadata) = store.stream_message_metadata(&message.subject)? else {
+                continue;
+            };
+            let at = |field: &str| metadata[field].as_str().unwrap_or("0").parse::<u128>();
+            (at("sent_at")?, at("updated_at")?, metadata["revision"].as_str().unwrap_or("message/unknown").to_owned(),
+             metadata["session_id"].clone())
+        } else {
+            let claims = store.claims_for(&message.subject, None)?;
+            let first = claims.first();
+            let last = claims.last();
+            let sent_at = first
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let mut updated_at = last
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or(sent_at);
+            let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+            // A seat this member hosts moves its message by a local mark, which no claim records.
+            if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                && at >= updated_at
+            {
+                (revision, updated_at) = (receipt, at);
+            }
+            let session_id = first
+                .and_then(|claim| {
+                    claim
+                        .body
+                        .get("fields")
+                        .unwrap_or(&claim.body)
+                        .get("session_id")
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            (sent_at, updated_at, revision, session_id)
+        };
         let mut reasons = Vec::new();
-        if message.status == "closed" {
+        if message.status == "closed"
+            || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
+        {
             reasons.push("closed");
         } else if !current_ids.contains(&message.subject) {
             reasons.push("superseded");
@@ -4659,14 +5399,14 @@ fn client_message_resources_at(
         let mut resource = json!({
             "id": message.subject,
             "kind": "message",
-            "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
+            "revision": revision,
             "updated_at": client_timestamp(updated_at),
             "from": message.from,
             "to": message.to,
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_for(store, &message, sent_at, now)?,
+            "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -4730,9 +5470,86 @@ fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, 
     }))
 }
 
-fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
-    let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
-    if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
+/// The host a stream item's recipient seat runs on, when that is not this one. Its receipts are
+/// that member's local lifecycle, in its own shard, so this member cannot see how far it got.
+fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyhow::Result<Option<String>> {
+    if !crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return Ok(None);
+    }
+    let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
+    Ok(owners
+        .first()
+        .and_then(|owner| owner.member.as_ref())
+        .map(|member| member.host.clone())
+        .filter(|host| host != store.origin()))
+}
+
+/// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
+/// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
+/// the receipts, and claiming sent or delivered here would be a guess. When that host answers
+/// reads (`message_reads::relay_host`), `relayed` is what it said, if this member asked it: the
+/// message is as far as the further of this member's own state and the host's answer.
+fn message_delivery_for(
+    store: &Store, message: &MessageView, sent_at: u128, now: u128, relayed: Option<&message_reads::Relayed>,
+) -> anyhow::Result<Value> {
+    let unknown = |reason: String| {
+        json!({
+            "state": "unknown", "phase": "unknown", "reason": reason,
+            "age_ms": now.saturating_sub(sent_at),
+            "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+        })
+    };
+    let mut status = message.status.clone();
+    let host = message_reads::relay_host(store, message)?;
+    if host.is_some()
+        && let Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) = relayed
+        && crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status)
+    {
+        status = (*relayed).to_owned();
+    }
+    // Durable expiry wins over seat diagnostics and an unavailable remote, but
+    // never over actual consumption, including a receipt just relayed by its host.
+    if let Some(expiry) = store.message_expiry(&message.subject)? {
+        if expiry.superseded
+            && let Some(current) = store.message(&message.subject)?
+            && crate::store::message_marks::rank(&current.status) > crate::store::message_marks::rank(&status)
+        {
+            status = current.status;
+        }
+        if !expiry.superseded && !matches!(status.as_str(), "delivered" | "read") {
+            if host.is_some()
+                && let Some(message_reads::Relayed::Answered { consumed: Some(phase), .. }) = relayed
+            {
+                return message_delivery_value(store, &message.to, phase, sent_at, now);
+            }
+            return Ok(json!({
+                "state": "expired", "phase": "expired",
+                "reason": expiry.claim.body["fields"]["reason"],
+                "age_ms": now.saturating_sub(sent_at),
+                "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+            }));
+        }
+        return message_delivery_value(store, &message.to, &status, sent_at, now);
+    }
+    if let Some(host) = host {
+        match relayed {
+            Some(message_reads::Relayed::Answered { .. }) => {}
+            Some(message_reads::Relayed::Unknown { reason, .. }) => {
+                return Ok(unknown(reason.clone()));
+            }
+            None => {
+                return Ok(unknown(format!(
+                    "the recipient's seat runs on {host}, which keeps this message's receipts; `st conversations status` asks it"
+                )));
+            }
+        }
+    } else if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(unknown(format!(
+            "the recipient's seat runs on {host}, which keeps this message's receipts"
+        )));
+    }
+    let mut delivery = message_delivery_value(store, &message.to, &status, sent_at, now)?;
+    if !matches!(status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
         return Ok(delivery);
     };
@@ -4897,7 +5714,7 @@ fn launch_preview_token_values(
     diagnostics: &[Value],
 ) -> anyhow::Result<String> {
     let input = json!({
-        "api_version": CLIENT_API_VERSION,
+        "api_version": LAUNCH_PREVIEW_HASH_API_VERSION,
         "launch_id": format!("launch/{launch_id}"),
         "variant_id": format!("launch-variant/{launch_id}/{variant}"),
         "candidate_revision": candidate_revision,
@@ -4991,7 +5808,7 @@ fn launch_visualization(
             .push(format!("step/{}", step.path));
     }
     json!({
-        "version": "st3.visualization.v0",
+        "version": "fractal.visualization.v0",
         "views": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"],
         "mission": format!("mission/{}", mission.id),
         "nodes": nodes,
@@ -5157,7 +5974,7 @@ fn client_launch_variant_resources(
                 (
                     json!({}),
                     Vec::new(),
-                    json!({"version": "st3.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
+                    json!({"version": "fractal.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
                     json!({"changes": [], "predicted_actions": []}),
                     None,
                 )
@@ -5510,6 +6327,7 @@ fn published_work_cursor(
         native_only: query.native_only,
         items_digest,
         before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
@@ -5565,7 +6383,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6160,7 +6978,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -6174,7 +6996,7 @@ where
 pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, St3Error> + Send + 'static,
+    F: FnOnce() -> Result<T, FractalError> + Send + 'static,
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
@@ -6262,11 +7084,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -6280,12 +7100,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to the refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so
-/// that a very cheap fold cannot turn fresh reads into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6303,9 +7132,16 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
+        // the writer, once for every refresher that pauses on it.
+        let mut local = agent_roster_local_commits(&store);
+        #[cfg(feature = "test-support")]
+        hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -6316,15 +7152,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            // Pause as long as the refresh took, so refreshing stays under about half a core
-            // however often readers ask, and at least the minimum pause unless a reader waits
-            // for a fresh roster: that read then waits for one fold, not the rest of the pause.
-            let pause = started.elapsed().max(AGENT_ROSTER_FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            tokio::select! {
-                () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
-                () = store.fresh_agent_roster_wanted() => {}
-            }
+            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6333,6 +7161,68 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// Why the refresher's pause between two refreshes ended.
+type AgentRosterPauseEnd = local_commits::PauseEnd;
+
+/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
+/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
+/// roster's incremental fold reads).
+fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
+}
+
+/// The name the roster's check has on the scanner.
+const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
+
+/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
+/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often. See
+/// [`local_commits::pause_after_fold`].
+async fn agent_roster_pause(
+    store: &Arc<Store>,
+    local: &mut local_commits::LocalCommits,
+    folded: Duration,
+    through: u64,
+) -> AgentRosterPauseEnd {
+    let pace = local_commits::Pace {
+        floor: AGENT_ROSTER_FRESH_PAUSE,
+        local: AGENT_ROSTER_LOCAL_PAUSE,
+        full: AGENT_ROSTER_REFRESH_PAUSE,
+    };
+    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
+}
+
+/// An isolated startup test reads a serving daemon whose refresher runs but has published no
+/// roster yet, as every daemon is for a moment after it starts serving.
+#[cfg(feature = "test-support")]
+async fn hold_first_agent_roster() {
+    let Some(directory) = std::env::var_os("ST3_TEST_AGENT_ROSTER_BARRIER") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(directory.join("entered"), b"first roster held")
+            .expect("publish agents roster barrier");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !directory.join("release").exists() {
+            assert!(Instant::now() < deadline, "startup test did not release the agents roster");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await
+    .expect("agents roster barrier");
 }
 
 /// One owner iteration, including both queues that can outlive its readers.
@@ -6356,7 +7246,7 @@ async fn refresh_agent_roster_admitted(
         let submitted = crate::otel::export_enabled().then(Instant::now);
         match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
             roster_worker(true, submitted, None, || {
-                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                let result = crate::task_cpu::profiled_blocking("startup.warmup", || warm_agent_roster(&reader));
                 (result, crate::otel::take_roster_attributes())
             })
         })).await {
@@ -6444,15 +7334,8 @@ pub async fn serve_unix_bound_with_ready(
     store: Arc<Store>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(
-        socket,
-        Some(state_socket),
-        app,
-        Some(store),
-        harness_ancestor,
-        ready,
-    )
-    .await
+    let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
+    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
 }
 
 /// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
@@ -6462,7 +7345,7 @@ pub async fn serve_unix_with_ancestor(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
@@ -6472,11 +7355,12 @@ async fn serve_unix_with_ancestor_ready(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, ancestor, ready).await
+    // Generic/injected-ancestry servers have no daemon supervisor authority.
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -6556,21 +7440,36 @@ pub async fn reserve_unix_socket(
 /// Only a fully initialized router may turn the reservation into a listener.
 /// `Some(store)` binds local harness ancestry and guards every router before route effects;
 /// `None` selects the unbound listener used by the paired gateway.
+/// `worker` supplies the supervisor's generation authority for otherwise unavailable ancestry.
 pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, harness_ancestor, ready)
-        .await
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, observed_harness_ancestor, ready).await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    worker: Option<WorkerAuthority>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker,
+        move |pid, peer| Ok(ancestor(pid, peer)), ready).await
+}
+
+async fn serve_reserved_unix_with_lookup_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
+    ancestor: impl Fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+        -> Result<HarnessAncestry, AncestryUnavailableCause> + Copy + Send + Sync + 'static,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -6581,7 +7480,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     // Install it here so directly constructed routers cannot bypass the guard.
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
-        Some(store) => app.layer(from_fn_with_state(store, guard_bound_actor)),
+        Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
         None => app,
     };
     let listener = socket.listen(1024)?;
@@ -6618,7 +7517,10 @@ async fn serve_reserved_unix_with_ancestor_ready(
         let peer_pid = local_peer_pid(&stream);
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
-        let peer_process = local_peer_process(&stream).ok();
+        let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
+            Ok(peer) => (Some(peer), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6629,34 +7531,63 @@ async fn serve_reserved_unix_with_ancestor_ready(
             if let Some(connection) = &mut diagnostic_connection {
                 connection.queued();
             }
-            let (bound_agent, caller, delivery_peer, diagnostic_connection) = match peer_pid {
+            let ancestry_peer = peer_process.clone();
+            let (ancestry_result, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
-                    let bound_agent = bind_ancestry.then(|| ancestor(pid)).flatten();
+                    let ancestry = if !bind_ancestry {
+                        Ok(HarnessAncestry::Person)
+                    } else if ancestry_peer.is_none() {
+                        Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: peer_capture_error.map_or(AncestryUnavailableReason::WitnessMissing,
+                                AncestryUnavailableReason::WitnessCaptureFailed) })
+                    } else {
+                        ancestor(pid, ancestry_peer.as_ref())
+                    };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
-                        bound_agent.as_deref(),
+                        ancestry.as_ref().ok().and_then(HarnessAncestry::agent),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.finished();
                     }
-                    (bound_agent, caller, delivery_peer, diagnostic_connection)
+                    (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
-                .unwrap_or_default(),
-                None => (None, None, None, diagnostic_connection),
+                .unwrap_or_else(|error| {
+                    let ancestry = if bind_ancestry {
+                        Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) })
+                    } else { Ok(HarnessAncestry::Unavailable) };
+                    (ancestry, None, None, None)
+                }),
+                None => {
+                    let ancestry = if bind_ancestry {
+                        Err(AncestryUnavailableCause { pid: None,
+                            reason: AncestryUnavailableReason::PeerPidUnavailable })
+                    } else { Ok(HarnessAncestry::Person) };
+                    (ancestry, None, None, diagnostic_connection)
+                }
+            };
+            let (ancestry, ancestry_cause) = match ancestry_result {
+                Ok(ancestry) => (ancestry, None),
+                Err(cause) => (HarnessAncestry::Unavailable, Some(Arc::new(cause))),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
-                let bound_agent = bound_agent.clone();
+                let ancestry = ancestry.clone();
+                let ancestry_cause = ancestry_cause.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
                 let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    if let Some(cause) = ancestry_cause {
+                        request.extensions_mut().insert(cause);
+                    }
                     if let Some(connection) = diagnostic_connection {
                         request.extensions_mut().insert(connection);
                     }
@@ -6664,7 +7595,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                         request.extensions_mut().insert(LocalPeer {
                             pid,
                             peer_process,
-                            ancestor: bound_agent.clone(),
+                            ancestor: ancestry.agent().map(str::to_owned),
                         });
                     }
                     if let Some(peer) = delivery_peer {
@@ -6673,8 +7604,14 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(caller) = caller {
                         request.extensions_mut().insert(caller);
                     }
-                    if let Some(agent) = &bound_agent {
-                        request.extensions_mut().insert(BoundAgent(agent.clone()));
+                    if let Some(agent) = ancestry.agent() {
+                        request.extensions_mut().insert(BoundAgent(agent.to_owned()));
+                    }
+                    if let HarnessAncestry::Run(credential) = &ancestry {
+                        request.extensions_mut().insert(credential.clone());
+                    }
+                    if matches!(ancestry, HarnessAncestry::Unavailable) {
+                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
                     app.oneshot(request).await
                 }
@@ -6712,38 +7649,311 @@ fn publish_state_socket(socket: &Path, state_socket: &Path) -> anyhow::Result<()
 #[cfg(test)]
 mod gateway_listener_tests;
 
-#[cfg(target_os = "linux")]
-fn harness_ancestor(mut pid: u32) -> Option<String> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() && seen.insert(pid) {
-        let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
-            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        // A masked/conflicting child identity must not inherit an ancestor's authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"));
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        pid = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-    }
-    None
+/// A completed walk without a harness is different from an unverifiable caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HarnessAncestry {
+    Bound(String),
+    /// A program effect: an ancestor carries the run credential its attempt was started with
+    /// (docs/st3/program-engine.md §3). The guard resolves it to `mission-run/RUN`.
+    Run(RunCredential),
+    Person,
+    #[default]
+    Unavailable,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn harness_ancestor(_pid: u32) -> Option<String> {
-    None
+/// A run credential read from a caller's exec-time environment. Its `Debug` never shows the
+/// secret, so ancestry diagnostics cannot leak it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunCredential(String);
+
+impl RunCredential {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RunCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RunCredential(..)")
+    }
+}
+
+/// The run a request's credential binds, set by the serving guard and never by a client.
+#[derive(Clone, Debug)]
+pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
+
+pub use crate::store::run_credentials::RUN_CREDENTIAL_ENV;
+
+impl HarnessAncestry {
+    fn agent(&self) -> Option<&str> {
+        match self { Self::Bound(agent) => Some(agent), _ => None }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn of_linux_environment(environment: &[u8]) -> Self {
+        // An empty or unterminated read cannot establish absence of agent markers.
+        // Fork-only children may legitimately retain a complete parent environment.
+        if environment.is_empty() || !environment.ends_with(&[0]) {
+            return Self::Unavailable;
+        }
+        Self::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then_some(value)
+        }))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
+        let primary = lookup("ST_AGENT");
+        let legacy = lookup("FRACTAL_AGENT");
+        // A program effect acts as its run, never as an agent too: one environment naming both
+        // cannot be bound to either.
+        if let Some(credential) = lookup(RUN_CREDENTIAL_ENV) {
+            return if credential.is_empty() || primary.is_some() || legacy.is_some() {
+                Self::Unavailable
+            } else {
+                Self::Run(RunCredential::new(credential))
+            };
+        }
+        if primary.is_none() && legacy.is_none() {
+            return Self::Person;
+        }
+        if primary.is_some_and(str::is_empty)
+            || legacy.is_some_and(str::is_empty)
+        {
+            return Self::Unavailable;
+        }
+        fractal_drivers::contracts::env_with("ST_AGENT", &|name| lookup(name).map(str::to_owned))
+            .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
+            .map_or(Self::Unavailable, Self::Bound)
+    }
+}
+
+mod ancestry_diagnostics;
+
+/// Preserve pending diagnostic counts before the daemon exits.
+pub fn flush_ancestry_diagnostics() {
+    ancestry_diagnostics::flush();
+}
+
+/// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
+/// In particular, identity parsing must never attach environment values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AncestryUnavailableCause {
+    pid: Option<u32>,
+    reason: AncestryUnavailableReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AncestryUnavailableReason {
+    PeerPidUnavailable,
+    WitnessCaptureFailed(String),
+    WitnessMissing,
+    LookupTaskFailed(String),
+    ProcessReadFailed { operation: &'static str, os_error: Option<i32>, error: String },
+    ProcessMetadataInvalid(&'static str),
+    ProcessTerminal,
+    EmptyEnvironment,
+    TruncatedEnvironment,
+    InvalidIdentity,
+    GenerationUnavailable,
+    WitnessRejected(String),
+    AncestorCycle,
+    AncestorGenerationChanged,
+    ConnectorGenerationChanged(String),
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    UnsupportedPlatform,
+}
+
+impl AncestryUnavailableCause {
+    fn reason_code(&self) -> &'static str {
+        match &self.reason {
+            AncestryUnavailableReason::PeerPidUnavailable => "peer-pid-unavailable",
+            AncestryUnavailableReason::WitnessCaptureFailed(_) => "witness-capture-failed",
+            AncestryUnavailableReason::WitnessMissing => "witness-missing",
+            AncestryUnavailableReason::LookupTaskFailed(_) => "lookup-task-failed",
+            AncestryUnavailableReason::ProcessReadFailed { operation, .. } => operation,
+            AncestryUnavailableReason::ProcessMetadataInvalid(_) => "process-metadata-invalid",
+            AncestryUnavailableReason::ProcessTerminal => "process-terminal",
+            AncestryUnavailableReason::EmptyEnvironment => "empty-environment",
+            AncestryUnavailableReason::TruncatedEnvironment => "truncated-environment",
+            AncestryUnavailableReason::InvalidIdentity => "invalid-or-conflicting-identity",
+            AncestryUnavailableReason::GenerationUnavailable => "generation-unavailable",
+            AncestryUnavailableReason::WitnessRejected(_) => "initial-witness-rejected",
+            AncestryUnavailableReason::AncestorCycle => "ancestor-cycle",
+            AncestryUnavailableReason::AncestorGenerationChanged => "ancestor-generation-changed",
+            AncestryUnavailableReason::ConnectorGenerationChanged(_) => "connector-generation-changed",
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            AncestryUnavailableReason::UnsupportedPlatform => "unsupported-platform",
+        }
+    }
+
+}
+
+
+#[cfg(test)]
+fn ancestry_or_record(
+    result: Result<HarnessAncestry, AncestryUnavailableCause>,
+    mut record: impl FnMut(&AncestryUnavailableCause),
+) -> HarnessAncestry {
+    result.unwrap_or_else(|cause| {
+        record(&cause);
+        HarnessAncestry::Unavailable
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone)]
+struct HarnessProcess {
+    uid: u32,
+    generation: Option<(u32, u64)>,
+    generation_error: Option<AncestryUnavailableReason>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry(
+    mut pid: u32,
+    peer: Option<&fractal_runtime::PeerProcessIdentity>,
+    mut inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
+    identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+) -> Result<HarnessAncestry, AncestryUnavailableCause> {
+    let cause = |pid, reason| AncestryUnavailableCause { pid: Some(pid), reason };
+    let first = inspect(pid).map_err(|reason| cause(pid, reason))?;
+    let peer = peer.ok_or_else(|| cause(pid, AncestryUnavailableReason::WitnessMissing))?;
+    let (_, birth) = first.generation.ok_or_else(|| cause(pid, first.generation_error.clone()
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(pid, birth)
+        .map_err(|error| cause(pid, AncestryUnavailableReason::WitnessRejected(error.to_string())))?;
+    let connector = pid;
+    let uid = first.uid;
+    let mut first = Some(first);
+    let mut observed = std::collections::BTreeMap::new();
+    let mut binding = HarnessAncestry::Person;
+    while pid > 1 && pid != std::process::id() {
+        let process = match first.take() {
+            Some(process) => process,
+            None => inspect(pid).map_err(|reason| cause(pid, reason))?,
+        };
+        // An observed ownership transition ends this caller's cooperative ancestry.
+        if process.uid != uid { break; }
+        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error
+            .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+        if observed.insert(pid, birth).is_some() {
+            return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
+        }
+        match identity(pid).map_err(|reason| cause(pid, reason))? {
+            HarnessAncestry::Person => {}
+            HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
+            ancestry => { binding = ancestry; break; }
+        }
+        pid = parent;
+    }
+    for (pid, birth) in observed {
+        let current = inspect(pid).map_err(|reason| cause(pid, reason))?;
+        if current.uid != uid || !current.generation.is_some_and(|(_, token)| token == birth) {
+            return Err(cause(pid, current.generation_error
+                .unwrap_or(AncestryUnavailableReason::AncestorGenerationChanged)));
+        }
+    }
+    let current = inspect(connector).map_err(|reason| cause(connector, reason))?;
+    let (_, token) = current.generation.ok_or_else(|| cause(connector, current.generation_error
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(connector, token).map_err(|error| cause(connector,
+        AncestryUnavailableReason::ConnectorGenerationChanged(error.to_string())))?;
+    Ok(binding)
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation, os_error: error.raw_os_error(), error: error.to_string(),
+        });
+    let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
+    let status = read("status", "proc-status-read")?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok()).ok_or_else(|| invalid("effective-uid"))?;
+    let generation = (|| {
+        let stat = read("stat", "proc-stat-read")?;
+        let mut fields = stat.rsplit_once(") ").ok_or_else(|| invalid("stat-fields"))?.1.split_whitespace();
+        if matches!(fields.next().ok_or_else(|| invalid("state"))?, "Z" | "X" | "x") {
+            return Err(AncestryUnavailableReason::ProcessTerminal);
+        }
+        let parent = fields.next().and_then(|value| value.parse().ok()).ok_or_else(|| invalid("parent-pid"))?;
+        let birth = fields.nth(17).and_then(|value| value.parse().ok()).ok_or_else(|| invalid("start-time"))?;
+        Ok((parent, birth))
+    })();
+    let (generation, generation_error) = match generation {
+        Ok(generation) => (Some(generation), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(HarnessProcess { uid, generation, generation_error })
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    match fractal_runtime::macos_process_identity(pid) {
+        Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
+        Err(error) => {
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, os_error: None, error };
+            let uid = fractal_runtime::macos_process_owner(pid)
+                .map_err(|error| failure("process-owner-read", error.to_string()))?;
+            Ok(HarnessProcess { uid, generation: None,
+                generation_error: Some(failure("process-identity-read", error.to_string())) })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let environment = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", os_error: error.raw_os_error(), error: error.to_string(),
+        })?;
+    if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
+    if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
+    match HarnessAncestry::of_linux_environment(&environment) {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let (_, environment) = local_process_arguments(pid)
+        .ok_or(AncestryUnavailableReason::ProcessMetadataInvalid("argument-environment"))?;
+    let ancestry = HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key == name).then_some(value)
+    }));
+    match ancestry {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
+}
+
+fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    observed_harness_ancestor(pid, peer).unwrap_or(HarnessAncestry::Unavailable)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observed_harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn observed_harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    Err(AncestryUnavailableCause { pid: Some(pid),
+        reason: AncestryUnavailableReason::UnsupportedPlatform })
 }
 
 #[derive(Clone)]
@@ -6764,34 +7974,7 @@ fn native_delivery_identity(
     args: &[String],
     env: &[String],
 ) -> Option<NativeDeliveryPeer> {
-    let (transport, archives_inbox) = args.windows(2).find_map(|pair| {
-        if pair[0] != "driver" {
-            return None;
-        }
-        match pair[1].as_str() {
-            "omp-channel" | "omp" => Some(("omp-channel", false)),
-            "pi-channel" | "pi" => Some(("pi-channel", false)),
-            "claude-mcp" => Some(("claude-channel", false)),
-            "claude" => Some(("claude-channel", true)),
-            "codex" => Some(("app-server", true)),
-            "opencode" => Some(("opencode-server", true)),
-            _ => None,
-        }
-    })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
-        env.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-    }).filter(|agent| agent.starts_with("agent/"))?;
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    Some(NativeDeliveryPeer {
-        agent,
-        transport,
-        pid,
-        archives_inbox,
-    })
+    native_delivery::identity(pid, args, env)
 }
 /// Capture the kernel connector generation, independently of generic local auth.
 pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
@@ -6823,7 +8006,12 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        fractal_runtime::PeerProcessIdentity::capture_pid(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
@@ -6956,20 +8144,102 @@ fn record_legacy_poll(
     }
 }
 
+/// Generation authority supplied by the replication worker's supervisor.
+pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+
+pub fn worker_route(path: &str) -> bool {
+    path.starts_with("/v1/internal/replication/")
+        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-freshness/reads" | "/v1/internal/seat-snapshot")
+        || path == crate::peer::CLIENT_READ_FORWARD_PATH
+}
+
+pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::Result<u32>) -> anyhow::Result<()> {
+    let peer = peer.ok_or_else(|| anyhow::anyhow!("worker socket credentials missing"))?;
+    anyhow::ensure!(peer.ancestor.is_none(), "seat callers cannot act as the worker");
+    let generation = peer.peer_process.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("worker process generation unavailable"))?;
+    generation.validate()?;
+    anyhow::ensure!(generation.pid() == peer.pid && observe()? == peer.pid,
+        "socket connector is not the supervised replication worker");
+    generation.validate()
+}
+
 /// The agent whose harness a local request comes from, when it comes from one.
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+/// The identity a local request is bound to by its caller's ancestry: an agent harness, or the
+/// mission run a program effect acts as. Handlers that hold a bound caller to its own identity
+/// read this one extractor, so a bound run is never mistaken for an unbound person.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundActor {
+    Agent(String),
+    Run(String),
+}
+
+impl BoundActor {
+    pub fn of(extensions: &axum::http::Extensions) -> Option<Self> {
+        extensions.get::<BoundAgent>().map(|agent| Self::Agent(agent.0.clone()))
+            .or_else(|| extensions.get::<BoundRun>().map(|run| Self::Run(run.0.run.clone())))
+    }
+
+    /// The bound identity: the agent as the harness names it, or `mission-run/RUN`.
+    pub fn actor(&self) -> &str {
+        match self { Self::Agent(actor) | Self::Run(actor) => actor }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for BoundActor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(Self::of(&parts.extensions))
+    }
+}
+
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
-    State(store): State<Arc<Store>>,
-    request: Request<Body>,
+    State((store, worker)): State<(Arc<Store>, Option<WorkerAuthority>)>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
+    let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A run credential binds only while its attempt runs; one that no longer binds leaves the
+    // caller unverifiable, so it writes nothing.
+    request.extensions_mut().remove::<BoundRun>();
+    if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
+        let lookup = store.clone();
+        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+            Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
+            _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
+        }
+    }
     let client_request = request.uri().path().starts_with("/v1/client/");
-    match guard_bound_request(request, bound_agent.as_deref(), &store).await {
+    // This guard is outside all router layers. Authenticate here, before ancestry admission,
+    // independently of the ingress observe/enforce rollout.
+    if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && let Some(worker) = worker
+    {
+        let peer = request.extensions().get::<LocalPeer>().cloned();
+        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
+            // The supervised worker runs in no harness. Its live generation is stronger
+            // evidence than an unreadable service-manager environment.
+            request.extensions_mut().insert(HarnessAncestry::Person);
+            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+        }
+    }
+    let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
+    let result = guard_bound_request(request, bound_agent.as_deref(), &store).await;
+    if let Some(diagnostic) = ancestry_diagnostic {
+        diagnostic.record(result.as_ref().err().map(|error| error.status), verified_worker);
+    }
+    match result {
         Ok(request) => next.run(request).await,
         Err(error) if client_request => {
             let status = error.status;
@@ -6999,37 +8269,61 @@ fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bo
     }
 }
 
+/// The prefix of the routes only this node's own processes call.
+pub const INTERNAL_ROUTE_PREFIX: &str = "/v1/internal/";
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
-    let Some(bound_agent) = bound_agent else {
-        return Ok(request);
+    // A bound run follows the rules of a bound agent, as the actor `mission-run/RUN`.
+    let bound_run = request.extensions().get::<BoundRun>().map(|run| run.0.run.clone());
+    let Some(bound_agent) = bound_agent.or(bound_run.as_deref()) else {
+        return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
+            guard_unverifiable_request(request).await
+        } else {
+            Ok(request)
+        };
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
+    // Internal routes serve this node's own processes: its replication worker and its operator's
+    // CLI. A seat's harness reads fleet views through their public routes instead.
+    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        return Err(ApiError::bad(FractalError::new(
+            "foreign-agent-actor",
+            format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
+        )));
+    }
     if request.method() == axum::http::Method::GET
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
-    let bound_identity = public_identity(
-        store, crate::store::identities::IdentityKind::Agent, bound_agent,
-    )?.identity;
+    let bound_identity = if bound_run.as_deref() == Some(bound_agent) {
+        bound_agent.to_owned()
+    } else {
+        public_identity(store, crate::store::identities::IdentityKind::Agent, bound_agent)?.identity
+    };
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
-    if let Some(person) = request
-        .headers()
-        .get(client_v0::LOCAL_PERSON_HEADER)
-        .and_then(|value| value.to_str().ok())
-        && !is_bound_actor(store, person, &bound_identity)?
+    for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
+        .into_iter().flat_map(|name| request.headers().get_all(name))
+        .filter_map(|value| value.to_str().ok())
     {
-        return Err(ApiError::bad(St3Error::new(
+        if is_bound_actor(store, person, &bound_identity)? { continue; }
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
         )));
     }
     let path = request.uri().path();
     if path == "/v1/repair/apply" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "bound harnesses must use the attributed repair apply route",
         )));
@@ -7037,7 +8331,7 @@ pub async fn guard_bound_request(
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
@@ -7052,9 +8346,12 @@ pub async fn guard_bound_request(
         "/v1/agents/rollout",
         "/v1/agents/start",
         "/v1/agents/source-offline",
+        "/v1/fleet/admission-override",
+        "/v1/fleet/transports",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
+        "/v1/agents/lane/burst",
         "/v1/delivery/hold",
         "/v1/lane-changes",
         "/v1/work/",
@@ -7073,6 +8370,8 @@ pub async fn guard_bound_request(
         "/v1/rules/",
         "/v1/repair",
         "/v1/signatures/",
+        "/v1/faults/",
+        "/v1/checkpoint/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -7080,14 +8379,15 @@ pub async fn guard_bound_request(
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+    // A publication carries program bundles, so the buffer matches the publication route limit.
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT)
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
         if parts.uri.path() == "/v1/repair/apply-attributed"
             && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "foreign-agent-actor",
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
@@ -7096,12 +8396,37 @@ pub async fn guard_bound_request(
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
                 )));
             }
         }
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
+}
+
+async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
+    let refuse = || ApiError::bad(FractalError::new(
+        "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
+    ));
+    let path = request.uri().path();
+    if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+        || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
+    {
+        return Err(refuse());
+    }
+    if matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return Ok(request);
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT).await.map_err(ApiError::internal)?;
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(refuse());
     }
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
@@ -7118,8 +8443,25 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
 }
 
 
+pub fn admission_now() -> u64 {
+    (client_now_ms() / 1_000).min(u128::from(u64::MAX)) as u64
+}
+
+/// Attach process-local admission facts only at a current API response boundary.
+pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bool) {
+    if history { return; }
+    let now = admission_now();
+    for item in items {
+        let admission = item["id"].as_str()
+            .and_then(|subject| state.seat_admission.subject(subject, now));
+        if let Some(admission) = admission {
+            item["seat_admission"] = admission;
+        }
+    }
+}
+
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({
+    let mut health = json!({
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
@@ -7127,8 +8469,16 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
-    })))
+        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+    });
+    // How far this member's messages stream has come. Absent when it holds no shard, so a
+    // client that waits on both indexes knows there is only the graph to wait on.
+    if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
+        .map_err(ApiError::internal)?
+    {
+        health["messages_store_index"] = json!(index);
+    }
+    Ok(Json(health))
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -7388,7 +8738,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         name: "attention-age".into(),
         status: "warn".into(),
         message: format!(
-            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
+            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source, or with `st missions dismiss-fault` once its run has ended: {}",
             stale.len(),
             listed.join("; ")
         ),
@@ -7592,8 +8942,162 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
     }
 }
 
-/// Held silent mail is never lost: unread past a day, it is listed for its seat.
-fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
+/// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
+/// that host answers about its held mail sent before `before`: mail its seat took any step with
+/// (staged, delivered, read or closed) goes, as any such claim or mark clears the host's own held
+/// flag, and mail the host did not answer for stays, as this member cannot say it was offered. A seat with more held
+/// mail than one read asks of a host keeps this member's own count, which can only be higher.
+pub fn relayed_held_mail(
+    state: &AppState,
+    seats: Vec<(String, u64, u128)>,
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<Vec<(String, u64, u128)>> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok(seats);
+    }
+    let host_of = hosts
+        .iter()
+        .flat_map(|(host, on)| on.iter().map(move |seat| (seat.clone(), host.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    let mut sent = BTreeMap::<String, (String, u128)>::new();
+    let mut past_bound = BTreeSet::<String>::new();
+    for (seat, _, _) in seats
+        .iter()
+        .filter(|(seat, _, _)| host_of.contains_key(seat))
+    {
+        let held = state
+            .store
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT held.subject, held.sent_ms FROM coordination_sends held
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
+                 LIMIT ?3",
+            )?
+            .query_map(
+                rusqlite::params![i64::try_from(before).unwrap_or(i64::MAX), seat, message_reads::MAX_MESSAGES_PER_HOST as i64 + 1],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if held.len() > message_reads::MAX_MESSAGES_PER_HOST {
+            past_bound.insert(seat.clone());
+            continue;
+        }
+        for (subject, at) in held {
+            asks.entry(host_of[seat].clone())
+                .or_default()
+                .push(subject.clone());
+            sent.insert(subject, (seat.clone(), at));
+        }
+    }
+    let relayed = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    let mut counted = BTreeMap::<String, (u64, u128)>::new();
+    for (subject, (seat, at)) in sent {
+        if relayed
+            .get(&subject)
+            .is_some_and(|answer| answer.status().is_some())
+        {
+            continue;
+        }
+        let entry = counted.entry(seat).or_insert((0, at));
+        entry.0 += 1;
+        entry.1 = entry.1.min(at);
+    }
+    Ok(seats
+        .into_iter()
+        .filter_map(|(seat, count, oldest)| {
+            if !host_of.contains_key(&seat) || past_bound.contains(&seat) {
+                return Some((seat, count, oldest));
+            }
+            counted
+                .remove(&seat)
+                .map(|(count, oldest)| (seat, count, oldest))
+        })
+        .collect())
+}
+
+/// A constant-size progress read: no message history is read to report the migration.
+fn work_wake_index_check(state: &AppState) -> DoctorCheck {
+    let name = "work-wake-index".into();
+    match crate::store::wake_lookup::status(&state.store.readers.get()) {
+        Ok((cursor, ceiling, complete)) => DoctorCheck {
+            name,
+            status: "pass".into(),
+            message: format!(
+                "cursor={cursor} ceiling={ceiling} done={complete}; {}",
+                if complete { "wake lookups seek indexed tags only" }
+                else { "legacy recipient reads remain only for the unindexed historical tail" },
+            ),
+        },
+        Err(error) => DoctorCheck { name, status: "warn".into(), message: error.to_string() },
+    }
+}
+
+/// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
+/// while it does not, which members keep it writing claims. Either is healthy: the check informs.
+fn message_marks_check(state: &AppState) -> DoctorCheck {
+    let switched = state.store.marks_switched();
+    let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+    let message = match (switched, blockers) {
+        (Ok(true), _) => {
+            let staged = state.store.staged_switched();
+            let staged_blockers = crate::store::marks_switch::staged_blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+            match (staged, staged_blockers) {
+                (Ok(true), _) => "on: this member records its own seats' staging, delivery, read and close as local marks".to_owned(),
+                (Ok(false), Ok(blockers)) if blockers.is_empty() => "on: this member records its own seats' delivery, read and close as local marks; every member is ready for stagings, which turn to marks at the next check".to_owned(),
+                (Ok(false), Ok(blockers)) => format!(
+                    "on: this member records its own seats' delivery, read and close as local marks; stagings stay claims until every other member advertises {}=1, whose reads count a host's staging ({})",
+                    crate::store::marks_switch::STAGED_FEATURE, blockers.join("; ")),
+                (Err(error), _) | (_, Err(error)) => {
+                    return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+                }
+            }
+        }
+        (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
+        (Ok(false), Ok(blockers)) => format!(
+            "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
+            crate::store::marks_switch::FEATURE, blockers.join("; ")),
+        (Err(error), _) | (_, Err(error)) => {
+            return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+        }
+    };
+    DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
+/// How long a staging may wait for its delivery before doctor calls it stalled: in-flight mail is
+/// staged and delivered within seconds, and a rollback never follows a staging that closely.
+const STALLED_STAGING_MS: u128 = 60_000;
+
+/// While this member's seats have mail staged as a mark over [`STALLED_STAGING_MS`] ago and not yet
+/// delivered, rolling this member back below v0.3.26 would offer that mail again: a warning that
+/// names the safe floor and the release note's steps. None while there is no such mail, so a strict
+/// doctor does not fail on ordinary in-flight mail.
+fn message_staging_check(state: &AppState, now: u128) -> Option<DoctorCheck> {
+    let name = "message-staging-rollback".to_owned();
+    match crate::store::message_marks::undelivered_staged(&state.store.readers.get(), now.saturating_sub(STALLED_STAGING_MS)) {
+        Ok((0, _)) => None,
+        Ok((count, first)) => Some(DoctorCheck {
+            name,
+            status: "warn".into(),
+            message: format!(
+                "{count} message(s) this member's seats staged as local marks over a minute ago are not delivered yet ({}): rolling this member back to v0.3.25 or earlier would offer them again; v0.3.26 is the safe floor. To roll back below it, first roll every member to v0.3.26, wait a minute for stagings to turn back to claims, and let staged mail deliver (release note staging-marks-writer)",
+                first.as_deref().unwrap_or("unknown")),
+        }),
+        Err(error) => Some(DoctorCheck { name, status: "warn".into(), message: format!("{error:#}") }),
+    }
+}
+
+/// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
+/// host keeps its receipts (`message_reads`) is listed by what that host answers: this member's
+/// held flags for it never clear.
+fn held_mail_check(state: &AppState, now: u128, runtime: Option<&tokio::runtime::Handle>) -> DoctorCheck {
+    let store = &state.store;
     match store.coordination_backfill_status() {
         Ok((cursor, ceiling, false, progress))
             if now.saturating_sub(u128::from(progress)) > 15 * 60 * 1000 =>
@@ -7615,7 +9119,10 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
         }
         _ => {}
     }
-    match store.held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS)) {
+    let held = store
+        .held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS))
+        .and_then(|seats| relayed_held_mail(state, seats, now.saturating_sub(crate::silent::HELD_TOO_LONG_MS), runtime));
+    match held {
         Ok(seats) if seats.is_empty() => DoctorCheck {
             name: "held-mail".into(),
             status: "pass".into(),
@@ -7651,42 +9158,240 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
     }
 }
 
-fn unread_current_seat_counts(
-    store: &Store,
-    recipients: &BTreeSet<&str>,
-    messages: &[MessageView],
-    now: u128,
-) -> anyhow::Result<(usize, usize)> {
-    let mut pending = 0;
-    let mut accepted = 0;
-    for message in messages.iter().filter(|message| {
-        recipients.contains(message.to.as_str())
-            && !matches!(message.status.as_str(), "read" | "closed")
-            // Held mail is not late: it waits for the seat's next turn.
-            && !crate::silent::waits_for_turn(message)
-    }) {
-        let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
-        if let Some(host) = owners
-            .first()
-            .and_then(|owner| owner.member.as_ref())
-            .map(|member| member.host.as_str())
-            && host != store.origin()
-            && !store.replication_peer_up(host)?.0
-        {
-            continue;
+/// Agents whose delivery path is stale or refused, and current-seat mail that is late. Mail to a
+/// seat whose host keeps its receipts is read from that host, through `runtime`.
+fn message_delivery_check(state: &AppState, runtime: Option<&tokio::runtime::Handle>) -> anyhow::Result<DoctorCheck> {
+    let now = client_now_ms();
+    let Some(agents) = doctor_agents(&state.store, now)? else {
+        return Ok(DoctorCheck {
+            name: "message-delivery".into(),
+            status: "warn".into(),
+            message: "the agents roster is not published yet, so delivery was not checked; run doctor again shortly".into(),
+        });
+    };
+    let current_recipients = agents
+        .iter()
+        .filter_map(|agent| agent["id"].as_str())
+        .collect::<BTreeSet<_>>();
+    let mut blocked = agents
+        .iter()
+        .filter(|agent| {
+            matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
+                || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                    .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                        || reason.starts_with("ownership proof unavailable"))
+        })
+        .map(|agent| {
+            format!(
+                "{}: {}",
+                agent["id"].as_str().unwrap_or("agent"),
+                agent
+                    .pointer("/delivery/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("delivery is stale")
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut notes = Vec::new();
+    if state.store.coordination_backfill_status()?.2 {
+        let (pending, accepted, unknown) = unread_current_seat_counts(state, &current_recipients, now, runtime)?;
+        if pending > 0 {
+            blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
         }
-        let claims = store.claims_for(&message.subject, Some("message.sent"))?;
-        let sent_at = claims
-            .first()
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        if now.saturating_sub(sent_at) > 10_000 {
-            pending += 1;
-            accepted += usize::from(message.status == "delivered");
+        if !unknown.is_empty() {
+            blocked.push(format!(
+                "unknown whether {} current-seat messages were read: their recipients' hosts keep the receipts and did not answer ({})",
+                unknown.values().sum::<usize>(),
+                unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    } else {
+        // Held mail waits for its seat's turn, and which mail is held is still being indexed.
+        notes.push("overdue mail was not counted while held mail is still being indexed");
+    }
+    Ok(DoctorCheck {
+        name: "message-delivery".into(),
+        status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
+        message: if blocked.is_empty() {
+            std::iter::once("no stalled local delivery paths or overdue agent messages were observed")
+                .chain(notes)
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            blocked.into_iter().chain(notes.into_iter().map(str::to_owned)).collect::<Vec<_>>().join("; ")
+        },
+    })
+}
+
+/// The agents doctor checks delivery for, with their delivery presence. A daemon reads its newest
+/// published roster and never folds one; with no refresher running, as in a tool or a test,
+/// the cached fold serves. `None` while a running refresher has published no roster yet.
+fn doctor_agents(store: &Store, now: u128) -> anyhow::Result<Option<Vec<Value>>> {
+    let index = store.index()?;
+    let mut agents = if store.agent_roster_refresher_running() {
+        let Some((cut, cards, _)) = store.published_agent_roster(index, false) else {
+            store.request_agent_roster_refresh();
+            return Ok(None);
+        };
+        if cut < index {
+            store.request_agent_roster_refresh();
+        }
+        (*cards).clone()
+    } else {
+        client_agent_resources_cached(store, false, index)?
+    };
+    overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
+    Ok(Some(agents))
+}
+
+/// Current-seat mail older than ten seconds that its recipient has not read: how many, how
+/// many of those a native harness accepted, and, by host, how many a host that keeps its seats'
+/// receipts did not answer for. It counts from the unread and idle-mail indexes, never loading a
+/// message: a read or closed claim or local mark makes a message read. Mail to a seat whose host
+/// keeps its receipts (`message_reads`) is counted by what that host answers. Otherwise mail to a
+/// seat whose owning host is unreachable is not late here.
+pub fn unread_current_seat_counts(
+    state: &AppState,
+    recipients: &BTreeSet<&str>,
+    now: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(u64, u64, BTreeMap<String, usize>)> {
+    let store = &state.store;
+    let before = now.saturating_sub(10_000);
+    let connection = store.readers.get();
+    let overdue = crate::store::unread_mail::overdue_by_recipient(&connection, before)?;
+    if overdue.is_empty() {
+        return Ok((0, 0, BTreeMap::new()));
+    }
+    // A message names its recipient by any of its identity's names.
+    let mut seats = BTreeMap::<String, &str>::new();
+    for recipient in recipients {
+        for name in crate::store::delivery::recipient_names(
+            &connection,
+            recipient,
+            crate::store::message_bare_recipient(recipient),
+        )? {
+            seats.insert(name, recipient);
         }
     }
-    Ok((pending, accepted))
+    drop(connection);
+    // Each raw recipient's seat, by any of its names.
+    let seat_of = |to: &str| {
+        seats
+            .get(to)
+            .or_else(|| seats.get(&crate::store::normalize_message_party(to)))
+            .copied()
+    };
+    let addressed = overdue
+        .iter()
+        .filter_map(|(to, _, _)| seat_of(to).map(|seat| (to.as_str(), seat)))
+        .collect::<Vec<_>>();
+    let (relayed_names, relayed) = relayed_overdue_mail(state, &addressed, before, runtime)?;
+    let mut reachable = BTreeMap::<&str, bool>::new();
+    let (mut pending, mut accepted) = (0, 0);
+    let mut unknown = BTreeMap::<String, usize>::new();
+    for (to, count, delivered) in overdue {
+        // Counted below, from what its host answered.
+        if relayed_names.contains(&to) {
+            continue;
+        }
+        let Some(recipient) = seat_of(&to) else {
+            continue;
+        };
+        if !match reachable.get(recipient) {
+            Some(reachable) => *reachable,
+            None => {
+                let owners = store.desired_subjects_named(&[recipient.to_owned()])?;
+                let up = match owners.first().and_then(|owner| owner.member.as_ref()).map(|member| member.host.as_str()) {
+                    Some(host) if host != store.origin() => store.replication_peer_up(host)?.0,
+                    _ => true,
+                };
+                *reachable.entry(recipient).or_insert(up)
+            }
+        } {
+            continue;
+        }
+        pending += count;
+        accepted += delivered;
+    }
+    for (delivered_here, answer) in relayed {
+        match answer {
+            Some(message_reads::Relayed::Unknown { host, .. }) => *unknown.entry(host).or_default() += 1,
+            answer => match answer.as_ref().and_then(message_reads::Relayed::status) {
+                Some("read" | "closed") => {}
+                status => {
+                    pending += 1;
+                    accepted += u64::from(delivered_here || status == Some("delivered"));
+                }
+            },
+        }
+    }
+    Ok((pending, accepted, unknown))
 }
+
+/// Whether a native harness accepted a message here, and what its host said about it.
+type RelayedMail = (bool, Option<message_reads::Relayed>);
+
+/// Overdue current-seat mail to seats whose host keeps their receipts, read from those hosts.
+/// `addressed` is each raw recipient name with its seat. It returns the names asked for, and for
+/// each message asked, whether a native harness accepted it here and what its host said (`None`
+/// when the host's reply left it out). A host with more of this mail than one read asks of a host
+/// is not asked, and its seats keep this member's own count. Nothing is asked while no host keeps
+/// its seats' receipts.
+fn relayed_overdue_mail(
+    state: &AppState,
+    addressed: &[(&str, &str)],
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(BTreeSet<String>, Vec<RelayedMail>)> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let host_of = addressed
+        .iter()
+        .filter_map(|(name, seat)| {
+            hosts
+                .iter()
+                .find(|(_, on)| on.contains(*seat))
+                .map(|(host, _)| (*name, host.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if host_of.is_empty() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let names = host_of.keys().copied().collect::<Vec<_>>();
+    let mail = crate::store::unread_mail::overdue_to(&state.store.readers.get(), before, &names)?;
+    let mut on_host = BTreeMap::<&str, Vec<(String, bool)>>::new();
+    for (subject, to, delivered_here) in mail {
+        if let Some(host) = host_of.get(to.as_str()) {
+            on_host.entry(host).or_default().push((subject, delivered_here));
+        }
+    }
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    let mut delivered = Vec::new();
+    for (host, mail) in on_host {
+        if mail.len() > message_reads::MAX_MESSAGES_PER_HOST {
+            continue;
+        }
+        asks.insert(host.to_owned(), mail.iter().map(|(subject, _)| subject.clone()).collect());
+        delivered.extend(mail);
+    }
+    let asked = host_of
+        .iter()
+        .filter(|(_, host)| asks.contains_key(**host))
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    let mut answers = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    Ok((
+        asked,
+        delivered
+            .into_iter()
+            .map(|(subject, delivered_here)| (delivered_here, answers.remove(&subject)))
+            .collect(),
+    ))
+}
+
 fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     fn has_exit_code_gate(mission: &crate::model::MissionSpec) -> bool {
         let has_gate = |gates: &[crate::model::GateSpec]| {
@@ -7738,89 +9443,413 @@ fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     })
 }
 
-pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
-    let drift = state.store.operation_projection_drift();
-    doctor_report_with_operation_drift(state, &drift)
+/// All of doctor's store checks together, inside the client's 120 s request limit with room
+/// for the checks outside the store.
+pub(crate) const DOCTOR_TOTAL: Duration = Duration::from_secs(60);
+/// One check's share of it. A check past its deadline reports `timeout`, and the rest still run.
+pub(crate) const DOCTOR_CHECK: Duration = Duration::from_secs(15);
+
+/// Deadlines for doctor's checks. Each check reads under a child of doctor's budget, so the
+/// store's read interrupt ends a slow check without ending the report. The deadline stops store
+/// reads and lock waits only: a check's filesystem and runtime observations run to their end,
+/// and the check is then reported as timed out.
+pub(crate) struct DoctorClock {
+    total: smallclaims::read_budget::ReadBudget,
+    check: Duration,
 }
 
-fn doctor_report_with_operation_drift(
+impl DoctorClock {
+    pub(crate) fn new(total: Duration, check: Duration) -> Self {
+        let total = match smallclaims::read_budget::current() {
+            Some(request) => request.child(total),
+            None => smallclaims::read_budget::ReadBudget::new("/v1/doctor", total),
+        };
+        Self { total, check }
+    }
+
+    #[cfg(test)]
+    fn with_clock_for_test(
+        total: Duration,
+        check: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
+        Self { total: smallclaims::read_budget::ReadBudget::with_clock_for_test("/v1/doctor", total, now), check }
+    }
+
+    /// Run one check under its own deadline. A check whose deadline passed reports `timeout`
+    /// with its elapsed time, whatever it returned; an error fails this check alone.
+    pub(crate) fn checks(
+        &self,
+        name: &str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError>,
+    ) -> Vec<DoctorCheck> {
+        if self.total.expired() {
+            return vec![DoctorCheck {
+                name: name.into(),
+                status: "timeout".into(),
+                message: "not run: doctor's checks used all their time".into(),
+            }];
+        }
+        let budget = self.total.child(self.check);
+        let started = Instant::now();
+        let result = smallclaims::read_budget::with(Some(budget.clone()), work);
+        if budget.expired() {
+            return vec![doctor_timeout(name, started.elapsed())];
+        }
+        result.unwrap_or_else(|error| {
+            vec![DoctorCheck {
+                name: name.into(),
+                status: "fail".into(),
+                message: error.message,
+            }]
+        })
+    }
+}
+
+pub(crate) fn doctor_timeout(name: &str, elapsed: Duration) -> DoctorCheck {
+    DoctorCheck {
+        name: name.into(),
+        status: "timeout".into(),
+        message: format!("did not finish in {:.1} s; the other checks still ran", elapsed.as_secs_f64()),
+    }
+}
+
+/// How many of doctor's checks read at once: a third of the read admission limit, at most 4, so
+/// a doctor run never takes the readers a busy daemon's requests need.
+pub(crate) fn doctor_workers(read_limit: usize) -> usize {
+    (read_limit / 3).clamp(1, 4)
+}
+
+type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
+
+/// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
+/// threads, each under its own deadline from the clock, so a slow check costs its own time and
+/// not the time of the checks after it. A worker past the first reads on a reader it is
+/// admitted for, and when the pool admits none the checks run on the caller's thread. A check
+/// therefore must not need the Tokio runtime or the caller's thread-locals beyond its read budget.
+#[derive(Default)]
+pub(crate) struct DoctorChecks<'a> {
+    slots: Vec<DoctorSlot<'a>>,
+}
+
+enum DoctorSlot<'a> {
+    Done(Vec<DoctorCheck>),
+    Due(&'static str, DoctorWork<'a>),
+    Alone(&'static str, DoctorWork<'a>),
+}
+
+impl<'a> DoctorChecks<'a> {
+    /// A check whose answer needs no store read.
+    pub(crate) fn push(&mut self, check: DoctorCheck) {
+        self.slots.push(DoctorSlot::Done(vec![check]));
+    }
+
+    /// A store check, run under its own deadline.
+    pub(crate) fn check(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Due(name, Box::new(work)));
+    }
+
+    /// A store check that can take the writer, such as one that seeds the sealed replication
+    /// snapshot: it runs by itself on the caller's thread once the others are done, so no other
+    /// check reads beside its write.
+    pub(crate) fn check_alone(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Alone(name, Box::new(work)));
+    }
+
+    pub(crate) fn run(
+        self,
+        clock: &DoctorClock,
+        readers: &smallclaims::sqlite::ReadPool,
+        workers: usize,
+    ) -> Vec<DoctorCheck> {
+        let mut done = Vec::with_capacity(self.slots.len());
+        let mut due = std::collections::VecDeque::new();
+        let mut alone = Vec::new();
+        for (position, slot) in self.slots.into_iter().enumerate() {
+            match slot {
+                DoctorSlot::Done(checks) => done.push(Some(checks)),
+                DoctorSlot::Due(name, work) => {
+                    done.push(None);
+                    due.push_back((position, name, work));
+                }
+                DoctorSlot::Alone(name, work) => {
+                    done.push(None);
+                    alone.push((position, name, work));
+                }
+            }
+        }
+        let extra = workers.saturating_sub(1).min(due.len().saturating_sub(1));
+        let due = std::sync::Mutex::new(due);
+        let done = std::sync::Mutex::new(done);
+        let drain = &|| loop {
+            let Some((position, name, work)) =
+                due.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front()
+            else {
+                return;
+            };
+            let checks = clock.checks(name, work);
+            done.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[position] = Some(checks);
+        };
+        // Workers enter the request's profile operation, so their SQL counts as doctor's.
+        let profile = crate::profile::current();
+        std::thread::scope(|scope| {
+            for _ in 0..extra {
+                let Some(permit) = readers.try_admit_read() else { break };
+                let total = clock.total.clone();
+                let profile = profile.clone();
+                scope.spawn(move || {
+                    let _entered = crate::profile::enter(profile.as_ref());
+                    smallclaims::read_budget::with(Some(total), || {
+                        // A refused loan leaves this worker's checks to the others.
+                        let _ = readers.request_read_with_permit(permit, drain);
+                    })
+                });
+            }
+            drain();
+        });
+        let mut done = done.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (position, name, work) in alone {
+            done[position] = Some(clock.checks(name, work));
+        }
+        done
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+}
+
+/// A timed-out check could not say the daemon is healthy, so it fails the report as a failed
+/// check does.
+pub(crate) fn doctor_status(checks: &[DoctorCheck]) -> &'static str {
+    if checks.iter().any(|check| check.status == "fail" || check.status == "timeout") {
+        "fail"
+    } else if checks.iter().any(|check| check.status == "warn") {
+        "warn"
+    } else {
+        "pass"
+    }
+}
+
+pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
+    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK))
+}
+
+/// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
+/// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
+pub(crate) fn operation_projection_check(
+    audit: Option<crate::store::OperationAuditRecord>,
+    now_ms: u128,
+) -> DoctorCheck {
+    let period = crate::store::OPERATION_AUDIT_PERIOD;
+    let check = |status: &str, message: String| DoctorCheck {
+        name: "operation-projection".into(),
+        status: status.into(),
+        message,
+    };
+    let Some(audit) = audit else {
+        return check("warn", format!(
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
+            period.as_secs() / 60
+        ));
+    };
+    let age_ms = now_ms.saturating_sub(audit.finished_at_unix_ms);
+    let when = format!(
+        "the audit that finished {} min ago ({:.1} s)",
+        age_ms / 60_000,
+        audit.took.as_secs_f64()
+    );
+    match audit.result {
+        Ok(drift) if !drift.is_empty() => check(
+            "fail",
+            format!("operation projection drift: {}; found by {when}", drift.join(", ")),
+        ),
+        Err(error) => check("fail", format!("the last operation audit failed: {error}; {when}")),
+        Ok(_) if age_ms > 2 * period.as_millis() => check(
+            "warn",
+            format!("the operation projection matched the claim log at {when}, but audits run every {} min", period.as_secs() / 60),
+        ),
+        Ok(_) => check("pass", format!("the operation projection matched the claim log at {when}")),
+    }
+}
+
+/// What waits for a writer's signature and what is fenced, both live, and the envelopes this node
+/// admitted before it knew better. Those are historical, since admission is never revisited, so
+/// the daemon counts them off the request path, at startup and then every
+/// [`crate::store::OPERATION_AUDIT_PERIOD`]: reading every validated envelope took 46 s cold
+/// on a 56 GB store. Only a membership change adds to them, and after one doctor reports the
+/// old count as outdated and wakes the daemon to count again
+/// ([`crate::store::Store::current_fleet_residue`]).
+pub(crate) fn fleet_admission_check(
+    unsigned: u64,
+    fenced: u64,
+    residue: Option<(crate::store::FleetResidueRecord, bool)>,
+    now_ms: u128,
+) -> DoctorCheck {
+    let period = crate::store::OPERATION_AUDIT_PERIOD;
+    let mut notes = vec![format!(
+        "{unsigned} envelopes wait for their writer's signature; {fenced} are fenced"
+    )];
+    let mut status = if unsigned == 0 { "pass" } else { "warn" };
+    let why = "admitted envelopes are never readmitted, so an hour-old count is accurate";
+    match residue {
+        None => {
+            status = "warn";
+            notes.push(format!(
+                "the count of envelopes admitted before this node knew their writer's key has not finished since the daemon started; it runs at startup and then every {} min",
+                period.as_secs() / 60
+            ));
+        }
+        Some((record, moved)) => {
+            let age_ms = now_ms.saturating_sub(record.finished_at_unix_ms);
+            if moved {
+                status = "warn";
+                notes.push(
+                    "fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"
+                        .to_string(),
+                );
+            }
+            let when = format!("counted {} min ago ({:.1} s)", age_ms / 60_000, record.took.as_secs_f64());
+            match record.result {
+                Err(error) => {
+                    status = "fail";
+                    notes.push(format!("counting envelopes admitted before this node knew better failed: {error}; {when}"));
+                }
+                Ok(residue) => {
+                    if !residue.is_empty() {
+                        status = "warn";
+                    }
+                    notes.extend(residue.iter().map(|item| {
+                        format!("{} envelopes from {} were {}", item.envelopes, item.writer, item.reason.replace('-', " "))
+                    }));
+                    if age_ms > 2 * period.as_millis() {
+                        status = "warn";
+                        notes.push(format!(
+                            "envelopes admitted before this node knew better were {when}, longer ago than the {} min the daemon counts them every; {why}",
+                            period.as_secs() / 60
+                        ));
+                    } else if !residue.is_empty() {
+                        notes.push(format!("those were {when}; {why}"));
+                    }
+                }
+            }
+        }
+    }
+    DoctorCheck {
+        name: "fleet-admission".into(),
+        status: status.into(),
+        message: notes.join("; "),
+    }
+}
+
+fn doctor_report_within(
     state: &AppState,
-    drift: &anyhow::Result<Vec<String>>,
+    clock: &DoctorClock,
 ) -> Result<Json<DoctorReport>, ApiError> {
-    let mut checks = Vec::new();
-    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
-        .map_err(ApiError::internal)?
-        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
-    let access_mode = if auto { "auto" } else { "bypass" };
+    // Checks run on threads outside the runtime; a check that asks another member goes through it.
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let mut checks = DoctorChecks::default();
+    let admission = state.seat_admission.snapshot(admission_now());
     checks.push(DoctorCheck {
-        name: "harness-access-mode".into(), status: "pass".into(),
-        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+        name: "seat-admission".into(),
+        status: "pass".into(),
+        message: format!("mode={}; reason={}; pendingCount={}; oldestPendingAgeSecs={}",
+            admission["mode"].as_str().unwrap_or("unknown"),
+            admission["reason"].as_str().unwrap_or("unknown"),
+            admission["pendingCount"], admission["oldestPendingAgeSecs"]),
+    });
+    checks.check("harness-access-mode", || {
+        let mut checks = Vec::new();
+        let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+            .map_err(ApiError::internal)?
+            .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+        let access_mode = if auto { "auto" } else { "bypass" };
+        checks.push(DoctorCheck {
+            name: "harness-access-mode".into(), status: "pass".into(),
+            message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+        });
+        Ok(checks)
     });
 
-    match state.store.index() {
-        Ok(index) => checks.push(DoctorCheck {
-            name: "claim-store".into(),
-            status: "pass".into(),
-            message: format!("the claim store is readable at index {index}"),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "claim-store".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
-        checks.push(DoctorCheck {
-            name: fault.code.clone(),
-            status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
-            message: format!("{}: {}", fault.subject, fault.detail),
-        });
-    }
-    match state.store.claim_verdict_counts() {
-        Ok(counts) => checks.push(claim_signatures_check(&counts)),
-        Err(error) => checks.push(DoctorCheck {
-            name: "claim-signatures".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    match drift {
-        Ok(drift) if drift.is_empty() => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "pass".into(),
-            message: "the operation projection matches the claim log".into(),
-        }),
-        Ok(drift) => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "fail".into(),
-            message: format!("operation projection drift: {}", drift.join(", ")),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    checks.push(operations::operational_repair_check(
-        operations::owner_operational_repair_plan(state),
-    )?);
-    checks.push(
-        terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
-            name: "terminal-exec-gates".into(),
-            status: "warn".into(),
-            message: format!("could not inspect terminal exec gates: {error}"),
-        }),
-    );
-    checks.push(
-        state
-            .store
-            .account_limits_check(client_now_ms(), 3_600_000)
-            .unwrap_or_else(|error| DoctorCheck {
-                name: "account-limits".into(),
-                status: "warn".into(),
-                message: format!("could not inspect weekly account readings: {error}"),
+    checks.check("claim-store", || {
+        let mut checks = Vec::new();
+        match state.store.index() {
+            Ok(index) => checks.push(DoctorCheck {
+                name: "claim-store".into(),
+                status: "pass".into(),
+                message: format!("the claim store is readable at index {index}"),
             }),
-    );
+            Err(error) => checks.push(DoctorCheck {
+                name: "claim-store".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("claim-signatures", || {
+        let mut checks = Vec::new();
+        for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
+            checks.push(DoctorCheck {
+                name: fault.code.clone(),
+                status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
+                message: format!("{}: {}", fault.subject, fault.detail),
+            });
+        }
+        match state.store.claim_verdict_counts() {
+            Ok(counts) => checks.push(claim_signatures_check(&counts)),
+            Err(error) => checks.push(DoctorCheck {
+                name: "claim-signatures".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("operation-projection", || {
+        Ok(vec![operation_projection_check(state.store.last_operation_audit(), client_now_ms())])
+    });
+    checks.check("operational-repair", || {
+        Ok(vec![operations::operational_repair_check(
+            operations::owner_operational_repair_plan(state),
+        )?])
+    });
+    checks.check("terminal-exec-gates", || {
+        let mut checks = Vec::new();
+        checks.push(
+            terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
+                name: "terminal-exec-gates".into(),
+                status: "warn".into(),
+                message: format!("could not inspect terminal exec gates: {error}"),
+            }),
+        );
+        Ok(checks)
+    });
+    checks.check("account-limits", || {
+        let mut checks = Vec::new();
+        checks.push(
+            state
+                .store
+                .account_limits_check(client_now_ms(), 3_600_000)
+                .unwrap_or_else(|error| DoctorCheck {
+                    name: "account-limits".into(),
+                    status: "warn".into(),
+                    message: format!("could not inspect weekly account readings: {error}"),
+                }),
+        );
+        Ok(checks)
+    });
     match tempfile::Builder::new()
         .prefix(".st3-doctor-")
         .tempfile_in(&state.state_dir)
@@ -7855,685 +9884,660 @@ fn doctor_report_with_operation_drift(
             ),
         },
     });
-    let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
-    for subject in &desired {
-        if subject.kind != "stop"
-            && !subject
-                .member
-                .as_ref()
-                .is_some_and(|member| member.host == state.store.origin())
-        {
-            continue;
-        }
-        if let Some(fault) = state
-            .store
-            .member_reconcile_fault(&subject.subject, None)
-            .map_err(ApiError::internal)?
-        {
-            checks.push(DoctorCheck {
-                name: format!("member-reconcile/{}", subject.subject),
-                status: "fail".into(),
-                message: fault,
-            });
-        }
-    }
-    let terminal_required = desired.iter().any(|subject| {
-        subject
-            .member
-            .as_ref()
-            .is_some_and(|member| member.terminal)
+    checks.check("graph-references", || {
+        Ok(vec![graph_references_check(
+            &state
+                .store
+                .unresolved_graph_references()
+                .map_err(ApiError::bad)?,
+        )])
     });
-    let pty_snapshot = daemon_pty(state).and_then(|runtime| runtime.snapshot());
-    match &pty_snapshot {
-        Ok(items) => checks.push(DoctorCheck {
-            name: "pty-runtime".into(),
-            status: "pass".into(),
-            message: format!("the PTY runtime returned {} sessions", items.len()),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "pty-runtime".into(),
-            status: if terminal_required { "fail" } else { "warn" }.into(),
-            message: error.to_string(),
-        }),
-    }
-    let isolation = fractal_runtime::isolation_mode();
-    checks.push(DoctorCheck {
-        name: "process-isolation".into(),
-        status: if isolation == fractal_runtime::Isolation::DegradedDetached {
-            "warn"
-        } else {
-            "pass"
-        }
-        .into(),
-        message: match isolation {
-            fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
-            fractal_runtime::Isolation::Detached => {
-                "tasks use detached process groups on this platform".into()
+    checks.check("member-runtimes", || {
+        let mut checks = Vec::new();
+        let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
+        for subject in &desired {
+            if subject.kind != "stop"
+                && !subject
+                    .member
+                    .as_ref()
+                    .is_some_and(|member| member.host == state.store.origin())
+            {
+                continue;
             }
-            fractal_runtime::Isolation::DegradedDetached => {
-                "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
+            if let Some(fault) = state
+                .store
+                .member_reconcile_fault(&subject.subject, None)
+                .map_err(ApiError::internal)?
+            {
+                checks.push(DoctorCheck {
+                    name: format!("member-reconcile/{}", subject.subject),
+                    status: "fail".into(),
+                    message: fault,
+                });
             }
-        },
-    });
-    let mut owners = BTreeMap::<String, Vec<String>>::new();
-    for subject in &desired {
-        if let Some(member) = &subject.member {
-            owners
-                .entry(member.runtime_id.clone())
-                .or_default()
-                .push(subject.subject.clone());
         }
-    }
-    let duplicates = owners
-        .into_iter()
-        .filter(|(_, subjects)| subjects.len() > 1)
-        .map(|(runtime, subjects)| format!("{runtime}: {}", subjects.join(", ")))
-        .collect::<Vec<_>>();
-    let mut ownership_problems = duplicates
-        .iter()
-        .map(|item| format!("duplicate runtime owners: {item}"))
-        .collect::<Vec<_>>();
-    let local_live_ptys = pty_snapshot
-        .as_ref()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| item.status == "running")
-                .map(|item| item.name.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let exec_runtime =
-        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
-    for subject in &desired {
-        let Some(member) = subject
-            .member
-            .as_ref()
-            .filter(|member| member.host != state.node)
-        else {
-            continue;
-        };
-        let local_live = if member.terminal {
-            local_live_ptys.contains(&member.runtime_id)
-        } else {
-            matches!(
-                exec_runtime.observe(&member.runtime_id),
-                Ok(Some(fractal_runtime::ExecObservation::Running(_)))
-            )
-        };
-        if local_live {
-            ownership_problems.push(format!("local runtime {} for {} is placed on host/{} instead of host/{}; restore the same state directory's stable node identity before moving or restarting the seat", member.runtime_id, subject.subject, member.host, state.node));
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "runtime-ownership".into(),
-        status: if ownership_problems.is_empty() {
-            "pass"
-        } else {
-            "fail"
-        }
-        .into(),
-        message: if ownership_problems.is_empty() {
-            "each desired member has a unique runtime ID and live local runtimes match their placement".into()
-        } else {
-            ownership_problems.join("; ")
-        },
-    });
-    checks.push(claude_hooks_check(state, &desired)?);
-    checks.push(claude_usage_check(state, &desired)?);
-    checks.push(graph_references_check(
-        &state
-            .store
-            .unresolved_graph_references()
-            .map_err(ApiError::bad)?,
-    ));
-    let terminal_owned = state
-        .store
-        .terminal_owned_runtime_subjects()
-        .map_err(ApiError::internal)?;
-    let mut desired_runtime_ids = desired
-        .iter()
-        .filter(|subject| !terminal_owned.contains(&subject.subject))
-        .filter(|subject| subject.member.as_ref().is_some_and(|member| member.host == state.node))
-        .filter_map(|subject| {
+        let terminal_required = desired.iter().any(|subject| {
             subject
                 .member
                 .as_ref()
-                .map(|member| member.runtime_id.clone())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    for subject in &desired {
-        if terminal_owned.contains(&subject.subject)
-            || !subject.member.as_ref().is_some_and(|member| member.host == state.node) {
-            continue;
+                .is_some_and(|member| member.terminal)
+        });
+        let pty_snapshot = daemon_pty(state).and_then(|runtime| runtime.snapshot());
+        match &pty_snapshot {
+            Ok(items) => checks.push(DoctorCheck {
+                name: "pty-runtime".into(),
+                status: "pass".into(),
+                message: format!("the PTY runtime returned {} sessions", items.len()),
+            }),
+            Err(error) => checks.push(DoctorCheck {
+                name: "pty-runtime".into(),
+                status: if terminal_required { "fail" } else { "warn" }.into(),
+                message: error.to_string(),
+            }),
         }
-        if let Some(runtime_id) = state
-            .store
-            .latest_actual_value(&subject.subject)
-            .map_err(ApiError::internal)?
-            .as_ref()
-            .map(|actual| actual.get("fields").unwrap_or(actual))
-            .and_then(|fields| fields.get("runtime_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            desired_runtime_ids.insert(runtime_id);
-        }
-    }
-    let mut unowned = pty_snapshot
-        .as_ref()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    item.status == "running" && !desired_runtime_ids.contains(&item.name)
-                })
-                .map(|item| format!("PTY {}", item.name))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let exec_directory = state.state_dir.join("exec");
-    let exec_runtime =
-        fractal_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
-    if let Ok(entries) = fs::read_dir(&exec_directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(runtime_id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if desired_runtime_ids.contains(runtime_id) {
-                continue;
-            }
-            match exec_runtime.observe(runtime_id) {
-                Ok(Some(fractal_runtime::ExecObservation::Running(_))) => {
-                    unowned.push(format!("exec {runtime_id}"));
-                }
-                Ok(Some(fractal_runtime::ExecObservation::Indeterminate(reason))) => {
-                    unowned.push(format!("exec {runtime_id} ({reason})"));
-                }
-                Ok(Some(fractal_runtime::ExecObservation::Exited(_)) | None) => {}
-                Err(error) => unowned.push(format!("exec {runtime_id} ({error})")),
-            }
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "runtime-drift".into(),
-        status: if unowned.is_empty() { "pass" } else { "warn" }.into(),
-        message: if unowned.is_empty() {
-            "the runtime has no unowned live sessions or indeterminate records".into()
-        } else {
-            format!("unowned runtime state: {}", unowned.join(", "))
-        },
-    });
-    let mut driver_gaps = Vec::new();
-    for desired_subject in desired.iter().filter(|desired| {
-        !terminal_owned.contains(&desired.subject)
-            && desired
-                .member
-                .as_ref()
-                .and_then(|member| member.driver.as_ref())
-                .is_some()
-    }) {
-        let selected = state
-            .store
-            .status(Some(&desired_subject.subject))
-            .map_err(ApiError::internal)?
-            .subjects
-            .into_iter()
-            .next();
-        let Some(subject) = selected else {
-            continue;
-        };
-        if !subject
-            .harness
-            .as_ref()
-            .is_some_and(crate::model::CurrentHarnessView::is_ready)
-            || subject.gap.is_some()
-        {
-            driver_gaps.push(format!(
-                "{}: {}",
-                subject.subject,
-                subject
-                    .harness
-                    .as_ref()
-                    .and_then(|harness| harness.reason.as_deref())
-                    .or(subject.gap.as_deref())
-                    .unwrap_or("the current harness incarnation is not ready")
-            ));
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "driver-readiness".into(),
-        status: if driver_gaps.is_empty() {
-            "pass"
-        } else {
-            "warn"
-        }
-        .into(),
-        message: if driver_gaps.is_empty() {
-            "all desired native drivers have a ready current harness incarnation".into()
-        } else {
-            driver_gaps.join("; ")
-        },
-    });
-    match state.store.replication_status_sealed(
-        state.fleet_id.is_some(),
-        state.fleet_id.as_deref(),
-        &replication_peer_names(state),
-    ) {
-        Ok(replication) if !replication.configured => checks.push(DoctorCheck {
-            name: "replication".into(),
-            status: "pass".into(),
-            message: if state.state_dir.join("left-fleet.json").is_file() {
-                "this node is intentionally local-only after leaving its fleet".into()
-            } else {
-                "no fleet is configured; use st fleet create or st fleet join to connect this node"
-                    .into()
-            },
-        }),
-        Ok(replication) => {
-            let unavailable = replication
-                .peers
-                .iter()
-                .filter(|peer| {
-                    !matches!(
-                        peer.status.as_str(),
-                        "up" | "last-seen" | "unknown" | "refused"
-                    )
-                })
-                .map(|peer| format!("{}={}", peer.peer, peer.status))
-                .collect::<Vec<_>>();
-            // A member that listens is meant to answer, so its absence warns. A dial-out
-            // member, or a config peer outside membership, can be away for hours, as a sleeping
-            // laptop is; its absence is reported without a warning.
-            let now = client_now_ms();
-            let listening = state
-                .store
-                .fleet_view_sealed()
-                .map(|view| {
-                    view.members
-                        .into_iter()
-                        .filter(|member| member.state == "current" && member.mode == "listening")
-                        .map(|member| member.name)
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
-            let (absent, away): (Vec<_>, Vec<_>) = replication
-                .peers
-                .iter()
-                .filter(|peer| peer.status == "last-seen")
-                .partition(|peer| listening.contains(&peer.peer));
-            let describe = |peers: Vec<&crate::model::ReplicationPeerStatus>| {
-                peers
-                    .into_iter()
-                    .map(|peer| {
-                        format!(
-                            "{} {}{}{}",
-                            peer.peer,
-                            peer.last_success_at_unix_ms
-                                .map(|at| format!(
-                                    "has not exchanged for {}",
-                                    elapsed_words(now.saturating_sub(at))
-                                ))
-                                .unwrap_or_else(|| "has never exchanged with this node".into()),
-                            peer.sync
-                                .as_ref()
-                                .map(|sync| sync.local_only_envelopes
-                                    + sync.added_since_measured_envelopes)
-                                .filter(|unsent| *unsent != 0)
-                                .map(|unsent| format!(
-                                    "; this node has not sent it {unsent} envelopes"
-                                ))
-                                .unwrap_or_default(),
-                            peer.last_error
-                                .as_deref()
-                                .map(|error| format!(" (last attempt: {error})"))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let absent = describe(absent);
-            let away = describe(away);
-            let unresolved = replication.invalid_records;
-            let diverged = replication
-                .peers
-                .iter()
-                .filter(|peer| peer.sync.as_ref().is_some_and(|sync| sync.diverged))
-                .map(|peer| peer.peer.as_str())
-                .collect::<Vec<_>>();
-            let differing_tables = replication
-                .peers
-                .iter()
-                .flat_map(|peer| {
-                    peer.differing_tables
-                        .iter()
-                        .map(|table| format!("{}/{table}", peer.peer))
-                })
-                .collect::<Vec<_>>();
-            if !differing_tables.is_empty() {
-                checks.push(DoctorCheck {
-                    name: "shared-projections".into(),
-                    status: "fail".into(),
-                    message: format!(
-                        "shared tables differ at equal inventory: {}",
-                        differing_tables.join(", ")
-                    ),
-                });
-            }
-            let first_sync_failed = replication
-                .first_sync
-                .as_ref()
-                .filter(|first| first.state == "failed");
-            // A verified first sync is history. Whether this node is caught up now takes an
-            // exchange since this daemon started, and one that found nothing left to fetch.
-            let catching_up = replication
-                .peers
-                .iter()
-                .filter_map(|peer| {
-                    let sync = peer.sync.as_ref().filter(|sync| sync.catching_up)?;
-                    Some(format!(
-                        "{} has {} envelopes this node lacks",
-                        peer.peer, sync.peer_only_envelopes
-                    ))
-                })
-                .collect::<Vec<_>>();
-            // A peer whose grants refuse this node never exchanges with it directly.
-            let unmeasured = replication.timings.exchanges == 0
-                && replication
-                    .peers
-                    .iter()
-                    .any(|peer| peer.status != "refused");
-            // A removed node is never told by status alone: its peers merely stop answering.
-            let removed = crate::fleet::file::RemovalNotice::load(&state.state_dir);
-            let status = if removed.is_some()
-                || replication.unhealthy_projections != 0
-                || !diverged.is_empty()
-                || first_sync_failed.is_some()
-            {
-                "fail"
-            } else if !unavailable.is_empty()
-                || !absent.is_empty()
-                || unresolved != 0
-                || !catching_up.is_empty()
-                || unmeasured
-            {
+        let isolation = fractal_runtime::isolation_mode();
+        checks.push(DoctorCheck {
+            name: "process-isolation".into(),
+            status: if isolation == fractal_runtime::Isolation::DegradedDetached {
                 "warn"
             } else {
                 "pass"
+            }
+            .into(),
+            message: match isolation {
+                fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+                fractal_runtime::Isolation::Detached => {
+                    "tasks use detached process groups on this platform".into()
+                }
+                fractal_runtime::Isolation::DegradedDetached => {
+                    "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
+                }
+            },
+        });
+        let mut owners = BTreeMap::<String, Vec<String>>::new();
+        for subject in &desired {
+            if let Some(member) = &subject.member {
+                owners
+                    .entry(member.runtime_id.clone())
+                    .or_default()
+                    .push(subject.subject.clone());
+            }
+        }
+        let duplicates = owners
+            .into_iter()
+            .filter(|(_, subjects)| subjects.len() > 1)
+            .map(|(runtime, subjects)| format!("{runtime}: {}", subjects.join(", ")))
+            .collect::<Vec<_>>();
+        let mut ownership_problems = duplicates
+            .iter()
+            .map(|item| format!("duplicate runtime owners: {item}"))
+            .collect::<Vec<_>>();
+        let local_live_ptys = pty_snapshot
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.status == "running")
+                    .map(|item| item.name.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let exec_runtime =
+            fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+        for subject in &desired {
+            let Some(member) = subject
+                .member
+                .as_ref()
+                .filter(|member| member.host != state.node)
+            else {
+                continue;
             };
-            checks.push(DoctorCheck {
+            let local_live = if member.terminal {
+                local_live_ptys.contains(&member.runtime_id)
+            } else {
+                matches!(
+                    exec_runtime.observe(&member.runtime_id),
+                    Ok(Some(fractal_runtime::ExecObservation::Running(_)))
+                )
+            };
+            if local_live {
+                ownership_problems.push(format!("local runtime {} for {} is placed on host/{} instead of host/{}; restore the same state directory's stable node identity before moving or restarting the seat", member.runtime_id, subject.subject, member.host, state.node));
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "runtime-ownership".into(),
+            status: if ownership_problems.is_empty() {
+                "pass"
+            } else {
+                "fail"
+            }
+            .into(),
+            message: if ownership_problems.is_empty() {
+                "each desired member has a unique runtime ID and live local runtimes match their placement".into()
+            } else {
+                ownership_problems.join("; ")
+            },
+        });
+        checks.push(claude_hooks_check(state, &desired)?);
+        checks.push(claude_usage_check(state, &desired)?);
+        let terminal_owned = state
+            .store
+            .terminal_owned_runtime_subjects()
+            .map_err(ApiError::internal)?;
+        let mut desired_runtime_ids = desired
+            .iter()
+            .filter(|subject| !terminal_owned.contains(&subject.subject))
+            .filter(|subject| subject.member.as_ref().is_some_and(|member| member.host == state.node))
+            .filter_map(|subject| {
+                subject
+                    .member
+                    .as_ref()
+                    .map(|member| member.runtime_id.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for subject in &desired {
+            if terminal_owned.contains(&subject.subject)
+                || !subject.member.as_ref().is_some_and(|member| member.host == state.node) {
+                continue;
+            }
+            if let Some(runtime_id) = state
+                .store
+                .latest_actual_value(&subject.subject)
+                .map_err(ApiError::internal)?
+                .as_ref()
+                .map(|actual| actual.get("fields").unwrap_or(actual))
+                .and_then(|fields| fields.get("runtime_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                desired_runtime_ids.insert(runtime_id);
+            }
+        }
+        let mut unowned = pty_snapshot
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.status == "running" && !desired_runtime_ids.contains(&item.name)
+                    })
+                    .map(|item| format!("PTY {}", item.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let exec_directory = state.state_dir.join("exec");
+        let exec_runtime =
+            fractal_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
+        if let Ok(entries) = fs::read_dir(&exec_directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Some(runtime_id) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                if desired_runtime_ids.contains(runtime_id) {
+                    continue;
+                }
+                match exec_runtime.observe(runtime_id) {
+                    Ok(Some(fractal_runtime::ExecObservation::Running(_))) => {
+                        unowned.push(format!("exec {runtime_id}"));
+                    }
+                    Ok(Some(fractal_runtime::ExecObservation::Indeterminate(reason))) => {
+                        unowned.push(format!("exec {runtime_id} ({reason})"));
+                    }
+                    Ok(Some(fractal_runtime::ExecObservation::Exited(_)) | None) => {}
+                    Err(error) => unowned.push(format!("exec {runtime_id} ({error})")),
+                }
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "runtime-drift".into(),
+            status: if unowned.is_empty() { "pass" } else { "warn" }.into(),
+            message: if unowned.is_empty() {
+                "the runtime has no unowned live sessions or indeterminate records".into()
+            } else {
+                format!("unowned runtime state: {}", unowned.join(", "))
+            },
+        });
+        let mut driver_gaps = Vec::new();
+        for desired_subject in desired.iter().filter(|desired| {
+            !terminal_owned.contains(&desired.subject)
+                && desired
+                    .member
+                    .as_ref()
+                    .and_then(|member| member.driver.as_ref())
+                    .is_some()
+        }) {
+            let selected = state
+                .store
+                .status(Some(&desired_subject.subject))
+                .map_err(ApiError::internal)?
+                .subjects
+                .into_iter()
+                .next();
+            let Some(subject) = selected else {
+                continue;
+            };
+            if !subject
+                .harness
+                .as_ref()
+                .is_some_and(crate::model::CurrentHarnessView::is_ready)
+                || subject.gap.is_some()
+            {
+                driver_gaps.push(format!(
+                    "{}: {}",
+                    subject.subject,
+                    subject
+                        .harness
+                        .as_ref()
+                        .and_then(|harness| harness.reason.as_deref())
+                        .or(subject.gap.as_deref())
+                        .unwrap_or("the current harness incarnation is not ready")
+                ));
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "driver-readiness".into(),
+            status: if driver_gaps.is_empty() {
+                "pass"
+            } else {
+                "warn"
+            }
+            .into(),
+            message: if driver_gaps.is_empty() {
+                "all desired native drivers have a ready current harness incarnation".into()
+            } else {
+                driver_gaps.join("; ")
+            },
+        });
+        Ok(checks)
+    });
+    checks.check_alone("replication", || {
+        let mut checks = Vec::new();
+        match state.store.replication_status_sealed(
+            state.fleet_id.is_some(),
+            state.fleet_id.as_deref(),
+            &replication_peer_names(state),
+        ) {
+            Ok(replication) if !replication.configured => checks.push(DoctorCheck {
                 name: "replication".into(),
-                status: status.into(),
-                message: format!(
-                    "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
-                    removed
-                        .map(|notice| format!(
-                            "{}; ",
-                            notice.describe(replication.fleet_id.as_deref())
-                        ))
-                        .unwrap_or_default(),
-                    if !catching_up.is_empty() {
-                        format!("catching up: {}; ", catching_up.join(", "))
-                    } else if unmeasured {
-                        "no exchange with a peer since this daemon started, so whether this \
-                         node is caught up is not known yet; "
-                            .to_owned()
-                    } else {
-                        String::new()
-                    },
-                    absent
-                        .iter()
-                        .chain(&away)
-                        .map(|peer| format!("{peer}; "))
-                        .collect::<String>(),
-                    first_sync_failed
-                        .map(|first| format!(
-                            "the first sync with {} failed on an earlier build: {}; it ends at \
-                             the next exchange where both hold the same claims; ",
-                            first.peer.as_deref().unwrap_or("a peer"),
-                            first.message.as_deref().unwrap_or("no reason recorded")
-                        ))
-                        .unwrap_or_default(),
-                    if diverged.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "graph diverged from {}: the same envelopes project a different \
-                             graph, which exchanges cannot fix (st replication status); ",
-                            diverged.join(", ")
+                status: "pass".into(),
+                message: if state.state_dir.join("left-fleet.json").is_file() {
+                    "this node is intentionally local-only after leaving its fleet".into()
+                } else {
+                    "no fleet is configured; use st fleet create or st fleet join to connect this node"
+                        .into()
+                },
+            }),
+            Ok(replication) => {
+                let unavailable = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| {
+                        !matches!(
+                            peer.status.as_str(),
+                            "up" | "last-seen" | "unknown" | "refused"
                         )
-                    },
-                    replication.received_envelopes,
-                    unresolved,
-                    replication.waiting_claims,
-                    replication.unhealthy_projections,
-                    replication
-                        .unhealthy
-                        .first()
-                        .map(|projection| format!(
-                            " ({}: {})",
-                            projection.aggregate,
-                            projection
-                                .error_message
-                                .as_deref()
-                                .unwrap_or("no reason recorded")
-                        ))
-                        .unwrap_or_default(),
-                    replication
-                        .peers
-                        .iter()
+                    })
+                    .map(|peer| format!("{}={}", peer.peer, peer.status))
+                    .collect::<Vec<_>>();
+                // A member that listens is meant to answer, so its absence warns. A dial-out
+                // member, or a config peer outside membership, can be away for hours, as a sleeping
+                // laptop is; its absence is reported without a warning.
+                let now = client_now_ms();
+                let listening = state
+                    .store
+                    .fleet_view_sealed()
+                    .map(|view| {
+                        view.members
+                            .into_iter()
+                            .filter(|member| member.state == "current" && member.mode == "listening")
+                            .map(|member| member.name)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let (absent, away): (Vec<_>, Vec<_>) = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.status == "last-seen")
+                    .partition(|peer| listening.contains(&peer.peer));
+                let describe = |peers: Vec<&crate::model::ReplicationPeerStatus>| {
+                    peers
+                        .into_iter()
                         .map(|peer| {
-                            match &peer.refusal_reason {
-                                Some(reason) => format!("{}: {reason}", peer.peer),
-                                None => format!("{}={}", peer.peer, peer.status),
-                            }
+                            format!(
+                                "{} {}{}{}",
+                                peer.peer,
+                                peer.last_success_at_unix_ms
+                                    .map(|at| format!(
+                                        "has not exchanged for {}",
+                                        elapsed_words(now.saturating_sub(at))
+                                    ))
+                                    .unwrap_or_else(|| "has never exchanged with this node".into()),
+                                peer.sync
+                                    .as_ref()
+                                    .map(|sync| sync.local_only_envelopes
+                                        + sync.added_since_measured_envelopes)
+                                    .filter(|unsent| *unsent != 0)
+                                    .map(|unsent| format!(
+                                        "; this node has not sent it {unsent} envelopes"
+                                    ))
+                                    .unwrap_or_default(),
+                                peer.last_error
+                                    .as_deref()
+                                    .map(|error| format!(" (last attempt: {error})"))
+                                    .unwrap_or_default()
+                            )
                         })
                         .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
+                };
+                let absent = describe(absent);
+                let away = describe(away);
+                let unresolved = replication.invalid_records;
+                let diverged = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.sync.as_ref().is_some_and(|sync| sync.diverged))
+                    .map(|peer| peer.peer.as_str())
+                    .collect::<Vec<_>>();
+                let differing_tables = replication
+                    .peers
+                    .iter()
+                    .flat_map(|peer| {
+                        peer.differing_tables
+                            .iter()
+                            .map(|table| format!("{}/{table}", peer.peer))
+                    })
+                    .collect::<Vec<_>>();
+                if !differing_tables.is_empty() {
+                    checks.push(DoctorCheck {
+                        name: "shared-projections".into(),
+                        status: "fail".into(),
+                        message: format!(
+                            "shared tables differ at equal inventory: {}",
+                            differing_tables.join(", ")
+                        ),
+                    });
+                }
+                let first_sync_failed = replication
+                    .first_sync
+                    .as_ref()
+                    .filter(|first| first.state == "failed");
+                // A verified first sync is history. Whether this node is caught up now takes an
+                // exchange since this daemon started, and one that found nothing left to fetch.
+                let catching_up = replication
+                    .peers
+                    .iter()
+                    .filter_map(|peer| {
+                        let sync = peer.sync.as_ref().filter(|sync| sync.catching_up)?;
+                        Some(format!(
+                            "{} has {} envelopes this node lacks",
+                            peer.peer, sync.peer_only_envelopes
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                // A peer whose grants refuse this node never exchanges with it directly.
+                let unmeasured = replication.timings.exchanges == 0
+                    && replication
+                        .peers
+                        .iter()
+                        .any(|peer| peer.status != "refused");
+                // A removed node is never told by status alone: its peers merely stop answering.
+                let removed = crate::fleet::file::RemovalNotice::load(&state.state_dir);
+                let status = if removed.is_some()
+                    || replication.unhealthy_projections != 0
+                    || !diverged.is_empty()
+                    || first_sync_failed.is_some()
+                {
+                    "fail"
+                } else if !unavailable.is_empty()
+                    || !absent.is_empty()
+                    || unresolved != 0
+                    || !catching_up.is_empty()
+                    || unmeasured
+                {
+                    "warn"
+                } else {
+                    "pass"
+                };
+                checks.push(DoctorCheck {
+                    name: "replication".into(),
+                    status: status.into(),
+                    message: format!(
+                        "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        removed
+                            .map(|notice| format!(
+                                "{}; ",
+                                notice.describe(replication.fleet_id.as_deref())
+                            ))
+                            .unwrap_or_default(),
+                        if !catching_up.is_empty() {
+                            format!("catching up: {}; ", catching_up.join(", "))
+                        } else if unmeasured {
+                            "no exchange with a peer since this daemon started, so whether this \
+                             node is caught up is not known yet; "
+                                .to_owned()
+                        } else {
+                            String::new()
+                        },
+                        absent
+                            .iter()
+                            .chain(&away)
+                            .map(|peer| format!("{peer}; "))
+                            .collect::<String>(),
+                        first_sync_failed
+                            .map(|first| format!(
+                                "the first sync with {} failed on an earlier build: {}; it ends at \
+                                 the next exchange where both hold the same claims; ",
+                                first.peer.as_deref().unwrap_or("a peer"),
+                                first.message.as_deref().unwrap_or("no reason recorded")
+                            ))
+                            .unwrap_or_default(),
+                        if diverged.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "graph diverged from {}: the same envelopes project a different \
+                                 graph, which exchanges cannot fix (st replication status); ",
+                                diverged.join(", ")
+                            )
+                        },
+                        replication.received_envelopes,
+                        unresolved,
+                        replication.waiting_claims,
+                        replication.unhealthy_projections,
+                        replication
+                            .unhealthy
+                            .first()
+                            .map(|projection| format!(
+                                " ({}: {})",
+                                projection.aggregate,
+                                projection
+                                    .error_message
+                                    .as_deref()
+                                    .unwrap_or("no reason recorded")
+                            ))
+                            .unwrap_or_default(),
+                        replication
+                            .peers
+                            .iter()
+                            .map(|peer| {
+                                match &peer.refusal_reason {
+                                    Some(reason) => format!("{}: {reason}", peer.peer),
+                                    None => format!("{}={}", peer.peer, peer.status),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+            Err(error) => checks.push(DoctorCheck {
+                name: "replication".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
         }
-        Err(error) => checks.push(DoctorCheck {
-            name: "replication".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+        Ok(checks)
+    });
+    checks.check("first-readiness", || {
+        Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
+    });
     if state.fleet_id.is_some() {
         checks.push(crate::replication_worker_build::check(
             &state.state_dir,
             fractal_drivers::version::build_commit(),
         ));
     }
-    match state.store.idempotency_conflicts(5) {
-        Ok((0, _)) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "pass".into(),
-            message: "no idempotency key was used for two different requests".into(),
-        }),
-        Ok((count, conflicts)) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "warn".into(),
-            message: format!(
-                "{count} idempotency {} used for different requests on different members, as \
-                 members apart during a partition can: each such claim stands, and a retry with \
-                 the key is refused as idempotency-conflict. {}",
-                if count == 1 { "key was" } else { "keys were" },
-                conflicts
-                    .iter()
-                    .map(|claims| claims
+    checks.check("idempotency-keys", || {
+        let mut checks = Vec::new();
+        match state.store.idempotency_conflicts(5) {
+            Ok((0, _)) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "pass".into(),
+                message: "no idempotency key was used for two different requests".into(),
+            }),
+            Ok((count, conflicts)) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "warn".into(),
+                message: format!(
+                    "{count} idempotency {} used for different requests on different members, as \
+                     members apart during a partition can: each such claim stands, and a retry with \
+                     the key is refused as idempotency-conflict. {}",
+                    if count == 1 { "key was" } else { "keys were" },
+                    conflicts
                         .iter()
-                        .map(|(subject, writer)| format!("{subject} by {writer}"))
+                        .map(|claims| claims
+                            .iter()
+                            .map(|(subject, writer)| format!("{subject} by {writer}"))
+                            .collect::<Vec<_>>()
+                            .join(" and "))
                         .collect::<Vec<_>>()
-                        .join(" and "))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
+                        .join("; ")
+                ),
+            }),
+            Err(error) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
     let (recording, message) = crate::recorder::health(&state.state_dir);
     checks.push(DoctorCheck {
         name: "command-recorder".into(),
         status: if recording { "pass" } else { "warn" }.into(),
         message,
     });
-    match (
-        client_agent_resources(
-            &state.store,
-            false,
-            "",
-            state.store.index().map_err(ApiError::internal)?,
-        ),
-        state.store.operational_messages(None, false),
-    ) {
-        (Ok(agents), Ok(messages)) => {
-            let current_recipients = agents
-                .iter()
-                .filter_map(|agent| agent["id"].as_str())
-                .collect::<BTreeSet<_>>();
-            let mut blocked = agents
-                .iter()
-                .filter(|agent| {
-                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
-                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
-                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
-                                || reason.starts_with("ownership proof unavailable"))
-                })
-                .map(|agent| {
-                    format!(
-                        "{}: {}",
-                        agent["id"].as_str().unwrap_or("agent"),
-                        agent
-                            .pointer("/delivery/reason")
-                            .and_then(Value::as_str)
-                            .unwrap_or("delivery is stale")
-                    )
-                })
-                .collect::<Vec<_>>();
-            let (pending, accepted) = unread_current_seat_counts(
-                &state.store,
-                &current_recipients,
-                &messages,
-                client_now_ms(),
-            )
-            .map_err(ApiError::internal)?;
-            if pending > 0 {
-                blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
-            }
-            checks.push(DoctorCheck {
-                name: "message-delivery".into(),
-                status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
-                message: if blocked.is_empty() {
-                    "no stalled local delivery paths or overdue agent messages were observed".into()
-                } else {
-                    blocked.join("; ")
-                },
-            });
-        }
-        (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
+    checks.check("message-delivery", || {
+        Ok(vec![message_delivery_check(state, runtime.as_ref()).unwrap_or_else(|error| DoctorCheck {
             name: "message-delivery".into(),
             status: "warn".into(),
             message: error.to_string(),
-        }),
-    }
-    match mail_backlog::report(&state.store, client_now_ms()) {
-        Ok(backlog) => checks.push(DoctorCheck {
-            name: "mail-backlog".into(),
-            status: if backlog.count == 0 { "pass" } else { "warn" }.into(),
-            message: format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command),
-        }),
-        Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
-    }
-    checks.push(publication_evidence_check(&state.store));
-    checks.push(held_mail_check(&state.store, client_now_ms()));
-    match delivery_probes::check(
-        &state.store,
-        client_now_ms(),
-        &replication_peer_names(state),
-    ) {
-        Ok(Some(check)) => checks.push(check),
-        Ok(None) => {}
-        Err(error) => checks.push(DoctorCheck {
-            name: "delivery-probes".into(),
-            status: "warn".into(),
-            message: error.to_string(),
-        }),
-    }
-    // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
-    // signature, what is fenced, and what was admitted before this node knew better.
-    match state.store.fleet_anchor() {
-        Ok(None) => {}
-        Ok(Some(_)) => match (
-            state
-                .store
-                .replication_status_sealed(true, state.fleet_id.as_deref(), &[]),
-            state.store.fleet_admission_residue(),
-        ) {
-            (Ok(holds), Ok(residue)) => {
-                let mut notes = vec![format!(
-                    "{} envelopes wait for their writer's signature; {} are fenced",
-                    holds.unsigned_envelopes, holds.fenced_envelopes
-                )];
-                notes.extend(residue.iter().map(|item| {
+        })])
+    });
+    // Its count flushes the unread-mail queue under the writer; alone, it never holds a table
+    // another check reads.
+    checks.check_alone("mail-backlog", || {
+        let mut checks = Vec::new();
+        match mail_backlog::report_with_unknown(state, client_now_ms(), runtime.as_ref()) {
+            Ok((backlog, unknown)) => checks.push(DoctorCheck {
+                name: "mail-backlog".into(),
+                status: if backlog.count == 0 && unknown.is_empty() { "pass" } else { "warn" }.into(),
+                message: if unknown.is_empty() {
+                    format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command)
+                } else {
                     format!(
-                        "{} envelopes from {} were {}",
-                        item.envelopes,
-                        item.writer,
-                        item.reason.replace('-', " ")
+                        "{} unread messages older than 1h; close them with `{}`; unknown for {} more: their recipients' hosts keep the receipts and did not answer ({})",
+                        backlog.count,
+                        backlog.cleanup_command,
+                        unknown.values().sum::<usize>(),
+                        unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
                     )
-                }));
-                checks.push(DoctorCheck {
-                    name: "fleet-admission".into(),
-                    status: if residue.is_empty() && holds.unsigned_envelopes == 0 {
-                        "pass"
-                    } else {
-                        "warn"
-                    }
-                    .into(),
-                    message: notes.join("; "),
-                });
-            }
-            (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
-                name: "fleet-admission".into(),
-                status: "fail".into(),
+                },
+            }),
+            Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
+        }
+        Ok(checks)
+    });
+    checks.check("publication-evidence", || {
+        Ok(vec![publication_evidence_check(&state.store)])
+    });
+    checks.check("message-marks", || {
+        Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
+    });
+    checks.check("work-wake-index", || Ok(vec![work_wake_index_check(state)]));
+    checks.check("held-mail", || {
+        Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
+    });
+    checks.check("delivery-probes", || {
+        let mut checks = Vec::new();
+        match delivery_probes::check(
+            &state.store,
+            client_now_ms(),
+            &replication_peer_names(state),
+        ) {
+            Ok(Some(check)) => checks.push(check),
+            Ok(None) => {}
+            Err(error) => checks.push(DoctorCheck {
+                name: "delivery-probes".into(),
+                status: "warn".into(),
                 message: error.to_string(),
             }),
-        },
-        Err(error) => checks.push(DoctorCheck {
+        }
+        Ok(checks)
+    });
+    // Its live counts can seed the sealed replication snapshot under the writer, as the
+    // replication check's do.
+    checks.check_alone("fleet-admission", || {
+        // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
+        // signature, what is fenced, and what was admitted before this node knew better.
+        let check = |status: &str, message: String| DoctorCheck {
             name: "fleet-admission".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    let attention_now = client_now_ms();
-    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
-    checks.push(
-        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
-            .map_err(ApiError::internal)?,
-    );
-    checks.push(stale_attention_check(&attention, attention_now));
-    let report_status = if checks.iter().any(|check| check.status == "fail") {
-        "fail"
-    } else if checks.iter().any(|check| check.status == "warn") {
-        "warn"
-    } else {
-        "pass"
-    };
+            status: status.into(),
+            message,
+        };
+        Ok(match state.store.fleet_anchor() {
+            Ok(None) => Vec::new(),
+            Ok(Some(_)) => match state.store.replication_status_sealed(true, state.fleet_id.as_deref(), &[]) {
+                Ok(holds) => match state.store.current_fleet_residue() {
+                    Ok(residue) => vec![fleet_admission_check(
+                        holds.unsigned_envelopes,
+                        holds.fenced_envelopes,
+                        residue,
+                        client_now_ms(),
+                    )],
+                    Err(error) => vec![check("fail", error.to_string())],
+                },
+                Err(error) => vec![check("fail", error.to_string())],
+            },
+            Err(error) => vec![check("fail", error.to_string())],
+        })
+    });
+    checks.check("attention", || {
+        let mut checks = Vec::new();
+        let attention_now = client_now_ms();
+        let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+        checks.push(
+            mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+                .map_err(ApiError::internal)?,
+        );
+        checks.push(stale_attention_check(&attention, attention_now));
+        Ok(checks)
+    });
+    let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));
+    let report_status = doctor_status(&checks);
+    let mut performance = crate::performance::snapshot();
+    performance["seatAdmission"] = admission;
+    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read());
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
         checks,
-        performance: crate::performance::snapshot(),
+        performance,
     }))
 }
 
@@ -8566,11 +10570,11 @@ mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
-fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, St3Error> {
+fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
     match result {
         Ok(projected) => Ok(projected),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
-        Err(error) => Err(St3Error::new("internal", error.to_string())),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
+        Err(error) => Err(FractalError::new("internal", error.to_string())),
     }
 }
 
@@ -8685,7 +10689,7 @@ fn concrete_person(person: &str) -> Result<(), ApiError> {
     if person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7 {
         Ok(())
     } else {
-        Err(ApiError::bad(St3Error::new(
+        Err(ApiError::bad(FractalError::new(
             "person-required",
             "fleet operations need a concrete person/NAME",
         )))
@@ -8718,6 +10722,7 @@ async fn refuse_while_leaving(
     // leaving, because transport observations stop. Everything else that writes waits,
     // including invite redemption and endpoint announcements.
     let allowed = path.starts_with("/v1/internal/fleet/leave/")
+        || path.starts_with("/v1/internal/replication/shard/")
         || matches!(
             path,
             "/v1/health"
@@ -8733,7 +10738,7 @@ async fn refuse_while_leaving(
         // closes the connection under it, and the client then reports a broken pipe instead
         // of this refusal.
         let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
-        return ApiError::bad(St3Error::new(
+        return ApiError::bad(FractalError::new(
             "fleet-leaving",
             "this node is leaving its fleet and accepts no new writes; `st fleet leave --cancel` stops the leave",
         ))
@@ -8769,9 +10774,9 @@ fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
-) -> Result<&'a crate::model::MissionSpec, St3Error> {
+) -> Result<&'a crate::model::MissionSpec, FractalError> {
     let Some(mission) = intent.missions.get(expected) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}` and no immediate desired state"
@@ -8781,7 +10786,7 @@ fn launch_candidate_mission<'a>(
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
     if !mission_only_subjects(intent) || published != published_closure {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}`, its implicit mission graphs, and no immediate desired state"
@@ -8912,7 +10917,7 @@ struct PublicationRefusals {
 
 impl PublicationRefusals {
     /// The error that refuses the publication, if anything does.
-    fn error(self) -> Option<St3Error> {
+    fn error(self) -> Option<FractalError> {
         let (code, refusals) = if !self.references.is_empty() {
             ("unresolved-reference", self.references)
         } else if !self.renders.is_empty() {
@@ -8920,7 +10925,7 @@ impl PublicationRefusals {
         } else {
             return None;
         };
-        Some(St3Error::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
+        Some(FractalError::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
     }
 
     /// Lists the refusals as the preview's blockers, where each replaces a warning of the same
@@ -8955,7 +10960,7 @@ async fn publication_refusals(
         let renders = if publication.iter().any(|subject| subject.member.is_some()) {
             let current = store
                 .desired_subjects()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             crate::render::publication_refusals(&store, &publication, &current, &node)
         } else {
             Vec::new()
@@ -8978,6 +10983,10 @@ pub struct AgentSuspensionRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Suspend or resume a member of an `enforce` owned set anyway, recording source debt with
+    /// `reason`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// The seat a suspend or resume names: a declared service seat with no conflicting declaration.
@@ -9002,7 +11011,7 @@ fn suspension_target(
         .map_err(ApiError::bad)?
         .is_some_and(|o| o.holds_seat())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -9016,13 +11025,13 @@ fn suspension_target(
         .into_iter()
         .find(|item| item.subject == subject)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-agent",
                 format!("no seat `{subject}`"),
             ))
         })?;
     if !current.conflicts.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "suspend-conflict",
             "resolve the seat's conflicting declarations first",
         )));
@@ -9036,7 +11045,7 @@ fn suspension_target(
         .and_then(|desired| desired.member)
         .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-declared",
                 "only a declared, started seat can be suspended or resumed",
             ))
@@ -9047,7 +11056,7 @@ fn suspension_target(
         member = incumbent;
     }
     let token = current.desired_token.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "suspend-not-declared",
             "the seat has no selected declaration",
         ))
@@ -9114,18 +11123,23 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Suspend, force_reason)
+        .map_err(ApiError::bad)?;
     let (current, member, token) = suspension_target(state, &subject)?;
     if let Some(suspension) =
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "already-suspended",
                 format!("the seat is already {}", suspension.phase),
             )
@@ -9141,7 +11155,7 @@ pub fn request_suspend(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-running",
                 "only a running seat can be suspended",
             ))
@@ -9149,7 +11163,7 @@ pub fn request_suspend(
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
     if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-authored-session-selection",
                 format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
             )
@@ -9160,7 +11174,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-blocked",
                 format!("the seat is not quiet: {}", blocking.join(", ")),
             )
@@ -9175,20 +11189,25 @@ pub fn request_suspend(
         ),
         ("incarnation_id".into(), Value::String(incarnation.into())),
     ]);
-    if let Some(reason) = request.reason.filter(|reason| !reason.trim().is_empty()) {
-        fields.insert("reason".into(), Value::String(reason));
+    if let Some(reason) = request.reason.as_ref().filter(|reason| !reason.trim().is_empty()) {
+        fields.insert("reason".into(), Value::String(reason.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![token],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![token],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Suspend,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -9210,20 +11229,25 @@ pub fn request_resume(
     {
         return Ok(prior);
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Resume, force_reason)
+        .map_err(ApiError::bad)?;
     let (_, member, token) = suspension_target(state, &subject)?;
     check_suspension_fence(fence.as_ref(), None, &token)?;
     let suspension = crate::suspension::current(&state.store, &subject)
         .map_err(ApiError::internal)?
         .filter(|suspension| suspension.phase == "suspended")
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new("not-suspended", "the seat is not suspended"))
+            ApiError::bad(FractalError::new("not-suspended", "the seat is not suspended"))
         })?;
     let suspend = suspension.suspend_operation_id.clone().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("a suspension without its suspend request"))
     })?;
     let host = request.host.unwrap_or_else(|| member.host.clone());
     if host.is_empty() || host.contains('/') {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
         )));
@@ -9232,7 +11256,7 @@ pub fn request_resume(
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
         if host != old.host {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "rollout-in-progress",
                 "resume on the current host before applying the pending manual rollout",
             )));
@@ -9257,13 +11281,13 @@ pub fn request_resume(
                 crate::fleet::MemberState::Current(_)
             )
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "unknown-host",
                 "the resume target is not a current fleet member",
             )));
         }
         if !matches!(suspension.harness.as_deref(), Some("pi" | "omp")) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "snapshot-harness-unsupported",
                 "cross-host resume currently supports pi and omp portable transcripts",
             )));
@@ -9271,17 +11295,22 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![launch_token, suspend],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![launch_token, suspend],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Resume,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -9300,7 +11329,7 @@ async fn apply_with_authority(
     bound: Option<&str>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = request.actor.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-publication-actor",
             "publication needs an explicit actor",
         ))
@@ -9309,13 +11338,13 @@ async fn apply_with_authority(
     if !intent.direct_message_registrations.is_empty()
         && bound.is_some_and(|bound| normalized_agent_actor(actor).as_deref() != Some(bound))
     {
-        return Err(ApiError::bad(St3Error::new("foreign-agent-actor",
+        return Err(ApiError::bad(FractalError::new("foreign-agent-actor",
             "a bound harness registers a message subscription only as itself")));
     }
     for declaration in intent.mission_runs.values() {
         if let Some(creation) = &declaration.creation {
             if creation.requester == "person/requester" {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "placeholder-run-requester",
                     "a mission run needs a concrete requester, not `person/requester`",
                 )));
@@ -9323,7 +11352,7 @@ async fn apply_with_authority(
             if let Some(agent) = normalized_agent_actor(actor)
                 && creation.requester != agent
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "run-requester-actor-mismatch",
                     format!(
                         "`{actor}` cannot create a run for requester `{}`",
@@ -9336,18 +11365,68 @@ async fn apply_with_authority(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
-    let mut response = state
-        .store
-        .apply_as(
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
+    let mut response = match request.force_reason.as_deref().map(str::trim) {
+        None => state.store.apply_as(
             &intent,
             &request.expected_subjects,
             &request.idempotency_key,
             Some(actor),
-        )
-        .map_err(ApiError::bad)?;
+        ),
+        Some(reason) if !reason.is_empty() => state.store.apply_forced(
+            &intent,
+            &request.expected_subjects,
+            &request.idempotency_key,
+            Some(actor),
+            reason,
+        ),
+        Some(_) => Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason")),
+    }
+    .map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
+}
+
+/// The request body a publication may use: program bundles travel inside it as base64, and a set
+/// apply may also carry a source map of at most `MAX_MAP_BYTES`.
+pub const PUBLICATION_BODY_LIMIT: usize = 32 * 1024 * 1024 + fractal_schema::source_map::MAX_MAP_BYTES;
+
+/// Verify each program bundle a publication carries against the hash its intent names, then stage
+/// the bytes as local blobs; the `mission.published` claim that names the hash promotes them
+/// (docs/st3/program-engine.md §4). A bundle the intent does not name is refused, so a publication
+/// cannot stage arbitrary bytes, and nothing is staged unless every bundle checks out.
+pub(crate) fn store_program_bundles(
+    state: &AppState,
+    intent: &crate::model::NormalizedIntent,
+    bundles: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    use base64::Engine as _;
+    let named = intent.missions.values().flat_map(|mission| mission.programs()).map(|(_, program)| program.bundle_hash.as_str()).collect::<BTreeSet<_>>();
+    let mut verified = Vec::with_capacity(bundles.len());
+    for (hash, encoded) in bundles {
+        if !named.contains(hash.as_str()) {
+            return Err(ApiError::bad(FractalError::new(
+                "unused-program-bundle",
+                format!("the publication carries program bundle {hash}, which none of its programs names"),
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| {
+            ApiError::bad(FractalError::new("invalid-program-bundle", format!("program bundle {hash} is not base64: {error}")))
+        })?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != *hash {
+            return Err(ApiError::bad(FractalError::new(
+                "program-bundle-hash-mismatch",
+                format!("program bundle {hash} has sha256 {actual}"),
+            )));
+        }
+        verified.push(bytes);
+    }
+    for bytes in verified {
+        state.store.put_blob(&bytes).map_err(ApiError::internal)?;
+    }
+    Ok(())
 }
 
 /// One write a rule in audit mode would have refused.
@@ -9380,7 +11459,7 @@ async fn get_delivery_hold(
 ) -> Result<Json<crate::delivery_hold::HoldView>, ApiError> {
     fractal_schema::registry()
         .validate_subject(&query.subject)
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
     let store = state.store.clone();
     blocking_store(move || {
         crate::delivery_hold::view(&store, &query.subject, client_now_ms() as u64)
@@ -9393,28 +11472,38 @@ async fn post_delivery_hold(
     State(state): State<AppState>,
     Json(request): Json<crate::delivery_hold::HoldRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let force = request.force;
     let input =
         crate::delivery_hold::input(request, client_now_ms() as u64).map_err(ApiError::bad)?;
     let store = state.store.clone();
     let (claim, appended) = blocking_action(move || {
-        if input.fields.get("held") == Some(&Value::Bool(true))
-            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true))
-        {
+        use crate::store::owned_sets::Verb;
+        let holding = input.fields.get("held") == Some(&Value::Bool(true))
+            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true));
+        let reason = input.fields.get("reason").and_then(Value::as_str).map(str::to_owned);
+        let force_reason = force.then_some(reason.as_deref()).flatten();
+        if holding {
+            // An owned set's source policy refuses, audits or records an ad hoc hold as debt.
+            store.source_gate(&input.subject, Verb::Hold, force_reason)?;
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let driver = subjects
                 .first()
                 .and_then(|subject| subject.member.as_ref())
                 .and_then(|member| member.driver.as_deref());
             if !matches!(driver, Some("codex" | "opencode")) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unsupported-delivery-hold",
                     "delivery holds currently require a declared Codex or OpenCode seat",
                 ));
             }
         }
-        store.append_claim_outcome(&input)
+        if holding {
+            store.append_source_gated(&input.subject, &input, Verb::Hold, force_reason)
+        } else {
+            store.append_claim_outcome(&input)
+        }
     })
     .await?;
     if appended {
@@ -9488,17 +11577,22 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         .and_then(|reloaded| reloaded.ok())
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let now = client_now_ms() as u64;
     let mut rows = crate::objectives::rows(
         &request_latency_target_windows(),
         &limits,
-        client_now_ms() as u64,
+        now,
         fresh_ms,
     );
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::credit_objectives::rows(store, now, fresh_ms)?));
     if let Some(open) = store.open_divergences_at_last_check() {
         // Objectives come before budgets.
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
     Ok(rows)
 }
 
@@ -9559,7 +11653,7 @@ pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
 
 fn device_signature_error(code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::bad(St3Error::new(code, message.into()))
+    ApiError::bad(FractalError::new(code, message.into()))
 }
 
 /// Check a device's signature on the message this daemon is about to write, before writing it.
@@ -9689,7 +11783,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "external sender imports require the enrolled adapter endpoint",
         )));
@@ -9697,7 +11791,7 @@ pub fn accept_message_receipt_with_upload_owner(
     crate::model::refuse_person_recipient(&normalize_message_party(&request.to))
         .map_err(ApiError::bad)?;
     if request.content.trim().is_empty() && request.attachments.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-message",
             "a message needs nonempty content",
         )));
@@ -9705,7 +11799,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
         && !request.content.starts_with("doc/");
     if long_body && request.content.len() > message_body::MAX_BYTES {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "message-too-large",
             format!(
                 "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
@@ -9716,13 +11810,13 @@ pub fn accept_message_receipt_with_upload_owner(
     }
     if request.content.starts_with("doc/") {
         let (name, hash) = request.content.rsplit_once('@').ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "unpinned-document-reference",
                 "a message document reference needs `doc/NAME@HASH`",
             ))
         })?;
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-document-reference",
                 "a message document reference has an invalid hash",
             )));
@@ -9733,7 +11827,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .map_err(ApiError::internal)?
             .is_none()
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "missing-document",
                 format!("message document `{}` is not stored", request.content),
             )));
@@ -9753,7 +11847,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::reserved_event_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "daemon event tags cannot be asserted by conversation senders",
         )));
@@ -9764,7 +11858,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::is_remaining_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "remaining-count tags are delivery metadata",
         )));
@@ -9787,6 +11881,26 @@ pub fn accept_message_receipt_with_upload_owner(
         .transpose()
         .map_err(ApiError::internal)?
         .flatten();
+    // Refuse stale recipient custody before recording its reply. Settlement checks again
+    // with the accepted reply's evidence, since retirement may change during the send.
+    if let Some(parent) = parent.as_ref()
+        && parent.to == from && parent.from == to && parent.status != "closed"
+    {
+        crate::store::retirements::admit_mail_claim_to(
+            &state.store.readers.get(),
+            &ClaimInput {
+                subject: parent.subject.clone(),
+                kind: "message.closed".into(),
+                actor: Some(from.clone()),
+                fields: BTreeMap::from([("status".into(), json!("closed"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+            parent,
+        )
+        .map_err(ApiError::bad)?;
+    }
     // A signed message stores exactly the tags its device signed; only a person signs, and a
     // person's message always wakes.
     let tags = if let Some(previous) = previous
@@ -9808,7 +11922,7 @@ pub fn accept_message_receipt_with_upload_owner(
                 == crate::silent::stored_tags(&from, &stored)
         };
         if !same_tags {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "idempotency-mismatch",
                 "the idempotency key already identifies different message tags",
             )));
@@ -9893,7 +12007,7 @@ pub fn accept_message_receipt_with_upload_owner(
             let mut names = signature.signed_fields.clone();
             names.sort();
             if names == SIGNED_MESSAGE_FIELDS {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "long-message-signature-unsupported",
                     format!(
                         "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
@@ -9928,7 +12042,10 @@ pub fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => match assistant_authorization {
             Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
-            None => state.store.append_claim_outcome(&input),
+            // A reply settles its parent citing the reply's claim, so it stays on the graph until
+            // 4c-3; any other send goes where its recipient's host reads it (message_routing).
+            None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
+            None => crate::store::message_routing::send_message(&state.store, &input),
         },
     }
     .map_err(|error| {
@@ -9957,12 +12074,18 @@ pub fn accept_message_receipt_with_upload_owner(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut work_wake = is_work_wake(&tags);
+    // A send routed to the messages shard, or a repeat replaying a stream item an earlier send of
+    // this key wrote, lists past the graph's indexes; the send that wrote it settled its parent.
+    let (created_index, stream_item) =
+        crate::store::message_sent::listed_index(&state.store, &record).map_err(ApiError::internal)?;
     if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
         work_wake |= parent
             .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        if !stream_item {
+            settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        }
     }
     signal_message_changed(state, "message.sent", work_wake);
     let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
@@ -9990,7 +12113,8 @@ pub fn accept_message_receipt_with_upload_owner(
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
-            created_index: record.store_index,
+            created_index,
+            status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),
@@ -10064,16 +12188,34 @@ fn settle_answered_message(
         if !needed {
             continue;
         }
+        let input = ClaimInput {
+            subject: parent.clone(),
+            kind: format!("message.{lifecycle}"),
+            actor: Some(from.into()),
+            fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
+            evidence: vec![reply_claim.into()],
+            expected_subject: None,
+            idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
+        };
+        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            // The parent lives in the stream even though its reply cites a graph claim.
+            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
+            crate::store::retirements::admit_mail_claim_to(
+                &store.readers.get(), &input, &current,
+            )
+            .map_err(ApiError::bad)?;
+            crate::store::messages_shard::record_lifecycle(
+                store,
+                &input.subject,
+                &input.kind,
+                input.actor.as_deref(),
+                &input.fields,
+            )
+            .map_err(ApiError::bad)?;
+            continue;
+        }
         store
-            .append_claim(&ClaimInput {
-                subject: parent.clone(),
-                kind: format!("message.{lifecycle}"),
-                actor: Some(from.into()),
-                fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
-                evidence: vec![reply_claim.into()],
-                expected_subject: None,
-                idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
-            })
+            .append_claim(&input)
             .map_err(ApiError::bad)?;
     }
     Ok(())
@@ -10108,6 +12250,11 @@ fn message_subject(value: &str) -> String {
 pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
+    /// The messages stream's position the client has read through. A client that sends it also
+    /// gets the stream's message events after it, in `stream_items`; one that does not gets the
+    /// graph's events alone, as before.
+    #[serde(default)]
+    messages_after: Option<u64>,
     subject: Option<String>,
     owner_run: Option<String>,
     wait: Option<bool>,
@@ -10121,12 +12268,22 @@ struct EventPage {
     next_after: Option<u64>,
     has_more: bool,
     frontier: u64,
+    /// The messages stream's message events after `messages_after`, when the client asked and
+    /// this member holds a shard. Their `store_index` is the stream's own index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_items: Option<Vec<EventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_next_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_frontier: Option<u64>,
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
     let limit = query.limit.unwrap_or(200);
     if !(1..=200).contains(&limit) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-event-limit",
             "event page limit must be 1 through 200",
         )));
@@ -10135,6 +12292,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let after = query.after;
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
+    let messages_after = query.messages_after;
     blocking_store(move || {
         // A commit is visible here before its writer publishes the store index that client
         // snapshots read at. A cursor past that index would let a client read a resource older
@@ -10156,13 +12314,41 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
+            // Stream items have no run owner, so an owner-filtered page has none of them.
+            let stream = match messages_after {
+                Some(messages_after) if owner.is_none() => {
+                    crate::store::messages_shard::stream_reads::stream_events_page(&store, messages_after, limit)?
+                }
+                _ => None,
+            };
+            let stream_items = stream.as_ref().map(|stream| {
+                stream
+                    .items
+                    .iter()
+                    .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
+                    .cloned()
+                    .collect()
+            });
             Ok(Ok(EventPage {
                 items,
                 next_after,
                 has_more,
                 frontier,
+                stream_items,
+                messages_next_after: stream.as_ref().and_then(|stream| stream.next_after),
+                messages_has_more: stream.as_ref().map(|stream| stream.has_more),
+                messages_frontier: stream.as_ref().map(|stream| stream.frontier),
             }))
         })
     })
@@ -10179,8 +12365,12 @@ async fn events_page(
         + Duration::from_millis(query.timeout_ms.unwrap_or(30_000).clamp(10, 30_000));
     loop {
         let page = read_event_page(&state, &query).await?;
-        if page.next_after.is_some() || query.wait != Some(true) {
-            if query.wait == Some(true) && page.items.is_empty() {
+        // A stream event is news for a waiter that asked for them, as a graph event is.
+        if page.next_after.is_some() || page.messages_next_after.is_some() || query.wait != Some(true) {
+            if query.wait == Some(true)
+                && page.items.is_empty()
+                && page.stream_items.as_ref().is_none_or(Vec::is_empty)
+            {
                 // A filtered page can advance through nonmatching rows during migration.
                 // Keep its exact continuation, but pace wait-mode clients instead of inviting
                 // an immediate empty-page repoll. The caller's timeout still bounds the wait.
@@ -10234,7 +12424,7 @@ async fn quick_agent(
         .cached_idempotency_response::<crate::model::ApplyResponse>(&request.idempotency_key)
         .map_err(ApiError::internal)?;
     if selected_token != request.expected_subject && historical_apply.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-subject",
             format!("the desired state for `{agent_subject}` changed"),
         )));
@@ -10314,7 +12504,7 @@ fn scope_eval_desired_subjects(
     intent: &mut crate::model::NormalizedIntent,
     current: &[crate::model::DesiredSubject],
     owner_run: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let selected = current
         .iter()
         .map(|subject| (subject.subject.as_str(), subject))
@@ -10331,7 +12521,7 @@ fn scope_eval_desired_subjects(
             shared.push(subject.clone());
             continue;
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "eval-desired-conflict",
             format!(
                 "eval declaration `{subject}` conflicts with the selected desired state; use a run-owned declaration or an isolated daemon"
@@ -10349,13 +12539,13 @@ pub async fn start_mission_run_action(
     Json(request): Json<MissionRunRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
     let requester = request.requester.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-run-requester",
             "a mission run needs an explicit requester",
         ))
     })?;
     if requester == "person/requester" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "placeholder-run-requester",
             "a mission run needs a concrete requester, not `person/requester`",
         )));
@@ -10521,7 +12711,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
         return Ok(actor.to_owned());
     }
     normalized_agent_actor(actor).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             code,
             format!("`{actor}` is neither a person nor an agent"),
         ))
@@ -10577,13 +12767,13 @@ async fn work_action_response_viewing(
         .as_deref()
         .and_then(normalized_agent_actor)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-work-actor",
                 "a work action needs an exact agent actor",
             ))
         })?;
     let incarnation = request.incarnation.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-work-incarnation",
             "a work action must be fenced to one exact live agent incarnation",
         ))
@@ -10599,31 +12789,32 @@ async fn work_action_response_viewing(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" && !lease_view {
-            // A renewal caches its view without the fields the writer no longer folds.
+        if action != "renew" || !lease_view {
+            // A work action caches its view without the fields the writer no longer folds: a
+            // renewal's queue, timing, summaries and wake, and any other action's wake.
             let store = state.store.clone();
+            let renewal = action == "renew";
             response = blocking_action(move || {
-                store
-                    .enrich_work_response(&mut response)
-                    .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                let filled = if renewal {
+                    store.enrich_work_response(&mut response)
+                } else {
+                    store.enrich_work_wake(&mut response, None)
+                };
+                filled.map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
                 Ok(response)
             })
             .await?;
         }
         return Ok(Json(response));
     }
-    let harness = state
+    // The claim's own incarnation is judged, not the seat's newest runtime record: another
+    // host can record the end of its own old runtime for a seat that has moved (#4743).
+    if !state
         .store
-        .current_harness(&actor)
+        .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
-                "inactive-work-incarnation",
-                format!("`{actor}` has no current live harness incarnation"),
-            ))
-        })?;
-    if harness.incarnation_id != incarnation || harness.state == "ended" {
-        return Err(ApiError::bad(St3Error::new(
+    {
+        return Err(ApiError::bad(FractalError::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),
         )));
@@ -10674,7 +12865,7 @@ pub fn live_session(
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-authority-indeterminate",
             format!("subject `{subject}` has indeterminate runtime authority"),
         )));
@@ -10685,7 +12876,7 @@ pub fn live_session(
         ))
     })?;
     if origin != state.store.origin() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-not-local",
             format!(
                 "subject `{subject}` is owned by `{}` and cannot be controlled through `{}`",
@@ -10713,7 +12904,7 @@ pub fn live_session(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no incarnation")))?;
     if expected_incarnation.is_some_and(|expected| incarnation_id != expected) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-incarnation",
             format!("subject `{subject}` changed incarnation"),
         )));
@@ -10764,7 +12955,7 @@ pub async fn input_session_as(
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)
             .map_err(|error| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "invalid-session-input",
                     format!("raw terminal input is not valid base64: {error}"),
                 ))
@@ -10873,7 +13064,7 @@ pub async fn signal_session_as(
         "user-1" => libc::SIGUSR1,
         "user-2" => libc::SIGUSR2,
         other => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-session-signal",
                 format!("session signal `{other}` is not registered"),
             )));
@@ -11029,7 +13220,7 @@ fn finish_session_control(
         } else {
             "control-action-failed"
         };
-        return Err(ApiError::bad(St3Error::new(code, reason)));
+        return Err(ApiError::bad(FractalError::new(code, reason)));
     }
     Ok(Json(SessionControlResponse {
         subject: subject.into(),
@@ -11070,7 +13261,7 @@ async fn host_agent_workspace(
     if host_id == client_host_id(&state.node) {
         let workspace =
             crate::config::default_agent_workspace(&query.identity).map_err(|error| {
-                ApiError::bad(St3Error::new("validation-failed", error.to_string()))
+                ApiError::bad(FractalError::new("validation-failed", error.to_string()))
             })?;
         return Ok(Json(json!({ "host_id": host_id, "workspace": workspace })));
     }
@@ -11079,7 +13270,7 @@ async fn host_agent_workspace(
         .and_then(|value| value.to_str().ok())
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-person",
                 format!("asking {host_id} for a workspace needs a concrete person"),
             ))
@@ -11120,6 +13311,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared;
 

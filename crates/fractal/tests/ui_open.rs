@@ -78,7 +78,7 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
+        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"));
         command.arg("ui");
         command.env_clear();
         for (name, value) in environment(root, socket) {
@@ -151,11 +151,14 @@ fn state(root: &Path, node: &str) -> AppState {
     // locked: claims` from `st work ask`.
     let store = Store::open(&root.join("claims.sqlite3"), node).unwrap();
     AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),
@@ -221,7 +224,7 @@ async fn serve_publishing(
 
 /// `st ui open …` from a seat, as its own process.
 async fn seat_opens(root: &Path, socket: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"));
     command
         .arg("ui")
         .arg("open")
@@ -365,7 +368,7 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
 
 /// `st work ask …` from a seat, as its own process.
 async fn seat_asks(root: &Path, socket: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"));
     command
         .arg("work")
         .arg("ask")

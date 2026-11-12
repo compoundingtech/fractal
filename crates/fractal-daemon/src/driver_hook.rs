@@ -382,11 +382,31 @@ fn claude_observe(
 const PROMPT_ANSWER_WAIT: std::time::Duration =
     std::time::Duration::from_millis(crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS as u64);
 const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a subagent's prompt waits for a person before st denies it: as long as Claude waits
+/// before it denies a top-level dangerous-removal prompt itself. A background subagent's dialog has
+/// no such deadline (Claude Code 2.1.302), so the subagent would wait until someone happened on the
+/// seat's terminal.
+const SUBAGENT_PROMPT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// What a subagent reads when st denies its prompt because nobody answered it.
+const SUBAGENT_PROMPT_UNANSWERED: &str = "No person answered this permission prompt within 2 minutes, so st denied it. The call was not run. If it removes files after a cd, remove them by literal absolute path instead (rm -f /full/path/to/dir/*), never by a relative glob.";
+
+/// How a hook's wait on its prompt ended.
+#[derive(Debug, PartialEq, Eq)]
+enum PromptWait {
+    /// A person answered from a client: their answer.
+    Answered(String),
+    /// The prompt closed elsewhere, such as in the terminal.
+    Gone,
+    /// Still open when the wait ran out.
+    Unanswered,
+}
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
 /// shows its dialog; if the person answers in st first, the hook returns that decision, which
 /// closes the dialog (measured on Claude Code 2.1.296, for the seat's own prompts and its
-/// subagents', and for `AskUserQuestion`, whose answer carries the person's choices).
+/// subagents', and for `AskUserQuestion`, whose answer carries the person's choices). A subagent's
+/// prompt nobody answers within [`SUBAGENT_PROMPT_ANSWER_WAIT`] is denied, so the subagent reads why
+/// and carries on; its next event closes the prompt (`fractal_drivers::claude_prompts`).
 fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
     // This hook's own prompt, as the seat's open prompts name it: it is answered only once the
@@ -423,7 +443,8 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
     // allow only that exact call, never whichever call happens to be pending.
     let call = fractal_drivers::claude_prompts::prompt_call(agent_dir, &prompt);
     let mut published = false;
-    let answer = wait_for_prompt_answer(
+    let output = prompt_output(
+        &payload,
         || match fractal_drivers::claude_prompts::waiting(agent_dir, &prompt) {
             fractal_drivers::claude_prompts::Waiting::Gone => {
                 Some(crate::store::NativePromptState::Gone)
@@ -453,12 +474,10 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
             }
         },
         PROMPT_ANSWER_WAIT,
+        SUBAGENT_PROMPT_ANSWER_WAIT,
         PROMPT_ANSWER_POLL,
     );
-    if let Some(output) = answer
-        .as_deref()
-        .and_then(|answer| permission_decision(answer, &payload))
-    {
+    if let Some(output) = output {
         println!("{output}");
     }
 }
@@ -642,23 +661,43 @@ pub async fn publish_prompt_call(
     .is_ok_and(|posted| posted.is_ok())
 }
 
-/// Poll `state` until the prompt is answered (its answer), gone, or `wait` runs out (none).
+/// Poll `state` until the prompt is answered, gone, or `wait` runs out.
 fn wait_for_prompt_answer(
     mut state: impl FnMut() -> Option<crate::store::NativePromptState>,
     wait: std::time::Duration,
     poll: std::time::Duration,
-) -> Option<String> {
+) -> PromptWait {
     let deadline = std::time::Instant::now() + wait;
     loop {
         match state() {
-            Some(crate::store::NativePromptState::Answered { answer }) => return Some(answer),
-            Some(crate::store::NativePromptState::Gone) => return None,
+            Some(crate::store::NativePromptState::Answered { answer }) => return PromptWait::Answered(answer),
+            Some(crate::store::NativePromptState::Gone) => return PromptWait::Gone,
             Some(crate::store::NativePromptState::Open) | None => {}
         }
         if std::time::Instant::now() + poll > deadline {
-            return None;
+            return PromptWait::Unanswered;
         }
         std::thread::sleep(poll);
+    }
+}
+
+/// What a permission hook prints for the prompt `payload` opened, once it has waited on `state`:
+/// the person's answer, or st's deny of a subagent's prompt nobody answered within `subagent_wait`.
+/// The seat's own prompt waits `wait` and, unanswered, prints nothing: Claude's dialog stays.
+fn prompt_output(
+    payload: &Value,
+    state: impl FnMut() -> Option<crate::store::NativePromptState>,
+    wait: std::time::Duration,
+    subagent_wait: std::time::Duration,
+    poll: std::time::Duration,
+) -> Option<String> {
+    let subagent = fractal_drivers::claude_prompts::asker(payload).is_some();
+    match wait_for_prompt_answer(state, if subagent { subagent_wait } else { wait }, poll) {
+        PromptWait::Answered(answer) => permission_decision(&answer, payload),
+        PromptWait::Unanswered if subagent => Some(decision_output(
+            serde_json::json!({"behavior": "deny", "message": SUBAGENT_PROMPT_UNANSWERED}),
+        )),
+        PromptWait::Gone | PromptWait::Unanswered => None,
     }
 }
 
@@ -721,11 +760,14 @@ fn permission_decision(answer: &str, payload: &Value) -> Option<String> {
         }
         _ => return None,
     };
-    Some(
-        serde_json::json!({"hookSpecificOutput": {
-            "hookEventName": "PermissionRequest", "decision": decision}})
-        .to_string(),
-    )
+    Some(decision_output(decision))
+}
+
+/// The hook output that hands Claude `decision` for its prompt.
+fn decision_output(decision: Value) -> String {
+    serde_json::json!({"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest", "decision": decision}})
+    .to_string()
 }
 
 /// Check that the SessionStart just applied bound this wrapper session to Claude's session.
@@ -1210,21 +1252,21 @@ mod tests {
         .into_iter();
         assert_eq!(
             super::wait_for_prompt_answer(|| states.next().flatten(), wait, tick),
-            Some("allow".into())
+            super::PromptWait::Answered("allow".into())
         );
         // Answered in the terminal: nothing to say, and the hook stops waiting.
         assert_eq!(
             super::wait_for_prompt_answer(|| Some(NativePromptState::Gone), wait, tick),
-            None
+            super::PromptWait::Gone
         );
-        // Nobody answers in time: the hook says nothing and Claude's dialog stays.
+        // Nobody answers in time.
         assert_eq!(
             super::wait_for_prompt_answer(
                 || Some(NativePromptState::Open),
                 std::time::Duration::from_millis(5),
                 tick
             ),
-            None
+            super::PromptWait::Unanswered
         );
         let bash = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "make"}});
         let allow: Value =
@@ -1236,6 +1278,54 @@ mod tests {
         assert_eq!(deny["hookSpecificOutput"]["decision"]["behavior"], "deny");
         assert!(super::permission_decision("maybe", &bash).is_none());
         assert!(super::permission_decision(r#"{"Which?":"Red"}"#, &bash).is_none());
+    }
+
+    /// A subagent's prompt nobody answers is denied at the subagent's own wait, Claude's two
+    /// minutes, so the subagent reads why and carries on (Claude Code issue 104925: a background subagent's
+    /// dialog never times out). One a person answers within that wait gets their answer. The seat's
+    /// own prompt keeps today's wait and, unanswered, prints nothing: Claude's dialog stays.
+    #[test]
+    fn a_subagents_unanswered_prompt_is_denied_at_its_own_wait() {
+        use crate::store::NativePromptState;
+        use std::time::{Duration, Instant};
+        assert_eq!(super::SUBAGENT_PROMPT_ANSWER_WAIT, Duration::from_secs(120));
+        assert_eq!(super::PROMPT_ANSWER_WAIT, Duration::from_secs(600));
+        let (tick, short, long) = (Duration::from_millis(1), Duration::from_millis(20), Duration::from_secs(600));
+        let call = serde_json::json!({"command": "cd /scratch && rm -f out/*"});
+        let subagent = serde_json::json!({"tool_name": "Bash", "tool_input": call, "agent_id": "agent-a"});
+        let top = serde_json::json!({"tool_name": "Bash", "tool_input": call});
+
+        // Unanswered: denied once the subagent's wait runs out, long before the seat's own would.
+        let started = Instant::now();
+        let output = super::prompt_output(&subagent, || Some(NativePromptState::Open), long, short, tick);
+        assert!(started.elapsed() < Duration::from_secs(60), "the subagent waited the seat's wait");
+        let denied: Value = serde_json::from_str(&output.expect("st denies the prompt")).unwrap();
+        assert_eq!(denied["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        let decision = &denied["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "deny");
+        let message = decision["message"].as_str().unwrap();
+        for said in ["within 2 minutes", "The call was not run", "literal absolute path", "never by a relative glob"] {
+            assert!(message.contains(said), "{said}: {message}");
+        }
+
+        // Answered within the wait: the person's answer, not st's.
+        let mut states = vec![
+            Some(NativePromptState::Open),
+            Some(NativePromptState::Answered { answer: "deny".into() }),
+        ]
+        .into_iter();
+        let answered: Value = serde_json::from_str(
+            &super::prompt_output(&subagent, || states.next().flatten(), long, long, tick).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(answered["hookSpecificOutput"]["decision"]["message"], "The person denied this from st.");
+        // Closed elsewhere first: nothing to say.
+        assert_eq!(super::prompt_output(&subagent, || Some(NativePromptState::Gone), long, long, tick), None);
+
+        // The seat's own prompt, unanswered at its own wait: nothing, and Claude's dialog stays.
+        let started = Instant::now();
+        assert_eq!(super::prompt_output(&top, || Some(NativePromptState::Open), short, long, tick), None);
+        assert!(started.elapsed() < Duration::from_secs(60), "the seat's prompt waited the subagent's wait");
     }
 
     /// A question's answer is its choices: Claude takes them as the tool's `answers`, beside the
@@ -1322,7 +1412,7 @@ mod tests {
             || Some(store.native_prompt_state(seat, 1, 3).unwrap()),
             std::time::Duration::ZERO,
             std::time::Duration::from_millis(1),
-        ), None);
+        ), super::PromptWait::Unanswered);
         // The polling hook has returned without a decision. An answer can still
         // arrive in Fractal, but there is no hook left to apply it to Claude.
         append("harness.diagnostic", serde_json::json!({

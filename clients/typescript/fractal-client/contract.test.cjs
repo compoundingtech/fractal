@@ -64,6 +64,43 @@ test('cancellation after async credentials prevents sending an action', async ()
     assert.equal(fetches, 0);
 });
 
+test('AbortSignal polyfills without throwIfAborted reach fetch unless aborted', async () => {
+    let fetches = 0;
+    const signal = { aborted: false };
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async (_url, init) => {
+            fetches++;
+            assert.equal(init.signal, signal);
+            return response(capabilityFixture);
+        },
+    });
+    await client.capabilities({ signal });
+    assert.equal(fetches, 1);
+    signal.aborted = true;
+    for (const reason of [new Error('cancelled by caller'), 'cancelled', 0, false]) {
+        signal.reason = reason;
+        await assert.rejects(client.capabilities({ signal }), error => error === reason);
+        await assert.rejects(client.discover({ signal }), error => error === reason);
+    }
+    assert.equal(fetches, 1);
+});
+
+test('aborted legacy signals use AbortError with and without global DOMException', async t => {
+    let fetches = 0;
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async () => { fetches++; return response(capabilityFixture); },
+    });
+    const signal = { aborted: true };
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof DOMException && error.name === 'AbortError');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'DOMException');
+    t.after(() => Object.defineProperty(globalThis, 'DOMException', descriptor));
+    globalThis.DOMException = undefined;
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof Error && error.name === 'AbortError' && error.message === 'This operation was aborted');
+    assert.equal(fetches, 0);
+});
+
 test('actual delayed WebSocket upgrade distinguishes readiness and contains malformed frames', async t => {
     const http = require('node:http');
     const { once } = require('node:events');
@@ -239,6 +276,44 @@ test('push registration commands use paired credentials and a local response wit
     assert.equal(calls[1][1].body, undefined);
 });
 
+test('phone commands preserve typed bodies, full ids, reactive wait and normal envelopes', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/device-command.json');
+    const report = require('../../../docs/st3/client-v0/fixtures/device-command-result.json');
+    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: wire.value.command_kind, args: wire.value.args, ttl_ms: 30000 };
+    const calls = [];
+    const controller = new AbortController();
+    const client = new FractalClient({
+        baseUrl: 'https://example.test', credential: () => 'phone-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : wire);
+        },
+    });
+    assert.deepEqual(await client.deviceCommand(command), wire);
+    assert.deepEqual(await client.deviceCommandGet(wire.value.id, { wait: true }, { signal: controller.signal }), wire);
+    assert.deepEqual(await client.deviceResult(report), wire);
+    assert.deepEqual(calls.map(([url, init]) => [url, init.method]), [
+        ['https://example.test/v1/client/device-commands', 'POST'],
+        ['https://example.test/v1/client/capabilities', 'GET'],
+        [`https://example.test/v1/client/device-commands/${encodeURIComponent(wire.value.id)}?wait=true`, 'GET'],
+        ['https://example.test/v1/client/device-results', 'POST'],
+    ]);
+    assert.deepEqual(JSON.parse(calls[0][1].body), command);
+    assert.deepEqual(JSON.parse(calls[3][1].body), report);
+    assert.equal(calls[2][1].signal, controller.signal);
+    assert(calls.every(([, init]) => init.headers.Authorization === 'Bearer phone-credential'));
+});
+
+test('commands windows use existing snapshot and changes frames with resource discriminators', () => {
+    const command = require('../../../docs/st3/client-v0/fixtures/device-command.json').value;
+    const initial = { kind: 'snapshot', id: 'commands', collection: 'commands', snapshot, items: [command], order: [command.id], has_more: false };
+    const window = applyWindow(undefined, initial);
+    assert.equal(window.items[0].kind, 'device-command');
+    const completed = { ...command, state: 'completed', revision: `${command.id}:completed`, result: { route: 'Conversation' } };
+    const changed = applyWindow(window, { kind: 'changes', id: 'commands', collection: 'commands', snapshot, upserts: [completed], removes: [], order: [command.id], has_more: false });
+    assert.deepEqual(changed.items, [completed]);
+});
+
 test('every HTTP API keeps cancellation in transport options, including all manifest reads and actions', async () => {
     const manifest = require('../../../docs/st3/client-v0/schemas/operations.json');
     const methodName = id => {
@@ -249,14 +324,17 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
-            case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
-            case 'arrangements.list': return ['person/example', {}, options];
+            case 'attention-budget': return ['mission/example', undefined, undefined, options];
+            case 'device-command.get': return ['device-command/example', { wait: true }, options];
+            case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
+            case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
             case 'arrangements.memberships': return ['example', 'arrangement-id', 'person/example', {}, options];
             case 'conversation.search': return ['needle', {}, options];
             case 'resources.list': return [{}, {}, options];
             case 'agent-declaration.get': return ['agent/example', undefined, false, options];
             case 'publication.definition': return ['mission/example', options];
+            case 'mission-declaration.get': return ['mission/example', undefined, options];
             case 'subject.definition': return ['mission/example', false, options];
             case 'conversation-content.chunk': return ['session/example', 'reference', 0, options];
             case 'conversation.changes': case 'timeline.list': return ['session/example', {}, options];
@@ -265,6 +343,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'terminal.screen': return ['terminal/example', options];
             case 'harness-inventory.get': return ['agent/example', {}, options];
             default:
+                if (id.startsWith('github-plugin.')) return ['acme', 'garden', 7, options];
                 if (id.startsWith('assistant.')) return [{}, { payload: { projection: id.slice('assistant.'.length), parameters: {}, max_response_bytes: 4096 } }, options];
                 if (id.endsWith('.get')) return ['resource/example', options];
                 if (id.startsWith('launch-')) return ['launch/example', {}, options];
@@ -298,6 +377,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         ['terminalsListFiltered', options => [{}, options]],
         ['pushRegister', options => [{ token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' }, options]],
         ['pushUnregister', options => [options]],
+        ['deviceCommand', options => [{ api_version: 'st3.client.v0', device: 'device/phone', kind: 'phone.inspect', args: {} }, options]],
+        ['deviceResult', options => [{ command_id: 'device-command/example', outcome: 'completed' }, options]],
     );
     for (const [method, argumentsFor] of cases) {
         const requests = [];
@@ -696,6 +777,40 @@ test('collection stream holds commands until the socket opens and passes frames 
     assert.deepEqual(socket.closed, [1000]);
 });
 
+test('collection native errors retain only NSError identity through plainError', async () => {
+    for (const [domain, code] of [['NSURLErrorDomain', -1009], ['SRWebSocketErrorDomain', 2132], ['NSPOSIXErrorDomain', 0]]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        const onerror = socket.onerror;
+        const event = { domain, code, message: 'private credential', localizedDescription: 'private gateway', userInfo: { url: 'https://private.invalid' } };
+        onerror(event);
+        onerror(event);
+        assert.equal(ends.length, 1);
+        assert.ok(ends[0] instanceof Error);
+        assert.equal(ends[0].message, `The collections socket failed (${domain} ${code})`);
+        assert.equal(plainError(ends[0]), ends[0].message);
+        assert.doesNotMatch(JSON.stringify({ issue: plainError(ends[0]) }), /private|localizedDescription|userInfo/);
+        assert.equal(socket.onopen, null);
+        assert.equal(socket.onerror, null);
+    }
+});
+
+test('browser and incomplete native collection errors retain generic text without event messages', async () => {
+    for (const event of [undefined, null, {}, new Error('private browser failure'),
+        { message: 'private' }, { domain: 'NSURLErrorDomain' }, { code: -1009 },
+        { domain: 1, code: -1009 }, { domain: 'NSURLErrorDomain', code: '-1009' },
+        { domain: 'NSURLErrorDomain', code: NaN }, { domain: 'NSURLErrorDomain', code: Infinity },
+        { domain: 'NSURLErrorDomain', code: 1.5 }]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        socket.onerror(event);
+        assert.equal(ends.length, 1);
+        assert.equal(plainError(ends[0]), 'The collections socket failed');
+    }
+});
+
 test('command observers see queued and direct commands only after socket.send', async () => {
     const socket = collectionSocket();
     const observed = [];
@@ -997,6 +1112,27 @@ test('reads bounded seat status history through the paired gateway', async () =>
     assert.equal(result.value.items[0].reset, true);
 });
 
+test('reads semantic related mission rows without joining agent work', async () => {
+    const calls = [];
+    const rows = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/agent-related-runs.json'), 'utf8'));
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : rows));
+    } });
+    const result = await client.agentRelatedRunsGet('agent/example');
+    assert.equal(calls[1], 'https://example.test/v1/client/agent-related-runs/agent%2Fexample');
+    assert.deepEqual(result.value, rows);
+});
+
+test('related runs on old daemons are typed unsupported, not an empty list', async () => {
+    for (const body of ['', JSON.stringify({ code: 'not-found', message: 'unknown route' })]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url =>
+            url.endsWith('/capabilities') ? response(envelope(capabilities)) : new Response(body, { status: 404 }) });
+        await assert.rejects(client.agentRelatedRunsGet('agent/example'),
+            error => error instanceof ClientError && error.response.code === 'unsupported-capability' && error.status === 404);
+    }
+});
+
 test('canonical publication read encodes mission and schedule subjects and preserves defaults', async () => {
     const calls = [];
     const declaration = { max_active_runs: 1, revision_cutover: 'restart-active', steps: { inspect: { retry: { attempts: 1, backoff_ms: 0 } } } };
@@ -1010,6 +1146,32 @@ test('canonical publication read encodes mission and schedule subjects and prese
         assert.deepEqual(result.value.declaration, declaration);
         assert.equal(calls.at(-1), 'https://example.test/v1/client/publication-definition?subject=' + encodeURIComponent(subject));
     }
+});
+
+test('mission declaration read encodes exact revisions and preserves served text', async () => {
+    const calls = [];
+    const value = { mission: 'mission/example/readback', revision: 'revision/one&two', published_at: 123, text: 'version 2\n', legacy: true };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : value));
+    } });
+    assert.deepEqual((await client.missionDeclarationGet(value.mission, value.revision)).value, value);
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/mission-declaration?mission=' + encodeURIComponent(value.mission) + '&revision=' + encodeURIComponent(value.revision));
+    await client.missionDeclarationGet(value.mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+});
+
+test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
+    const calls = [];
+    const mission = 'mission/example/readback';
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'mission', id: mission }));
+    } });
+    await client.missionsGetRun(mission, 'mission-run/old&one');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/missions/' + encodeURIComponent(mission) + '?run=' + encodeURIComponent('mission-run/old&one'));
+    await client.missionsGet(mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('run'), false);
 });
 
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {
@@ -1132,4 +1294,19 @@ test('human error sentences match the shared Rust cases without mutating wire en
             assert.equal(JSON.stringify(error.response), before);
         }
     }
+});
+
+test('internal notice descriptors do not register public server or client support', () => {
+    const schema = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    const operations = require('../../../docs/st3/client-v0/schemas/operations.json');
+    assert.deepEqual(schema['x-st-internal-resources'], { NoticeSnapshot: { collection: 'notices' } });
+    assert.ok(!schema.$defs.Resource.oneOf.some(branch => branch.$ref === '#/$defs/NoticeSnapshot'));
+    const internalOnly = manifest => assert.doesNotMatch(JSON.stringify(manifest), /NoticeSnapshot|notice\.(?:seen|dismiss|snooze)|\"notices\"/);
+    internalOnly(operations);
+    const copy = structuredClone(operations);
+    copy.actions['notice.seen'] = {};
+    assert.throws(() => internalOnly(copy), assert.AssertionError);
+    delete copy.actions['notice.seen'];
+    internalOnly(copy);
+    assert.ok(!Object.getOwnPropertyNames(FractalClient.prototype).some(name => /notice/i.test(name)));
 });

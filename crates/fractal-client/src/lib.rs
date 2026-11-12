@@ -13,6 +13,7 @@ mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+pub mod quota;
 pub mod scenarios;
 pub use contract::*;
 pub use generated::*;
@@ -20,6 +21,11 @@ mod identities;
 pub use identities::*;
 
 use bytes::Bytes;
+use fractal_socket_discovery::default_unix_socket;
+#[cfg(test)]
+use fractal_socket_discovery::{
+    runtime_or_published_socket, unix_socket_answers, unix_socket_path_fits,
+};
 use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Method, Request};
@@ -45,18 +51,62 @@ const HARD_MAX_RESPONSE_BYTES: usize = 8 * 1_048_576;
 pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
+// DeviceCommandRequest.ttl_ms maximum in client-v0.schema.json; checked below.
+const DEVICE_COMMAND_MAX_TTL_MS: u64 = 60_000;
+const DEVICE_COMMAND_WAIT_MARGIN: Duration = Duration::from_secs(5);
+
+fn request_deadline(method: &Method, path: &str) -> Duration {
+    if *method == Method::GET
+        && path.starts_with("/v1/client/device-commands/")
+        && path.ends_with("?wait=true")
+    {
+        Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN
+    } else {
+        REQUEST_DEADLINE
+    }
+}
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
-/// Resolve the local daemon socket in the same order as the `st3` CLI.
+/// A trusted local control socket's discovery identity, retained across daemon outages.
+/// Explicit and configured paths are exact; only defaults use published/legacy discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnixSocketDiscovery {
+    Explicit(PathBuf),
+    Defaults {
+        runtime: PathBuf,
+        published: PathBuf,
+    },
+}
+
+impl UnixSocketDiscovery {
+    /// Resolve the currently available daemon without freezing a default's selected path.
+    pub fn resolve(&self) -> PathBuf {
+        match self {
+            Self::Explicit(path) => path.clone(),
+            Self::Defaults { runtime, published } => default_unix_socket(runtime, published),
+        }
+    }
+}
+
+/// Resolve a snapshot of the local daemon socket in the same order as the `st3` CLI.
+/// Use [`discover_unix_identity`] with [`Client::discovered_unix`] to follow daemon restarts.
+pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, ClientError> {
+    discover_unix_identity(explicit).map(|identity| identity.resolve())
+}
+
+/// Discover the local control socket identity without probing for a running daemon.
 ///
 /// An explicit endpoint (including `ST3_ENDPOINT`, when the caller exposes it through clap) wins,
 /// followed by the normal st config file and then the XDG runtime/state defaults.
-pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, ClientError> {
+/// Configuration is read once; default candidates are resolved on every connection attempt.
+pub fn discover_unix_identity(
+    explicit: Option<PathBuf>,
+) -> Result<UnixSocketDiscovery, ClientError> {
     if let Some(path) = explicit {
-        return Ok(path);
+        return Ok(UnixSocketDiscovery::Explicit(path));
     }
 
     let config_base = xdg_path("XDG_CONFIG_HOME", ".config")?;
@@ -65,7 +115,7 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
     match std::fs::read_to_string(&config_path) {
         Ok(document) => {
             if let Some(socket) = configured_socket(&document)? {
-                return Ok(socket);
+                return Ok(UnixSocketDiscovery::Explicit(socket));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -77,15 +127,28 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         }
     }
 
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(runtime).join("st3.sock"));
-    }
-    let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
-    Ok(
+    let state_socket = xdg_path("XDG_STATE_HOME", ".local/state").map(|state_base| {
         product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
             .join("run")
-            .join("st3.sock"),
-    )
+            .join("fractal.sock")
+    });
+    match (std::env::var_os("XDG_RUNTIME_DIR"), state_socket) {
+        (Some(runtime), Ok(state_socket)) => Ok(UnixSocketDiscovery::Defaults {
+            runtime: PathBuf::from(runtime).join("fractal.sock"),
+            published: state_socket,
+        }),
+        (Some(runtime), Err(_)) => {
+            let socket = PathBuf::from(runtime).join("fractal.sock");
+            Ok(UnixSocketDiscovery::Defaults {
+                runtime: socket.clone(),
+                published: socket,
+            })
+        }
+        (None, state_socket) => state_socket.map(|socket| UnixSocketDiscovery::Defaults {
+            runtime: socket.clone(),
+            published: socket,
+        }),
+    }
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
@@ -118,6 +181,7 @@ fn xdg_path(variable: &str, home_suffix: &str) -> Result<PathBuf, ClientError> {
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    DiscoveredUnix(UnixSocketDiscovery),
     Fabric(fabric::FabricEndpoint),
     FabricLoopback(String),
 }
@@ -158,6 +222,15 @@ pub enum Observation<'a> {
         outcome: RequestOutcome,
         status: Option<u16>,
         took: Duration,
+    },
+    /// One logical mutation, including retries of a refused projection drain. The request
+    /// observations above still describe each physical attempt.
+    Mutation {
+        method: &'a str,
+        route: &'a str,
+        attempts: u32,
+        took: Duration,
+        retry_wait: Duration,
     },
     /// A collections-stream frame: the subscription, the frame kind, its size, and for the
     /// first frame of a subscription how long after the subscribe command it arrived.
@@ -467,6 +540,15 @@ impl CollectionStream {
             command["subject"] = serde_json::json!(subject);
         }
         self.send(&command).await
+    }
+    /// Follow the person's read positions; frames are invalidations, so re-list `read_positions_list`.
+    pub async fn subscribe_read_positions(
+        &mut self,
+        id: &str,
+        person: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"read-positions", "person":person, "limit":limit})).await
     }
 
     pub async fn subscribe_ordered_memberships(
@@ -994,6 +1076,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -1007,6 +1092,13 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -1200,6 +1292,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
+        | ErrorCode::PairingOriginRequired
+        | ErrorCode::PairingRestartRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
@@ -1238,9 +1332,13 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::RetireRevisionMismatch
+        | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
+        | ErrorCode::SetManagedSubject
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::DatabaseBusy
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -1347,6 +1445,11 @@ impl Client {
             Endpoint::Unix(path) if self.credential.is_none() => Self::unix(path)
                 .with_messages_paging(self.messages_paging)
                 .with_outage_wait(self.outage_wait, self.announce_outage_wait),
+            Endpoint::DiscoveredUnix(identity) if self.credential.is_none() => {
+                Self::discovered_unix(identity.clone())
+                    .with_messages_paging(self.messages_paging)
+                    .with_outage_wait(self.outage_wait, self.announce_outage_wait)
+            }
             _ => self.clone(),
         }
     }
@@ -1377,6 +1480,9 @@ impl Client {
             Endpoint::Unix(socket) => {
                 Ok(TransportEndpoint::Unix(std::borrow::Cow::Borrowed(socket)))
             }
+            Endpoint::DiscoveredUnix(identity) => Ok(TransportEndpoint::Unix(
+                std::borrow::Cow::Owned(identity.resolve()),
+            )),
             Endpoint::Fabric(endpoint) => {
                 fabric::FabricEndpoint::validate_path(path)?;
                 Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(
@@ -1385,6 +1491,26 @@ impl Client {
             }
             Endpoint::FabricLoopback(base) => Ok(TransportEndpoint::FabricLoopback(base)),
         }
+    }
+
+    /// Connect to the trusted local control daemon, resolving defaults on every connection.
+    /// Paired Unix gateways must use [`Self::unix_gateway`] with their exact socket path.
+    pub fn discovered_unix(identity: UnixSocketDiscovery) -> Self {
+        match identity {
+            UnixSocketDiscovery::Explicit(path) => Self::unix(path),
+            identity @ UnixSocketDiscovery::Defaults { .. } => {
+                let mut client = Self::unix(Path::new(""));
+                client.endpoint = Endpoint::DiscoveredUnix(identity);
+                client
+            }
+        }
+    }
+
+    /// Select a local person while retaining connect-time control socket discovery.
+    pub fn discovered_unix_as(identity: UnixSocketDiscovery, person_id: impl Into<String>) -> Self {
+        let mut client = Self::discovered_unix(identity);
+        client.local_person = Some(person_id.into());
+        client
     }
 
     pub fn unix(path: impl AsRef<Path>) -> Self {
@@ -1749,10 +1875,13 @@ impl Client {
         Ok(response)
     }
     /// The current work list's first page as of this request: the daemon waits briefly for a
-    /// publication at least as new as the request. While the list is not ready, or not yet that
-    /// fresh, and while the daemon is unreachable, it asks again within the client's daemon
-    /// wait, measured once from the first attempt across every attempt and pause. A zero wait
-    /// asks once. Only these answers are asked again; any other error returns at once.
+    /// publication at least as new as the request. The first not-fresh answer's wanted cut,
+    /// when supplied, is pinned as min_cut on every retry; later answers cannot advance it.
+    /// Older daemons that omit the cut retain unpinned retries. While the list is not ready,
+    /// or not yet that fresh, and while the daemon is unreachable, it asks again within the
+    /// client's daemon wait, measured once from the first attempt across every attempt and
+    /// pause. A zero wait asks once. Only these answers are asked again; any other error
+    /// returns at once.
     pub async fn work_list_fresh(
         &self,
         actor: Option<&str>,
@@ -1765,7 +1894,8 @@ impl Client {
         if let Some(actor) = actor {
             query.push(format!("actor={}", percent_encode(actor)));
         }
-        let path = format!("/v1/client/work?{}", query.join("&"));
+        let mut path = format!("/v1/client/work?{}", query.join("&"));
+        let mut wanted_cut = None;
         let started = tokio::time::Instant::now();
         let deadline = started + self.outage_wait;
         let mut pause = Duration::from_millis(100);
@@ -1816,6 +1946,17 @@ impl Client {
                     }
                     outcome => outcome,
                 };
+            }
+            if wanted_cut.is_none()
+                && let Err(ClientError::Api(_, _, envelope)) = &outcome
+                && let Some(reason) = envelope.details.get("reason")
+                && reason.as_str() == Some("work-list-not-fresh")
+                && let Some(cut) = envelope.details.get("wanted_cut")
+                && let Some(cut) = cut.as_u64()
+            {
+                use std::fmt::Write as _;
+                write!(&mut path, "&min_cut={cut}").expect("writing to a String cannot fail");
+                wanted_cut = Some(cut);
             }
             // An unreachable daemon is announced once, as for every other request.
             if let Err(ClientError::Unreachable(outage)) = &outcome
@@ -2142,6 +2283,17 @@ impl Client {
     pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {
         self.capabilities_internal().await
     }
+    pub async fn device_command_get(
+        &self,
+        id: &str,
+        wait: bool,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.get(&format!(
+            "/v1/client/device-commands/{}?wait={wait}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {
         self.get(&format!(
             "/v1/client/documents/content?name={}",
@@ -2194,6 +2346,20 @@ impl Client {
             percent_encode(subject)
         ))
         .await
+    }
+    pub async fn mission_declaration_get(
+        &self,
+        mission: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<MissionDeclaration>, ClientError> {
+        let mut path = format!(
+            "/v1/client/mission-declaration?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
     }
     pub async fn subject_definition(
         &self,
@@ -2250,6 +2416,102 @@ impl Client {
         };
         self.get(&format!("/v1/client/usage{query}")).await
     }
+    pub async fn usage_hub_quota(
+        &self,
+    ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
+        self.get("/v1/client/usage/quota").await
+    }
+    pub async fn github_plugin_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/issues/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_conversation(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/conversation",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/checks",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/files",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/comments/{comment_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/runs/{run_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
     }
@@ -2285,6 +2547,24 @@ impl Client {
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal("attention", cursor, limit, history)
             .await
+    }
+    pub async fn attention_budget(
+        &self,
+        mission: &str,
+        person: Option<&str>,
+        at: Option<u128>,
+    ) -> Result<Envelope<AttentionBudgetReport>, ClientError> {
+        let mut path = format!(
+            "/v1/client/attention-budget?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(person) = person {
+            path.push_str(&format!("&person={}", percent_encode(person)));
+        }
+        if let Some(at) = at {
+            path.push_str(&format!("&at={at}"));
+        }
+        self.get(&path).await
     }
     pub async fn attention_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("attention", id).await
@@ -2376,6 +2656,19 @@ impl Client {
     pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("missions", id).await
     }
+    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.
+    pub async fn missions_get_run(
+        &self,
+        id: &str,
+        run: &str,
+    ) -> Result<Envelope<Resource>, ClientError> {
+        self.get(&format!(
+            "/v1/client/missions/{}?run={}",
+            percent_encode_segment(id),
+            percent_encode(run)
+        ))
+        .await
+    }
     pub async fn work_list(
         &self,
         cursor: Option<&str>,
@@ -2457,6 +2750,16 @@ impl Client {
     pub async fn agent_queue(&self, agent_id: &str) -> Result<Envelope<AgentQueue>, ClientError> {
         self.agent_queue_internal(agent_id).await
     }
+    pub async fn agent_related_runs_get(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<AgentRelatedRuns>, ClientError> {
+        self.get(&format!(
+            "/v1/client/agent-related-runs/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn harness_inventory_get(
         &self,
         agent_id: &str,
@@ -2489,6 +2792,26 @@ impl Client {
             fields.join("&")
         ))
         .await
+    }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
     }
     pub async fn runtimes_list(
         &self,
@@ -2694,6 +3017,24 @@ impl Client {
             "/v1/client/arrangements/{}/{}/memberships?person={}",
             percent_encode(person_name),
             percent_encode(uuid),
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
+    pub async fn read_positions_list(
+        &self,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ReadPositionPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/read-positions?person={}",
             percent_encode(person)
         );
         if let Some(cursor) = cursor {
@@ -3165,6 +3506,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn read_position_advance(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ReadPositionAdvanceParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::read_position_advance(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn review_approve(
         &self,
         id: impl Into<String>,
@@ -3482,6 +3834,21 @@ impl Client {
             .await
     }
 
+    /// Issue one expiring command. This is not a durable action or replay queue.
+    pub async fn device_command(
+        &self,
+        command: &DeviceCommandRequest,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-commands", command).await
+    }
+
+    pub async fn device_result(
+        &self,
+        result: &DeviceResult,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-results", result).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
@@ -3720,13 +4087,23 @@ impl Client {
     /// Whether this client talks to a daemon on this machine over its Unix socket, as opposed to
     /// a paired device's remote gateway.
     pub fn is_local_socket(&self) -> bool {
-        matches!(self.endpoint, Endpoint::Unix(_))
+        matches!(
+            self.endpoint,
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)
+        )
     }
 
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(error) if error.is_missing_route() => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
@@ -3738,7 +4115,7 @@ impl Client {
         &self,
         subject: &str,
     ) -> Result<Option<LocalTerminalLocation>, ClientError> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !self.is_local_socket() {
             return Ok(None);
         }
         // Sessions routes answer in the daemon's own envelope, with the value under `value`.
@@ -4261,18 +4638,50 @@ impl Client {
         content_type: &str,
     ) -> Result<T, ClientError> {
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
-            match self
-                .request_once(method.clone(), path, body.clone(), key, content_type, None)
-                .await
-            {
+        let result = loop {
+            attempts += 1;
+            let request =
+                self.request_once(method.clone(), path, body.clone(), key, content_type, None);
+            let outcome = request.await;
+            match outcome {
+                Err(error @ ClientError::Api(..))
+                    if mutation
+                        && matches!(&error,
+                    ClientError::Api(_, _, envelope)
+                        if envelope.retryable
+                            && envelope.details.get("reason").and_then(serde_json::Value::as_str)
+                                == Some("run-projection-drain")) =>
+                {
+                    let remaining =
+                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    // Never cancel an in-flight mutation and then report the earlier refusal.
+                    // Reserve the complete ordinary request deadline before sending again.
+                    if remaining < request_deadline(&method, path) + pause {
+                        break Err(error);
+                    }
+                    draining = true;
+                    let waited = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += waited.elapsed();
+                    if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                        < request_deadline(&method, path)
+                    {
+                        break Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(ClientError::Unreachable(mut outage)) if !self.outage_wait.is_zero() => {
                     let waited = started.elapsed();
                     if waited >= self.outage_wait {
                         outage.waited = Some(waited);
-                        return Err(ClientError::Unreachable(outage));
+                        break Err(ClientError::Unreachable(outage));
                     }
                     if self.announce_outage_wait && !announced {
                         eprintln!(
@@ -4282,12 +4691,37 @@ impl Client {
                         );
                         announced = true;
                     }
-                    tokio::time::sleep(pause.min(self.outage_wait - waited)).await;
+                    let remaining = if draining {
+                        (self.outage_wait - waited).min(
+                            drain_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                    } else {
+                        self.outage_wait - waited
+                    };
+                    let slept = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += slept.elapsed();
+                    if draining
+                        && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                            < request_deadline(&method, path)
+                    {
+                        break Err(ClientError::Unreachable(outage));
+                    }
                     pause = (pause * 2).min(Duration::from_secs(1));
                 }
-                outcome => return outcome,
+                outcome => break outcome,
             }
+        };
+        if mutation && OBSERVER.get().is_some() {
+            observe(Observation::Mutation {
+                method: method.as_str(),
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
     async fn request_once<T: DeserializeOwned>(
         &self,
@@ -4301,6 +4735,7 @@ impl Client {
         let limit = read_authorization.map_or_else(|| self.response_limit(), |(_, limit)| limit);
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
+        let deadline = request_deadline(&method, path);
         let request = async {
             match &self.transport_endpoint(path).await? {
                 TransportEndpoint::Unix(socket) => {
@@ -4362,7 +4797,7 @@ impl Client {
                 }
             }
         };
-        let outcome = tokio::time::timeout(REQUEST_DEADLINE, request).await;
+        let outcome = tokio::time::timeout(deadline, request).await;
         if let Some(guard) = guard {
             match &outcome {
                 Ok(Ok((status, _))) => guard.finish(RequestOutcome::Completed, Some(*status)),
@@ -4375,16 +4810,24 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
-            // A schedule collection has no missing-item 404. An older router may answer an
-            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
-            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+            // These projections have no missing-item 404; an older router may return no envelope.
+            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
+            if status == 404
+                && (related_runs || path.split('?').next() == Some("/v1/client/schedules"))
+            {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
                     code: ErrorCode::UnsupportedCapability,
-                    message: "this server does not support schedules.list; upgrade the server"
-                        .into(),
+                    message: format!(
+                        "this server does not support {}; upgrade the server",
+                        if related_runs {
+                            "agent-related-runs.get"
+                        } else {
+                            "schedules.list"
+                        }
+                    ),
                     retryable: false,
                     retry_after_ms: None,
                     details: Default::default(),
@@ -4411,6 +4854,11 @@ impl Client {
                     error.message.clone(),
                     Box::new(error),
                 ));
+            }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))
@@ -4657,6 +5105,38 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod wire_receiver_tests {
     use super::*;
+
+    #[test]
+    fn phone_command_wait_deadline_covers_contract_maximum() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        for variant in schema["$defs"]["DeviceCommandRequest"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(
+                variant["properties"]["ttl_ms"]["maximum"],
+                DEVICE_COMMAND_MAX_TTL_MS
+            );
+        }
+        assert_eq!(
+            request_deadline(
+                &Method::GET,
+                "/v1/client/device-commands/device-command%2Fa?wait=true"
+            ),
+            Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN
+        );
+        assert_eq!(
+            request_deadline(&Method::GET, "/v1/client/device-commands/a?wait=false"),
+            REQUEST_DEADLINE
+        );
+        assert_eq!(
+            request_deadline(&Method::POST, "/v1/client/device-commands"),
+            REQUEST_DEADLINE
+        );
+    }
 
     #[test]
     fn stream_receivers_accept_both_spellings_but_only_one_selected_protocol() {
@@ -5061,6 +5541,21 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phone_documents_without_params_matches_the_schema() {
+        let value = serde_json::to_value(PhoneNavigateArgs::Documents(None)).unwrap();
+        assert_eq!(value, serde_json::json!({"screen": "Documents"}));
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        let schema =
+            serde_json::json!({"$ref": "#/$defs/PhoneNavigateArgs", "$defs": contract["$defs"]});
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&value));
+        assert!(!validator.is_valid(&serde_json::json!({"screen": "Documents", "params": null})));
+    }
+
     #[test]
     fn agents_publication_subscribe_has_only_the_opt_in_grammar() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
@@ -5607,6 +6102,317 @@ mod tests {
     }
 
     #[test]
+    fn socket_probe_never_blocks_on_a_full_backlog_and_rejects_stale_sockets() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fractal.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let legacy = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&legacy).unwrap());
+        // SAFETY: listener owns a valid listening socket; reduce its queue to the minimum.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        // SAFETY: zero initialization is valid before populating the Unix address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = socket.as_os_str().as_bytes();
+        assert!(unix_socket_path_fits(&socket));
+        for (destination, source) in address.sun_path.iter_mut().zip(path) {
+            *destination = *source as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        let mut clients = Vec::new();
+        let mut backlog_error = None;
+        for _ in 0..1024 {
+            // SAFETY: socket creates a descriptor that is immediately given a unique owner.
+            let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0);
+            // SAFETY: fd is valid and has no other owner.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            // SAFETY: set nonblocking mode before connecting, even when the queue is full.
+            assert_eq!(
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+                0
+            );
+            // SAFETY: address and length describe the validated socket path.
+            let result = unsafe {
+                libc::connect(
+                    fd.as_raw_fd(),
+                    std::ptr::from_ref(&address).cast(),
+                    length as libc::socklen_t,
+                )
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            clients.push(fd);
+            if result < 0 {
+                assert!(
+                    error == Some(libc::EAGAIN)
+                        || error == Some(libc::EWOULDBLOCK)
+                        || error == Some(libc::EINPROGRESS)
+                        || (cfg!(target_os = "macos") && error == Some(libc::ECONNREFUSED)),
+                    "{error:?}"
+                );
+                backlog_error = error;
+                break;
+            }
+        }
+        assert!(
+            backlog_error.is_some(),
+            "listener backlog did not fill after 1024 nonblocking connects"
+        );
+        let start = Instant::now();
+        assert_eq!(
+            unix_socket_answers(&socket),
+            backlog_error != Some(libc::ECONNREFUSED)
+        );
+        assert_eq!(
+            default_unix_socket(&socket, &socket),
+            socket.canonicalize().unwrap()
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(clients);
+        drop(listener);
+        assert!(socket.exists());
+        assert!(!unix_socket_answers(&socket));
+        assert!(!unix_socket_answers(&legacy));
+    }
+
+    #[test]
+    fn socket_names_prefer_fractal_and_fall_back_to_a_legacy_only_daemon() {
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join(primary_name);
+            let legacy = root.path().join(legacy_name);
+            assert_eq!(default_unix_socket(&primary, &primary), primary);
+            let _old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            assert_eq!(
+                default_unix_socket(&primary, &primary),
+                legacy.canonicalize().unwrap()
+            );
+            let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+            assert_eq!(
+                default_unix_socket(&primary, &primary),
+                primary.canonicalize().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_keeps_addressable_spellings_when_parent_symlinks_expand_past_the_budget() {
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut directory = root.path().join("long-directory");
+            while unix_socket_path_fits(&directory.join(legacy_name)) {
+                directory = directory.join("long-directory");
+            }
+            std::fs::create_dir_all(&directory).unwrap();
+            let short = root.path().join("short");
+            std::os::unix::fs::symlink(&directory, &short).unwrap();
+            let primary = short.join(primary_name);
+            let legacy = short.join(legacy_name);
+            assert!(unix_socket_path_fits(&primary));
+            let old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            assert!(!unix_socket_path_fits(&legacy.canonicalize().unwrap()));
+            let identity = UnixSocketDiscovery::Defaults {
+                runtime: primary.clone(),
+                published: primary.clone(),
+            };
+            let separate_runtime = UnixSocketDiscovery::Defaults {
+                runtime: root.path().join("missing").join(primary_name),
+                published: primary.clone(),
+            };
+            assert_eq!(identity.resolve(), legacy);
+            std::os::unix::net::UnixStream::connect(identity.resolve()).unwrap();
+            assert_eq!(separate_runtime.resolve(), legacy);
+            std::os::unix::net::UnixStream::connect(separate_runtime.resolve()).unwrap();
+            drop(old_daemon);
+            std::fs::remove_file(&legacy).unwrap();
+            let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+            std::os::unix::fs::symlink(primary_name, &legacy).unwrap();
+            assert!(!unix_socket_path_fits(&primary.canonicalize().unwrap()));
+            assert_eq!(identity.resolve(), primary);
+            std::os::unix::net::UnixStream::connect(identity.resolve()).unwrap();
+            assert_eq!(separate_runtime.resolve(), primary);
+            std::os::unix::net::UnixStream::connect(separate_runtime.resolve()).unwrap();
+        }
+    }
+
+    #[test]
+    fn discovery_without_a_runtime_directory_uses_the_short_published_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("daemon.sock");
+        let _daemon = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let mut directory = root.path().to_path_buf();
+        while unix_socket_path_fits(&directory.join("fractal.sock")) {
+            directory = directory.join("long-state-directory");
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        let published = directory.join("fractal.sock");
+        std::os::unix::fs::symlink(&target, &published).unwrap();
+        let identity = UnixSocketDiscovery::Defaults {
+            runtime: published.clone(),
+            published: published.clone(),
+        };
+        assert_eq!(identity.resolve(), std::fs::canonicalize(&target).unwrap());
+        assert_eq!(
+            UnixSocketDiscovery::Explicit(published.clone()).resolve(),
+            published
+        );
+    }
+
+    #[test]
+    fn default_discovery_retries_when_a_legacy_daemon_appears_after_an_outage() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join("fractal.sock");
+            let legacy = root.path().join("st3.sock");
+            let identity = UnixSocketDiscovery::Defaults {
+                runtime: primary.clone(),
+                published: primary.clone(),
+            };
+            assert_eq!(identity.resolve(), primary);
+            let client = Client::discovered_unix_as(identity, "person/test")
+                .with_outage_wait(Duration::from_secs(5), false);
+            // Poll the real retry loop before the old daemon exists.
+            let request = client.request::<Envelope<Page>>(Method::GET, "/v1/client/agents", None);
+            tokio::pin!(request);
+            tokio::select! {
+                result = &mut request => panic!("request finished before daemon startup: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(150)) => {}
+            }
+            let listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    // Socket discovery probes connect and immediately close without HTTP.
+                    if request.is_empty() {
+                        continue;
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        EMPTY_PAGE.len(),
+                        EMPTY_PAGE
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    break String::from_utf8(request).unwrap();
+                }
+            });
+            request.await.unwrap();
+            let received = server.await.unwrap();
+            assert!(received.starts_with("GET /v1/client/agents HTTP/1.1\r\n"));
+            assert!(received.contains("x-st3-person: person/test\r\n"));
+            // Discovery identity survives dropping local-person authority as well.
+            assert!(matches!(
+                client.trusted_unscoped_read().endpoint,
+                Endpoint::DiscoveredUnix(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn explicit_unix_control_and_gateway_paths_do_not_probe_or_fall_back() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join("fractal.sock");
+            let legacy = root.path().join("st3.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            for client in [
+                Client::unix(&primary),
+                Client::unix_as(&primary, "person/test"),
+                Client::unix_gateway(&primary, "paired-secret"),
+                Client::discovered_unix(UnixSocketDiscovery::Explicit(primary.clone())),
+            ] {
+                assert!(matches!(
+                    client.transport_endpoint("/v1/client/agents").await.unwrap(),
+                    TransportEndpoint::Unix(std::borrow::Cow::Borrowed(path)) if path == primary
+                ));
+                assert!(matches!(
+                    client
+                        .request::<Envelope<Page>>(Method::GET, "/v1/client/agents", None)
+                        .await,
+                    Err(ClientError::Unreachable(_))
+                ));
+            }
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
+    }
+
+    #[test]
+    fn socket_names_skip_a_primary_that_exceeds_the_platform_path_budget() {
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let mut directory = String::from("/");
+            while unix_socket_path_fits(&Path::new(&directory).join(primary_name)) {
+                directory.push('x');
+            }
+            let primary = Path::new(&directory).join(primary_name);
+            let legacy = Path::new(&directory).join(legacy_name);
+            assert!(unix_socket_path_fits(&legacy));
+            assert_eq!(default_unix_socket(&primary, &primary), legacy);
+        }
+    }
+
+    #[test]
+    fn discovery_follows_the_published_link_past_a_dead_runtime_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime/st3.sock");
+        let real = root.path().join("state/st3.sock");
+        let published = root.path().join("state/run/st3.sock");
+        for directory in ["runtime", "state/run"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        // An earlier daemon's socket stays behind with nothing listening on it.
+        drop(std::os::unix::net::UnixListener::bind(&runtime).unwrap());
+        // No link yet: the runtime default, as before.
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        let _daemon = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &published).unwrap();
+        assert_eq!(
+            runtime_or_published_socket(&runtime, &published),
+            std::fs::canonicalize(&real).unwrap()
+        );
+        // A runtime default that answers keeps precedence.
+        std::fs::remove_file(&runtime).unwrap();
+        let _other = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        // A link that leads to the default itself, and a dead link, change nothing.
+        drop(_other);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(&runtime, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(root.path().join("state/gone.sock"), &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
     fn explicit_discovery_endpoint_has_absolute_precedence() {
         let explicit = PathBuf::from("/tmp/explicit-st3.sock");
         assert_eq!(
@@ -5707,6 +6513,20 @@ mod tests {
     }
 
     #[test]
+    fn related_runs_old_daemon_is_typed_unsupported_not_an_empty_list() {
+        runtime().block_on(async {
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("related.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,404,String::new()),(0,404,error)]);
+            let client=Client::unix_as(&socket,"person/reviewer");
+            for _ in 0..2 {
+                assert!(matches!(client.agent_related_runs_get("agent/example").await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            }
+            assert_eq!(server.await.unwrap().len(),2);
+        });
+    }
+
+    #[test]
     fn agents_reads_keep_legacy_fresh_and_add_an_explicit_host_local_cut() {
         runtime().block_on(async {
             let page = EMPTY_PAGE
@@ -5783,11 +6603,40 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_work_list_pins_the_first_wanted_cut_across_retries() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("pinned.sock");
+            let not_fresh = |cut: u64| {
+                let mut error: serde_json::Value =
+                    serde_json::from_str(&work_list_error("work-list-not-fresh", true)).unwrap();
+                error["details"]["wanted_cut"] = serde_json::json!(cut);
+                error.to_string()
+            };
+            let server = scripted_server(&socket, vec![
+                (0, 503, not_fresh(7)),
+                (0, 503, not_fresh(11)),
+                (0, 503, work_list_error("work-list-not-ready", true)),
+                (0, 200, page),
+            ]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+            client.work_list_fresh(Some("agent/garden/ash"), Some(5)).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec![
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+            ]);
+        });
+    }
+
+    #[test]
     fn a_fresh_work_list_retries_only_not_ready_and_not_fresh_within_one_daemon_wait() {
         runtime().block_on(async {
             let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
             let directory = tempfile::tempdir().unwrap();
-            // Not ready, then not fresh, then rows: three requests, one answer.
+            // Legacy errors omit wanted_cut: not ready, then not fresh, then rows stay unpinned.
             let socket = directory.path().join("ready.sock");
             let server = scripted_server(&socket, vec![
                 (0, 503, work_list_error("work-list-not-ready", true)),

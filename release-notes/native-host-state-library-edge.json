@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Separate shared native host and harness-session state helpers from the catalog runner module while preserving existing paths.",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No stored data or schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest changes."},
+  "compatibility": {"status": "none", "detail": "Moved function bodies and shared OnceLock are unchanged; existing public and crate-private run paths are re-exported. Environment precedence, state locations and hostname detection are preserved."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No required manual step."},
+  "recovery": {"status": "none", "detail": "Reverting the module move restores the former layout without a data change."}
+}

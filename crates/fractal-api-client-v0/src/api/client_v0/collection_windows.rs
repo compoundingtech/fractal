@@ -337,7 +337,7 @@ mod tests {
             }
             let grant = "custom/client/scoped-window-reader";
             let pair = |scopes: Value| {
-                state.store.append_claim(&ClaimInput {
+                state.store.append_client_operation_claim(&ClaimInput {
                 subject:grant.into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
                 fields:serde_json::from_value(json!({"session_actor":"client/scoped-window-reader", "person_id":"person/ada", "expires_at_unix_ms":client_now_ms() as u64 + 60_000, "scopes":scopes})).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,
@@ -699,7 +699,7 @@ mod tests {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
-        let grant = state.store.append_claim(&ClaimInput {
+        let grant = state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cost-window-reader".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/cost-window-reader", "person_id":"person/ada", "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections","read.glasses"]})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -794,7 +794,7 @@ mod tests {
             };
             let paired = state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: grant.into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/ada".into()),
@@ -822,7 +822,7 @@ mod tests {
             if change == "revoked" {
                 state
                     .store
-                    .append_claim(&ClaimInput {
+                    .append_client_operation_claim(&ClaimInput {
                         subject: grant.into(),
                         kind: "custom.client.pairing-revoked".into(),
                         actor: Some("person/ada".into()),
@@ -922,12 +922,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = super::super::tests::next_data_frame(socket).await;
             assert_eq!(frame["kind"], "snapshot");
             assert_eq!(frame["id"], id);
         }
@@ -948,12 +943,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), reconnect.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = super::super::tests::next_data_frame(&mut reconnect).await;
         assert_eq!(frame["kind"], "snapshot");
         assert_eq!(frame["snapshot"]["store_index"], index);
         assert_eq!(windows.builds(), 1);
@@ -1110,6 +1100,7 @@ mod tests {
             for kind in fractal_schema::registry().claims.keys() {
                 let telemetry = matches!(kind.as_str(),
                     "daemon.diagnostic" | "transport.observed" | "workspace.observed")
+                    || kind == fractal_schema::read_positions::KIND
                     || (collection == "missions" && matches!(kind.as_str(),
                         "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
                             | "harness.todo.observed" | "harness.session-file"))
@@ -1216,9 +1207,7 @@ mod tests {
                     barrier.wait().await;
                     socket.send(Message::Text(json!({"kind":"subscribe", "id":"visible",
                         "collection":collection, "limit":n%8+1}).to_string().into())).await.unwrap();
-                    let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
-                        .await.unwrap().unwrap().unwrap();
-                    let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    let frame = super::super::tests::data_frame_within(&mut socket, Duration::from_secs(10)).await.expect("a data frame within 10 s");
                     assert_eq!(frame["kind"], "snapshot", "{frame}");
                     assert_eq!(frame["items"].as_array().unwrap().len(), n%8+1);
                     socket

@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
-use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionOutputView, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunReportView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlannerSpec, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus, SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView, SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView};
+use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionOutputView, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunReportView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlannerSpec, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus, SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView, SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView};
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, ReplicationReceipt};
 #[cfg(any(test, feature = "test-support"))]
 use crate::model::ReplicationExchange;
@@ -59,7 +59,7 @@ use crate::store::{AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissi
 use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, IdempotencyConflict, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, StatusEntry, StepLabel, StepTiming};
 use crate::store::{Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, analyze_mission_revision, append_claim_fenced_outcome};
 use crate::store::{append_claim_tx, append_claim_with_commit_context, check_mailbox_fence, claim_append_error, claim_log_order, desired_from_row, desired_revision, fold_step_clock, fold_step_timing, generation_id_from_subject};
-use crate::store::{insert_local_observation_tx, local_retention, loop_run_views_tx, migrate_local_usage_seen, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, normalize_message_party, project_mission_run_created, project_replicated_mission_runs, rebuild_planning_tx};
+use crate::store::{insert_local_observation_tx, local_code, local_retention, loop_run_views_tx, migrate_local_usage_seen, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, normalize_message_party, project_mission_run_created, project_replicated_mission_runs, rebuild_planning_tx};
 use crate::store::{recently_ended_since, replay_graph_from_nothing_tx, runtime, seat_queue_joins_query, seat_queue_moves_query, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_run_from_row};
 use crate::store::{step_timeout_episode, step_timeout_extension_at, subject_status_at, subscription_started_run_tx, validate_claim_input, validate_local_observation};
 #[cfg(any(test, feature = "test-support"))]
@@ -97,7 +97,7 @@ impl Store {
         for input in inputs {
             self.validate_claim_input(input).unwrap();
             assert!(
-                local_retention(&input.kind),
+                local_retention(&input.kind) || local_code(input),
                 "{} is not a local observation",
                 input.kind
             );
@@ -109,7 +109,7 @@ impl Store {
 
     /// Append `input` as a replicated claim, as a build from before its kind became a local
     /// observation wrote it.
-    pub fn append_as_older_build_for_test(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+    pub fn append_as_older_build_for_test(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         append_claim_with_commit_context(self, input, None, None, None, None, ClaimCommitContext {
             as_older_build: true,
             ..Default::default()
@@ -138,16 +138,16 @@ impl Store {
         &self,
         relay: &str,
         input: &ReplicationBatch,
-    ) -> Result<ReplicationResponse, St3Error> {
+    ) -> Result<ReplicationResponse, FractalError> {
         if relay != input.peer {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "peer-label-mismatch",
                 "the configured relay label does not match the batch label",
             ));
         }
         for (hash, bytes) in &input.blobs {
             if hex::encode(Sha256::digest(bytes)) != *hash {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "blob-hash-mismatch",
                     format!("replicated blob `{hash}` failed verification"),
                 ));
@@ -187,7 +187,7 @@ impl Store {
                     .optional()
                     .map_err(internal)?;
                 if stored_hash.as_deref() != Some(batch.hash.as_str()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "replica-sequence-conflict",
                         format!(
                             "replica `{}` sequence {} has another hash",
@@ -215,7 +215,7 @@ impl Store {
                 .optional()
                 .map_err(internal)?;
             if expected_previous != batch.previous_hash {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "broken-replica-chain",
                     format!(
                         "replica sequence {} does not cite the current chain head",

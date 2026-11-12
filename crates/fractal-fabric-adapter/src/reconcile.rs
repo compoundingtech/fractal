@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use smallclaims::fleet::{FleetView, MemberView};
 
 const REQUEST_LIMIT: usize = 1024 * 1024;
+pub(super) const RENAMED_OWNER_PREFIX: &str = concat!("fractal", "/fleet/");
 const RESPONSE_LIMIT: u64 = 4 * 1024 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -223,6 +224,48 @@ fn grants(fleet_id: &str) -> BTreeSet<String> {
     [format!("st3/fleet/{fleet_id}"), "st3-client-v0".into()].into()
 }
 
+fn accepted_grants(fleet: &str) -> BTreeSet<String> {
+    grants(fleet)
+        .into_iter()
+        .chain([format!("{RENAMED_OWNER_PREFIX}{fleet}"), "fractal-client-v0".into()])
+        .collect()
+}
+
+fn service_allowed(expected: &BTreeSet<String>, service: &str) -> bool {
+    expected.contains(service)
+        || (service == "fractal-client-v0" && expected.contains("st3-client-v0"))
+        || service.strip_prefix(RENAMED_OWNER_PREFIX).is_some_and(|fleet| {
+            expected
+                .iter()
+                .any(|grant| grant.strip_prefix("st3/fleet/") == Some(fleet))
+        })
+}
+
+// A reader may reduce an existing renamed owner's authority, never publish new authority.
+fn retained_policy(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy, expiries: &Expiries) -> DesiredPolicy {
+    snapshot
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            let expected = desired.get(&peer.node_id)?;
+            let expiry = peer.trust_sources.iter().find_map(|source| match source {
+                Source::Runtime { owner: source_owner, expires_at } if source_owner == owner => Some(*expires_at),
+                _ => None,
+            })?;
+            // Expiry is immutable: changing it would replace and re-authorize
+            // this record. Only the compatibility writer may publish authority.
+            if expiry != expiries.get(&peer.node_id).copied() {
+                return None;
+            }
+            let actual: BTreeSet<_> = peer.services.iter()
+                .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
+                .map(|(service, _)| service.clone()).collect();
+            actual.iter().all(|service| service_allowed(expected, service))
+                .then(|| (peer.node_id.clone(), actual))
+        })
+        .collect()
+}
+
 fn desired(
     view: &FleetView,
     own_key: &str,
@@ -258,8 +301,10 @@ fn desired(
             }
             // Do not turn arbitrary signed endpoint names into Fabric grants.
             ensure!(
-                endpoint["protocol"] == format!("st3/fleet/{fleet_id}"),
-                "member {} advertises a nonstandard Fabric replication protocol; expected st3/fleet/{fleet_id}",
+                endpoint["protocol"].as_str().is_some_and(|protocol| {
+                    smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, fleet_id)
+                }),
+                "member {} advertises a nonstandard Fabric replication protocol; expected st3/fleet/{fleet_id} or fractal/fleet/{fleet_id}",
                 member.name
             );
             let node = endpoint["node"]
@@ -388,7 +433,7 @@ fn residual(peers: &[Peer], desired: &DesiredPolicy, grants: &BTreeSet<String>) 
                     grants.contains(*service)
                         && !desired
                             .get(&peer.node_id)
-                            .is_some_and(|expected| expected.contains(*service))
+                            .is_some_and(|expected| service_allowed(expected, service))
                 })
                 .map(|(service, sources)| {
                     format!(
@@ -462,6 +507,10 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
 }
 
 fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy, expiries: &Expiries) -> bool {
+    if pending.request["owner"].as_str().is_some_and(|owner| owner.starts_with(RENAMED_OWNER_PREFIX)) {
+        return pending.request["operations"].as_array().is_some_and(|operations|
+            operations.iter().all(|operation| operation["op"] == "remove_peer"));
+    }
     pending.request["operations"]
         .as_array()
         .is_some_and(|operations| {
@@ -595,54 +644,74 @@ async fn apply(
     withdrawing: bool,
 ) -> Result<ReconcileStatus> {
     let owner = format!("st/fleet/{fleet_id}");
-    let grants = grants(fleet_id);
+    let grants = accepted_grants(fleet_id);
     let mut journal = load_journal(state_dir).await?;
+    if let Some(pending) = &journal.pending {
+        ensure!(
+            pending.request["owner"] == owner
+                || pending.request["owner"] == format!("{RENAMED_OWNER_PREFIX}{fleet_id}"),
+            "pending Fabric batch belongs to another fleet"
+        );
+    }
     resolve_pending(state_dir, socket, &mut journal, &desired, &expiries).await?;
     let mut journal_changed = false;
     for node in ended {
         journal_changed |= journal.retired.insert(node);
     }
     let mut current = snapshot(socket).await?;
-    let operations = plan(&current, &owner, &desired, &expiries);
-    ensure!(
-        operations.len() <= 128,
-        "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
-        operations.len()
-    );
-    if !operations.is_empty() {
-        for operation in &operations {
-            if operation["op"] == "remove_peer" {
-                journal.retired.insert(
-                    operation["node_id"]
-                        .as_str()
-                        .context("removal has no NodeID")?
-                        .to_owned(),
-                );
-            }
-        }
-        let revision = current.policy_revision;
-        let digest = Sha256::digest(serde_json::to_vec(&json!([
-            &owner,
-            &current.instance,
-            revision,
-            &operations
-        ]))?);
-        journal.pending = Some(Pending {
-            request: json!({"operation":"batch", "owner":owner, "request_id":format!("st-{}", hex::encode(digest)),
-                "expected_revision":revision, "operations":operations}),
-            created_unix_ms: now_ms(),
-        });
-        // Durable before sending: restarting st must not forget an uncertain commit
-        // or replace a pending/timed-out cancellation with an empty-diff success.
-        save_journal(state_dir, &journal).await?;
-        let mutation = resolve_pending(state_dir, socket, &mut journal, &desired, &expiries)
-            .await?
-            .expect("pending transaction");
-        journal_changed = false;
-        current = snapshot(socket).await?;
+    for owner in [&owner, &format!("{RENAMED_OWNER_PREFIX}{fleet_id}")] {
+        let retained;
+        let policy = if owner.starts_with("st/") {
+            &desired
+        } else {
+            retained = retained_policy(&current, owner, &desired, &expiries);
+            &retained
+        };
+        let operations = plan(&current, owner, policy, &expiries);
         ensure!(
-            current.policy_revision >= mutation.current_revision,
-            "Fabric policy revision regressed after mutation"
+            operations.len() <= 128,
+            "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
+            operations.len()
+        );
+        if !operations.is_empty() {
+            for operation in &operations {
+                if operation["op"] == "remove_peer" {
+                    journal.retired.insert(
+                        operation["node_id"]
+                            .as_str()
+                            .context("removal has no NodeID")?
+                            .to_owned(),
+                    );
+                }
+            }
+            let revision = current.policy_revision;
+            let digest = Sha256::digest(serde_json::to_vec(&json!([
+                &owner,
+                &current.instance,
+                revision,
+                &operations
+            ]))?);
+            journal.pending = Some(Pending {
+                request: json!({"operation":"batch", "owner":owner, "request_id":format!("st-{}", hex::encode(digest)),
+                "expected_revision":revision, "operations":operations}),
+                created_unix_ms: now_ms(),
+            });
+            // Durable before sending: restarting st must not forget an uncertain commit
+            // or replace a pending/timed-out cancellation with an empty-diff success.
+            save_journal(state_dir, &journal).await?;
+            let mutation = resolve_pending(state_dir, socket, &mut journal, policy, &expiries)
+                .await?
+                .expect("pending transaction");
+            journal_changed = false;
+            current = snapshot(socket).await?;
+            ensure!(
+                current.policy_revision >= mutation.current_revision,
+                "Fabric policy revision regressed after mutation"
+            );
+        }
+        ensure!(
+            plan(&current, owner, policy, &expiries).is_empty(),
+            "Fabric final snapshot does not match the desired exact grants and expiry for {owner}; no rekey receipt is safe"
         );
     }
     ensure!(
@@ -668,7 +737,7 @@ async fn apply(
                 || journal.retired.contains(&peer.node_id)
                 || desired
                     .get(&peer.node_id)
-                    .is_some_and(|expected| expected.len() < grants.len())
+                    .is_some_and(|expected| expected.len() < 2)
         })
         .collect::<Vec<_>>();
     let message = residual(&relevant, &desired, &grants);
@@ -754,6 +823,10 @@ pub async fn acknowledge(
     let current = snapshot(socket).await?;
     ensure!(plan(&current, &format!("st/fleet/{fleet_id}"), &policy, &expiries).is_empty(),
         "Fabric receipt verification failed: exact installed grants/expiry differ");
+    let renamed_owner = format!("{RENAMED_OWNER_PREFIX}{fleet_id}");
+    let retained = retained_policy(&current, &renamed_owner, &policy, &expiries);
+    ensure!(plan(&current, &renamed_owner, &retained, &expiries).is_empty(),
+        "Fabric receipt verification failed: renamed-owner grants/expiry differ");
     for (member_key, rotation) in receipts {
         ensure!(u128::from(rotation.deadline) * 1000 > now_ms(), "Fabric rekey expired before receipt publication");
         client.post("http://localhost/v1/internal/fleet/fabric-rekey")

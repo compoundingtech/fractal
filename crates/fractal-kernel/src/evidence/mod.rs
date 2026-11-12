@@ -863,6 +863,9 @@ mod policy_path_tests {
         git(
             repo,
             &[
+                // Fixture history must not execute the operator's global commit hooks.
+                "-c",
+                "core.hooksPath=/dev/null",
                 "-c",
                 "user.name=Fixture",
                 "-c",

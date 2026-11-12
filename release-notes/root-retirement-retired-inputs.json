@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove deleted root-runner paths from CI input declarations and tighten its retired Clippy baseline.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or migration implementation changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored schema or wire-format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Remove only declarations of paths deleted by root-runner retirement. Commands, trust, sampling, enforcement, and strict input-list and path-existence checks stay unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No runtime compatibility change. The Clippy baseline drops the retired fractal-legacy-runner package and its three warnings; remaining package counts and toolchain are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Source and build reconciliation performs no live service operation."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No additional operator action beyond the root-retirement release note."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing backup, recovery and compatibility procedures remain applicable."
+  }
+}

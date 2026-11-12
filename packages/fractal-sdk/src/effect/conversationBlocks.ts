@@ -2,7 +2,7 @@
 // malformed view (st 84c3622 sends float `wall_ms` on bash outputs) would reject the whole entry.
 // The entry decodes with its blocks lifted out, then every block decodes on its own, then a failing
 // block retries without its view: the smallest unit that fails is the unit that degrades.
-import { TimelineBlock, TimelineEntry, type UnknownCase } from '@fractal/client/schema'
+import { TimelineBlock, TimelineEntry, type UnknownCase } from '@fractal/client/schema/read'
 import { Exit, Schema } from 'effect'
 
 /** What one block lost while decoding. */

@@ -557,7 +557,12 @@ pub(super) async fn run_mission_view(
             publish_mission_file(client, args, json_output).await
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-        MissionViewCommand::Check(args) => check_mission_file(client, args, json_output).await,
+        MissionViewCommand::Check(args) => {
+            let attributed = args.actor.as_ref()
+                .map(|actor| execution_client(endpoint, actor.clone()))
+                .transpose()?;
+            check_mission_file(attributed.as_ref().unwrap_or(client), args, json_output).await
+        }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await
@@ -565,6 +570,7 @@ pub(super) async fn run_mission_view(
         MissionViewCommand::Outcome(args) => {
             set_mission_run_outcome(client, args, json_output).await
         }
+        MissionViewCommand::DismissFault(args) => dismiss_fault(client, args, json_output).await,
         MissionViewCommand::ReportTo(args) => {
             set_mission_run_report(client, args, json_output).await
         }
@@ -596,6 +602,7 @@ async fn check_mission_file(
     let checked = run_gate_check(
         client,
         &intent,
+        None,
         &args.workspace,
         &args.inputs,
         |view, item| {
@@ -702,6 +709,38 @@ async fn set_mission_run_outcome(
     }
 }
 
+async fn dismiss_fault(
+    client: &Client,
+    args: MissionDismissFaultArgs,
+    json_output: bool,
+) -> Result<()> {
+    let source = if args.source.contains('/') {
+        args.source
+    } else {
+        format!("mission-run/{}", args.source)
+    };
+    let dismissed: fractal_daemon::model::FaultDismissal = client
+        .post(
+            "/v1/faults/dismiss",
+            &fractal_daemon::model::FaultDismissRequest {
+                source,
+                episode: args.episode,
+                reason: args.reason,
+                actor: args.actor,
+            },
+        )
+        .await?;
+    if json_output {
+        print_value(&dismissed, true)
+    } else {
+        println!(
+            "dismissed the fault on {} (episode {}): {}",
+            dismissed.subject, dismissed.episode, dismissed.title
+        );
+        Ok(())
+    }
+}
+
 async fn set_mission_run_report(
     client: &Client,
     args: MissionReportToArgs,
@@ -766,6 +805,7 @@ async fn retire_mission(client: &Client, args: MissionRetireArgs, json_output: b
             &MissionRetireRequest {
                 actor: args.actor,
                 idempotency_key: format!("mission-retire:{mission}:{nonce}"),
+                force_reason: args.force.then_some(args.reason).flatten(),
             },
         )
         .await?;

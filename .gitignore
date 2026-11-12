@@ -30,6 +30,7 @@ clients/typescript/fractal-client/node_modules/
 clients/typescript/fractal-views/node_modules/
 clients/typescript/fractal-scenarios/node_modules/
 packages/fractal-sdk/node_modules/
+packages/fractal/node_modules/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/
@@ -43,6 +44,7 @@ packages/fractal-sdk/node_modules/
 
 # Derived from apps/fractal-web/.changelog/ by scripts/changelog-registry.mjs; never committed (it would conflict).
 /apps/fractal-web/.changelog/registry.generated.ts
+/apps/fractal-web/.changelog/registry.generated.ts.*.tmp
 
 # Local Alchemy cache/state metadata; remote Cloudflare state is authoritative.
 /infra/storybook/.alchemy/

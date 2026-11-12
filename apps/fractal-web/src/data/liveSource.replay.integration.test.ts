@@ -81,6 +81,34 @@ const conversationItems = (live: LiveSource) => {
 }
 
 describe('scenario replay through the real live source', () => {
+  it.live('keeps Pins reads and sockets inside the replay transports', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const network = vi.fn(() => { throw new Error('Unexpected real transport') })
+      vi.stubGlobal('fetch', network); vi.stubGlobal('WebSocket', network)
+      const pins = live.source.pins!
+      const release = live.registry.mount(pins)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(pins).state.phase).not.toBe('connecting')
+        expect(network).not.toHaveBeenCalled()
+      } finally { release() }
+    })),
+  )
+  it.live('keeps quota and history reads inside the replay transport', () =>
+    withReplay(world, (live) => Effect.gen(function* () {
+      const network = vi.fn(() => { throw new Error('Unexpected real transport') })
+      vi.stubGlobal('fetch', network)
+      const usage = live.source.usage
+      if (usage._tag !== 'declared') throw new Error('Expected the live usage relay')
+      const quota = yield* Effect.result(usage.source.quota)
+      const history = yield* Effect.result(usage.source.history('synthetic/account'))
+      // The world does not model quota: its transport returns an explicit unsupported route.
+      expect(quota).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'quota returned HTTP 501' } })
+      expect(history).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'history returned HTTP 501' } })
+      expect(network).not.toHaveBeenCalled()
+    })),
+  )
+
   it.live('classifies an unmodelled replay usage read as unsupported', () =>
     withReplay(world, (live, clock) => Effect.gen(function* () {
       const usage = live.source.nativeDetails!.usagePeriod(world.slices.roster.state.agents[0]!.id)

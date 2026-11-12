@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "External quota source v1",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "freshness_horizon_seconds", "accounts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "freshness_horizon_seconds": {"type": "integer", "minimum": 1},
+    "accounts": {"type": "array", "items": {"$ref": "#/$defs/account"}}
+  },
+  "$defs": {
+    "account": {
+      "type": "object",
+      "required": ["id", "provider", "label", "observed_at", "windows"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "provider": {"type": "string"},
+        "label": {"type": "string"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "governing_window_id": {"type": ["string", "null"]},
+        "windows": {"type": "array", "items": {"$ref": "#/$defs/window"}}
+      }
+    },
+    "window": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "label": {"type": "string"},
+        "used_percent": {"type": ["number", "null"], "minimum": 0},
+        "resets_at": {"type": ["string", "null"], "format": "date-time"}
+      }
+    }
+  }
+}

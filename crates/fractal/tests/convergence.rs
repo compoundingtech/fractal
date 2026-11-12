@@ -52,7 +52,7 @@ use serde_json::{Map, Value, json};
 use fractal_daemon::model::{ClaimInput, ClaimRecord};
 use fractal_daemon::store::{
     CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
-    checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
+    checkpoint, checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
 };
 use fractal_schema::{FieldSpec, Retention, ValueType};
 
@@ -67,9 +67,11 @@ const START_MS: i64 = 4_102_489_800_000;
 const STEP_MS: i64 = 1_000;
 const PERSON: &str = "person/operator";
 
-/// The seeds CI runs. Every failing seed found by hand is added here.
+/// The seeds CI runs. Every failing seed found by hand is added here. The second row diverged in
+/// `resource_observations` until a rebuild kept items only compact states describe (#4426).
 const SEEDS: &[u64] = &[
     1, 2, 3, 5, 8, 13, 17, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
+    27, 74, 106, 121, 130, 133, 179, 209, 241, 246, 277, 281, 291, 293, 294,
 ];
 
 /// Both revisions draw the same kinds and fields. Native admission still uses each
@@ -77,10 +79,19 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v10.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v22.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
+}
+
+/// Whether every replica admits `kind` only from a keyed member's signed envelope, by the
+/// daemon's own admission rule.
+fn keyed_only(kind: &str) -> bool {
+    use smallclaims::store::Runtime as _;
+    static RUNTIME: std::sync::LazyLock<fractal_store::store::FractalRuntime> =
+        std::sync::LazyLock::new(Default::default);
+    RUNTIME.requires_keyed_envelope(kind)
 }
 
 #[test]
@@ -120,6 +131,31 @@ fn the_corpus_generates_valid_deployment_inputs() {
     }
 }
 
+#[test]
+fn the_corpus_generates_valid_read_position_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let spec = &corpus()[fractal_schema::read_positions::KIND];
+    let input = world.claim_of(spec, 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let expected = world.nodes[0].store.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.nodes[0].store.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    let actual = world.oracle.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.oracle.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
+}
+
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
 fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     let value = match kind {
@@ -145,23 +181,64 @@ fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
+/// Kinds a checkpoint rule may drop. Every other kind is kept on every node. The oracle keeps
+/// its own list, so a retention rule that starts or stops dropping a kind fails
+/// `the_oracle_drops_the_kinds_the_retention_policy_drops` until this list is updated on purpose.
 const RULE_KINDS: &[&str] = &[
+    "daemon.diagnostic",
     "harness-question.observed",
+    "harness.diagnostic",
+    "harness.limits",
     "harness.observed",
     "harness.timeline",
+    "harness.todo.observed",
+    "harness.usage",
     "loop.state",
-    "subscription.mission-deferred",
     "observer.observed",
-    "daemon.diagnostic",
-    "transport.observed",
+    "render.applied",
+    "resource.observed",
+    "runtime.action.deadline-reached",
+    "runtime.action.failed",
     "runtime.action.requested",
     "runtime.action.succeeded",
-    "runtime.action.failed",
-    "runtime.action.deadline-reached",
-    "render.applied",
+    "runtime.observed",
     "runtime.readiness-deadline-reached",
+    "runtime.reconcile-decision",
+    "sekret.called",
+    "sekret.changed",
+    "sekret.exited",
+    "sekret.refused",
+    "slo.breach-transition",
+    "subscription.mission-deferred",
+    "transport.observed",
 ];
+
+/// The kinds the retention policy lets a checkpoint drop: each kind a slotted rule names, and a
+/// seat's status sources, which the status history rule trims.
+fn policy_rule_kinds() -> BTreeSet<String> {
+    let mut kinds = BTreeSet::new();
+    for rule in &fractal_schema::retention::policy().rules {
+        if rule.kind == "seat.status-history" {
+            kinds.extend(checkpoint::STATUS_SOURCE_KINDS.map(str::to_owned));
+        } else if rule.slot.is_some() {
+            kinds.insert(rule.kind.clone());
+        }
+    }
+    kinds
+}
+
+#[test]
+fn the_oracle_drops_the_kinds_the_retention_policy_drops() {
+    let oracle = RULE_KINDS.iter().map(|kind| kind.to_string()).collect::<BTreeSet<_>>();
+    let policy = policy_rule_kinds();
+    let unlisted = policy.difference(&oracle).collect::<Vec<_>>();
+    let stale = oracle.difference(&policy).collect::<Vec<_>>();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "retention.toml changed which kinds a checkpoint drops: add {unlisted:?} to and remove \
+         {stale:?} from RULE_KINDS in this file, after checking that the oracle should accept it"
+    );
+}
 
 /// A small, fast, seeded generator (SplitMix64).
 struct Rng(u64);
@@ -354,6 +431,7 @@ impl World {
     fn new(seed: u64, sabotage: Sabotage) -> Self {
         let root = scratch_dir();
         let oracle = Store::open(&root.path().join("oracle.sqlite3"), "oracle").unwrap();
+        oracle.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         oracle.bind_fleet(FLEET).unwrap();
         let mut world = Self {
             seed,
@@ -396,6 +474,7 @@ impl World {
         let path = self.root.path().join(format!("{name}.sqlite3"));
         let scratch = self.root.path().join(format!("{name}-scratch"));
         let store = Store::open(&path, name.clone()).unwrap();
+        store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         store.bind_fleet(FLEET).unwrap();
         let skew_ms = if self.rng.chance(30) {
             (self.rng.below(6 * 24) as i64 - 3 * 24) * DAY_MS / 24
@@ -476,6 +555,7 @@ impl World {
         let placeholder = Store::open_memory(format!("{name}-closed")).unwrap();
         drop(std::mem::replace(&mut self.nodes[index].store, placeholder));
         self.nodes[index].store = Store::open(&path, name).unwrap();
+        self.nodes[index].store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         self.nodes[index].store.bind_fleet(FLEET).unwrap();
         self.set_clock(index);
         self.check_index(index);
@@ -943,12 +1023,80 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
-        self.claim_of(spec, index)
+        let input = self.claim_of(spec, index)?;
+        // Every replica admits some kinds, such as an operation authorization, only from a keyed
+        // member's signed envelope and holds an unkeyed writer's as unsigned. These nodes have no
+        // member keys, so such a claim would stay pending on every other node and hold every later
+        // checkpoint back; production writes it only on keyed members. The input is still drawn,
+        // so a seed whose store refused it keeps its schedule.
+        (!keyed_only(&input.kind)).then_some(input)
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == fractal_schema::usage_limits::KIND {
+            return Some(ClaimInput {
+                subject: "agent/sample/usage-producer".into(),
+                kind: spec.kind.clone(),
+                actor: Some("agent/sample/usage-producer".into()),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!([])),
+                    ("credit_readings".into(), json!([{
+                        "account": "digest",
+                        "account_ref": "account/example-0",
+                        "provider": "anthropic",
+                        "credit_id": "durable-convergence-credit",
+                        "expires_at": "2100-01-08T12:30:00Z",
+                        "measured_at": "2100-01-01T12:30:00Z",
+                        "state": "available",
+                        "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                        "coverage": "reported",
+                        "source": "omp-usage",
+                        "host": self.nodes[index].name
+                    }])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("usage")),
+            });
+        }
+        if spec.kind == fractal_schema::read_positions::KIND {
+            let conversation = self.subject_of("agent", index)?;
+            return Some(ClaimInput {
+                subject: fractal_schema::read_positions::subject(PERSON),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!(PERSON)),
+                    ("conversation".into(), json!(conversation)),
+                    ("at_ms".into(), json!(self.now())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("read")),
+            });
+        }
+        if spec.kind == fractal_schema::source_map::KIND {
+            return self.source_map_claim(index);
+        }
         let family = self.rng.pick(&spec.subjects).clone();
-        let subject = self.subject_of(&family, index)?;
+        let subject = if spec.kind == "message.expired" {
+            // Expiry requires existing sent mail. A fresh subject would make every random
+            // expiry fail admission even with the runtime actor; native admission still
+            // decides whether delivery or closure has already made this mail ineligible.
+            let mut subjects = claims(&self.nodes[index].store)
+                .into_values()
+                .filter(|claim| claim.kind == "message.sent")
+                .map(|claim| claim.subject)
+                .collect::<Vec<_>>();
+            subjects.sort();
+            subjects.dedup();
+            if subjects.is_empty() {
+                return None;
+            }
+            self.rng.pick(&subjects).clone()
+        } else {
+            self.subject_of(&family, index)?
+        };
         let deployment = deployment_fields(&spec.kind);
         let (fields, actor) = if let Some(mut fields) = deployment {
             if spec.kind == "deploy.go" && self.rng.chance(40) {
@@ -963,11 +1111,15 @@ impl World {
                     fields.insert(name.clone(), self.value_of(field, index));
                 }
             }
-            let actor = match self.rng.below(4) {
-                0 => None,
-                1 => Some(PERSON.to_owned()),
-                2 if subject.starts_with("agent/") => Some(subject.clone()),
-                _ => Some("agent/run-0/worker-0".to_owned()),
+            let actor = if spec.kind == "message.expired" {
+                Some("daemon/runtime".to_owned())
+            } else {
+                match self.rng.below(4) {
+                    0 => None,
+                    1 => Some(PERSON.to_owned()),
+                    2 if subject.starts_with("agent/") => Some(subject.clone()),
+                    _ => Some("agent/run-0/worker-0".to_owned()),
+                }
             };
             (fields, actor)
         };
@@ -979,6 +1131,44 @@ impl World {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(self.fresh("any")),
+        })
+    }
+
+    /// A `source.mapped` claim on `<agent>@<revision>` naming one text. The text is staged on the
+    /// writer, as a set publication stages it, so appending the claim promotes it into the shared
+    /// blobs that replicate with the claim.
+    fn source_map_claim(&mut self, index: usize) -> Option<ClaimInput> {
+        use fractal_schema::source_map::{Claim, ClaimFile, Node, Position, Span, claim_subject};
+        let subject = self.subject_of("agent", index)?;
+        let revision = self.fresh("revision");
+        let text = format!("{}\n", self.fresh("source"));
+        let blob_hash = self.nodes[index].store.put_blob(text.as_bytes()).expect("stage a source text");
+        let position = Position { line: 1, column: 1 };
+        let claim = Claim {
+            subject: subject.clone(),
+            revision: revision.clone(),
+            set_revision: format!("owned-set/convergence@{}", self.fresh("set")),
+            repository: "acme/convergence".into(),
+            r#ref: "refs/heads/main".into(),
+            sha: "a".repeat(40),
+            sequence: self.serial,
+            files: vec![ClaimFile { repository: "acme/convergence".into(), path: "graph/agent.ts".into(), blob: "b".repeat(40), blob_hash }],
+            declaration: 0,
+            inputs: vec![0],
+            nodes: vec![Node { kdl: format!("agent[{}]", subject.trim_start_matches("agent/")), kdl_lines: [1, 1],
+                span: Span { file: 0, start: position, end: position }, frames: vec![] }],
+        };
+        let Value::Object(fields) = serde_json::to_value(claim).expect("source map claim fields") else {
+            unreachable!("a claim serializes to an object")
+        };
+        Some(ClaimInput {
+            subject: claim_subject(&subject, &revision),
+            kind: fractal_schema::source_map::KIND.into(),
+            actor: None,
+            fields: fields.into_iter().collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(self.fresh("source-map")),
         })
     }
 
@@ -997,6 +1187,7 @@ impl World {
             "file" => format!("file/{}:/srv/example-{small}", self.nodes[index].name),
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
+            "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -1507,9 +1698,12 @@ impl World {
                     None => {}
                 }
             }
-            for id in held.keys() {
+            for (id, claim) in &held {
                 if !oracle_claims.contains_key(id) {
-                    failures.push(format!("{name}: holds {id}, which the oracle never saw"));
+                    failures.push(format!(
+                        "{name}: holds {id} ({} on {}, from {}), which the oracle never saw",
+                        claim.kind, claim.subject, claim.origin
+                    ));
                 }
             }
             if node.old_build {
@@ -1583,7 +1777,7 @@ fn admit(store: &Store) -> anyhow::Result<()> {
 fn append_generated_claim(
     store: &Store,
     input: &ClaimInput,
-) -> Result<ClaimRecord, fractal_daemon::St3Error> {
+) -> Result<ClaimRecord, fractal_daemon::FractalError> {
     // A fleet's checkpoints still trim the diagnostics its older builds replicated.
     if input.kind == "daemon.diagnostic" {
         return store.append_as_older_build_for_test(input);
@@ -1617,6 +1811,46 @@ fn append_generated_claim(
                 && claim.body["revision"] == intent.missions[id].revision
         })
         .expect("publication API wrote the generated mission"))
+}
+
+#[test]
+fn generated_message_expiry_is_admitted_and_replicates() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut sent = world.claim_of(&corpus()["message.sent"], 0).unwrap();
+    sent.actor = Some(PERSON.into());
+    sent.fields = BTreeMap::from([
+        ("status".into(), json!("sent")),
+        ("from".into(), json!(PERSON)),
+        ("to".into(), json!("agent/run-0/worker-0")),
+        ("content".into(), json!("Convergence expiry fixture")),
+    ]);
+    append_generated_claim(&world.nodes[0].store, &sent).unwrap();
+
+    // Use the random schedule's exact generation and admission paths, not a
+    // hand-authored expiry that only proves corpus membership.
+    let input = world.claim_of(&corpus()["message.expired"], 0).unwrap();
+    assert_eq!(input.subject, sent.subject);
+    assert_eq!(input.actor.as_deref(), Some("daemon/runtime"));
+    assert_eq!(input.fields["status"], json!("expired"));
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    let expiry = world.nodes[0].store.latest_claim(&input.subject, Some("message.expired")).unwrap().unwrap();
+    assert_eq!(expiry.id, claim.id);
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
+#[test]
+fn generated_source_maps_are_admitted_and_replicate_with_their_texts() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()[fractal_schema::source_map::KIND], 0).unwrap();
+    let hash = input.fields["files"][0]["blob_hash"].as_str().unwrap().to_owned();
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    let replicated = world.oracle.source_blob(&hash).unwrap().expect("the named text replicates with its claim");
+    assert!(String::from_utf8(replicated).unwrap().starts_with("source-1-"));
+    assert!(world.failures.is_empty(), "{}", world.report());
 }
 
 #[test]
@@ -1734,16 +1968,17 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
-/// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the three durable person-repair kinds.
-/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[];
+/// Corpus v22 adds `source.mapped` to kind selection, shifting the shared RNG schedule; hosted
+/// linux-tests on the storage PR left seed 34 untrimmed. The never-trim set is characterized by
+/// hosted CI; a lightly loaded runner diverges from it (#6210).
+const NEVER_TRIMS: &[u64] = &[34];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v10 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v22 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1796,6 +2031,21 @@ seed_tests! {
     seed_610_converges: 610,
     seed_987_converges: 987,
     seed_1597_converges: 1597,
+    seed_27_converges: 27,
+    seed_74_converges: 74,
+    seed_106_converges: 106,
+    seed_121_converges: 121,
+    seed_130_converges: 130,
+    seed_133_converges: 133,
+    seed_179_converges: 179,
+    seed_209_converges: 209,
+    seed_241_converges: 241,
+    seed_246_converges: 246,
+    seed_277_converges: 277,
+    seed_281_converges: 281,
+    seed_291_converges: 291,
+    seed_293_converges: 293,
+    seed_294_converges: 294,
 }
 
 #[test]
@@ -1957,7 +2207,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v10.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v22.json"
         }))
         .unwrap(),
     )

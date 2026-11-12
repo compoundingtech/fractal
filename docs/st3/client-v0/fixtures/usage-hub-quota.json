@@ -1,0 +1,27 @@
+{
+  "api_version": "st3.client.v0",
+  "request_id": "request/example",
+  "snapshot": {
+    "id": "snapshot/example/1/0000000000000000",
+    "host_id": "host/example",
+    "store_index": 1,
+    "projection_version": "client-projection.v0",
+    "created_at": "2026-01-01T00:00:00.000Z"
+  },
+  "value": {
+    "state": "available",
+    "refresh_seconds": 30,
+    "snapshot": {
+      "schemaVersion": 3,
+      "generatedAt": "2026-01-01T00:00:00Z",
+      "freshnessHorizonSeconds": 900,
+      "coverage": {
+        "expectedAccounts": 0,
+        "reportedAccounts": 0,
+        "unreportedAccountIds": [],
+        "disabledAccountIds": []
+      },
+      "accounts": []
+    }
+  }
+}

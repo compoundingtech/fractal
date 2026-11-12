@@ -21,7 +21,7 @@ ENTRY_FILES = {"lib", "main", "fixture"}
 TEST_ONLY_MODULES = {"test_support"}
 REEXPORTS = {
     "NormalizedIntent": "model",
-    "St3Error": "model",
+    "FractalError": "model",
     "cli_print": "cli_output",
     "cli_println": "cli_output",
     "parse_intent": "graph",

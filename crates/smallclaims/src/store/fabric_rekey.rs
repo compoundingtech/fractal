@@ -42,10 +42,14 @@ fn node_id(node: &str) -> bool {
 impl Store {
     fn own_endpoint_fields(&self) -> Result<Value> {
         let key = self.member_public_key().context("this node has no fleet member key")?;
-        Ok(self.latest_claim(&format!("host/{}", self.origin), Some("fleet.member-endpoints"))?
-            .map(|claim| claim.body["fields"].clone())
-            .filter(|fields| fields["member_key"] == key)
-            .unwrap_or_else(|| json!({"endpoints":[]})))
+        // Reuse the membership fold's writer, signature and incarnation-window checks.
+        // A public member_key copied into another writer's claim is not authority.
+        let membership = self.fleet_membership()?;
+        Ok(match membership.state(&self.origin) {
+            crate::fleet::MemberState::Current(own) if own.member_key == key =>
+                json!({"mode": own.mode, "endpoints": own.endpoints}),
+            _ => json!({"endpoints":[]}),
+        })
     }
 
     pub(super) fn preserve_fabric_rekey(&self, mode: &str, endpoints: &[Value], clear: bool) -> Result<Vec<Value>> {
@@ -164,7 +168,7 @@ impl Store {
                 }
             }
         }
-        self.publish_fleet_endpoints_locked(fields["mode"].as_str().unwrap_or(&own.mode), &endpoints, build)
+        self.publish_fleet_endpoints_locked(fields["mode"].as_str().unwrap_or(&own.mode), &endpoints, build, None)
     }
 }
 
@@ -182,8 +186,8 @@ mod tests {
         store.set_member_key(Some(key.clone())).unwrap();
         store.admit_fleet_anchor("rekey-test", key.public(), "listening").unwrap();
         store.publish_fleet_endpoints("listening", &[json!({
-            "transport":"fabric","node":"a".repeat(64),"protocol":"st3/fleet/rekey-test"
-        })], "test").unwrap();
+            "transport":"fabric","node":"a".repeat(64),"protocol":"fractal/fleet/rekey-test"
+        })], "test", None).unwrap();
         key
     }
 
@@ -199,6 +203,66 @@ mod tests {
         view.members.iter().find(|member| member.name == "anchor").unwrap().endpoints.clone()
     }
 
+    fn append_fields(store: &Store, subject: &str, kind: &str, fields: Value) {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn exchange(source: &Store, target: &Store) {
+        let exchange = source.export_replication_exchange(
+            "rekey-test", &target.replication_inventory().unwrap()).unwrap();
+        target.receive_replication_exchange(&source.origin, "rekey-test", &exchange).unwrap();
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!(admission.held, 0, "{admission:?}");
+        target.project_replication_backlog().unwrap();
+    }
+
+    #[test]
+    fn another_members_signed_rekey_metadata_is_not_preserved_or_republished() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        let own_key = configure(&store);
+        let peer = Store::open_memory("peer", Arc::new(Plain)).unwrap();
+        let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+        peer.bind_fleet("rekey-test").unwrap();
+        peer.pin_fleet_anchor(own_key.public()).unwrap();
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        append_fields(&store, "host/peer", "fleet.member-admitted", json!({
+            "member_key":peer_key.public(), "via":"member", "sponsor":"anchor",
+            "writer_floor":0, "mode":"listening"
+        }));
+        exchange(&store, &peer);
+        for legitimate in [false, true] {
+            if legitimate {
+                assert!(store.fabric_rekey_at(&request(FabricRekeyAction::Prepare), "test", 1000).unwrap());
+            }
+            let authenticated = current_endpoints(&store);
+            append_fields(&peer, "host/anchor", "fleet.member-endpoints", json!({
+                "member_key":own_key.public(), "mode":"listening",
+                "endpoints":[
+                    {"transport":"fabric", "node":"d".repeat(64)},
+                    {"transport":"fabric-rekey", "state":"committed",
+                     "old_node":"a".repeat(64), "next_node":"d".repeat(64), "deadline":1600},
+                    {"transport":"fabric-rekey-receipt", "member_key":peer_key.public(),
+                     "old_node":"a".repeat(64), "next_node":"d".repeat(64), "deadline":1600,
+                     "state":"committed"}
+                ]
+            }));
+            exchange(&peer, &store);
+            let latest = store.latest_claim("host/anchor", Some("fleet.member-endpoints")).unwrap().unwrap();
+            assert_eq!(latest.origin, "peer", "the unauthenticated latest lookup accepts the forgery");
+            assert_eq!(current_endpoints(&store), authenticated, "membership rejects the forgery");
+            store.publish_fleet_endpoints("listening", &[json!({
+                "transport":"fabric", "node":"a".repeat(64), "protocol":"fractal/fleet/rekey-test"
+            })], "test", None).unwrap();
+            let published = store.latest_claim("host/anchor", Some("fleet.member-endpoints")).unwrap().unwrap();
+            assert_eq!(published.origin, "anchor");
+            assert_eq!(published.body["fields"]["endpoints"], json!(authenticated));
+            assert_eq!(current_endpoints(&store), authenticated);
+        }
+    }
     #[test]
     fn signed_transition_survives_worker_refresh_and_abort_from_committed() {
         let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
@@ -212,13 +276,13 @@ mod tests {
             crate::fleet::transport::LocalTransports { fabric: true, ..Default::default() });
         assert_eq!(routes.len(), 1, "signed rekey metadata must never become a route");
         store.publish_fleet_endpoints("listening", &[json!({
-            "transport":"fabric","node":"c".repeat(64),"protocol":"st3/fleet/rekey-test"
-        })], "test").unwrap();
+            "transport":"fabric","node":"c".repeat(64),"protocol":"fractal/fleet/rekey-test"
+        })], "test", None).unwrap();
         assert_eq!(current_endpoints(&store), prepared);
         request.action = FabricRekeyAction::Commit;
         assert!(store.fabric_rekey_at(&request, "test", 1002).unwrap());
         assert!(!store.fabric_rekey_at(&request, "test", 1003).unwrap());
-        store.publish_fleet_endpoints("listening", &[], "test").unwrap();
+        store.publish_fleet_endpoints("listening", &[], "test", None).unwrap();
         let committed = current_endpoints(&store);
         assert!(committed.iter().any(|entry| entry["transport"] == "fabric" && entry["node"] == request.next_node));
         request.action = FabricRekeyAction::Abort;
@@ -320,7 +384,7 @@ mod tests {
         receipt.deadline += 1;
         assert!(peer.fabric_rekey_at(&receipt, "test", 1001).unwrap());
         assert!(!peer.fabric_rekey_at(&receipt, "test", 1002).unwrap());
-        peer.publish_fleet_endpoints("listening", &[], "test").unwrap();
+        peer.publish_fleet_endpoints("listening", &[], "test", None).unwrap();
         let view = peer.fleet_view_sealed().unwrap();
         let own = view.members.iter().find(|member| member.name == "peer").unwrap();
         assert!(own.endpoints.iter().any(|entry| entry["transport"] == "fabric-rekey-receipt"
@@ -336,7 +400,7 @@ mod tests {
         receipt.state = Some(FabricRekeyState::Committed);
         assert!(peer.fabric_rekey_at(&receipt, "test", 1004).unwrap());
         assert!(peer.fabric_rekey_at(&receipt, "test", 1600).is_err());
-        peer.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test").unwrap();
+        peer.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test", None).unwrap();
         let view = peer.fleet_view_sealed().unwrap();
         let own = view.members.iter().find(|member| member.name == "peer").unwrap();
         assert!(own.endpoints.iter().any(|entry| entry["transport"] == "fabric-rekey-receipt"
@@ -353,9 +417,9 @@ mod tests {
         store.fabric_rekey_at(&rotation, "test", now).unwrap();
         rotation.action = FabricRekeyAction::Commit;
         store.fabric_rekey_at(&rotation, "test", now).unwrap();
-        assert!(store.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test").unwrap());
+        assert!(store.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test", None).unwrap());
         assert!(current_endpoints(&store).is_empty());
-        assert!(!store.publish_fleet_endpoints("listening", &[], "test").unwrap());
+        assert!(!store.publish_fleet_endpoints("listening", &[], "test", None).unwrap());
         assert!(current_endpoints(&store).is_empty());
     }
 
@@ -367,8 +431,8 @@ mod tests {
         store.fabric_rekey_at(&rotation, "test", 1000).unwrap();
         // Its historical deadline is expired: changing mode can withdraw the route.
         store.publish_fleet_endpoints("dial-out", &[json!({
-            "transport":"fabric","node":rotation.old_node,"protocol":"st3/fleet/rekey-test"
-        })], "test").unwrap();
+            "transport":"fabric","node":rotation.old_node,"protocol":"fractal/fleet/rekey-test"
+        })], "test", None).unwrap();
         assert!(current_endpoints(&store).is_empty());
         assert_eq!(store.fleet_view_sealed().unwrap().members[0].mode, "dial-out");
     }

@@ -47,7 +47,14 @@ pub struct PreparedEnvelope<'r> {
     pub verify: std::time::Duration,
     /// The envelope's payload bytes, which its decoded content roughly doubles while it waits.
     pub bytes: usize,
-    content: Result<PreparedPayload, St3Error>,
+    content: Result<PreparedPayload, FractalError>,
+}
+
+impl PreparedEnvelope<'_> {
+    pub fn requires_keyed_envelope(&self) -> bool {
+        self.content.as_ref().is_ok_and(|content| content.payload.batch.claims.iter()
+            .any(|claim| self.runtime.requires_keyed_envelope(&claim.kind)))
+    }
 }
 
 struct EnvelopeKey {
@@ -70,18 +77,18 @@ struct PreparedBlob {
 
 struct PreparedClaim {
     record_ref: String,
-    raw: Result<Vec<u8>, St3Error>,
-    body: Result<String, St3Error>,
-    predecessors: Result<String, St3Error>,
+    raw: Result<Vec<u8>, FractalError>,
+    body: Result<String, FractalError>,
+    predecessors: Result<String, FractalError>,
     check: ClaimCheck,
 }
 
 /// What the claim checks that need no store found.
 enum ClaimCheck {
     /// The claim names another batch or writer, or its id is not its content hash.
-    Failed(St3Error),
+    Failed(FractalError),
     /// The runtime classified it without the store.
-    Classified(Result<ReplicatedClaimAdmission, St3Error>),
+    Classified(Result<ReplicatedClaimAdmission, FractalError>),
     /// The runtime classifies with the store, under the writer.
     Unclassified,
 }
@@ -109,9 +116,9 @@ pub fn prepare_envelope<'r>(
 fn prepare_payload(
     envelope: &ReplicaEnvelope,
     runtime: &dyn Runtime,
-) -> Result<PreparedPayload, St3Error> {
+) -> Result<PreparedPayload, FractalError> {
     let payload_bytes = envelope.payload.bytes().map_err(|error| {
-        St3Error::new(
+        FractalError::new(
             "invalid-envelope-payload",
             format!("the envelope payload is not valid base64: {error}"),
         )
@@ -124,14 +131,14 @@ fn prepare_payload(
         payload_bytes,
     );
     if expected_hash != envelope.hash {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "envelope-hash-mismatch",
             "the envelope hash does not match its payload",
         ));
     }
     let payload: ReplicaEnvelopePayload =
         ciborium::from_reader(payload_bytes).map_err(|error| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-envelope-payload",
                 format!("the envelope payload is not valid CBOR: {error}"),
             )
@@ -142,7 +149,7 @@ fn prepare_payload(
         || batch.previous_hash != envelope.previous_hash
         || batch.accepted_at_unix_ms != envelope.accepted_at_unix_ms
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "envelope-batch-mismatch",
             "the envelope and its batch identify different writes",
         ));
@@ -199,7 +206,7 @@ fn prepare_payload(
 /// The part of `validate_replicated_claim` that reads no stored state, in its order.
 fn check_claim(batch: &ReplicaBatch, claim: &ClaimRecord, runtime: &dyn Runtime) -> ClaimCheck {
     if claim.batch_id != batch.id || claim.origin != batch.origin {
-        return ClaimCheck::Failed(St3Error::new(
+        return ClaimCheck::Failed(FractalError::new(
             "claim-batch-mismatch",
             format!(
                 "replicated claim `{}` names another batch or writer",
@@ -210,7 +217,7 @@ fn check_claim(batch: &ReplicaBatch, claim: &ClaimRecord, runtime: &dyn Runtime)
     match claim_id_is_content_hash(claim) {
         Ok(true) => {}
         Ok(false) => {
-            return ClaimCheck::Failed(St3Error::new(
+            return ClaimCheck::Failed(FractalError::new(
                 "claim-hash-mismatch",
                 format!("replicated claim `{}` failed verification", claim.id),
             ));
@@ -231,7 +238,7 @@ fn finish_claim_check(
     claim: &ClaimRecord,
     runtime: &dyn Runtime,
     check: ClaimCheck,
-) -> Result<ReplicatedClaimAdmission, St3Error> {
+) -> Result<ReplicatedClaimAdmission, FractalError> {
     let admission = match check {
         ClaimCheck::Failed(error) => return Err(error),
         ClaimCheck::Classified(classification) => classification?,
@@ -251,7 +258,7 @@ pub fn admit_prepared_envelope_tx(
     transaction: &Connection,
     prepared: PreparedEnvelope<'_>,
     outcome: &mut ReplicationAdmission,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let PreparedEnvelope {
         writer,
         sequence,
@@ -444,28 +451,36 @@ pub fn admit_prepared_envelope_tx(
                     )
                     .map_err(internal)?;
                 }
-                transaction
-                    .prepare_cached(
-                        /* sqlite-large-value: allow-for-now lv-h0f58f2e5f02b owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
-                             record_ref, writer, sequence, envelope_hash, position, raw, state,
-                             claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
-                         ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
-                            claim_id=excluded.claim_id,
-                            subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
-                            error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
-                            error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms
-                         WHERE claim_id IS NOT excluded.claim_id
-                            OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT excluded.kind_hint
-                            OR (state IS NOT 'repaired' AND
-                                (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
-                    )
-                    .map_err(internal)?
-                    .execute(/* sqlite-large-value: allow-for-now lv-h31c9cb563400 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
-                    .map_err(internal)?;
+                // Where the retired ledger is the authority, this member deleted the claim and its
+                // record and keeps the envelope only for its other claims and for peers: the
+                // record of a claim it retired stays deleted.
+                let retired_here =
+                    tombstoned && super::retired::authoritative(transaction).map_err(internal)?;
+                if !retired_here {
+                    transaction
+                        .prepare_cached(
+                            /* sqlite-large-value: allow-for-now lv-h1693db03cced owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
+                                 record_ref, writer, sequence, envelope_hash, position, raw, state,
+                                 claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
+                             ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
+                                claim_id=excluded.claim_id,
+                                subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
+                                error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
+                                error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
+                                updated_at_unix_ms=excluded.updated_at_unix_ms
+                             WHERE claim_id IS NOT excluded.claim_id
+                                OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT excluded.kind_hint
+                                OR (state IS NOT 'repaired' AND
+                                    (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
+                        )
+                        .map_err(internal)?
+                        .execute(/* sqlite-large-value: allow-for-now lv-h31c9cb563400 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
+                        .map_err(internal)?;
+                }
                 outcome.valid += 1;
-                outcome.changed |= inserted != 0 || previous_state.as_deref() != Some("valid");
+                outcome.changed |=
+                    inserted != 0 || (!retired_here && previous_state.as_deref() != Some("valid"));
             }
             Ok(
                 classification @ (ReplicatedClaimAdmission::UnknownKind

@@ -19,6 +19,95 @@ fn declaration_mission_revision_is_pinned() {
     );
 }
 
+#[test]
+fn typescript_declarations_match_the_pinned_rust_fixture() {
+    let source = include_str!(
+        "../../../clients/typescript/fractal-declarations/fixtures/daily-review.kdl"
+    );
+    let actual = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let expected = fractal_store::graph::parse_intent(FIXTURE, "local").unwrap();
+
+    // Compare parsed declarations, not source hashes or formatting-sensitive provenance.
+    assert_eq!(actual.subjects, expected.subjects);
+    assert_eq!(actual.missions, expected.missions);
+    assert_eq!(actual.missions["docs/daily-review"].revision, PINNED_REVISION);
+}
+
+#[test]
+fn typescript_principal_and_capacity_match_current_grammar() {
+    let source = include_str!(
+        "../../../clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl"
+    );
+    let intent = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let mission = &intent.missions["docs/daily-review"];
+    assert_eq!(mission.capacity.unwrap().cores, 2);
+    assert_eq!(mission.capacity.unwrap().memory, 4 << 30);
+    assert_eq!(
+        mission.steps["review"].capacity.unwrap().memory,
+        Some(8 << 30)
+    );
+    assert!(intent.subjects["agent/docs/editor"].desired["children"].as_array().unwrap()
+        .iter().any(|child| child["name"] == "principal" && child["arguments"][0] == "person/operator"));
+    for (source, code) in [
+        (
+            source.replace("person/operator", "operator"),
+            "invalid-agent-principal",
+        ),
+        (
+            source.replace("assigned-to \"agent/docs/writer\"", "agentless"),
+            "invalid-capacity",
+        ),
+    ] {
+        assert_eq!(
+            fractal_store::graph::parse_intent(&source, "local")
+                .err()
+                .unwrap()
+                .code,
+            code
+        );
+    }
+}
+
+#[test]
+fn authoring_package_matches_the_declarations_sdk_mission() {
+    // packages/fractal renders the same agents and mission through its own encoder; the schedule
+    // is outside the shared subset. Equal parsed declarations mean an equal native revision.
+    let source = include_str!("../../../packages/fractal/fixtures/daily-review.kdl");
+    let actual = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let mut expected = fractal_store::graph::parse_intent(FIXTURE, "local").unwrap();
+    expected.subjects.retain(|_, subject| subject.kind != "schedule");
+    assert_eq!(actual.subjects, expected.subjects);
+    assert_eq!(actual.missions, expected.missions);
+    assert_eq!(actual.missions["docs/daily-review"].revision, PINNED_REVISION);
+}
+
+#[test]
+fn authoring_package_fixtures_parse_as_declarations() {
+    for (name, source, missions) in [
+        (
+            "pr-landing.kdl",
+            include_str!("../../../packages/fractal/fixtures/pr-landing.kdl"),
+            &["pr-landing"][..],
+        ),
+        (
+            "upstream-repin.kdl",
+            include_str!("../../../packages/fractal/fixtures/upstream-repin.kdl"),
+            &[
+                "example/upstream-repin",
+                "__st3/example/upstream-repin/loop/await-upstream/round",
+            ][..],
+        ),
+    ] {
+        let intent = fractal_store::graph::parse_intent(source, "local")
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let mut parsed: Vec<&str> = intent.missions.keys().map(String::as_str).collect();
+        parsed.sort_unstable();
+        let mut expected = missions.to_vec();
+        expected.sort_unstable();
+        assert_eq!(parsed, expected, "{name}");
+    }
+}
+
 #[tokio::test]
 async fn validate_reads_files_without_a_daemon_or_configuration() {
     let scratch = tempfile::tempdir().unwrap();

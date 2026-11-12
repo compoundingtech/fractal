@@ -122,6 +122,79 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn notice_internal_definitions_conform() {
+    let cases = fixture("notice-conformance.json");
+    let snapshot = &cases["snapshot"];
+    let validator = contract_validator("NoticeSnapshot");
+    assert_conforms(&validator, "full notice", snapshot);
+    let created = contract_validator("NoticeCreated");
+    assert_conforms(&created, "producer input", &snapshot["input"]);
+    for case in cases["invalid_snapshot"].as_array().unwrap() {
+        let mut invalid = snapshot.clone();
+        let pointer = case["pointer"].as_str().unwrap();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        invalid.pointer_mut(parent).unwrap().as_object_mut().unwrap()
+            .insert(key.into(), case["value"].clone());
+        assert!(!validator.is_valid(&invalid), "accepted {case}");
+    }
+    for (field, limit) in [("dedupe_key", 200), ("summary", 200), ("speech", 300), ("body", 20000)] {
+        let mut input = snapshot["input"].clone();
+        input[field] = Value::String("😀".repeat(limit));
+        assert_conforms(&created, field, &input);
+        input[field] = Value::String("😀".repeat(limit + 1));
+        assert!(!created.is_valid(&input), "accepted overlong {field}");
+    }
+    let mut minimal = snapshot["input"].clone();
+    for field in ["speech", "body", "expires_at"] {
+        minimal.as_object_mut().unwrap().remove(field);
+    }
+    assert_conforms(&created, "absent optional fields", &minimal);
+    minimal["links"] = serde_json::json!([]);
+    minimal["body"] = Value::String(String::new());
+    assert_conforms(&created, "empty optional body/links", &minimal);
+    minimal["links"] = Value::Array(vec![snapshot["input"]["links"][0].clone(); 11]);
+    assert!(!created.is_valid(&minimal));
+    for (field, definition, values) in [
+        ("delivery", "NoticeDelivery", "valid_delivery"),
+        ("integrity", "NoticeIntegrity", "valid_integrity"),
+    ] {
+        for value in cases[values].as_array().unwrap() {
+            assert_conforms(&contract_validator(definition), field, value);
+            let mut joined = snapshot.clone();
+            joined[field] = if field == "delivery" { serde_json::json!([value]) } else { value.clone() };
+            assert_conforms(&validator, field, &joined);
+        }
+    }
+    let mut controlled = snapshot.clone();
+    controlled["control_revision"] = serde_json::json!("control-v1");
+    for field in ["seen_at", "dismissed_at", "snoozed_until"] {
+        controlled[field] = snapshot["updated_at"].clone();
+    }
+    assert_conforms(&validator, "person controls", &controlled);
+    for field in ["control_revision", "seen_at", "dismissed_at", "snoozed_until"] {
+        let mut absent = snapshot.clone();
+        absent.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&absent), "accepted absent {field}");
+    }
+    let id = &snapshot["id"];
+    let fence = serde_json::json!({"notice_id": id, "source_revision": "source-v1", "control_revision": null});
+    assert_conforms(&contract_validator("NoticeFence"), "no control fence", &fence);
+    for definition in ["NoticeSeenParameters", "NoticeDismissParameters", "NoticeSnoozeParameters"] {
+        let validator = contract_validator(definition);
+        let mut params = serde_json::json!({"notice_id": id});
+        if definition == "NoticeSnoozeParameters" {
+            assert!(!validator.is_valid(&params));
+            params["until"] = Value::Null;
+            assert_conforms(&validator, "clear snooze", &params);
+            params["until"] = snapshot["updated_at"].clone();
+        }
+        assert_conforms(&validator, definition, &params);
+        params["actor"] = serde_json::json!("person/example");
+        assert!(!validator.is_valid(&params));
+    }
+}
+
+#[test]
 fn agents_publication_contract_is_complete_and_unbounded() {
     let validator = contract_validator("AgentsPublication");
     let resources = fixture("resources.json");
@@ -395,6 +468,55 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
         wrong_run["runs"] = serde_json::json!(["agent/example"]);
         assert!(!validator.is_valid(&wrong_run));
     }
+}
+
+#[test]
+fn mission_detail_step_history_eta_and_declaration_provenance_conform() {
+    let mission = fixture("mission-detail-step-history.json");
+    let retry = &mission["run_details"][0]["steps"][0]["waits"][2];
+    assert_eq!(retry["kind"], "retry");
+    assert_eq!(retry["end"], retry["until"], "this example's later claim must not extend its backoff");
+    for validator in [consumer_validator("Mission"), contract_validator("Mission")] {
+        assert_conforms(&validator, "mission detail step history fixture", &mission);
+        // Older daemons, lists and steps outside the enriched runs omit every new field.
+        let mut older = mission.clone();
+        for step in older["run_details"][0]["steps"].as_array_mut().unwrap() {
+            let step = step.as_object_mut().unwrap();
+            for field in ["attempts", "waits", "transitions", "history_complete", "eta"] {
+                step.remove(field);
+            }
+        }
+        assert_conforms(&validator, "a step without history", &older);
+        for (path, value) in [
+            ("/run_details/0/steps/0/waits/0/start", serde_json::json!("2026-11-08T10:00:00Z")),
+            ("/run_details/0/steps/1/eta/samples", serde_json::json!(0)),
+        ] {
+            let mut invalid = mission.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            assert!(!validator.is_valid(&invalid), "{path} must be rejected");
+        }
+    }
+    // Consumers keep a future outcome, wait kind or event; this daemon emits only the known ones.
+    for path in [
+        "/run_details/0/steps/0/attempts/0/outcome",
+        "/run_details/0/steps/0/waits/0/kind",
+        "/run_details/0/steps/0/transitions/0/event",
+        "/run_details/0/steps/0/transitions/0/status",
+    ] {
+        let mut future = mission.clone();
+        *future.pointer_mut(path).unwrap() = serde_json::json!("future-word");
+        assert_conforms(&consumer_validator("Mission"), path, &future);
+        assert!(!contract_validator("Mission").is_valid(&future), "{path} is a known word");
+    }
+    let declaration = fixture("mission-declaration-provenance.json");
+    let validator = contract_validator("MissionDeclaration");
+    assert_conforms(&validator, "declaration with provenance", &declaration);
+    let mut without = declaration.clone();
+    without.as_object_mut().unwrap().remove("provenance");
+    assert_conforms(&validator, "declaration without provenance", &without);
+    let mut short = declaration.clone();
+    short["provenance"]["commit"] = serde_json::json!("abc123");
+    assert!(!validator.is_valid(&short), "a provenance commit is a full commit id");
 }
 
 #[test]
@@ -880,6 +1002,47 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
     assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
 }
 
+/// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
+/// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
+#[test]
+fn github_plugin_fixtures_conform_to_their_reads_and_the_envelope() {
+    let root = asset_root();
+    let manifest = json(root.join("fixtures/manifest.json"));
+    let envelope = contract_validator("Envelope");
+    let mut seen = 0;
+    for entry in manifest["fixtures"].as_array().unwrap() {
+        let file = entry["file"].as_str().unwrap();
+        if !file.starts_with("github-plugin-") {
+            continue;
+        }
+        seen += 1;
+        let value = json(root.join("fixtures").join(file));
+        let definition = entry["definition"].as_str().unwrap();
+        let errors = contract_validator(definition).iter_errors(&value).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} as {definition}: {errors:?}");
+        assert!(contract_validator("GithubPluginRead").is_valid(&value), "{file}");
+        let wrapped = serde_json::json!({
+            "api_version": "st3.client.v0",
+            "request_id": "request/example",
+            "snapshot": {
+                "id": "snapshot/example/1/0000000000000000",
+                "host_id": "host/example",
+                "store_index": 1,
+                "projection_version": "client-projection.v0",
+                "created_at": "2026-01-01T00:00:00.000Z"
+            },
+            "value": value,
+        });
+        let errors = envelope.iter_errors(&wrapped).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} in an Envelope: {errors:?}");
+    }
+    assert_eq!(seen, 12);
+    // A URL is never an item: a found read whose item misses fields does not conform.
+    assert!(!contract_validator("GithubPullRequestRead").is_valid(&serde_json::json!({
+        "status": "found", "fetched_at": "2026-11-07T06:40:00Z", "stale": false, "item": { "url": "https://github.com/acme/garden/pull/7" }
+    })));
+}
+
 #[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
@@ -976,6 +1139,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "timeline.list",
         "events.list",
         "terminal.screen",
+        "read-positions.list",
     ] {
         assert!(
             read_ids.contains(required),
@@ -1027,6 +1191,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "terminal.attach",
         "terminal.detach",
         "pairing.revoke",
+        "read-position.advance",
     ] {
         assert!(
             actions.contains_key(required),
@@ -1235,7 +1400,7 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
+    AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
     // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
     store: Arc::new(
         Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
@@ -1243,6 +1408,7 @@ fn test_state(root: &Path) -> AppState {
     notify: Arc::new(Notify::new()),
     event_notify: watch::channel(0_u64).0,
     node: "client-v0-baseline".into(),
+    api_socket: root.join("api.sock"),
     state_dir: root.to_path_buf(),
     pty_root: root.join("pty"),
     pty_binary: PathBuf::from("pty"),
@@ -1596,7 +1762,7 @@ async fn client_v0_read_routes_conform_to_the_manifest() {
     assert_eq!(response.status(), StatusCode::OK);
     let envelope: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(envelope["api_version"], "st3.client.v0");
+    assert_eq!(envelope["api_version"], "fractal.client.v0");
     assert_eq!(
         envelope["snapshot"]["projection_version"],
         "client-projection.v0"
@@ -2182,6 +2348,12 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
     receiver.store.bind_fleet(fleet).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    for state in [&issuer, &receiver] {
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+    }
+    issuer.store.set_member_key(Some(key.clone())).unwrap();
+    issuer.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
     let issuer_app = fractal_daemon::api::router(issuer.clone());
     let (status, challenge) = client_post_json(
         issuer_app.clone(),
@@ -2315,7 +2487,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let device = paired["value"]["device_id"].as_str().unwrap();
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_client_operation_claim(&fractal_daemon::model::ClaimInput {
             subject: "custom/client/pairing-expired-inventory".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
@@ -2489,6 +2661,18 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let (status, capabilities) =
         client_json_auth(fabric.clone(), "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let (status, denied) = client_json_auth(
+        fabric.clone(), "/v1/client/agent-declarations/agent/example", credential,
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "forbidden");
+    assert!(denied["details"].get("reason").is_none(), "{denied}");
+    let (status, unknown) = client_json_auth(
+        fabric.clone(), "/v1/client/capabilities", "unknown-paired-credential",
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{unknown}");
+    assert_eq!(unknown["code"], "forbidden");
+    assert_eq!(unknown["details"]["reason"], "credential-rejected");
     let capability_state = |id: &str| {
         capabilities["value"]["capabilities"]
             .as_array()
@@ -2703,13 +2887,15 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
             idempotency_key: None,
         })
         .unwrap();
-    let (status, _) = client_json_auth(
+    let (status, expired) = client_json_auth(
         fabric.clone(),
         "/v1/client/capabilities",
         expired_credential,
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(expired["code"], "forbidden");
+    assert_eq!(expired["details"]["reason"], "credential-rejected");
 
     let (_, local_capabilities) = client_json(local.clone(), "/v1/client/capabilities").await;
     let revoke = serde_json::json!({
@@ -2720,8 +2906,10 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     });
     let (status, revoked) = client_post_json(local, "/v1/client/actions", revoke).await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
-    let (status, _) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
+    let (status, refused) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["code"], "forbidden");
+    assert_eq!(refused["details"]["reason"], "credential-rejected");
 }
 
 #[tokio::test]
@@ -2812,7 +3000,7 @@ async fn full_control_pairing_requires_explicit_local_person_opt_in_and_can_be_r
 }
 
 #[tokio::test]
-async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_actions() {
+async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_actions() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -2870,7 +3058,7 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
         local.clone(),
         "/v1/client/pairings",
         "person/ada",
-        begin(serde_json::json!(["terminal.read", "read.projections", "read.glasses"])),
+        begin(serde_json::json!(["terminal.read", "read.arrangements", "read.projections", "read.glasses"])),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
@@ -2891,14 +3079,14 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     assert_eq!(status, StatusCode::OK, "{paired}");
     assert_eq!(
         paired["value"]["scopes"],
-        serde_json::json!(["read.projections", "read.glasses", "terminal.read"])
+        serde_json::json!(["read.projections", "read.glasses", "read.arrangements", "terminal.read"])
     );
     let credential = paired["value"]["credential"].as_str().unwrap();
 
     let (status, capabilities) =
         client_json_auth(gateway.clone(), "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
-    for action in ["work.done", "launch.create", "message.send"] {
+    for action in ["work.done", "launch.create", "message.send", "control.arrangements", "read.declarations"] {
         let state = capabilities["value"]["capabilities"]
             .as_array()
             .unwrap()
@@ -2907,6 +3095,55 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
             .unwrap()["state"]
             .clone();
         assert_eq!(state, "ungranted", "{action}");
+    }
+
+    let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+    let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
+    let create_arrangement = serde_json::json!({
+        "api_version": "st3.client.v0", "id": "action/read-only-arrangement-fixture",
+        "type": "arrangement.edit", "idempotency_key": "read-only-arrangement-fixture",
+        "fence": { "snapshot_id": capabilities["snapshot"]["id"] },
+        "parameters": {
+            "subject": subject, "owner": "person/ada", "version": 2,
+            "operations": [{ "op": "create", "name": "Sidebar" }]
+        }
+    });
+    let (status, created) = client_post_json_person(
+        local.clone(), "/v1/client/actions", "person/ada", create_arrangement,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+
+    let (status, arrangements) = client_json_auth(
+        gateway.clone(), "/v1/client/arrangements?person=person%2Fada", credential,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{arrangements}");
+    assert_eq!(arrangements["value"]["items"][0]["id"], subject);
+    let (status, arrangement) = client_json_auth(gateway.clone(), path, credential).await;
+    assert_eq!(status, StatusCode::OK, "{arrangement}");
+    assert_eq!(arrangement["value"]["id"], subject);
+    let (status, memberships) = client_json_auth(
+        gateway.clone(), &format!("{path}/memberships?person=person%2Fada"), credential,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{memberships}");
+    assert_eq!(memberships["value"]["collection"], "ordered-memberships");
+    assert_eq!(memberships["value"]["items"], serde_json::json!([]));
+
+    for (action_type, operations) in [
+        ("arrangement.edit", serde_json::json!([{ "op": "create", "name": "Forbidden" }])),
+        ("arrangement.membership.edit", serde_json::json!([
+            { "op": "place", "member": format!("agent/{}.asker", store.origin()), "bucket": null, "key": "a0" }
+        ])),
+    ] {
+        let denied_edit = serde_json::json!({
+            "api_version": "st3.client.v0", "id": format!("action/read-only-{action_type}"),
+            "type": action_type, "idempotency_key": format!("read-only-{action_type}"),
+            "fence": { "snapshot_id": arrangement["snapshot"]["id"] },
+            "parameters": { "subject": subject, "owner": "person/ada", "operations": operations }
+        });
+        let (status, denied) = client_post_json_auth(
+            gateway.clone(), "/v1/client/actions", credential, denied_edit,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
     }
 
     let (status, attention) =
@@ -3387,7 +3624,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             client_json(app.clone(), &format!("/v1/client/{collection}")).await;
         assert_eq!(status, StatusCode::OK, "{collection}: {envelope}");
         assert_conforms(&validator, collection, &envelope);
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["value"]["kind"], "page");
         assert_eq!(envelope["value"]["collection"], collection);
         assert!(envelope["value"]["items"].is_array());
@@ -3453,7 +3690,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
     ];
     let steps = states
         .iter()
-        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/builder\" }}"))
+        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/client-v0-baseline.builder\" }}"))
         .collect::<Vec<_>>()
         .join("\n");
     let source = format!(
@@ -3545,6 +3782,18 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap();
         }
     }
+    // Older stores can retain slash-qualified assignees without the actor prefix.
+    let legacy_step = run.steps.iter().find(|step| step.step == "ready").unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    assert_eq!(
+        connection.execute(
+            "UPDATE step_runs SET assignee = ?1 WHERE subject = ?2",
+            rusqlite::params!["legacy/builder", legacy_step.subject],
+        ).unwrap(),
+        1
+    );
+    drop(connection);
     let app = fractal_daemon::api::router(state);
     for path in ["/v1/client/missions", "/v1/client/missions/state-contract"] {
         let (status, response) = client_json(app.clone(), path).await;
@@ -3570,6 +3819,30 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap()
                 .iter()
                 .any(|step| step["state"] == "claimed")
+        );
+        // Use the same presentation emitter as the published mission cards, not a hand-built
+        // presentation fixture, and validate the enclosing resource including /presentation.
+        let mut card = mission.clone();
+        fractal_daemon::api::published_lists::present(&mut card, &[], Some(&Default::default()));
+        assert!(card["presentation"].is_object(), "{card}");
+        assert_conforms(&contract_validator("Mission"), path, &card);
+        let presented_steps = card["presentation"]["steps"].as_array().unwrap();
+        assert_eq!(presented_steps.len(), states.len());
+        for step in presented_steps {
+            assert_eq!(step["owner"]["kind"], "agent", "{step}");
+            assert_conforms(
+                &contract_validator("AgentId"),
+                "/presentation/steps/*/owner/agent",
+                &step["owner"]["agent"],
+            );
+        }
+        let legacy = presented_steps.iter().find(|step| step["path"] == "ready").unwrap();
+        assert_eq!(legacy["owner"]["agent"], "agent/legacy/builder");
+        let mut invalid = card.clone();
+        invalid["presentation"]["steps"][0]["owner"]["agent"] = serde_json::json!("legacy/builder");
+        assert!(
+            !contract_validator("Mission").is_valid(&invalid),
+            "strict /presentation AgentId contract must reject an unprefixed actor"
         );
     }
     let (status, response) = client_json(app.clone(), "/v1/client/work?history=true").await;
@@ -3612,7 +3885,7 @@ version 2
 agent "ios-owner" { workspace "/tmp"; command "true" }
 mission "ios-proof" state="ready" {
   goal "Run the physical simulator proof."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/client-v0-baseline.ios-owner" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -3726,7 +3999,7 @@ version 2
 agent "release-owner" { workspace "/tmp"; command "true" }
 mission "release-proof" state="ready" {
   goal "Publish the release."
-  step "tag-proof" { assigned-to "agent/release-owner"; goal "Prove the published tag builds." }
+  step "tag-proof" { assigned-to "agent/client-v0-baseline.release-owner"; goal "Prove the published tag builds." }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -3893,7 +4166,7 @@ agent "queue-seat" { workspace "/tmp"; command "true" }
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-baseline.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -4740,6 +5013,88 @@ mission "timing/run" state="ready" {
     }).unwrap();
     let (status, denied) = client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+}
+
+#[tokio::test]
+async fn mission_detail_projects_a_program_steps_journal_and_its_fault() {
+    use sha2::Digest as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let bundle = b"export default {}";
+    let hash = hex::encode(sha2::Sha256::digest(bundle));
+    state.store.put_blob(bundle).unwrap();
+    let source = format!(
+        r#"version 2
+mission "program/land" state="ready" {{
+  goal "Land one change by program."
+  step "land" {{ program "/bundles/land.mjs" sha256="{hash}" stalled-after="10m" }}
+}}
+"#
+    );
+    let intent = fractal_daemon::graph::parse_intent(&source, state.store.origin()).unwrap();
+    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.clone(),
+        source_name: None,
+    }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "program-definition").unwrap();
+    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "program/land".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/avery".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "program-run".into(),
+    }).unwrap();
+    let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
+    state.store.set_step_state(&land, "working", None).unwrap();
+    let append = |kind: &str, fields: Value| {
+        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: land.clone(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    for (key, status, extra) in [
+        ("merge", "started", serde_json::json!({})),
+        ("merge", "failed", serde_json::json!({"ms": 900, "error": {"_tag": "Conflict"}})),
+        ("review", "started", serde_json::json!({"child": "mission-run/program/review"})),
+    ] {
+        let mut fields = serde_json::json!({"key": key, "status": status, "attempt": 1, "program": hash});
+        fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        append("program.step", fields);
+    }
+    append("reconcile.fault", serde_json::json!({
+        "scope": "program/stalled", "status": "faulted", "reason": "no journal entry for 10m; open key `review`",
+    }));
+
+    let app = fractal_daemon::api::router(state.clone());
+    let path = "/v1/client/missions/mission%2Fprogram%2Fland";
+    let (status, response) = client_json(app, path).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_conforms(&contract_validator("Envelope"), path, &response);
+    let envelope: fractal_client::Envelope<fractal_client::Resource> =
+        serde_json::from_value(response.clone()).unwrap();
+    let fractal_client::Resource::Mission(mission) = envelope.value else {
+        panic!("mission detail must be a mission resource");
+    };
+    let detail = &mission.run_details[0];
+    let step = detail.steps.as_ref().unwrap().iter().find(|step| step.path == "land").unwrap();
+    let program = step.program.as_ref().expect("a program step carries its journal");
+    assert_eq!(program.open_key.as_deref(), Some("review"));
+    assert_eq!((program.stalled_after_ms, program.truncated), (600_000, false));
+    let entries = program.entries.iter().map(|entry| (entry.key.as_str(), entry.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(entries, [("merge", "failed"), ("review", "started")]);
+    assert_eq!((program.entries[0].ms, program.entries[0].error.as_deref()), (Some(900), Some(r#"{"_tag":"Conflict"}"#)));
+    assert_eq!(program.entries[1].child.as_deref(), Some("mission-run/program/review"));
+    let fault = program.fault.as_ref().unwrap();
+    assert_eq!(fault.scope, "program/stalled");
+    let blocker = &response["value"]["run_details"][0]["blocker"];
+    assert_eq!((blocker["step"].as_str(), blocker["scope"].as_str()), (Some(land.as_str()), Some("program/stalled")));
 }
 
 #[tokio::test]

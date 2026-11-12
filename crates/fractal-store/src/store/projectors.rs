@@ -56,7 +56,12 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
+    Hook { name: "read-positions", run: read_positions::open },
     Hook { name: "limits", run: limits::open_limits },
+    Hook { name: "usage-credits", run: usage_credits::open },
+    Hook { name: "run-eta", run: run_eta::open },
+    Hook { name: "gate-runners", run: gate_runners::open },
+    Hook { name: "wake-lookup", run: wake_lookup::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -73,7 +78,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "resources",
-        takes: Takes::Kinds(&["resource.observed"]),
+        takes: Takes::Kinds(&["resource.observed", fractal_schema::github_plugin::ITEM_STATE]),
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
     },
     AppendProjector {
@@ -105,13 +110,23 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "limits",
-        takes: Takes::Kinds(&["harness.limits"]),
+        takes: Takes::Kinds(&["harness.limits", "usage.limits.observed"]),
         project: |transaction, _| limits::flush_limits(transaction).map(drop),
+    },
+    AppendProjector {
+        name: "usage-credits",
+        takes: Takes::Kinds(&["usage.limits.observed"]),
+        project: usage_credits::project,
     },
     AppendProjector {
         name: "arrangements",
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project,
+    },
+    AppendProjector {
+        name: "read-positions",
+        takes: Takes::Kinds(&[read_positions::KIND]),
+        project: read_positions::project,
     },
     AppendProjector {
         name: "ordered-membership",
@@ -129,9 +144,19 @@ pub const APPEND: &[AppendProjector] = &[
 /// claim of the range has its event row.
 pub const REPLICATED: &[AppendProjector] = &[
     AppendProjector {
+        name: "usage-credits",
+        takes: Takes::Kinds(&["usage.limits.observed"]),
+        project: usage_credits::project,
+    },
+    AppendProjector {
         name: "arrangement-project",
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project_replicated,
+    },
+    AppendProjector {
+        name: "read-position-project",
+        takes: Takes::Kinds(&[read_positions::KIND]),
+        project: read_positions::project,
     },
     AppendProjector {
         name: "ordered-membership-project",
@@ -150,7 +175,9 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
+    Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },
+    Hook { name: "run-eta", run: run_eta::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
 ];
 
@@ -166,6 +193,11 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
+    Hook { name: "read-positions", run: read_positions::rebuild },
+    Hook { name: "usage-credits", run: usage_credits::rebuild },
+    Hook { name: "run-eta", run: run_eta::rebuild },
+    Hook { name: "gate-runners", run: gate_runners::rebuild },
+    Hook { name: "wake-lookup", run: wake_lookup::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -179,12 +211,18 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
+    ReplayStage { phase: "full-replay/read-positions", run: read_positions::rebuild },
+    ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
+    ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
+    ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 
+/// Run each hook in order. Inside a staged writer lend each is its own stage, named after it, so
+/// a long hold says which domain's catch-up it spent its time in.
 pub fn run_hooks(hooks: &[Hook], transaction: &Transaction<'_>) -> Result<()> {
-    hooks.iter().try_for_each(|hook| (hook.run)(transaction))
+    hooks.iter().try_for_each(|hook| holds::stage(hook.name, || (hook.run)(transaction)))
 }
 
 /// Run each projector that takes `claim`'s kind, in the registry's order.

@@ -1,6 +1,10 @@
 use crate::DeliveryStore;
 use super::*;
 
+#[cfg(test)]
+#[path = "replication_receive_tests.rs"]
+mod receive_tests;
+
 pub async fn replication_status(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationStatus>, ApiError> {
@@ -24,12 +28,35 @@ pub struct ReplicationRecordsQuery {
     unresolved: bool,
 }
 
+fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
+    !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
+        && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+}
+
+#[test]
+fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"custom/example/ordinary", "kind":"custom.example.created"
+    })).unwrap();
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("custom/attention/source/legacy".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = Some("custom/example/alternate".into());
+    record.kind = Some("custom.attention.notice-created".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
 pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.replica_records(query.unresolved))
+    blocking_store(move || Ok(store.replica_records(query.unresolved)?
+        .into_iter().filter(generic_replica_record_visible).collect()))
         .await
         .map(Json)
 }
@@ -47,6 +74,7 @@ pub async fn replication_record(
     let record_for_read = record.clone();
     blocking_store(move || store.replica_record(&record_for_read))
         .await?
+        .filter(generic_replica_record_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
@@ -77,7 +105,8 @@ pub(super) async fn plan_waiting_for_proof(
     wait: Duration,
     mut busy: impl FnMut(),
 ) -> Result<crate::store::CheckpointPlanView, ApiError> {
-    let deadline = Instant::now() + wait;
+    // Use the timer's clock for the deadline too, so paused-time tests control the whole wait.
+    let deadline = tokio::time::Instant::now() + wait;
     loop {
         let error = match plan_once(state, cut).await? {
             Ok(plan) => return Ok(plan),
@@ -86,9 +115,9 @@ pub(super) async fn plan_waiting_for_proof(
         if error.downcast_ref::<smallclaims::store::checkpoint::CheckpointProofBusy>().is_none() {
             return Err(ApiError::internal(error));
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "checkpoint-proof-in-progress",
                 "a checkpoint proof is running; retry shortly",
             )));
@@ -273,18 +302,86 @@ pub async fn replication_checkpoint_adopt(
     Ok(Json(actions))
 }
 
+pub(super) fn receive_correlation(headers: &axum::http::HeaderMap) -> uuid::Uuid {
+    headers.get("x-fractal-exchange-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+/// One INFO event describes all work charged to this receive, including failed requests.
+/// Phase wall times contain nested writer work and are non-additive with writer/shared costs.
+/// Counts include backlog work done by this request, not only envelopes it offered.
+/// Commits count successful managed transactions, not savepoints or implicit autocommit.
+/// `projection_stage` identifies failed final drains or other projection failure boundaries.
 pub async fn replication_receive(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let started = std::time::Instant::now();
+    let correlation = receive_correlation(&headers);
+    let correlation_id = correlation.to_string();
+    let peer = request.peer.clone();
+    let envelopes_offered = request.exchange.envelopes.len();
+    let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
+    let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
+    let counters = metrics.snapshot();
+    let outcome = match &result {
+        Err(error) if matches!(error.code.as_str(), "database-busy" | "database-locked") => "contended",
+        Err(error) => error.code.as_str(),
+        Ok(_) if counters.contended => "contended",
+        Ok(_) => counters.projection_error.unwrap_or(if counters.deferred { "deferred" } else { "ok" }),
+    };
+    tracing::info!(
+        correlation_id = %correlation_id,
+        peer = %peer,
+        envelopes_offered,
+        envelopes_admitted = counters.envelopes_admitted,
+        admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
+        project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],
+        admission_prelude = ?counters.phases[smallclaims::receive_metrics::Stage::AdmissionPrelude as usize],
+        admission = ?counters.phases[smallclaims::receive_metrics::Stage::Admission as usize],
+        repairs = ?counters.phases[smallclaims::receive_metrics::Stage::Repairs as usize],
+        projection = ?counters.phases[smallclaims::receive_metrics::Stage::Projection as usize],
+        response_postcommit = ?counters.phases[smallclaims::receive_metrics::Stage::ResponsePostcommit as usize],
+        phase_costs_additive = false,
+        shared_finalizations = counters.shared_finalizations,
+        first_shared_batch = counters.first_shared_batch,
+        last_shared_batch = counters.last_shared_batch,
+        shared_event_join = %correlation_id,
+        projection_chunks = counters.projection_chunks,
+        rebuild_part_count = counters.rebuild_part_count,
+        rebuild_part_ms = counters.rebuild_part_time.as_secs_f64() * 1000.0,
+        commits = counters.commits,
+        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        outcome = %outcome,
+        projection_stage = %counters.projection_stage.as_deref().unwrap_or("-"),
+        "replication receive summary",
+    );
+    result
+}
+
+async fn replication_receive_inner(
+    state: AppState,
+    request: ReplicationReceiveRequest,
+    metrics: smallclaims::receive_metrics::RequestMetrics,
+    correlation: uuid::Uuid,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
+    let response_metrics = metrics.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        let _metrics = metrics.enter();
+        let receipt_timer = smallclaims::receive_metrics::Timer::start(
+            smallclaims::receive_metrics::Stage::ReceiptIngest,
+        );
         let before_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let projection_was_healthy = !store
             .replication_projection_needs_recovery()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
@@ -299,20 +396,24 @@ pub async fn replication_receive(
         )?;
         if store
             .observes_transport_to(&request.peer)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
         {
             store
                 .record_transport_observation(&request.peer, "up", None, None)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
+        drop(receipt_timer);
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
             let admission = store
                 .validate_replication_backlog()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            let _repairs = smallclaims::receive_metrics::Timer::start(
+                smallclaims::receive_metrics::Stage::Repairs,
+            );
             let repairs = store
                 .apply_replication_repairs()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -321,6 +422,9 @@ pub async fn replication_receive(
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
         let projection = if new_data || was_deferred {
+            let _projection = smallclaims::receive_metrics::Timer::start(
+                smallclaims::receive_metrics::Stage::Projection,
+            );
             use opentelemetry::trace::{Span as _, TraceContextExt as _};
             use tracing_opentelemetry::OpenTelemetrySpanExt as _;
             let receive = crate::otel::export_enabled().then(|| {
@@ -357,10 +461,16 @@ pub async fn replication_receive(
         } else {
             Some(true)
         };
+        let _response = smallclaims::receive_metrics::Timer::start(
+            smallclaims::receive_metrics::Stage::ResponsePostcommit,
+        );
+        if projection.is_none() {
+            smallclaims::receive_metrics::deferred();
+        }
         let projected = projection.unwrap_or(false);
         let store_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
         let quiet_only = projection_was_healthy
@@ -370,7 +480,7 @@ pub async fn replication_receive(
             && admission.invalid == 0
             && store
                 .claims_since_only_quiet_notifications(before_index)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         Ok((
             ReplicationReceiveResponse {
@@ -382,7 +492,20 @@ pub async fn replication_receive(
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
-    .await?;
+    .await.inspect_err(|error| {
+        smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
+            smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
+            || format!(
+                "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
+                correlation,
+                error.code,
+            ),
+        );
+    })?;
+    let _metrics = response_metrics.enter();
+    let _response = smallclaims::receive_metrics::Timer::start(
+        smallclaims::receive_metrics::Stage::ResponsePostcommit,
+    );
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,
@@ -485,4 +608,195 @@ pub async fn replication_wake(State(state): State<AppState>) -> Result<Json<Valu
         "projected": projected,
         "projection_attempted": projection_attempted,
     })))
+}
+
+/// The named shard a `/v1/internal/replication/shard/{shard}/…` route serves: the messages
+/// shard, when this daemon opened it.
+fn replication_shard(state: &AppState, shard: &str) -> Result<Arc<smallclaims::store::Store>, ApiError> {
+    crate::store::messages_shard::shard(&state.store)
+        .filter(|_| shard == crate::store::messages_shard::SHARD_ID)
+        .ok_or_else(|| ApiError::not_found(format!("this daemon holds no shard `{shard}`")))
+}
+
+/// The members to dial for a shard: those whose current daemon advertises holding it.
+pub async fn shard_replication_peers(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    replication_shard(&state, &shard)?;
+    let store = state.store.clone();
+    let configured = state.configured_peers.clone();
+    let peers = blocking_store(move || {
+        crate::store::messages_shard::advertising_hosts(&store, &configured)
+    })
+    .await?;
+    Ok(Json(json!({ "peers": peers })))
+}
+
+pub async fn shard_replication_export(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationExportRequest>,
+) -> Result<Json<ReplicationExportResponse>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    blocking_store(move || {
+        let exchange = if request.summary_only {
+            store.export_replication_summary(&request.fleet_id)?
+        } else {
+            store.export_replication_exchange_answering(
+                &request.fleet_id,
+                &request.inventory,
+                &request.signature_requests,
+            )?
+        };
+        Ok(Json(ReplicationExportResponse {
+            exchange,
+            store_index: store.index()?,
+        }))
+    })
+    .await
+}
+
+/// After the messages shard admitted items: note where in this member's graph order they arrived,
+/// for the timeline, and wake every event waiter, such as `conversations wait`, that reads the
+/// stream beside the graph. The items are admitted already, so a recording that fails is logged
+/// and the waiters still wake: the next conversation read records what it finds unrecorded, and
+/// the peer does not retry an exchange this member holds.
+pub(crate) async fn stream_admitted(state: &AppState) {
+    let graph = state.store.clone();
+    let recorded = blocking_store(move || {
+        crate::store::messages_shard::stream_reads::record_arrivals(&graph).map(|_| ())
+    })
+    .await;
+    if let Err(error) = recorded {
+        eprintln!(
+            "st3: messages stream: recording where admitted items arrived failed; the next conversation read records them: {}",
+            error.message
+        );
+    }
+    state
+        .event_notify
+        .send_modify(|generation| *generation = generation.saturating_add(1));
+}
+
+/// Receive a peer's shard exchange, then admit and project what it brought. A shard carries
+/// no transport observations or sync notices: those describe the graph's exchanges.
+pub async fn shard_replication_receive(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationReceiveRequest>,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let response = blocking_action(move || {
+        let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
+        let before_index = store.index().map_err(internal)?;
+        let receipt = store.receive_replication_exchange_via(
+            &request.peer,
+            &request.fleet_id,
+            &request.exchange,
+            request.round_trip_ms.is_some(),
+            request.carrier,
+        )?;
+        // Held envelopes get another pass when the graph's membership moved since the last one.
+        if replication_receive_has_new_data(receipt.received + receipt.signatures)
+            || store.fleet_moved_since_admission().map_err(internal)?
+        {
+            store.validate_replication_backlog().map_err(internal)?;
+            store.apply_replication_repairs().map_err(internal)?;
+            store.project_replication_backlog().map_err(internal)?;
+        }
+        let store_index = store.index().map_err(internal)?;
+        Ok(ReplicationReceiveResponse {
+            receipt,
+            changed: store_index != before_index,
+            store_index,
+        })
+    })
+    .await?;
+    if response.changed {
+        stream_admitted(&state).await;
+    }
+    Ok(Json(response))
+}
+
+pub async fn shard_replication_peer_failure(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationPeerFailureRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    blocking_store(move || {
+        store.record_peer_failure_via(
+            &request.peer, &request.status, &request.error, request.carrier, request.failure.as_ref(),
+        )?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({ "recorded": true })))
+}
+
+pub async fn shard_replication_wake(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let changed = blocking_store(move || {
+        let admission = store.validate_replication_backlog()?;
+        let repairs = store.apply_replication_repairs()?;
+        let projected = store.project_replication_backlog()?;
+        Ok(projected && (admission.changed || repairs != 0))
+    })
+    .await?;
+    if changed {
+        stream_admitted(&state).await;
+    }
+    Ok(Json(json!({ "changed": changed })))
+}
+
+/// Test support: append a claim to the messages shard as this daemon.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_append(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, appended) = blocking_action(move || store.append_claim_outcome(&input)).await?;
+    // The dialers wake on the graph's replication file, as they do for a graph write.
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    // The claim, and whether this append wrote it or replayed its idempotency key's send.
+    let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
+    answer["appended"] = serde_json::Value::Bool(appended);
+    Ok(Json(answer))
+}
+
+/// Test support: write a claim to the messages shard as a peer's replicated copy arrives, without
+/// the graph check a send makes, so a test can hold a stream item under a subject the graph has.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_copy(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    Ok(Json(serde_json::to_value(claim).map_err(ApiError::internal)?))
+}
+
+/// Test support: the claims the messages shard holds about one subject.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_items(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> Result<Json<Vec<smallclaims::claim::ClaimRecord>>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let subject = query.get("subject").cloned().unwrap_or_default();
+    Ok(Json(blocking_store(move || store.claims_for(&subject, None)).await?))
+}
+
+/// Test support: the members this daemon dials for the messages shard, as the worker reads them.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_peers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    shard_replication_peers(State(state), AxumPath(crate::store::messages_shard::SHARD_ID.to_owned())).await
 }

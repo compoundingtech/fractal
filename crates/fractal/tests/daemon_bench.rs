@@ -428,11 +428,14 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty.clone(),
@@ -480,6 +483,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
                 socket.display().to_string(),
                 notify.clone(),
                 event_notify.clone(),
+                None,
                 None,
             )
             .unwrap(),
@@ -804,6 +808,7 @@ async fn held_seats_can_reclaim_after_orphan_repair() {
         root.path().join("st3.sock").display().to_string(),
         Arc::new(Notify::new()),
         events,
+        None,
         None,
     )
     .unwrap();
@@ -1758,11 +1763,14 @@ async fn send_messages(scratch: &Path, main: &Path, count: usize) {
     let store = Arc::new(Store::open(main, NODE).unwrap());
     let socket = scratch.join("generate.sock");
     let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: scratch.join("state").join("api.sock"),
         state_dir: scratch.join("state"),
         pty_root: scratch.join("pty"),
         pty_binary: PathBuf::from("pty"),

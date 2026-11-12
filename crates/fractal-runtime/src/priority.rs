@@ -9,9 +9,10 @@
 //! systemd's default weight of 100 (unless overridden by host policy). The daemon's unit carries
 //! [`LIVE_WEIGHT`] too.
 //!
-//! macOS has no cgroups. There the harness, and each exec task such as a gate's tests, starts
-//! under `taskpolicy -b`, which throttles it and every child it starts, while the daemon and the PTY servers keep
-//! their launchd agent's default QoS.
+//! macOS has no cgroups. There a standing seat's harness starts under `taskpolicy -b`, which
+//! throttles it and every child it starts, while the daemon and the PTY servers keep their launchd
+//! agent's default QoS. Exec tasks and seats a mission run owns start at [`SeatPriority::Normal`]
+//! unless they declare [`PRIORITY_ENV`]; the reconciler picks that default per launch.
 //!
 //! Linux scope weights only divide a resource between cgroups, and need the user manager to
 //! delegate the controller. A harness therefore also starts at [`BACKGROUND_NICE`] and IO class
@@ -59,6 +60,13 @@ pub fn server_unit(runtime_id: &str, pid: u32) -> String {
         "st3-pty-server-{}-{pid}.scope",
         crate::isolate::sanitize(runtime_id)
     )
+}
+
+pub(crate) fn server_identity(unit: &str) -> Option<&str> {
+    let body = unit.strip_suffix(".scope")?;
+    let (body, pid) = body.rsplit_once('-')?;
+    let identity = body.strip_prefix("st3-pty-server-")?;
+    (server_unit(identity, pid.parse().ok()?) == unit).then_some(identity)
 }
 
 /// The environment variable that carries a seat's [`SeatPriority`] into its launch. The daemon sets

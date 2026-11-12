@@ -97,8 +97,10 @@ pub trait MissionListStore {
     /// steps and faults, the root runs those steps answer to, revision proposals for those
     /// runs, and the person asks that block them, which their requesters' declarations and
     /// runtime decide; and which runs wait on a person. A claim about any other subject
-    /// changes no card.
-    fn mission_list_changes(&self, after: u64, through: u64) -> Result<MissionChanges>;
+    /// changes no card. With `origin`, only the claims that node wrote are read.
+    fn mission_list_changes(&self, after: u64, through: u64, origin: Option<&str>) -> Result<MissionChanges>;
+    /// ETA window generation and consumers changed since it, independent of claim appends.
+    fn mission_eta_changes(&self, after: u64) -> Result<(u64, BTreeSet<String>)>;
     /// Every mission's `mission/` ID, defined or run, for a fold from nothing to read in chunks.
     fn mission_list_ids(&self) -> Result<Vec<String>>;
     /// The missions with a current step whose worker lease ended after `after` and by
@@ -181,7 +183,15 @@ impl MissionListStore for Store {
         Ok(keys)
     }
 
-    fn mission_list_changes(&self, after: u64, through: u64) -> Result<MissionChanges> {
+    fn mission_eta_changes(&self, after: u64) -> Result<(u64, BTreeSet<String>)> {
+        let connection = self.readers.get();
+        let generation = connection.query_row("SELECT COALESCE(MAX(changed_index),0) FROM local_run_eta_mission_changes", [], |row| row.get(0))?;
+        let missions = connection.prepare_cached("SELECT 'mission/'||mission_id FROM local_run_eta_mission_changes WHERE changed_index>?1")?
+            .query_map([after], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok((generation, missions))
+    }
+
+    fn mission_list_changes(&self, after: u64, through: u64, origin: Option<&str>) -> Result<MissionChanges> {
         let connection = self.readers.get();
         let mut changes = MissionChanges::default();
         let mut runs = BTreeSet::new();
@@ -191,7 +201,7 @@ impl MissionListStore for Store {
         let mut tree_roots = BTreeSet::new();
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc1a7495dab62 owner=fractal_missions::store::mission_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
-            .query_map(params![after, through], |row| {
+            .query_map(params![after, through, origin], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the driver's terminal-completion fixture hooks publish their barrier files whole (temporary file, then rename), so a test polling for a barrier no longer reads it empty (#5428)",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Mixed-version fleets with the previous release are unaffected: the changed code compiles only with the test-support feature (fixture hooks in crates/fractal/src/driver_cli.rs and crates/fractal-secrets/src/test_support.rs); no runtime, client, wire or store change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

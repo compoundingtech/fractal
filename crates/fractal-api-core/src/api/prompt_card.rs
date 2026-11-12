@@ -804,31 +804,37 @@ pub(crate) mod tests {
     /// does not, nor does a transcript no card read any more.
     #[tokio::test]
     async fn a_followed_transcript_that_changes_wakes_the_refresher() {
-        let root = tempfile::tempdir().unwrap();
-        let (oak, elm) = (root.path().join("oak.jsonl"), root.path().join("elm.jsonl"));
-        std::fs::write(&oak, "{}\n").unwrap();
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let mut watch = PromptWatch::new(Arc::clone(&wake));
-        watch.begin();
-        watch.follow(&oak).unwrap();
-        watch.finish();
-        // What is watched changed: read again, since FSEvents can lose an event around it.
-        assert!(watch.take_changed());
-        append(&oak);
-        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
-        assert!(!watch.take_changed(), "asked once");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let root = tempfile::tempdir().unwrap();
+            let (oak, elm) = (root.path().join("oak.jsonl"), root.path().join("elm.jsonl"));
+            std::fs::write(&oak, "{}\n").unwrap();
+            let wake = Arc::new(tokio::sync::Notify::new());
+            let mut watch = PromptWatch::new(Arc::clone(&wake));
+            watch.begin();
+            watch.follow(&oak).unwrap();
+            watch.finish();
+            // What is watched changed: read again, since FSEvents can lose an event around it.
+            assert!(watch.take_changed());
+            append(&oak);
+            assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+            assert!(!watch.take_changed(), "asked once");
 
-        // Another seat's transcript beside it changes nothing here.
-        append(&elm);
-        assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
+            // Another seat's transcript beside it changes nothing here.
+            append(&elm);
+            // CI scratch-space accounting opens watched directories without changing them.
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+            assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
 
-        // No card read it at the last refresh: it is no longer followed.
-        watch.begin();
-        watch.finish();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        watch.take_changed();
-        append(&oak);
-        assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
+            // No card read it at the last refresh: it is no longer followed.
+            watch.begin();
+            watch.finish();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            watch.take_changed();
+            append(&oak);
+            assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
+        })
+        .await
+        .expect("prompt transcript watch test did not finish within 30 seconds");
     }
 
     /// A SQLite source (OpenCode's) commits to its write-ahead log and leaves the database file

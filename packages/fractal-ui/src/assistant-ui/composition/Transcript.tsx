@@ -3,9 +3,8 @@ import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar, VisuallyHidden } from 'react-aria-components'
-import type { ScenarioMountedWindow } from '@fractal/scenarios/storybook/check'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport, historyBatchSize, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -19,22 +18,22 @@ import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from '.
 import type { ComposerAvailability } from '../embrace-composer/send'
 import { TranscriptAttachmentImagesContext, TranscriptAttachments, type TranscriptAttachmentImages } from './TranscriptAttachments'
 import { HarnessNotice } from './HarnessNotice'
+import { MailMessage, type MailParticipants } from './MailMessage'
 import { UnsupportedRecord } from './UnsupportedRecord'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m, geometryNumbers } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
 import { Tooltip } from './Controls'
 import { useCopyFeedback, type CopyAction } from './useCopyFeedback'
 import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
+import { TranscriptFind, type TranscriptFindMemory } from './TranscriptFind'
+import { createTranscriptRevealStore, TranscriptRevealContext, useRevealOpen } from './transcript-reveal'
 import { useClockLabel } from '../../time/clock'
-import { NarrowLayoutContext } from './NarrowLayout'
+import { LiveRing } from './LiveRing'
+import { transcriptInitialSourceRowCount } from './transcript-window'
 
-/** Source rows (a prompt counts as one) the first commit mounts; the latest prompt and a reasoning run crossing the bound mount whole besides. */
-export const transcriptInitialSourceRowCount = 6
-/** Story-declared window tied to the same constant as the real initial mount. */
-export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'sourceRows' }> = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount }
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -47,16 +46,26 @@ export interface TranscriptTurn {
   /** Host-owned interaction state; the kit never infers a pending question from output text. */
   readonly activity?: LiveActivityState
   readonly senderCaptions?: Readonly<Record<string, string | undefined>>
+  /**
+   * The item that opened this episode when no person did: a wake or incoming mail. It is one of `items`
+   * and draws first, above the work log, as the episode's trigger.
+   */
+  readonly triggerId?: string
+  /** Host naming for each message item, by item id. */
+  readonly participants?: Readonly<Record<string, MailParticipants>>
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
-export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
+/** The host's request for history before the loaded window: in flight, or failed with Retry. Diagnostics stay with the host. */
+export type TranscriptOlderRequest = { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
+/** `HasOlder` is the boundary's presence; `Complete` removes it. `older` is optional request state for `onLoadEarlier`. */
+export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void; readonly older?: TranscriptOlderRequest }
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly title: string
   /** Omit when the host already owns the conversation's header band. */
   readonly showHeader?: boolean
-  /** With showHeader=false, preserve sync/run controls in the owning pane header's stable action slot. */
+  /** With showHeader=false, preserve sync controls in the owning pane header's stable action slot. */
   readonly headerActionsHost?: HTMLElement | null
   readonly sync: SyncStatus
   /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
@@ -100,24 +109,31 @@ export interface TranscriptProps {
   readonly active?: boolean
 }
 const SenderCaption = React.createContext<string | undefined>(undefined)
+const MailNames = React.createContext<MailParticipants | undefined>(undefined)
 const SeatHeader = React.createContext(true)
 /** True for a prose block that continues the same sender's run inside one turn. */
 const RunContinuation = React.createContext(false)
 /** Whole-run text for the block that heads a multi-block prose run, so its single Copy covers every block. */
 const RunCopyText = React.createContext<string | undefined>(undefined)
 const RetrySend = React.createContext<TranscriptProps['onRetrySend']>(undefined)
+/** False inside an episode: the episode's head carries its one timestamp, so rows carry none. */
+const RowTimes = React.createContext(true)
 const TurnFooterRenderer = React.createContext<TranscriptProps['renderTurnFooter']>(undefined)
 const ToolDetailRenderer = React.createContext<TranscriptProps['renderToolDetail']>(undefined)
 function TranscriptMessage() {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined
   const summary = useAuiState(state => state.message.content.find(part => part.type === 'text')?.text ?? '')
   const caption = React.useContext(SenderCaption)
+  const mailNames = React.useContext(MailNames)
   const continuation = React.useContext(RunContinuation)
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
   if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption} continuation={continuation} />
-  if (item._tag === 'Message') return <SeatProse item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
+  // Mail names its participants; a message with neither (an imported handoff) keeps the seat's prose.
+  if (item._tag === 'Message') return item.text === undefined && item.from === undefined && item.to === undefined && item.author === undefined && mailNames === undefined
+    ? <SeatProse item={item} senderLine={caption ?? item.sender?.label} />
+    : <MailMessage item={item} participants={mailNames} />
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
-  if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" /></MessagePrimitive.Root>
+  if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" showTime={false} /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
@@ -135,6 +151,7 @@ function MixedContentMessage({ item }: { readonly item: Extract<ConversationItem
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
   const [expanded, setExpanded] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === item.id, expanded, setExpanded)
   const active = React.useContext(TranscriptActiveContext)
   const [overflows, setOverflows] = React.useState(false)
   const text = React.useRef<HTMLSpanElement>(null)
@@ -176,12 +193,13 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
   const showSeatHeader = React.useContext(SeatHeader)
+  const rowTimes = React.useContext(RowTimes)
   const header = !continuation && (item._tag !== 'Text' || showSeatHeader) && (senderLine !== undefined || !streaming)
   const [hovered, setHovered] = React.useState(false)
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} data-run-continuation={continuation || undefined} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} {...stylex.props(styles.answer)}>
     {header && <div data-testid="message-header" {...stylex.props(styles.answerHeader)}>
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
-      {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
+      {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{rowTimes && Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
     {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
@@ -189,21 +207,26 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. A host's semantic detail stands in for the summary line; the raw disclosure always remains. */
 export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void; readonly semantic?: React.ReactNode }) {
   const [rawOpen, setRawOpen] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, rawOpen, setRawOpen)
+  // A match past the preview's first lines has to be on screen to be highlighted in place.
+  const [wholeOutput, setWholeOutput] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, wholeOutput, setWholeOutput)
   const output = call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
   const lines = output.split('\n')
   const remaining = Math.max(0, lines.length - Number(output.endsWith('\n')) - 4)
   const command = readableCommand(call)
   const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    {semantic ?? <p>{call.summary ?? call.title} · {call.status}</p>}
+    {semantic ?? <p>{call.summary === undefined ? call.title : <span data-search-tool-summary>{call.summary}</span>} · {call.status}</p>}
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
       <DisclosurePanel>{rawOpen && <>
-        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
+        {semantic != null && call.summary !== undefined && <p data-search-tool-summary>{call.summary}</p>}
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" data-search-tool-input {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
         {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.rawInput === undefined && call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
-        {showOutput && <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
-        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
+        {showOutput && <pre data-search-tool-output={call.detail !== undefined && call.detail !== '' ? true : undefined} {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined || wholeOutput ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
+        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && !wholeOutput && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
       </>}</DisclosurePanel>
     </Disclosure>
   </div>
@@ -212,7 +235,7 @@ export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: W
 const strandedText = (item: ConversationItem): string | undefined => {
   switch (item._tag) {
     case 'Text': case 'Reasoning': return item.text
-    case 'Message': return item.title
+    case 'Message': return item.text === undefined ? item.title : `${item.title === undefined ? '' : `${item.title}\n`}${item.text}`
     case 'Notice': return item.detail === undefined ? item.text : `${item.text}\n${item.detail}`
     case 'Event': return `${item.title}\n${item.text}`
     case 'Status': return item.detail
@@ -235,7 +258,7 @@ const itemContent = (item: ConversationItem): string => {
   switch (item._tag) {
     case 'Text': return `${item.text}\u0000${item.attachments.map(attachment => attachment.id).join('\u0000')}`
     case 'Reasoning': return item.text
-    case 'Message': return item.title ?? ''
+    case 'Message': return `${item.title ?? ''}\u0000${item.text ?? ''}\u0000${item.attachments?.map(attachment => attachment.id).join('\u0000') ?? ''}`
     case 'Notice': return `${item.text}\u0000${item.detail ?? ''}`
     case 'Event': return `${item.title}\u0000${item.text}`
     case 'Status': return item.detail ?? ''
@@ -270,7 +293,21 @@ const workMembers = (turn: TranscriptTurn): readonly string[] => {
   workMemberIds.set(turn, ids)
   return ids
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
+/** When an episode began: its prompt or trigger, else its first entry. */
+const turnStart = (turn: TranscriptTurn): number => {
+  for (const item of [turn.prompt, ...turn.items]) {
+    const at = item === undefined || item.at === undefined ? NaN : Date.parse(item.at)
+    if (Number.isFinite(at)) return at
+  }
+  return NaN
+}
+const dayFormatter = new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' })
+const dayKey = (time: number) => Number.isFinite(time) ? new Date(time).toDateString() : undefined
+/** A day separator before an episode that starts on another day than the one before it. */
+function DaySeparator({ time }: { readonly time: number }) {
+  return <div role="separator" data-testid="transcript-day" {...stylex.props(styles.day)}><time dateTime={new Date(time).toISOString().slice(0, 10)}>{dayFormatter.format(time)}</time></div>
+}
+const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay, startedAt }: { turn: TranscriptTurn; /** When the whole episode began; the mounted turn may have lost its trigger to the tail window. */ startedAt?: number; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
   const renderToolDetail = React.useContext(ToolDetailRenderer)
@@ -279,7 +316,10 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     return <ToolDetailPreview call={call} onOpen={onOpenTool} semantic={item === undefined ? undefined : renderToolDetail?.(item, call)} />
   }, [turn.items, renderToolDetail, onOpenTool])
   const reasoning = workLogReasoning(turn.items)
-  const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
+  const trigger = turn.triggerId === undefined ? undefined : turn.items.find(item => item.id === turn.triggerId)
+  const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning' && item !== trigger)
+  const started = startedAt ?? turnStart(turn)
+  const renderItem = (item: ConversationItem, continuation = false, runText?: string) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <MailNames.Provider key={item.id} value={turn.participants?.[item.id]}><SenderCaption.Provider value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continuation}><RunCopyText.Provider value={runText}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider></MailNames.Provider>
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
   // The block heading a run carries the run's full text, blocks joined by a blank line, for its one Copy.
@@ -288,13 +328,21 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}>
-    {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
-    {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
+  // One timestamp per episode, at its head beside the prompt or trigger.
+  const head = turn.prompt !== undefined
+    ? (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)
+    : trigger === undefined ? undefined : renderItem(trigger)
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}><RowTimes.Provider value={false}>
+    {newDay === true && Number.isFinite(started) && <DaySeparator time={started} />}
+    <div data-testid="turn-head" {...stylex.props(styles.turnHead)}>
+      <div {...stylex.props(styles.turnLead)}>{head}</div>
+      {Number.isFinite(started) && <time data-testid="turn-time" dateTime={new Date(started).toISOString()} {...stylex.props(styles.turnTime)}>{messageTimeFormatter.format(started)}</time>}
+    </div>
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log${Number.isFinite(started) ? `, started ${messageTimeFormatter.format(started)}` : ''}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow hideTime onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
+    {shown.map((item, index) => renderItem(item, continues[index]!, runTexts[index]))}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
-  </section>
+  </RowTimes.Provider></section>
 })
 /** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
 export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now?: number }) {
@@ -303,14 +351,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
     return Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
   }, now)
   const waiting = state._tag === 'WaitingForAnswer'
-  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing, waiting && styles.waitingRing)} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
-}
-function RunElapsed({ startedAt, now }: { readonly startedAt?: string; readonly now?: number }) {
-  const elapsed = useClockLabel(now => {
-    const started = Date.parse(startedAt ?? '')
-    return Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''
-  }, now)
-  return <span data-testid="run-elapsed">Running{elapsed}</span>
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><LiveRing spinning={!waiting} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
@@ -355,22 +396,30 @@ function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedR
     })
   }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
   const last = turns[turns.length - 1]
-  return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+  // A day separator wherever an episode starts on another day than the episode before it.
+  // Both come from the whole episode, so revealing history never moves its time or its day.
+  const days = new Map<string, boolean>()
+  const starts = new Map<string, number>()
+  let previousDay: string | undefined
+  for (const turn of turns) {
+    const started = turnStart(turn)
+    starts.set(turn.id, started)
+    const day = dayKey(started)
+    if (day === undefined) continue
+    days.set(turn.id, previousDay !== undefined && day !== previousDay)
+    previousDay = day
+  }
+  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} startedAt={starts.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
- * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
- * Browser Find only sees rendered rows, so the one-line summary leads with that limit (truncation only ever cuts the
- * count) while a polite status carries the full range. Both actions stay mounted and focusable while rows are
- * materializing (repeat presses are ignored). Once every row is rendered the actions leave but the line keeps its
- * height, so the viewport never resizes mid-prepend; focus that was on an action moves to the conversation history.
+ * The window of rendered source rows takes no height: scrolling up prepends earlier rows, and this polite status tells
+ * assistive tech what browser Find can reach. Show all prepares every loaded row for it, as a skip link that appears only
+ * on keyboard focus. Once every row is rendered focus on the action moves to the conversation history.
  */
-function HistoryRange({ total, start, shown, materializing, earlierId, firstId, revealRow, scrollId }: { readonly total: number; readonly start: number; readonly shown: number; readonly materializing: boolean; readonly earlierId: string; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
-  const [request, setRequest] = React.useState<'earlier' | 'all'>()
+function HistoryRange({ total, start, shown, materializing, firstId, revealRow, scrollId }: { readonly total: number; readonly start: number; readonly shown: number; readonly materializing: boolean; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
   const focusWithin = React.useRef(false)
   const statusId = React.useId()
   const complete = start === 0 && !materializing
-  const showingAll = materializing && request !== 'earlier'
-  if (!materializing && request !== undefined) setRequest(undefined)
   React.useLayoutEffect(() => {
     if (!complete || !focusWithin.current) return
     focusWithin.current = false
@@ -379,25 +428,50 @@ function HistoryRange({ total, start, shown, materializing, earlierId, firstId, 
   const hidden = total - shown
   const status = complete
     ? `All ${total} entries shown. Browser Find searches all loaded messages.`
-    : showingAll
+    : materializing
       ? `Showing all ${total} entries… Browser Find may miss earlier entries until this finishes.`
       : `Latest ${shown} of ${total} entries shown. Browser Find misses ${hidden} earlier ${hidden === 1 ? 'entry' : 'entries'} until you choose Show all messages.`
-  const reveal = (next: 'earlier' | 'all') => {
-    if (materializing) return
-    setRequest(next)
-    revealRow(next === 'all' ? firstId : earlierId, true)
-  }
-  return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : showingAll ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
+  return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : materializing ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
     <span id={statusId} role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.visuallyHidden)}>{status}</span>
-    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}><span {...stylex.props(styles.historyLead)}>{complete ? 'Find: all loaded' : showingAll ? 'Find: preparing' : 'Find: shown only'}</span><span {...stylex.props(styles.historyCount)}> · {complete ? `All ${total} entries shown` : `${shown}/${total} entries`}</span></span>
-    {!complete && <><Button aria-label="Show earlier messages" data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Earlier</Button>
-      <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>Show all</Button></>}
+    {!complete && <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => { if (!materializing) revealRow(firstId, true) }} {...stylex.props(styles.historyLoad, styles.historySkip)}>Show all</Button>}
+  </div>
+}
+/** One in-lane row: one button changes label across idle, loading and failed, so focus stays on it. */
+function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHistory, { readonly _tag: 'HasOlder' }> }) {
+  const loading = history.older?._tag === 'Loading', failed = history.older?._tag === 'Failed'
+  const node = React.useRef<HTMLDivElement>(null)
+  // Complete history (or a window that no longer starts at the top) removes this row; keep keyboard focus in the lane.
+  React.useLayoutEffect(() => {
+    const boundary = node.current
+    return () => {
+      if (boundary !== null && boundary.contains(boundary.ownerDocument.activeElement)) boundary.closest<HTMLElement>('[data-testid="transcript-scroll"]')?.focus({ preventScroll: true })
+    }
+  }, [])
+  const load = loading || failed ? undefined : history.onLoadEarlier
+  // A reader who has moved off the live tail and can see this row gets the next page. Opening a conversation sits at the tail,
+  // so it fetches nothing; a failure waits for Retry, and the button stays for a lane with nothing to scroll.
+  React.useEffect(() => {
+    const boundary = node.current
+    const lane = boundary?.closest<HTMLElement>('[data-testid="transcript-scroll"]')
+    if (load === undefined || boundary == null || lane == null) return
+    const scrolled = () => {
+      const offTail = lane.scrollHeight - lane.clientHeight - lane.scrollTop > geometryNumbers.scrollEndTolerance
+      if (offTail && boundary.getBoundingClientRect().bottom >= lane.getBoundingClientRect().top) load()
+    }
+    lane.addEventListener('scroll', scrolled, { passive: true })
+    return () => lane.removeEventListener('scroll', scrolled)
+  }, [load])
+  return <div ref={node} data-testid="history-boundary" data-state={loading ? 'loading' : failed ? 'failed' : 'idle'} aria-busy={loading} {...stylex.props(styles.historyBoundary)}>
+    <span aria-live="polite" data-testid="history-boundary-note" {...stylex.props(styles.historyNote)}>{failed ? "Couldn't load earlier messages" : 'Earlier messages not loaded'}</span>
+    {/* Not RAC `isPending`: its focus announcement points a live-region `role="img"` at this button's id, which dangles once Complete removes the button. */}
+    {history.onLoadEarlier !== undefined && <Button aria-disabled={loading || undefined} onPress={loading ? undefined : history.onLoadEarlier} {...stylex.props(styles.historyLoad, loading && styles.historyPending)}>{loading ? 'Loading earlier messages…' : failed ? 'Retry' : 'Load earlier messages'}</Button>}
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
-  const narrow = React.useContext(NarrowLayoutContext)
+  const [reveal] = React.useState(createTranscriptRevealStore)
+  const [findMemory] = React.useState<TranscriptFindMemory>(() => new Map())
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. A child effect runs before its provider's adoption effect, so
@@ -432,14 +506,15 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
       return true
     }
     const committed = turns.flatMap(turn => {
-      if (turn.prompt !== undefined && !visible(turn.prompt.id)) return []
-      const pendingIndex = turn.items.findIndex(item => !visible(item.id))
-      if (pendingIndex === -1) return [turn]
-      // Keep the existing turn mounted while waiting, and defer only its pending suffix.
-      const items = turn.items.slice(0, pendingIndex)
-      if (turn.prompt === undefined && items.length === 0) return []
+      // Adoption can split either end of a turn: a pending prompt or earlier item must
+      // not hide the already-published suffix while an older page is being prepared.
+      const prompt = turn.prompt !== undefined && visible(turn.prompt.id) ? turn.prompt : undefined
+      const pendingItems = turn.items.some(item => !visible(item.id))
+      if (prompt === turn.prompt && !pendingItems) return [turn]
+      const items = pendingItems ? turn.items.filter(item => visible(item.id)) : turn.items
+      if (prompt === undefined && items.length === 0) return []
       const itemIds = new Set(items.map(item => item.id))
-      return [{ ...turn, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
+      return [{ ...turn, prompt, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
     })
     return { committed, stranded }
   }, [published, turns, adoptionEpoch, runtimeIds])
@@ -468,7 +543,6 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   // One viewport row per source row, so the initial bound and history reveal count conversation items rather than turns.
   const rows = React.useMemo(() => sourceRows.map(row => ({ id: row.item.id, version: contentVersion(row.item) })), [sourceRows])
   const rowIds = React.useMemo(() => rows.map(row => row.id), [rows])
-  const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   // Error copy is time-independent; time-bearing sync copy subscribes inside SyncLine.
   const failure = sync._tag === 'Failed' ? syncLine({ status: sync, label: 'conversation', now: now ?? observedAt, observedAt }) : undefined
@@ -483,31 +557,30 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   const headerStatus = <>
     {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
-    {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
   </>
-  return <TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+  return <TranscriptRevealContext.Provider value={reveal}><TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       renderHeader={(startIndex, revealRow, materializing) => {
-        if (rows.length <= transcriptInitialSourceRowCount) return null
         const bound = sourceWindow(sourceRows, startIndex)
-        return <HistoryRange total={rows.length} start={bound.start} shown={bound.shown} materializing={materializing} earlierId={rowIds[Math.max(0, bound.start - historyBatchSize)]!} firstId={rowIds[0]!} revealRow={revealRow} scrollId={scrollId} />
+        return <>
+          {rows.length > transcriptInitialSourceRowCount && <HistoryRange total={rows.length} start={bound.start} shown={bound.shown} materializing={materializing} firstId={rowIds[0]!} revealRow={revealRow} scrollId={scrollId} />}
+          <TranscriptFind key={viewportKey ?? ''} memoryKey={viewportKey ?? ''} memory={findMemory} scrollId={scrollId} turns={committed} rowIds={rowIds} revealRow={revealRow} history={history} active={active} reveal={reveal} />
+        </>
       }}>
       {(startIndex, revealRow) => {
         const bound = sourceWindow(sourceRows, startIndex)
         return <>
-          {history._tag === 'HasOlder' && bound.start === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+          {history._tag === 'HasOlder' && bound.start === 0 && <HistoryBoundary history={history} />}
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
             <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
           </TranscriptSearch>}
         </>
       }}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider></TranscriptRevealContext.Provider>
 }
-const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
-const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInlineStart: `max(${s.lg}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${s.lg}, env(safe-area-inset-right, 0px))`, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
@@ -521,7 +594,12 @@ const styles = stylex.create({
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
   userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
-  answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 },
+  // The outcome is what the reader came for: full contrast, never dimmer than the prompt.
+  answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fg, flexShrink: 0 },
+  turnHead: { display: 'flex', alignItems: 'flex-start', gap: s.md, minWidth: 0 },
+  turnLead: { flex: '1 1 0', minWidth: 0 },
+  turnTime: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums' },
+  day: { display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, '::before': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border }, '::after': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border } },
   answerHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: t.metaLeading, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
@@ -534,13 +612,9 @@ const styles = stylex.create({
   copy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', opacity: { default: 0, ':focus': 1 }, transitionProperty: 'opacity', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: m.ease, ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   copyVisible: { opacity: 1 },
   progress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm }, track: { height: g.progressSm, backgroundColor: surface.rowActive, overflow: 'hidden' }, fill: (width: string) => ({ width, height: '100%', backgroundColor: accent.primary }),
-  runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
-  runningSegment: { display: 'block', width: '25%', height: '100%', backgroundColor: accent.primary, animationName: runSweep, animationDuration: m.pulse, animationTimingFunction: m.linear, animationIterationCount: 'infinite', animationDirection: 'alternate', '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' } },
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
-  liveRing: { width: g.status, height: g.status, boxSizing: 'border-box', flexShrink: 0, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderTopColor: ink.fgMuted, animationName: liveSpin, animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
-  waitingRing: { animationName: 'none' },
   liveLabel: { color: ink.fgSoft },
-  preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlockStart: s.xs2, marginInlineStart: g.textColumn, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingBlock: s.md, paddingInline: s.lg, gap: s.xs },
+  preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginInlineStart: g.textColumn, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingBlock: s.md, paddingInline: s.lg, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
   command: { boxSizing: 'border-box', marginBlockEnd: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.codeBg, color: ink.fg },
   errorReason: { margin: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.metaSize },
@@ -549,13 +623,12 @@ const styles = stylex.create({
   emptyBody: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm, padding: s.xl, textAlign: 'center' },
   historyBoundary: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.md, minHeight: g.controlMd, flexShrink: 0 },
   historyNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
-  // One line under the header with a fixed height: the Find limit leads, the count truncates first, actions never wrap.
-  historyBar: { position: 'relative', display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlMd, minHeight: g.controlMd, paddingInline: s.lg, flexShrink: 0, whiteSpace: 'nowrap', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  historySummary: { display: 'flex', flex: '1 1 0', minWidth: 0 },
-  historyLead: { flexShrink: 0 },
-  historyCount: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums' },
+  historyBar: { position: 'relative', height: 0, flexShrink: 0, zIndex: 1 },
+  // A skip link: off screen until keyboard focus lands on it.
+  historySkip: { position: 'absolute', top: s.xs, left: s.lg, whiteSpace: 'nowrap', overflow: { default: 'hidden', ':focus': 'visible' }, width: { default: 1, ':focus': 'auto' }, height: { default: 1, ':focus': 'auto' }, clipPath: { default: 'inset(50%)', ':focus': 'none' }, backgroundColor: { default: surface.transparent, ':focus': surface.raised } },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  historyPending: { cursor: 'progress', color: ink.fgMuted, ':hover': { color: ink.fgMuted } },
   unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   unavailableDetails: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, maxWidth: g.lane },
   unavailableDetail: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, overflowWrap: 'anywhere' },

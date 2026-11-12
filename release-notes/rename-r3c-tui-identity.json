@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept the fractal-tui identity and read TUI state from either subdirectory without changing writers.",
+  "replay": {"status": "none", "detail": "No graph replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination changes."},
+  "compatibility": {"status": "changed", "detail": "Readers recognize fractal-tui alongside stui. TUI state reads prefer each legacy stui entry and otherwise accept tui; malformed legacy entries never fall through. Request queues are scanned independently, legacy first, and requests are answered and consumed in their source directory. Client names, telemetry class labels and new state writes remain stui until W5."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No state directories are moved, copied or deleted."},
+  "recovery": {"status": "none", "detail": "Legacy state and writer identities remain unchanged; this release can read state left under tui by later releases."}
+}

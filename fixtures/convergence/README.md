@@ -160,3 +160,137 @@ the exact `NEVER_TRIMS` set is empty. The remote characterization used
 That run observed every seed trim; its sole failed assertion was v9's obsolete
 expectation that seed 3 never trims. The per-seed equality remains enforced.
 
+`claims-v11.json` captures the registry that adds the GitHub plugin's two compact kinds,
+`vcs.item.state` on `resource` subjects and `github.event` on the new `github-event` family
+(docs/st3/plugins.md). Versions 1 through 10 stay frozen. Generate v11 from the merged
+registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`;
+do not hand-edit or overwrite v10. The generator names `github-event` subjects explicitly;
+each draw takes a fresh event key, since `github.event` is written once per subject. The
+simulation selects v11 and records its filename in audit summaries.
+
+With v11 all 17 fixed seeds converge and trim (17/17 coverage), so the never-trim set stays
+empty. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+(26 passed, 189.5 s).
+
+Under corpus v11 a wide audit of seeds 1–300 failed 15 seeds in `resource_observations`
+(#4426). A rebuild of the resource projection, which a replay or a checkpoint proof runs, kept
+only subjects with a `resource.observed` claim. So an item that only `vcs.item.state` claims
+describe lost its row on whichever node rebuilt. With the rebuild fixed, all 300 seeds converge.
+The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 209, 241, 246,
+277, 281, 291, 293 and 294. Each of them trims, so the never-trim set stays empty. The audit
+used
+`CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
+(1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
+
+`claims-v12.json` captures the registry that adds `fault.dismissed` (a person's or the fleet
+fault agent's dismissal of a fault whose run has ended), and the current `daemon.diagnostic`
+fields. Versions 1 through 11 stay frozen. Generate v12 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`;
+do not hand-edit or overwrite v11. The simulation selects v12 and records its filename in audit
+summaries.
+
+With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 34 and 106 no
+longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
+trims. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
+`claims-v13.json` captures the registry that adds `member.admission-override` (a person's or an
+agent's release of a restarted member from waiting for the named peers, for its current daemon
+start). Versions 1 through 12 stay frozen. Generate v13 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v13.json`;
+do not hand-edit or overwrite v12. The simulation selects v13 and records its filename in audit
+summaries.
+
+With v13 every fixed seed converges. The new kind shifts the draws: seeds 2, 34 and 106 now trim,
+and seed 1597 is the exact never-trim set. Characterization used
+`cargo nextest run -p fractal --features test-support -E 'test(/convergence::/)'`.
+
+`claims-v14.json` captures the registry that adds `work.handoff-returned`, the durable
+record that returns handed-off work to its owning agent. Versions 1 through 13 stay
+frozen. Generate v14 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v14.json`;
+do not hand-edit the snapshot. The simulation selects v14 and records its filename
+in audit summaries.
+
+With v14 every fixed seed converges; seeds 21 and 74 are the exact never-trim set.
+Characterization used
+`cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+The first characterization run failed only the three stale v13 trim expectations;
+the per-seed equality and majority-trim assertions remain enforced.
+
+`claims-v15.json` captures the registry that adds `fleet.shard-bounds`, a leaving member's signed
+record of how far it wrote in the messages shard. Versions 1 through 14 stay frozen. Generate v15
+from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v15.json`;
+do not hand-edit the snapshot. The simulation selects v15 and records its filename in audit
+summaries.
+
+With v15 every fixed seed converges; seeds 2 and 27 are the exact never-trim set (seeds 21 and 74
+trim again). Characterization used
+`cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+The first characterization run failed only the four stale v14 trim expectations.
+
+`claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
+Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
+
+`claims-v18.json` captures the complete registry with `message.expired`, the durable,
+runtime-authored mail expiry outcome. Versions 1 through 17 stay frozen. Generate it
+from the merged expiry registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v18.json`;
+the example serializes `fractal_schema::registry().claims` with
+`serde_json::to_string_pretty`, followed by a newline. Do not hand-edit the snapshot.
+The simulation selects v18. Expiry draws select an existing sent message in stable
+subject order and use `daemon/runtime`; native admission still rejects mail with a
+terminal receipt. The focused expiry regression generates the outcome through the
+same path as random schedules and checks native admission and replication to the
+oracle, rather than treating corpus membership as write coverage.
+
+`claims-v19.json` captures the complete registry with `program.step`, the system-only, append-only
+journal entry of a program step run (docs/st3/program-engine.md §5). Versions 1 through 18 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
+do not hand-edit the snapshot. The simulation selects v19. Draws use the existing `step-run`
+subject family and the generic system-only append path.
+
+A drawn `client.operation-authorized` (in the corpus since v17) is not written. Every replica
+admits that kind only from a keyed member's signed envelope and holds an unkeyed writer's as
+unsigned; the simulated nodes have no member keys. Written, it stayed pending on every other node
+and the oracle and held every later checkpoint back, so the run never settled and the writer held
+a claim the oracle never saw. On hosted CI, v19's draws first wrote one, in seeds 1 and 34; off
+CI, schedules diverge and more seeds wrote one (seeds 3, 13, 17, 277 and 1597 in burst run
+42880734602). The input is still drawn, so a seed whose store refused it keeps its schedule.
+With v19 every fixed seed converges and trims (hosted run 42884923668), so the never-trim set is
+empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
+lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
+leaves seeds 55 and 610 untrimmed.
+
+`claims-v20.json` captures the complete registry with the source-enforcement kinds
+`source.debt.recorded`, `source.debt.closed` and `source.audited`. Versions 1 through 19 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v20.json`;
+do not hand-edit the snapshot. The simulation selects v20, and the draws use the generic append path.
+
+`claims-v21.json` adds `read-position.advanced` to the merged program-step and source-enforcement
+registry. Main's versions 1 through 20 remain byte-identical. The simulation now selects v21.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v21.json`;
+do not hand-edit it. Read-position draws use the person's native admission path and the focused
+regression checks admission and oracle replication. Preserve the keyed-only write exclusion:
+the unkeyed simulated fleet still draws, but cannot admit, operation authorizations.
+Changing selected kinds and random draws changes subsequent actions in the shared SplitMix64
+schedule, including checkpoint work. Earlier trim characterization is not evidence for v21;
+do not add trim exceptions without observing the generated inputs.
+
+`claims-v22.json` adds `source.mapped`, the durable, system-written source map of one agent or
+mission revision (docs/st3/owned-sets.md). Versions 1 through 21 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v22.json`;
+do not hand-edit it. The simulation selects v22. A draw stages one text on the writer and claims
+it under `blob_hash` on `agent/<id>@<revision>`, as a set publication does, so the claim's append
+promotes the text into the shared blobs that replicate with it. The focused regression checks
+admission and that the oracle receives the claim with its text.
+With v22 every fixed seed converges; seed 34 is the exact never-trim set, observed by hosted
+linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
+cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).

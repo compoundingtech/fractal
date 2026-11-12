@@ -1,16 +1,18 @@
 // Explicit-clock presentation only: time leaves read the shared context clock, or the host's fixed instant when given.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Focusable, Popover } from 'react-aria-components'
+import { Button, Focusable } from 'react-aria-components'
 import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import type { SidebarActions, SidebarAgentRow as Row } from './model'
-import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { rowAttention, rowStatusLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { AgentHoverCard, AgentRowActions } from './DeferredRowActions.tsx'
+import { Highlight } from './rowPresentation.tsx'
 import { SidebarMissionLine, missionLineHasTrigger } from './SidebarMissionLine'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
+import { HoverCardSurface, useHoverCardIntent } from '../entity/HoverCard'
 import { useTouchLayout } from './useTouchLayout'
 import { ThemePortal } from '../taste/ThemePortal'
 
@@ -46,6 +48,8 @@ export interface MilestoneAgentRowProps {
    * the row is memoized.
    */
   readonly onSubagentsPress?: (row: Row) => void
+  /** Makes the row's mission run its own button, which opens the mission ref instead of the agent. Pass a stable callback. */
+  readonly onOpenMission?: (mission: string) => void
   readonly actions?: SidebarActions
   readonly onMarkRead?: (ref: string) => void
 }
@@ -63,13 +67,14 @@ export const openAgentRowMenu = (element: Element): boolean => {
 /**
  * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title + subagent count · trailing slot · (chevron). The trailing
  * slot (last turn, then an unread count or attention mark) takes width only for the content it holds, so the title runs to
- * the row edge when it is empty. Line 2: `[mission pill] · step` while the agent works on a mission (see
+ * the row edge when it is empty. Line 2: `ring n/m · step · slug` while the agent works on a mission (see
  * `SidebarMissionLine`), otherwise `status · host`; spend and duration live in the hover card and reported details.
  * On touch layouts (a coarse primary pointer, or a host that marks its subtree narrow) a row whose mission line holds a
  * button (a queue, or Stale/Failed mission info) grows line 2 to a 44px track, 68px in all, so that button's own box is
  * the 44 × 44 hit area. Width alone never enlarges targets: hosts provide `NarrowLayoutContext` only for touch surfaces.
- * The "!" appears only when needing you is the row's sole cue: a waiting status ("Needs you" and its glyph) or a waiting
- * mission question (its decision handle) already carries the attention.
+ * Color means act: the status column draws the amber Needs-you disc on `needsMe` (the set the counts use) and the red
+ * Failed disc, every other state a neutral mark. A failed row that also needs you keeps a trailing amber dot, so each counted
+ * row still shows amber.
  * Activation belongs to the hosting tree item, so the row is never a button. Desktop pointer hover shows the kit hover
  * card with no timers: the CSS entrance delay supplies hover intent. The shared ghost action trigger overlays the end of
  * line 2 on desktop, which fades out beneath it; touch rows reserve an always-visible touch-sized action column.
@@ -77,38 +82,48 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * "? subagents" while unreported, nothing at zero; display-only rows carry none. The unreported "?" explains itself in
  * the kit tooltip on hover and keyboard focus, and to assistive tech as its description.
  */
-export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, onSubagentsPress, actions, onMarkRead }: MilestoneAgentRowProps) {
+export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, onSubagentsPress, onOpenMission, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
-  const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
+  const { hoverOpen: hovered, setHoverOpen: setRowHovered } = useSidebarHoverIntent()
+  // The row's hover reveals its menu at once; the card follows the canonical hover-card intent.
+  const card = useHoverCardIntent()
+  const setHovered = (value: boolean) => { setRowHovered(value); if (!value) card.setOpen(false) }
   const [countExplained, setCountExplained] = React.useState(false)
   const [menuFocused, setMenuFocused] = React.useState(false)
+  const [overlays, setOverlays] = React.useState({ mission: false, menu: false, details: false })
+  const overlayOpen = overlays.mission || overlays.menu || overlays.details
+  const changeOverlayOpen = (kind: keyof typeof overlays, open: boolean) => {
+    if (open) card.setOpen(false)
+    setOverlays(previous => ({ ...previous, [kind]: open }))
+  }
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
   const unavailable = !displayOnly && row.missionContext?._tag === 'Unavailable'
-  const touchMission = mission !== undefined && touch && missionLineHasTrigger(mission, row.missionInfo)
+  const touchMission = mission !== undefined && touch && (onOpenMission !== undefined || missionLineHasTrigger(mission, row.missionInfo))
   const touchRow = touch && !displayOnly
   const queuedMission = (mission?.queued.length ?? 0) > 0
   // The desktop trigger overlays line 2's end; the text fades out beneath it while it shows.
   const menuOverlay = !displayOnly && !touch && !queuedMission && (hovered || menuFocused)
-  const attentionCovered = row.status === 'waiting' || mission?.step._tag === 'Waiting'
-  const signal = row.needsMe === true && !attentionCovered
-    ? <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
-    : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
+  const attention = rowAttention(row)
+  const statusLabel = rowStatusLabel(row)
+  const signal = row.needsMe === true && attention === 'failed'
+    ? <span data-row-column="attention" role="img" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenNeeds)} />
+    : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
-    onMouseEnter={displayOnly ? undefined : () => setHovered(true)} onMouseLeave={displayOnly ? undefined : () => setHovered(false)}
+    onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if (!overlayOpen && (event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); if (!overlayOpen) card.intend(false) }}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
     {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, touchRow && styles.touchRow, touchRow && chevron !== undefined && styles.touchWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
     {/* One themed portal layer for the whole row: the count's tooltip mounts here, never inside the clipping name column. */}
     <ThemePortal>
-    <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
+    <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={statusLabel} statusSince={row.statusSince} variant="Marks" needsYou={attention === 'needs-you'} freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <span data-count-scope onPointerEnter={() => card.setOpen(false)} onPointerLeave={() => { if (!overlayOpen) card.intend(true) }} {...stylex.props(styles.countScope)}><SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} /></span>}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -119,18 +134,18 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     {!displayOnly && touchDisclosure !== undefined && <span data-row-column="touch-disclosure" {...stylex.props(styles.touchDisclosureSlot)}>{touchDisclosure}</span>}
     <span data-row-column="line2" data-mission-info={mission === undefined ? undefined : (row.missionInfo?._tag ?? 'Live').toLowerCase()} data-menu-overlay={menuOverlay || undefined} {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, touchRow && styles.line2BeforeMenu, !displayOnly && !touch && queuedMission && styles.line2ClearsMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2, menuOverlay && styles.line2Faded)}>
       {mission !== undefined
-        ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} />
+        ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} needsYou={attention === 'needs-you'} onOpen={onOpenMission} onOverlayOpenChange={open => changeOverlayOpen('mission', open)} />
         : <>{unavailable
           ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" {...stylex.props(styles.warningIcon)}><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
-          : <span data-row-field="status-label">{row.statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
+          : <span data-row-field="status-label">{statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {/* The hover card and the actions' overlays portal into the row's themed surface, so a light root gets light overlays. */}
     {!displayOnly && <>
-      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)} onMenuOpenChange={open => changeOverlayOpen('menu', open)} onDetailsOpenChange={open => changeOverlayOpen('details', open)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
-      {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+      <HoverCardSurface isOpen={card.isOpen && !countExplained && !overlayOpen} onOpenChange={card.setOpen} triggerRef={anchor} placement="right top" label={`Reported details for ${row.title}`}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
-      </Popover>}
+      </HoverCardSurface>
     </>}
     </ThemePortal>
   </div>
@@ -173,6 +188,8 @@ const compactName = '@container agent-name (width < 192px)'
 const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
+  // The count explains itself in its own tooltip; pointing at it holds the row's card back instead of stacking both.
+  countScope: { display: 'contents' },
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
   row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   interactive: { ':hover': { backgroundColor: surface.rowHover } },
@@ -216,14 +233,15 @@ const styles = stylex.create({
   trailing: { gridColumn: '3', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'end', gap: s.sm },
   time: { color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   signal: { display: 'flex', justifyContent: 'center' },
-  // Bold: at semibold the thin amber glyph anti-aliases below the 3:1 non-text minimum on the light sidebar.
-  needs: { color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightBold },
-  unread: { color: accent.primary, fontSize: t.microSize, fontVariantNumeric: 'tabular-nums' },
+  // The 6px dot, not a glyph: this is the row's second cue beside the red disc.
+  needs: { display: 'block', width: g.statusPip, height: g.statusPip, borderRadius: r.full, backgroundColor: tone.attention },
+  frozenNeeds: { backgroundColor: ink.fgSoft },
+  unread: { color: ink.fgSoft, fontSize: t.microSize, fontVariantNumeric: 'tabular-nums' },
   // Last-observed values: neutral ink, no live accent. fgSoft (not fgMuted) so it still clears 4.5:1 on the active-row wash.
   frozenInk: { color: ink.fgSoft },
   chevronSlot: { gridColumn: '4', gridRow: '1', display: 'flex', justifyContent: 'center' },
   line2: { gridColumn: '2 / -1', gridRow: '2', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
-  // The pill sits at line 2's first pixel; its slots truncate, so the line itself does not clip the mission buttons' focus rings.
+  // The mark sits at line 2's first pixel; its slots truncate, so the line itself does not clip the mission buttons' focus rings.
   line2Mission: { display: 'flex', alignItems: 'center', overflow: 'visible' },
   // Touch rows give the action trigger its own column.
   line2BeforeMenu: { gridColumn: '2 / -2' },
@@ -234,6 +252,4 @@ const styles = stylex.create({
   sep: { paddingInline: s.xs, color: ink.fgMuted },
   unavailable: { color: ink.fgMuted },
   warningIcon: { display: 'inline-block', verticalAlign: 'middle' },
-  // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.
-  hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationDelay: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
 })

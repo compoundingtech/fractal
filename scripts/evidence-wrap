@@ -64,7 +64,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SIGNER = ['st', 'sekrets', '--', 'evidence-sign']
 # What would make the loader or the interpreter load code into the signer, which refuses to start with any of them
 # set (scripts/evidence-sign REFUSED_ENVIRONMENT; the refusal stays, it is the signer's tripwire). Some hosts preload
-# a library into every process (hetz2: jemalloc), so the signer is started without these, and with a fixed PATH: its
+# a library into every process (jemalloc, on one build host), so the signer is started without these, and with a fixed PATH: its
 # program is resolved first, with the caller's.
 LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
 LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')

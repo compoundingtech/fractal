@@ -1374,22 +1374,18 @@ fn malformed_or_duplicate_kdl_presentation_is_rejected() {
 }
 
 #[test]
-fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
+fn presentation_bounds_count_names_in_scalars_descriptions_in_bytes_and_reject_noncanonical_values() {
     use agent_spec::spec::{
-        AGENT_DESCRIPTION_MAX_CHARS, AGENT_NAME_MAX_CHARS, validate_presentation,
+        AGENT_DESCRIPTION_MAX_BYTES, AGENT_NAME_MAX_CHARS, validate_description,
+        validate_presentation,
     };
 
     let name_at_limit = "é".repeat(AGENT_NAME_MAX_CHARS);
-    let description_at_limit = "界".repeat(AGENT_DESCRIPTION_MAX_CHARS);
+    // 2,730 three-byte characters and two ASCII bytes: exactly 8,192 bytes.
+    let description_at_limit = format!("{}ab", "界".repeat(AGENT_DESCRIPTION_MAX_BYTES / 3));
+    assert_eq!(description_at_limit.len(), AGENT_DESCRIPTION_MAX_BYTES);
     assert!(validate_presentation("name", Some(&name_at_limit), AGENT_NAME_MAX_CHARS).is_ok());
-    assert!(
-        validate_presentation(
-            "description",
-            Some(&description_at_limit),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )
-        .is_ok()
-    );
+    assert!(validate_description(Some(&description_at_limit)).is_ok());
     assert!(
         validate_presentation(
             "name",
@@ -1398,19 +1394,14 @@ fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
         )
         .is_err()
     );
-    assert!(
-        validate_presentation(
-            "description",
-            Some(&format!("{description_at_limit}x")),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )
-        .is_err()
-    );
-    for (field, max_chars) in [
-        ("name", AGENT_NAME_MAX_CHARS),
-        ("description", AGENT_DESCRIPTION_MAX_CHARS),
-    ] {
-        assert!(validate_presentation(field, Some(r"slash/name\path"), max_chars).is_ok());
+    assert!(validate_description(Some(&format!("{description_at_limit}x"))).is_err());
+    assert!(validate_description(None).is_ok());
+    let check = |field: &str, value: &str| match field {
+        "name" => validate_presentation(field, Some(value), AGENT_NAME_MAX_CHARS),
+        _ => validate_description(Some(value)),
+    };
+    for field in ["name", "description"] {
+        assert!(check(field, r"slash/name\path").is_ok());
         for invalid in [
             "",
             " leading",
@@ -1420,10 +1411,7 @@ fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
             "line\u{2028}separator",
             "paragraph\u{2029}separator",
         ] {
-            assert!(
-                validate_presentation(field, Some(invalid), max_chars).is_err(),
-                "accepted {field} {invalid:?}"
-            );
+            assert!(check(field, invalid).is_err(), "accepted {field} {invalid:?}");
         }
     }
 }
@@ -1736,9 +1724,8 @@ fn malformed_resource_envelopes_are_rejected_without_defining_downstream_types()
 
 #[test]
 fn catalog_relative_resource_uris_are_an_st2_extension_resolved_against_the_declaration_dir() {
-    // Catalog-relative carrier paths are an st2 extension pending canonical Agent Spec adoption
-    // (see docs/vrs/06-resync): accepted here, resolved by the consumer against the declaration
-    // directory.
+    // Catalog-relative carrier paths are accepted here and resolved by their consumer
+    // against the declaration directory.
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
@@ -2846,8 +2833,8 @@ fn a_legacy_declaration_falls_back_to_its_bus_identity_and_positional_address() 
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
-        "agents/dev3/verifier/agent.kdl",
-        "agent \"verifier\" { host \"dev3\"; command \"work\" }\n",
+        "agents/devbox-a/verifier/agent.kdl",
+        "agent \"verifier\" { host \"devbox-a\"; command \"work\" }\n",
     );
 
     let found = discover_strict(tmp.path());
@@ -2855,10 +2842,10 @@ fn a_legacy_declaration_falls_back_to_its_bus_identity_and_positional_address() 
     let spec = find(&found.specs, "verifier");
     assert_eq!(spec.id, None);
     assert_eq!(spec.address, None);
-    assert_eq!(spec.effective_id("other"), "dev3.verifier");
+    assert_eq!(spec.effective_id("other"), "devbox-a.verifier");
     assert_eq!(spec.effective_address(), "verifier");
-    assert_eq!(spec.bus_address("other"), "dev3.verifier");
-    assert_eq!(spec.bus_id("other"), "dev3.verifier");
+    assert_eq!(spec.bus_address("other"), "devbox-a.verifier");
+    assert_eq!(spec.bus_id("other"), "devbox-a.verifier");
 }
 
 /// An explicit `id` is the immutable subject identity and an explicit `address` is the effective
@@ -2868,11 +2855,11 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
-        "agents/dev3/verifier/agent.kdl",
+        "agents/devbox-a/verifier/agent.kdl",
         r#"agent "verifier" {
   id "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"
   address "dotfiles.fractal.keymap.verifier"
-  host "dev3"
+  host "devbox-a"
   command "work"
 }
 "#,
@@ -2886,7 +2873,7 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
         Some("0199b8f4-8d3a-7c21-9a44-6f85b7320ea1")
     );
     assert_eq!(
-        spec.effective_id("dev3"),
+        spec.effective_id("devbox-a"),
         "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"
     );
     assert_eq!(
@@ -2896,21 +2883,21 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     assert_eq!(spec.effective_address(), "dotfiles.fractal.keymap.verifier");
     assert_eq!(
         spec.bus_address("other"),
-        "dev3.dotfiles.fractal.keymap.verifier"
+        "devbox-a.dotfiles.fractal.keymap.verifier"
     );
     // The legacy bus identity remains the declaration's positional projection; it is not the ID.
-    assert_eq!(spec.bus_id("other"), "dev3.verifier");
+    assert_eq!(spec.bus_id("other"), "devbox-a.verifier");
     assert_eq!(spec.identity, "verifier");
 
     // Equal bytes across the two namespaces do not collide: the ID may look like an address and
     // an address may look like a legacy host-qualified identity.
     write(
         tmp.path(),
-        "agents/dev3/opaque/agent.kdl",
+        "agents/devbox-a/opaque/agent.kdl",
         r#"agent "opaque" {
-  id "dev3.frozen.legacy"
-  address "dev3.frozen.legacy"
-  host "dev3"
+  id "devbox-a.frozen.legacy"
+  address "devbox-a.frozen.legacy"
+  host "devbox-a"
   command "work"
 }
 "#,
@@ -2918,8 +2905,8 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     let found = discover_strict(tmp.path());
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let opaque = find(&found.specs, "opaque");
-    assert_eq!(opaque.id.as_deref(), Some("dev3.frozen.legacy"));
-    assert_eq!(opaque.effective_address(), "dev3.frozen.legacy");
+    assert_eq!(opaque.id.as_deref(), Some("devbox-a.frozen.legacy"));
+    assert_eq!(opaque.effective_address(), "devbox-a.frozen.legacy");
 }
 
 /// A declaration whose *only* agent-shaped signal is an `id` or an `address` is not a candidate.
@@ -3024,7 +3011,7 @@ fn the_address_grammar_is_bounded_lowercase_dotted_segments() {
 fn the_id_grammar_admits_uuidv7_and_frozen_bus_identities_only() {
     for accepted in [
         "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1",
-        "dev3.dotfiles.fractal.help-key.verifier",
+        "devbox-a.dotfiles.fractal.help-key.verifier",
         "example-linux.worker",
         "Legacy_Identity-9",
     ] {

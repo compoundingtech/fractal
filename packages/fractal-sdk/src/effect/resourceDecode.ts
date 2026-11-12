@@ -1,4 +1,4 @@
-import { Agent, CollectionName, Resource, UsageSummary, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, CollectionName, Resource, UsageSummary, decodeUnknownSync } from '@fractal/client/schema/read'
 import { Schema, SchemaAST, SchemaTransformation } from 'effect'
 import type { Brand, DateTime, Duration, Option } from 'effect'
 import type { Issue } from 'effect/SchemaIssue'
@@ -191,6 +191,22 @@ export const openAgent = (agent: Agent): DecodedAgent => {
 }
 
 /** Identity and structure are closed; future agent leaf cases remain in their own row. */
+/**
+ * A mission's optional served projections, which clients do not need to list it. One that fails its schema costs
+ * that projection, not the mission: daemons have served step owners that are people under `owner.agent`.
+ */
+const missionProjectionFields = ['presentation', 'declared_admission'] as const
+const missionServedProjections = (raw: unknown): readonly string[] =>
+  object(raw) && raw.kind === 'mission' ? missionProjectionFields.filter((field) => raw[field] !== undefined) : []
+const decodeLenientMission = (raw: Record<string, unknown>, fields: readonly string[]): DecodedResource | undefined => {
+  try {
+    const value = decodeResource(Object.fromEntries(Object.entries(raw).filter(([key]) => !fields.includes(key))))
+    return value.kind === 'mission' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export const decodeResourceRow = (raw: unknown): ResourceDecodeResult => {
   const id = object(raw) && typeof raw.id === 'string' ? raw.id : undefined
   const diagnostic = (path: string, reason: string, tag: ResourceDecodeDiagnostic['_tag'] = 'Rejected'): Undecodable => ({
@@ -215,6 +231,11 @@ export const decodeResourceRow = (raw: unknown): ResourceDecodeResult => {
       undecodable: unrecognized.map((leaf) => diagnostic(leaf.path, 'Unrecognized leaf value', 'Degraded')),
     }
   } catch (error) {
+    const servedProjections = missionServedProjections(raw)
+    if (servedProjections.length > 0) {
+      const value = decodeLenientMission(raw as Record<string, unknown>, servedProjections)
+      if (value !== undefined) return { value, undecodable: servedProjections.map((field) => diagnostic(field, 'Optional served projection dropped', 'Degraded')) }
+    }
     const failures: Undecodable[] = []
     if (object(raw) && raw.kind === 'agent' && Schema.isSchemaError(error)) {
       const visit = (issue: Issue, path: readonly PropertyKey[]): void => {

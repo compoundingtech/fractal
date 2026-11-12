@@ -136,13 +136,23 @@ pub fn systemd_user_available() -> bool {
 }
 
 pub fn scope_unit(product: &str, task_id: &str) -> String {
+    scope_unit_name(product, task_id, std::process::id(), SCOPE_SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+fn scope_unit_name(product: &str, task_id: &str, pid: u32, sequence: u64) -> String {
     let safe_product = sanitize(product);
     let safe_task = sanitize(task_id);
-    let sequence = SCOPE_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{safe_product}-{safe_task}-{}-{sequence}.scope",
-        std::process::id()
-    )
+    format!("{safe_product}-{safe_task}-{pid}-{sequence}.scope")
+}
+
+/// Inverse of `scope_unit`, splitting numeric suffixes from the right.
+pub(crate) fn scope_identity<'a>(product: &str, unit: &'a str) -> Option<&'a str> {
+    let body = unit.strip_suffix(".scope")?;
+    let (body, sequence) = body.rsplit_once('-')?;
+    let (body, pid) = body.rsplit_once('-')?;
+    let identity = body.strip_prefix(product)?.strip_prefix('-')?;
+    (scope_unit_name(product, identity, pid.parse().ok()?, sequence.parse().ok()?) == unit)
+        .then_some(identity)
 }
 
 pub(crate) fn sanitize(value: &str) -> String {
@@ -159,7 +169,7 @@ pub(crate) fn sanitize(value: &str) -> String {
 }
 
 pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
-    wrap_in(unit, program, arguments, None, None)
+    wrap_in(unit, program, arguments, None, None, None)
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
@@ -170,6 +180,7 @@ pub(crate) fn wrap_in(
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
     lane: Option<&crate::lane::Lane>,
+    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
 ) -> Command {
     wrap_for_mode(
         mode(),
@@ -178,7 +189,7 @@ pub(crate) fn wrap_in(
         program,
         arguments,
         environment,
-        lane,
+        ScopePlacement { lane, unlaned_seat },
     )
 }
 
@@ -188,6 +199,12 @@ pub(crate) fn systemd_254() -> bool {
     mode() == Isolation::Scope && *SCOPE_EXPANSION_FLAG.get().unwrap_or(&false)
 }
 
+#[derive(Default)]
+struct ScopePlacement<'a> {
+    lane: Option<&'a crate::lane::Lane>,
+    unlaned_seat: Option<&'a crate::UnlanedSeatPlacement>,
+}
+
 fn wrap_for_mode(
     isolation: Isolation,
     expansion_flag: bool,
@@ -195,7 +212,7 @@ fn wrap_for_mode(
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
-    lane: Option<&crate::lane::Lane>,
+    placement: ScopePlacement<'_>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -216,10 +233,12 @@ fn wrap_for_mode(
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
             }
-            if let Some(lane) = lane {
+            if let Some(lane) = placement.lane {
                 command.args(lane.scope_arguments());
                 let seat = |key: &str| environment?.get(key).cloned();
                 command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
+            } else if let Some(policy) = placement.unlaned_seat {
+                policy.apply(&mut command);
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
@@ -306,6 +325,55 @@ fn own_unit() -> Option<String> {
     Some(path.rsplit('/').next()?.to_owned())
 }
 
+/// Whether `pid` runs in the scope `unit`. `systemd-run --scope` moves itself into its scope when
+/// the user manager starts it and only then execs the task; until then the scope is loaded and
+/// empty, so a signal to it succeeds and reaches nothing. A process that cannot be read has not.
+pub(crate) fn joined(unit: &str, pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|text| {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("0::"))
+            .any(|path| path.split('/').any(|part| part == unit))
+    })
+}
+
+/// How long `systemd-run --scope` gets to join its scope. Its request to start the scope gives up
+/// sooner, at the bus's 25s method timeout, but its wait for the start job to run has no limit.
+pub(crate) const SCOPE_JOIN_LIMIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Join {
+    Joined,
+    Exited,
+    TimedOut,
+}
+
+/// Waits until `pid` has joined the scope `unit`, or `alive` says it has exited, for up to `limit`.
+/// Until it joins, `systemd-run` is in the cgroup of the process that started it, and a kill of
+/// that cgroup ends it.
+pub(crate) fn await_join(
+    unit: &str,
+    pid: u32,
+    limit: Duration,
+    alive: impl Fn() -> Result<bool>,
+) -> Result<Join> {
+    let started = Instant::now();
+    // A join usually takes a few milliseconds, so look often at first.
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if joined(unit, pid) {
+            return Ok(Join::Joined);
+        }
+        if !alive()? {
+            return Ok(Join::Exited);
+        }
+        if started.elapsed() >= limit {
+            return Ok(Join::TimedOut);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(10));
+    }
+}
+
 /// Whether this process has seen the work scope `unit` empty.
 pub(crate) fn has_ended(unit: &str) -> bool {
     ENDED
@@ -328,23 +396,44 @@ fn mark_ended(unit: &str) {
 ///
 /// Returns whether the scope is now empty. It is false, and nothing is signalled, on a host
 /// without systemd user scopes or for a unit that is not a work scope.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "end_scope",
+        recorded_scope = unit,
+        grace_ms = grace.as_millis() as u64,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn end_scope(unit: &str, grace: Duration) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope teardown skipped");
         return Ok(false);
     }
     if has_ended(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "already_ended", "scope teardown skipped");
         return Ok(true);
     }
     let Some(cgroup) = control_group(unit)? else {
+        tracing::debug!(guard_decision = "skip", reason = "scope_not_loaded", "scope teardown needs no signal");
         mark_ended(unit);
         return Ok(true);
     };
     if !grace.is_zero() && populated(&cgroup) {
-        kill_unit(unit, libc::SIGTERM)?;
+        kill_unit(unit, libc::SIGTERM, ScopeSignalCaller::EndScope)?;
         wait_until_empty(&cgroup, grace);
     }
     if populated(&cgroup) {
-        kill_unit(unit, libc::SIGKILL)?;
+        kill_unit(unit, libc::SIGKILL, ScopeSignalCaller::EndScope)?;
         anyhow::ensure!(
             wait_until_empty(&cgroup, SCOPE_KILL_WAIT),
             "processes in {unit} survived SIGKILL for {}s",
@@ -376,6 +465,7 @@ static LATER: Mutex<Later> = Mutex::new(Later {
 pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + 'static) {
     let mut later = LATER.lock().unwrap_or_else(PoisonError::into_inner);
     if !later.keys.insert(key.clone()) {
+        tracing::debug!(recorded_scope = %key, guard_decision = "skip", reason = "already_queued", "scope teardown queue skipped");
         return;
     }
     later.queue.push_back((key, Box::new(job)));
@@ -408,11 +498,30 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
 
 /// Sends `signal` to every process in the work scope `unit`. Returns whether it was sent: it is
 /// not where [`end_scope`] would do nothing, or once the scope has ended.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "signal_scope",
+        recorded_scope = unit,
+        signal,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) || has_ended(unit) {
+        tracing::debug!(recorded_scope = unit, signal, caller = "signal_scope", guard_decision = "skip", reason = "scope_mode_work_scope_or_ended_guard", "scope signal skipped");
         return Ok(false);
     }
-    kill_unit(unit, signal)
+    kill_unit(unit, signal, ScopeSignalCaller::SignalScope)
 }
 
 /// The cgroup directory of `unit`, or none once the unit is not loaded.
@@ -470,9 +579,16 @@ fn wait_until_empty(cgroup: &Path, within: Duration) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScopeSignalCaller {
+    EndScope,
+    SignalScope,
+    Retirement,
+}
+
 /// `systemctl kill` signals every process in the unit's cgroup. Returns false when the unit was
 /// no longer loaded.
-fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
+fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool> {
     let name = match signal {
         libc::SIGTERM => "SIGTERM".to_owned(),
         libc::SIGKILL => "SIGKILL".to_owned(),
@@ -483,6 +599,24 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
         .args(["--user", "kill"])
         .arg(format!("--signal={name}"))
         .arg(unit);
+    tracing::info!(
+        ?caller,
+        reason = "signal_work_scope",
+        recorded_scope = unit,
+        signal,
+        guard_decision = "allow",
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable",
+        "signalling work scope"
+    );
     let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)
         .with_context(|| format!("ask the systemd user manager to signal {unit}"))?;
     if output.status.success() {
@@ -490,6 +624,7 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
     }
     let error = String::from_utf8_lossy(&output.stderr);
     if error.contains("not loaded") {
+        tracing::debug!(?caller, recorded_scope = unit, signal, guard_decision = "skip", reason = "scope_not_loaded", "scope signal found no loaded unit");
         mark_ended(unit);
         return Ok(false);
     }
@@ -524,7 +659,7 @@ mod tests {
             OsStr::new("provider"),
             &arguments,
             None,
-            None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -548,7 +683,7 @@ mod tests {
             program,
             &arguments,
             None,
-            None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -565,7 +700,6 @@ mod tests {
 
     #[test]
     fn instance_isolation_probe_uses_the_host_runtime_directory() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
         let environment = std::collections::BTreeMap::from([
             ("PATH".into(), root.path().display().to_string()),
@@ -577,12 +711,11 @@ mod tests {
             ),
         ]);
         for program in ["systemd-run", "systemctl"] {
-            let path = root.path().join(program);
-            std::fs::write(
-                &path,
+            crate::test_executable::fake_executable(
+                root.path(),
+                program,
                 "#!/bin/sh\n[ \"$XDG_RUNTIME_DIR\" = /run/user/1000 ] || exit 1\nprintf 'systemd 260\\n'\n",
-            ).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            );
         }
         assert_eq!(systemd_scope_in(&environment), Some(true));
         let mut without_instance = environment.clone();
@@ -610,7 +743,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("%n:$HOME")],
             Some(&environment),
-            None,
+            ScopePlacement::default(),
         );
         assert_eq!(
             command
@@ -633,7 +766,7 @@ mod tests {
 
     #[test]
     fn isolation_probe_resolves_tools_from_the_captured_path() {
-        use std::os::unix::fs::PermissionsExt as _;
+        use crate::test_executable::fake_executable;
         let root = tempfile::tempdir().unwrap();
         let environment = std::collections::BTreeMap::from([
             ("PATH".into(), root.path().display().to_string()),
@@ -642,19 +775,16 @@ mod tests {
         ]);
         assert_eq!(systemd_scope_in(&environment), None);
         for program in ["systemd-run", "systemctl"] {
-            let path = root.path().join(program);
-            std::fs::write(&path, "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 249 (249.11)\\n'\n").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            fake_executable(root.path(), program, "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 249 (249.11)\\n'\n");
         }
         assert_eq!(systemd_scope_in(&environment), Some(false));
-        let systemd_run = root.path().join("systemd-run");
-        std::fs::write(
-            &systemd_run,
+        fake_executable(
+            root.path(),
+            "systemd-run",
             "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 260\\n'\n",
-        )
-        .unwrap();
+        );
         assert_eq!(systemd_scope_in(&environment), Some(true));
-        std::fs::write(root.path().join("systemctl"), "#!/bin/sh\nexit 1\n").unwrap();
+        fake_executable(root.path(), "systemctl", "#!/bin/sh\nexit 1\n");
         assert_eq!(systemd_scope_in(&environment), None);
     }
 
@@ -700,6 +830,31 @@ mod tests {
     }
 
     #[test]
+    fn unlaned_daemon_seat_placement_is_explicit_and_never_overrides_a_lane() {
+        let policy = crate::seat_placement::tests::policy();
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
+            wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
+                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy })
+                .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
+        };
+        assert_eq!(arguments(None, None), [
+            "--user", "--scope", "--collect", "--quiet", "--no-ask-password",
+            "--unit=st3-work.scope", "--description=Fractal seat", "--expand-environment=no",
+            "--", "provider",
+        ].map(std::ffi::OsString::from));
+        assert_eq!(arguments(Some(&lane), Some(&policy)), arguments(Some(&lane), None));
+        let placed = arguments(None, Some(&policy));
+        assert_eq!(placed[8..], [
+            "--slice=app-seats.slice", "-p", "MemoryMax=1073741824", "-p",
+            "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
+        ].map(std::ffi::OsString::from));
+        let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
+            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy) });
+        assert!(detached.get_args().next().is_none());
+    }
+
+    #[test]
     fn a_lane_caps_the_scope_and_keeps_its_builds_inside() {
         let environment = std::collections::BTreeMap::from([
             ("PATH".to_owned(), "/bin".to_owned()),
@@ -713,7 +868,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("--flag")],
             Some(&environment),
-            Some(&lane),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         let arguments = command.get_args().collect::<Vec<_>>();
         let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
@@ -739,7 +894,7 @@ mod tests {
             OsStr::new("provider"),
             &[],
             Some(&environment),
-            Some(&lane),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         assert!(detached.get_args().next().is_none());
         assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));

@@ -60,6 +60,21 @@ leaves `resolveImage` at its default `Defer`. The kit renders no remote image be
 or after this callback; it never fetches the URL on the app's behalf.
 `onOpenResource` remains reserved for workspace references.
 
+The GitHub plugin's reads, `GET /v1/client/plugins/github/{owner}/{repo}/...`, are not
+that proxy. The browser sends only typed path values (an owner, a repository, a number
+or id), never a URL. The daemon checks them and reads `https://api.github.com` alone,
+through `fractal-github-base`'s credentialed, admitted send boundary. It sends one
+hop and follows no redirect: a 301 is reported as `moved` only when its `Location` is
+on `api.github.com` and parses back to a typed item. Every upstream body is bounded.
+The answer is JSON (`apps/fractal-web/src/plugins/github/schema.ts`). Avatars and
+body images are never fetched; they stay links.
+REST and GraphQL reads select the owner's installation credential before looking up
+the cache; documents, ETags and repository relocations are partitioned by the selected
+principal. Bounded PAT fallback responses do not populate installation document caches.
+File lists count encoded JSON bytes (including escaping and metadata), reserving
+128,000 bytes below the advertised client response ceiling for the read wrapper and envelope.
+Excess patches are omitted, or the file list is cut short, with `truncated: true`.
+
 Sent and received image attachments use a separate consent boundary: **Show image**
 reads the attachment through `AttachmentPort.chunk`, retaining the native message
 carrier so the gateway authorizes the viewer. No upload preview URL is reused.
@@ -145,18 +160,18 @@ Authorization and capability refusals retain their distinct explanations.
 ## Local daemon web app
 
 The daemon serves the web app by default at `http://127.0.0.1:7410`.
-Disable it with `st up --web-listen off`. `--web-dist /path/to/dist/web`
+Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
 overrides the default installed assets at `../share/fractal-web` relative to the
 daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
 The assets stay separate from the daemon binary so a UI change does not require
 recompiling or relinking Rust.
 
 Missing assets or a missing configured concrete `person` degrade web availability
-without taking down the daemon's API listeners. `st doctor` reports the web
+without taking down the daemon's API listeners. `fractal doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `st web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+Run `fractal web [--state-dir DIR]` or `fractal web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -193,14 +208,14 @@ carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for ta
 browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
 carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
 can reach the loopback port could claim a login, so run it only on a host where every local
-user is already trusted with that person's st.
+user is already trusted with that person's Fractal.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
 WF_PORT=7411 \
 WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
 WF_TAILNET_LOGINS=robin@example.com \
-WF_ST_GATEWAY=$XDG_RUNTIME_DIR/st3-client.sock \
+WF_ST_GATEWAY=$XDG_RUNTIME_DIR/fractal-client.sock \
 WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
   pnpm --dir apps/fractal-web start
 tailscale serve --bg --https=8443 http://127.0.0.1:7411
@@ -209,9 +224,34 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7411
 Set `TAILNET_HTTPS_ORIGIN` to the exact HTTPS origin published by Serve, including
 its port when non-default.
 
+For an immutable deployment, the flake exposes `packages.<system>.fractal-web-publisher`
+and `apps.<system>.fractal-web-publisher`. The executable bundles the upstream
+`server/main.mts` and its dependencies from the frozen workspace installation and
+runs with the pinned Node 24 runtime. During packaging, esbuild reads dependencies
+directly from the immutable installation via `NODE_PATH` and writes the bundle to
+the writable build directory; no dependency-tree copy is needed. No source checkout
+or package installation is needed on the serving host. The publisher does not include
+assets or start the daemon; select the assets independently with `WF_DIST`:
+
+```sh
+WF_DIST=/path/to/selected-package/share/fractal-web \
+WF_PORT=7411 \
+WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
+WF_TAILNET_LOGINS=robin@example.com \
+WF_ST_GATEWAY=$XDG_RUNTIME_DIR/fractal-client.sock \
+WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
+  nix run .#fractal-web-publisher
+```
+
+Fleet service managers must resolve `WF_DIST` from the running daemon's selected
+`--web-dist`, not a pinned store path or a candidate installer. Restart the
+publisher after daemon selection changes: the host reads `build-identity.json`
+at startup, and serves assets from that same selected directory. A changed
+installer record alone does not prove that the daemon restarted with those assets.
+
 The settings:
 
-- `WF_ST_GATEWAY` names st's paired client gateway socket, never the privileged `st3.sock`.
+- `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
 - `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
@@ -532,13 +572,27 @@ Both commands skip all live activity when the one-minute `/proc/loadavg` value i
 ## Fractal web alert strip live proof
 
 `node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
-alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
+alert strip against a real daemon without touching your own Fractal. `up` makes a throwaway instance
 (`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
 agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
 headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
-header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
+header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
+
+## Sidebar migration
+
+Importing `custom.fractal.sidebar` history into arrangements is client-owned. The legacy
+HLC register representation lives in `apps/fractal-web/src/folders/core.mts`; the daemon
+provides no Fractal web-specific importer.
+Discover capability, pause legacy writers, fold the HLC history once, and durably stage
+the snapshot, target ID, exact typed operations and idempotency key. Preserve stable IDs,
+import order, tombstones and placements. Sort legacy siblings by `(key, ID)` and derive
+canonical fractional keys for each folder and placement list.
+Retry that exact staged request until acknowledged and readable, then switch exclusively
+to arrangements. Old stamps remain provenance, not live ordering. Keep staged state on
+failure, leave immutable custom history, and never dual-write. See the
+[arrangements contract](st3/client-v0/README.md#person-arrangements).
 
 ## Fractal web arrangement edits
 
@@ -605,6 +659,70 @@ CI=1 pnpm --dir apps/fractal-web exec vitest run src/data/inventory-transport.un
 pnpm --filter fractal-web typecheck
 ```
 
+### Ordered Pins data
+
+`src/data/pins.ts` follows the discovered person's reserved Pins arrangement and
+its complete paginated ordered memberships. Window frames invalidate the complete
+read, including changes outside the window. Edits use caller-owned action identities
+and fences, root membership place/remove operations, and no Sidebar folder changes.
+Creation is disabled unless the caller confirms the coordinated v2 reader rollout.
+Incompatible v1 bodies and permanent retirement are refused, not migrated.
+Consumers close and reopen the follow after a socket interruption; an HTTP refresh
+cannot restore synced or editable state on an interrupted follow. Failed reads
+retain the last complete members with an unavailable phase. Sidebar rendering is
+independent of this data API.
+The source-owned Pins binding reuses the source's fetch/socket transports, including
+replay. Source switches, unmounts and retries abort initializing reads and close their
+collection sockets before starting another follow. Kit consumers receive plain views.
+
+The live sidebar renders returned Pins in membership order above the roster and
+hides an empty section. Pin/unpin menus appear only with a synced writable follow.
+Retired or unavailable subjects remain hidden by membership reads; these defaults
+are reversible presentation choices. The UI does not opt into Pins creation.
+Pins occupy at most 40% of the roster, with their own vertical scroll area; keyboard
+focus scrolls later rows into view while the agent tree keeps the remaining space.
+
+## Focused local checks
+
+From the repository root, batch both web/UI typechecks and explicitly selected app
+tests into one check-lane admission:
+
+```sh
+python3 scripts/web-check check src/web/sidebarRow.unit.test.ts
+```
+
+With a warm shell, `check` prepares megarepo members and the frozen pnpm installation
+before requesting a slot. `prepare` performs only that warm setup and fails closed
+without building when the rooted profile is missing (including a broken symlink).
+With a cold shell, `check` requests admission first, realizes the profile inside
+the slot, then prepares dependencies and runs the batch. Cold realizations are
+serialized across all cache keys, with one local Nix build job and no remote
+builders. `run FILE...` and the internal `cold-run FILE...` payload require a caller
+that already owns a check slot. Neither runs browsers or a full test suite.
+Every batch runs both typechecks and the selected tests and fails if any phase fails.
+
+The shared shell profile lives under `$XDG_CACHE_HOME/fractal-web-check/v1` (default
+`~/.cache`) and is keyed by the tracked Nix definitions plus `flake.lock`, not the
+worktree path. `.devenv/gc/devshell` links to this rooted profile. Warm preparation
+and the check payload open that profile offline with builds and substitution
+disabled; they never evaluate the flake. A changed Nix input takes the admitted
+cold path if its profile is not already realized.
+
+TypeScript writes incremental state to `.devenv/web-check/*.tsbuildinfo`. Successful
+batches publish seed files under the shared cache, keyed by the pnpm lock and
+project configs. Preparation copies those into a new worktree at the same relative
+depth; TypeScript validates source versions and compiler options before reusing
+them. A main-worktree batch can therefore prime later PR worktrees. Type state is
+an optimization, never a success receipt: the compiler and tests always execute.
+Delete `.devenv/web-check` to force a cold compiler run; remove the shared cache
+entry and run `check FILE...` again to rebuild a shell under admission. Cold builds
+consume the slot's hold time and may take longer than warm checks. Existing package
+scripts and CI remain unchanged.
+
+The root `//:typecheck` Buck target covers the TypeScript clients only. There are no
+app/UI BUCK files, so this wrapper does not claim Buck action-cache hits for these
+checks or skip test execution on the basis of a previous result.
+
 ## Fractal web roster lifecycle
 
 The generated client-v0 `Agent` schema models lifecycle as an optional open enum:
@@ -628,14 +746,35 @@ pnpm exec tsc --noEmit -p apps/fractal-web
 
 ## Fractal web terminal attachment
 
-The header's **Toggle terminal drawer** stays disabled with an accessible description and
+The header's control swaps the main pane between the agent's conversation and its terminal,
+each replacing the other: **Show terminal** with a terminal glyph, then **Show conversation**
+with a message glyph and the active fill. The name carries the state, so the control has no
+`aria-pressed`. Terminal mode hides the workspace tabs; a terminal is never a tab. The URL
+(`?open=terminal/<ref>:detail`) restores the view on reload, and this page also remembers per
+agent, in memory, which agents were left on their terminal. Opening an agent from an alert or
+a mission always shows its conversation.
+
+The conversation is retained behind the terminal like any hidden pane. The selected agent's
+terminal stays mounted and connected once shown: while hidden it has `content-visibility:
+hidden` and `inert`, accepts no input, releases its projected follow and paints no new frames,
+while its raw session keeps feeding the emulator so the reveal needs no reattach. Leaving the
+agent closes it. A wide window moves focus to the shown view on an explicit switch: the
+composer, or the terminal pane rather than its grid, because focusing a live grid arms typing.
+A phone keeps focus on the toggle, so a switch raises no keyboard.
+
+An attach that reports `no-terminal` turns the tab back to its conversation (a view change, so
+it adds no history entry) and disables **Show terminal** with that reason. The failure is remembered
+per agent in memory until the roster reports a different runtime list for that agent.
+
+**Show terminal** stays disabled with an accessible description and
 hover title until the live roster establishes a runtime for the selected agent. While
 loading, its reason is “Waiting for the live agent roster to find this agent’s terminal.”
 An absent roster row or an empty runtime list keeps it disabled with the specific cause.
-An explicit terminal deep link still shows its local reason beside the usable thread.
+An explicit terminal deep link shows its local reason in the pane, with **Show conversation**
+enabled as the way back.
 On phones the control leaves the header, which keeps its room for the breadcrumb: a
-labelled **Terminal** button sits fixed at the right end of the workspace tab row, has a
-44px target and reports its pressed state. The tabs scroll and truncate before it rather
+labelled **Terminal** (then **Conversation**) button sits fixed at the right end of the workspace tab row, has a
+44px target and the active fill while the terminal is shown, when it is alone in the row. The tabs scroll and truncate before it rather
 than running under it. When unavailable it stays focusable; pressing it opens a reason
 popover rather than relying on a hover title.
 

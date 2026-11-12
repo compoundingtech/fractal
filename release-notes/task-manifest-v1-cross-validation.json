@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cross-validate TaskManifest v1 time windows, exact origins and principals, ordered browser scope, writes and reader budgets; duplicate reader principal/peer pairs are refused.",
+  "replay": {"status": "none", "detail": "No claims or replay changes."},
+  "schema": {"status": "none", "detail": "Shared manifest validation only; no registry or storage changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "The new manifest parser now checks cross-field semantics. Reader principal/peerHost pairs must be unique; empty readers remain valid. General text uses the explicit ECMAScript TrimString blank set and rejects Unicode Cc controls. No active route uses this parser."},
+  "downtime": {"status": "none", "detail": "No service changes."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Revert the library addition; no persisted state is changed."}
+}

@@ -196,6 +196,24 @@ pub fn read(socket: &Path) -> Option<Readiness> {
     }
 }
 
+/// Whether a daemon once observed startup at this socket and none holds it now: its readiness
+/// lock is there with no live writer. A restart reads the same until the next daemon takes it.
+pub fn abandoned(socket: &Path) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let [_, lock_path] = paths(socket);
+        OpenOptions::new()
+            .read(true)
+            .open(lock_path)
+            .is_ok_and(|file| !writer_is_live(&file))
+    }
+}
+
 pub struct Startup {
     path: Option<PathBuf>,
     _lock: Option<File>,

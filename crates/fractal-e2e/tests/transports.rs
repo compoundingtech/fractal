@@ -31,11 +31,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
 fn state(root: &Path, name: &str) -> AppState {
     AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
-        store: Arc::new(Store::open_memory(name).unwrap()),
+        store: Arc::new(Store::open(&root.join("graph.db"), name).unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: name.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),
@@ -48,6 +51,33 @@ fn state(root: &Path, name: &str) -> AppState {
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     }
+}
+
+// The server's list refreshers read while its API calls write. In a shared-cache memory store a
+// snapshot's read lock on sqlite_sequence makes an AUTOINCREMENT write fail at once with
+// SQLITE_LOCKED, which no busy timeout waits out, so the fixture store must be file-backed.
+#[test]
+fn the_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path(), "reader-writer");
+    state.store.read_snapshot(|_| {
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
+        // Join the other thread's commit while this thread still holds its read snapshot.
+        std::thread::scope(|scope| scope.spawn(|| {
+            state.store.append_claim(&ClaimInput {
+                subject: "agent/reader-writer".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/reader-writer".into()),
+                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+        }).join().unwrap())?;
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
+        Ok(())
+    }).unwrap();
+    assert!(state.store.latest_claim("agent/reader-writer", None).unwrap().is_some());
 }
 
 async fn publish_fixture_lists(state: &AppState) {
@@ -836,6 +866,14 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_mes
         "an idle conversation must send nothing"
     );
     stream.unsubscribe("chat").await.unwrap();
+    // Sending unsubscribe does not wait for the server to read it. Its next snapshot
+    // confirms that the preceding command was processed on this socket.
+    // The later message does not change the work collection.
+    stream.subscribe("barrier", "work", 2, None, None).await.unwrap();
+    match next_collection_event(&mut stream, "the unsubscribe barrier snapshot").await {
+        CollectionEvent::Snapshot { id, .. } if id == "barrier" => {}
+        other => panic!("expected the unsubscribe barrier snapshot, got {other:?}"),
+    }
     state
         .store
         .append_claim(&ClaimInput {
@@ -853,12 +891,9 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_mes
             idempotency_key: None,
         })
         .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_000), stream.next_event())
-            .await
-            .is_err(),
-        "an unsubscribed conversation must send nothing more"
-    );
+    if let Ok(event) = tokio::time::timeout(Duration::from_millis(1_000), stream.next_event()).await {
+        panic!("an unsubscribed conversation must send nothing more, got {event:?}");
+    }
     server.abort();
 }
 
@@ -1100,7 +1135,8 @@ mission "example/definition" state="ready" {
         ));
     }
 
-    // Descriptions are capped at 1,000 bytes; a command is not, so it can outgrow a response.
+    // A description, the agent's charter, is capped at 8 KiB; a command is not, so it can
+    // outgrow a response.
     let oversized = format!(
         "version 2\nagent \"example/large-definition\" {{ command \"true {}\" }}",
         "x".repeat(1_100_000),
@@ -1612,9 +1648,9 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         &advertised.into_body().collect().await.unwrap().to_bytes(),
     ).unwrap();
     assert_eq!(advertisement, serde_json::json!({
-        "api_version": fractal_client::API_VERSION,
+        "api_version": fractal_daemon::api::CLIENT_API_VERSION,
         "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-    }), "a client that did not ask sees exactly the one capability older clients validate");
+    }), "a client that did not ask sees exactly the one capability in the default advertisement");
     let asked = unix_response(&gateway_socket, "/v1/client/capabilities?accepts=fabric-gateway-grant", None).await;
     let asked: Value = serde_json::from_slice(&asked.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(asked["capabilities"], serde_json::json!([

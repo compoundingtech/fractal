@@ -6,9 +6,11 @@
 import { it as effectIt } from '@effect/vitest'
 import type { CollectionFrame, CollectionSocket } from '@fractal/client'
 import type { CollectionName, ResourceCollectionName, Snapshot } from '@fractal/client'
+import * as Deferred from 'effect/Deferred'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import * as Layer from 'effect/Layer'
+import * as Queue from 'effect/Queue'
 import type * as Scope from 'effect/Scope'
 import * as Stream from 'effect/Stream'
 import * as SubscriptionRef from 'effect/SubscriptionRef'
@@ -92,7 +94,7 @@ class FakeGateway {
     this.socket?.onclose?.({ code: 1006, reason: 'socket dropped' })
   }
 
-  idOf(collection: CollectionName): string {
+  idOf(collection: CollectionName | 'terminal'): string {
     const command = this.commands.findLast(
       (candidate) => candidate.kind === 'subscribe' && candidate.collection === collection,
     )
@@ -153,6 +155,7 @@ const watchFollow = <A>(
   fractal: Fractal['Service'],
   key: string,
   follow: Stream.Stream<FollowEvent<A>>,
+  onEvent?: (event: FollowEvent<A>) => Effect.Effect<unknown>,
 ): Effect.Effect<Mounted<A>, never, Scope.Scope> =>
   Effect.gen(function* () {
     const events: FollowEvent<A>[] = []
@@ -161,7 +164,10 @@ const watchFollow = <A>(
     let ended = false
     const fiber = yield* Effect.forkChild(
       follow.pipe(
-        Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+        Stream.runForEach((event) => Effect.gen(function* () {
+          events.push(event)
+          if (onEvent !== undefined) yield* onEvent(event)
+        })),
         Effect.ensuring(Effect.sync(() => (ended = true))),
       ),
     )
@@ -224,6 +230,7 @@ const runEffect = (
     readonly conversationSlots?: number | 'advertised'
     readonly setup?: (gateway: FakeGateway) => void
     readonly onDiagnostics?: (event: FractalDiagnostic) => void
+    readonly onFollowSubscribeSent?: () => void
   },
   test: (gateway: FakeGateway) => Effect.Effect<void, never, Fractal | Scope.Scope>,
 ) => {
@@ -235,6 +242,7 @@ const runEffect = (
     ...(options.conversationSlots === undefined ? {} : { conversationSlots: options.conversationSlots }),
     socket: gateway.factory,
     fetch: gateway.fetch,
+    ...(options.onFollowSubscribeSent === undefined ? {} : { onFollowSubscribeSent: options.onFollowSubscribeSent }),
     ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
   }).pipe(Layer.provide(Layer.succeed(FractalPlatform, {
     admission: (budget) => {
@@ -264,9 +272,163 @@ const run = (
   test: Parameters<typeof runEffect>[1],
 ) => Effect.runPromise(runEffect(options, test))
 
+const serveTerminal = (gateway: FakeGateway) => {
+  let requests = 0
+  gateway.probe = async () => {
+    const value = ++requests === 1
+      ? {
+          kind: 'runtime', id: 'runtime/a', revision: '1', desired_revision: null,
+          incarnation_id: 'incarnation/a', owner_host_id: 'host/test', owner_id: 'agent/a',
+          runtime_id: 'a', runtime_kind: 'agent', state: 'running', terminal_id: 'terminal/a',
+          updated_at: '2026-10-03T00:00:00Z',
+        }
+      : { terminal_attachment: { runtime_incarnation: 'incarnation/a', stream_capability: 'capability/a' } }
+    return new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot, value }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })
+  }
+}
+
 describe('follow freshness', () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
-  afterEach(() => vi.useRealTimers())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.doUnmock('@fractal/client/schema')
+  })
+
+  it('admits with a cold codec and retains only the latest complete screen across a flood', async () => {
+    const { promise: pending, resolve: release } = Promise.withResolvers<void>()
+    const started = Effect.runSync(Deferred.make<void>())
+    vi.doMock('@fractal/client/schema', async () => {
+      Effect.runSync(Deferred.succeed(started, undefined))
+      await pending
+      return vi.importActual('@fractal/client/schema')
+    })
+    const subscribed = Effect.runSync(Deferred.make<void>())
+    try {
+      await run({
+        maxFollows: 1,
+        onFollowSubscribeSent: () => Effect.runSync(Deferred.succeed(subscribed, undefined)),
+      }, (gateway) => Effect.gen(function* () {
+        serveTerminal(gateway)
+        const observed = yield* Deferred.make<void>()
+        let count = 0
+        const fractal = yield* Fractal
+        const spec = { _tag: 'Terminal', runtime: 'runtime/a' } as const
+        const stream = fractal.followTerminal(spec)
+        const mounted = yield* watchFollow(fractal, followKey(spec), stream, (event) =>
+          event._tag === 'Observed' && ++count === 1 ? Deferred.succeed(observed, undefined) : Effect.void,
+        )
+        yield* Deferred.await(subscribed)
+        yield* Deferred.await(started)
+        expect(mounted.lastStatus()).toMatchObject({ _tag: 'Requested' })
+        const frame = {
+          kind: 'screen', id: gateway.idOf('terminal'), collection: 'terminal', snapshot,
+          value: {
+            kind: 'terminal-screen', terminal_id: 'terminal/a', runtime_incarnation: 'incarnation/a',
+            revision: '1', rows: 24, columns: 80, title: '',
+            cursor: { row: 0, column: 0, visible: true, style: 'block', blinking: false },
+            modes: {
+              alternate_screen: false, application_cursor: false, application_keypad: false,
+              bracketed_paste: false, focus_events: false, mouse_tracking: 'none', mouse_encoding: 'default',
+            },
+            lines: [], next_sequence: 0, truncated: false,
+          },
+        } satisfies CollectionFrame
+        gateway.send({ ...frame, value: { ...frame.value, rows: 23 } })
+        gateway.send({ kind: 'resync', id: frame.id, collection: 'terminal' })
+        yield* settle
+        gateway.send(frame)
+        for (let revision = 1; revision <= 1000; revision++)
+          gateway.send({ ...frame, value: { ...frame.value, rows: 24 + revision, revision: `${revision}` } })
+        expect(mounted.events).toMatchObject([{ _tag: 'Stale' }])
+        release()
+        yield* Deferred.await(observed)
+        expect(mounted.events).toMatchObject([
+          { _tag: 'Stale' },
+          { _tag: 'Observed', value: { rows: 1024, revision: '1000' } },
+        ])
+        expect(count).toBe(1)
+        gateway.send({ ...frame, value: { ...frame.value, rows: 0, title: 'private screen text' } })
+        yield* settle
+        expect(mounted.events.at(-1)).toMatchObject({
+          _tag: 'Failed', error: { _tag: 'Decode', message: 'Fractal terminal screen did not decode' },
+        })
+        expect(mounted.lastStatus()).toMatchObject({ _tag: 'Failed' })
+        expect(mounted.ended()).toBe(true)
+      }))
+    } finally {
+      release()
+    }
+  })
+
+  it('publishes a Failed status before emitting a rejected codec import', async () => {
+    vi.doMock('@fractal/client/schema', () => { throw new Error('private loader detail') })
+    await run({ maxFollows: 1 }, (gateway) =>
+      Effect.gen(function* () {
+        serveTerminal(gateway)
+        const fractal = yield* Fractal
+        const spec = { _tag: 'Terminal', runtime: 'runtime/import-failure' } as const
+        const key = followKey(spec)
+        const events: FollowEvent<unknown>[] = []
+        yield* fractal.followTerminal(spec).pipe(Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(key)).toMatchObject({
+              _tag: 'Failed', cause: { _tag: 'Unknown' },
+            })
+            events.push(event)
+          }),
+        ))
+        expect(events).toMatchObject([{
+          _tag: 'Failed', error: { _tag: 'Decode', message: 'Fractal terminal screen codec could not load' },
+        }])
+        const status = yield* fractal.followSyncStatus(key).pipe(Stream.take(1), Stream.runCollect)
+        expect(Array.from(status)).toMatchObject([{ _tag: 'Failed', cause: { _tag: 'Unknown' } }])
+      }),
+    )
+  })
+
+  it.each(['resolve', 'reject'] as const)('stops during cold loading without late events when the import later %ss', async (outcome) => {
+    const { promise: pending, resolve: release, reject } = Promise.withResolvers<void>()
+    const started = Effect.runSync(Deferred.make<void>())
+    vi.doMock('@fractal/client/schema', async () => {
+      Effect.runSync(Deferred.succeed(started, undefined))
+      await pending
+      return vi.importActual('@fractal/client/schema')
+    })
+    try {
+      const subscribed = Effect.runSync(Deferred.make<void>())
+      const active: number[] = []
+      await run({
+        maxFollows: 1,
+        onFollowSubscribeSent: () => Effect.runSync(Deferred.succeed(subscribed, undefined)),
+        onDiagnostics: (event) => { if (event._tag === 'Follows') active.push(event.active) },
+      }, (gateway) =>
+        Effect.gen(function* () {
+          const fractal = yield* Fractal
+          const spec = { _tag: 'Terminal', runtime: 'runtime/pending-import' } as const
+          const key = followKey(spec)
+          serveTerminal(gateway)
+          const mounted = yield* watchFollow(fractal, key, fractal.followTerminal(spec))
+          yield* Deferred.await(started)
+          yield* Deferred.await(subscribed)
+          expect(active.at(-1)).toBe(1)
+          yield* mounted.interrupt
+          if (outcome === 'reject') reject(new Error('late private loader detail'))
+          else release()
+          yield* settle
+          expect(mounted.events).toEqual([])
+          expect(active.at(-1)).toBe(0)
+          expect((yield* SubscriptionRef.get(fractal.syncStatuses)).has(key)).toBe(false)
+          expect((yield* SubscriptionRef.get(fractal.freshness)).has(key)).toBe(false)
+          yield* mountWindow('agents')
+          expect(active.at(-1)).toBe(1)
+        }),
+      )
+    } finally {
+      release()
+    }
+  })
 
   it('resubscribes a cursor-gap conversation resync without failing or reconnecting the socket', () =>
     run({ maxFollows: 4 }, (gateway) =>
@@ -748,26 +910,44 @@ describe('follow freshness', () => {
     ))
 
   effectIt.live('refreshes Live window snapshot evidence without restarting its since clock', () =>
-    runEffect({ maxFollows: 4 }, (gateway) =>
-      Effect.gen(function* () {
-        const fractal = yield* Fractal
-        const roster = yield* mountWindow('agents')
-        gateway.window('agents')
-        yield* settle
-        const first = roster.lastStatus()
-        expect(first).toMatchObject({ _tag: 'Live', snapshot })
-        const updated = { ...snapshot, id: 'snapshot/2', store_index: 2 }
-        gateway.send({
-          kind: 'changes', id: gateway.idOf('agents'), collection: 'agents',
-          upserts: [], removes: [], order: [], has_more: false, snapshot: updated,
-        })
-        yield* settle
-        expect(roster.events.at(-1)).toMatchObject({ _tag: 'Observed', value: { snapshot: updated } })
-        expect(roster.lastStatus()).toEqual({ ...first, snapshot: updated })
-        expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(windowSpec('agents'))))
-          .toEqual({ ...first, snapshot: updated })
-      }),
-    ))
+    Effect.gen(function* () {
+      const subscribed = yield* Deferred.make<void>()
+      yield* runEffect({
+        maxFollows: 4,
+        onFollowSubscribeSent: () => { Effect.runFork(Deferred.succeed(subscribed, undefined)) },
+      }, (gateway) =>
+        Effect.gen(function* () {
+          // Ingest publishes on timer tasks and Effect streams consume asynchronously.
+          // Await those publications, not a fixed number of event-loop turns.
+          vi.useRealTimers()
+          const fractal = yield* Fractal
+          const spec = windowSpec('agents')
+          const events = yield* Queue.unbounded<FollowEvent<WindowValue>>()
+          const statuses = yield* Queue.unbounded<SyncStatus>()
+          yield* Effect.forkChild(fractal.watch(collectionWindow(spec)).pipe(
+            Stream.runForEach((event) => Queue.offer(events, event)),
+          ))
+          yield* Effect.forkChild(fractal.followSyncStatus(followKey(spec)).pipe(
+            Stream.filter((status) => status._tag === 'Live'),
+            Stream.runForEach((status) => Queue.offer(statuses, status)),
+          ))
+          yield* Deferred.await(subscribed)
+          gateway.window('agents')
+          expect(yield* Queue.take(events)).toMatchObject({ _tag: 'Observed', value: { snapshot } })
+          const first = yield* Queue.take(statuses)
+          expect(first).toMatchObject({ _tag: 'Live', snapshot })
+          const updated = { ...snapshot, id: 'snapshot/2', store_index: 2 }
+          gateway.send({
+            kind: 'changes', id: gateway.idOf('agents'), collection: 'agents',
+            upserts: [], removes: [], order: [], has_more: false, snapshot: updated,
+          })
+          expect(yield* Queue.take(events)).toMatchObject({ _tag: 'Observed', value: { snapshot: updated } })
+          expect(yield* Queue.take(statuses)).toEqual({ ...first, snapshot: updated })
+          expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(spec)))
+            .toEqual({ ...first, snapshot: updated })
+        }),
+      )
+    }))
 
   it('binds a conversation chunk to the subscribe generation that delivered it', () =>
     run({ maxFollows: 4 }, (gateway) =>

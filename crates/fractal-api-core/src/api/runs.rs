@@ -10,18 +10,30 @@ pub async fn start_gate_check(
     State(state): State<AppState>,
     Json(request): Json<crate::model::GateCheckRequest>,
 ) -> Result<Json<crate::model::GateCheckView>, ApiError> {
-    let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
+    // An owned-set publication pins same-bundle missions with ST_REVISION tokens; check the
+    // source it would store.
+    let source = if request.intent.kdl.contains(crate::graph::REVISION_TOKEN) {
+        crate::graph::resolve_mission_revision_tokens(&request.intent.kdl, &state.node)
+            .map_err(ApiError::bad)?
+            .0
+    } else {
+        request.intent.kdl.clone()
+    };
+    let initial = parse_intent(&source, &state.node).map_err(ApiError::bad)?;
     // Check the commands a publication would store: document names pinned to their versions.
-    let intent = state
+    let mut intent = state
         .store
         .document_bindings_at(&initial.document_refs, None)
         .ok()
-        .and_then(|bindings| resolve_document_references(&request.intent.kdl, &bindings).ok())
+        .and_then(|bindings| resolve_document_references(&source, &bindings).ok())
         .and_then(|resolved| parse_intent(&resolved, &state.node).ok())
         .unwrap_or(initial);
+    if let Some(only) = &request.missions {
+        intent.missions.retain(|_, mission| only.contains(&mission.subject));
+    }
     let workspace = std::path::Path::new(&request.workspace);
     if !workspace.is_absolute() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-check-workspace",
             "a gate check's workspace must be an absolute path",
         )));
@@ -64,7 +76,7 @@ pub async fn start_eval(
 ) -> Result<Json<EvalStartResponse>, ApiError> {
     let actual_hash = hex::encode(Sha256::digest(&request.bundle));
     if actual_hash != request.bundle_hash {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "eval-bundle-hash-mismatch",
             "the eval bundle bytes do not match the supplied hash",
         )));
@@ -97,7 +109,7 @@ pub async fn start_eval(
         .find(|mission| mission.id == named_entry)
         .or_else(|| (ready.len() == 1).then_some(ready[0]))
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "invalid-eval-mission-count",
                 format!(
                     "an eval with helper missions needs one ready entry mission named `{named_entry}`"
@@ -105,13 +117,13 @@ pub async fn start_eval(
             ))
         })?;
     let timeout_ms = entry.timeout_ms.ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-eval-timeout",
             format!("eval entry mission `{}` needs a timeout", entry.id),
         ))
     })?;
     if timeout_ms > MAX_EVAL_TIMEOUT_MS {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "eval-timeout-too-large",
             format!(
                 "eval entry mission `{}` timeout exceeds the 20 minute limit",
@@ -143,7 +155,7 @@ pub async fn start_eval(
         )
         .map_err(ApiError::bad)?;
     if !mission.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "eval-blocked",
             mission.blockers.join("; "),
         )));
@@ -301,7 +313,7 @@ pub async fn outcome_history(
         || query.since > i64::MAX as u64
         || query.until.is_some_and(|until| until > i64::MAX as u64)
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-history-filter",
             "select missions or work, a terminal status, a valid time window, and a limit of 1 through 200",
         )));
@@ -323,8 +335,19 @@ pub async fn outcome_history(
     .map(Json)
 }
 
-pub async fn performance_report() -> Json<Value> {
-    Json(crate::performance::snapshot())
+pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
+    let mut report = crate::performance::snapshot();
+    // Lane bursts held and asked now, and those dropped since start because their holder stopped
+    // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
+    // room admission keeps from starts for a burst, as it last judged a seat's start.
+    let (held, waiting, lapsed, reserve) = {
+        let admission = state.seat_admission.state();
+        let held = admission.lane_bursts.iter().filter(|burst| burst.granted).count();
+        (held, admission.lane_bursts.len() - held, admission.bursts_lapsed, admission.burst_reserve.clone())
+    };
+    report["lane_bursts"] = json!({"held": held, "waiting": waiting, "dropped_by_lease": lapsed,
+        "reserve": reserve.map(|(subject, full, kept)| json!({"subject": subject, "full": full, "kept": kept}))});
+    Json(report)
 }
 
 pub async fn list_mission_runs(
@@ -332,29 +355,32 @@ pub async fn list_mission_runs(
     Query(query): Query<MissionRunQuery>,
 ) -> Result<Json<Vec<MissionRunView>>, ApiError> {
     let store = state.store.clone();
-    match (query.root, query.mission) {
+    let mut runs = match (query.root, query.mission) {
         (Some(root), None) => blocking_store(move || {
             let mut runs = store.mission_runs_for_root(&root)?;
             annotate_stuck_gates(&store, &mut runs)?;
             for run in &mut runs { present_mission_run(&store, run)?; }
             Ok(runs)
         })
-        .await
-        .map(Json),
+        .await?,
         (None, Some(mission)) => {
             blocking_store(move || {
                 let mut runs = store.active_mission_runs_for_mission(&mission)?;
                 for run in &mut runs { present_mission_run(&store, run)?; }
                 Ok(runs)
             })
-                .await
-                .map(Json)
+                .await?
         }
-        _ => Err(ApiError::bad(St3Error::new(
+        _ => return Err(ApiError::bad(FractalError::new(
             "invalid-mission-run-query",
             "select exactly one mission or root mission run",
         ))),
-    }
+    };
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    super::message_reads::read_work_wakes(&state, runs.iter_mut().flat_map(|run| run.steps.iter_mut()))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(runs))
 }
 
 pub async fn list_mission_run_tree(
@@ -363,7 +389,7 @@ pub async fn list_mission_run_tree(
 ) -> Result<Json<crate::model::MissionRunTreePage>, ApiError> {
     let limit = query.limit.unwrap_or(50);
     if !(1..=50).contains(&limit) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-run-limit",
             "mission run tree page limit must be 1 through 50",
         )));
@@ -388,7 +414,7 @@ pub async fn list_mission_run_tree(
     })
     .await?;
     page.map(Json).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "invalid-mission-run-cursor",
             "the mission run cursor is absent from this root; start again without a cursor",
         ))
@@ -410,7 +436,7 @@ fn annotate_stuck_gates(store: &Store, runs: &mut [MissionRunView]) -> anyhow::R
     Ok(())
 }
 
-pub(super) fn present_mission_run(store: &Store, run: &mut MissionRunView) -> Result<(), St3Error> {
+pub(super) fn present_mission_run(store: &Store, run: &mut MissionRunView) -> Result<(), FractalError> {
     use crate::store::identities::{IdentityKind, IdentityStore};
     run.mission = store.resolve_identity(IdentityKind::Mission, &run.mission)?.canonical_id;
     Ok(())
@@ -422,7 +448,7 @@ pub async fn get_mission_run(
 ) -> Result<Json<MissionRunView>, ApiError> {
     let store = state.store.clone();
     let run_for_read = run.clone();
-    blocking_store(move || {
+    let mut found = blocking_store(move || {
         let Some(mut run) = store.mission_run(&run_for_read)? else {
             return Ok(None);
         };
@@ -431,8 +457,12 @@ pub async fn get_mission_run(
         Ok(Some(run))
     })
     .await?
-    .map(Json)
-    .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))
+    .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))?;
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    super::message_reads::read_work_wakes(&state, found.steps.iter_mut())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(found))
 }
 
 pub async fn revise_mission_run(
@@ -454,13 +484,13 @@ pub async fn revise_mission_run(
         .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))?;
     let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
     if crate::mission::top_level_mission_ids(&initial.missions).len() != 1 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-revision-intent",
             "a run revision must contain exactly one top-level mission",
         )));
     }
     if !mission_only_subjects(&initial) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-revision-intent",
             "a run revision can contain only its mission",
         )));
@@ -473,7 +503,7 @@ pub async fn revise_mission_run(
         resolve_document_references(&request.intent.kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
     if !mission_only_subjects(&intent) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-revision-intent",
             "a run revision can contain only its mission",
         )));
@@ -483,7 +513,7 @@ pub async fn revise_mission_run(
         .strip_prefix("mission/")
         .unwrap_or(&current.mission);
     let Some(replacement) = intent.missions.get(mission_id) else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "wrong-mission-revision",
             format!("revision does not replace mission `{mission_id}`"),
         )));
@@ -493,13 +523,13 @@ pub async fn revise_mission_run(
         .mission_spec(mission_id, Some(&current.revision))
         .map_err(ApiError::internal)?
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-mission-revision",
                 "the current mission revision is unavailable",
             ))
         })?;
     if old.inputs != replacement.inputs {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "run-input-mutation",
             "a run revision cannot change its input declarations",
         )));
@@ -531,7 +561,7 @@ pub async fn revise_mission_run(
         .await?
         .block(&mut planned);
     if !planned.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "mission-revision-blocked",
             planned.blockers.join("; "),
         )));
@@ -702,10 +732,10 @@ fn stage_eval_documents(
     state: &AppState,
     workspace: &Path,
     intent: &crate::model::NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for reference in &intent.document_refs {
         let (name, hash) = reference.rsplit_once('@').ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-document-reference",
                 format!("eval document reference `{reference}` has no hash"),
             )
@@ -713,14 +743,14 @@ fn stage_eval_documents(
         if state
             .store
             .get_document(name, hash)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
             .is_some()
         {
             continue;
         }
         let path = workspace.join(".st3-documents").join(hash);
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            St3Error::new(
+            FractalError::new(
                 "missing-eval-document",
                 format!(
                     "eval document `{reference}` is absent from the store and {} is not staged: {error}",
@@ -729,7 +759,7 @@ fn stage_eval_documents(
             )
         })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-eval-document",
                 format!(
                     "staged eval document {} is not a regular file",
@@ -738,13 +768,13 @@ fn stage_eval_documents(
             ));
         }
         let bytes = fs::read(&path).map_err(|error| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-eval-document",
                 format!("read staged eval document {}: {error}", path.display()),
             )
         })?;
         if hex::encode(Sha256::digest(&bytes)) != hash {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "eval-document-hash-mismatch",
                 format!(
                     "staged eval document {} does not match `{reference}`",
@@ -755,7 +785,7 @@ fn stage_eval_documents(
         let expected = state
             .store
             .latest_document_token(name)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         state.store.put_document(
             name,
             &bytes,

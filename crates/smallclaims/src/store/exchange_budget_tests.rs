@@ -114,7 +114,7 @@ fn an_envelope_too_large_to_send_alone_is_a_typed_error() {
     let mut oversized = exchange(vec![envelope("agent/plain", 1, vec![7; 10_000])]);
     let budget = size(&oversized) - 1;
     let error = fit_exchange_body(&mut oversized, budget).unwrap_err();
-    let error = error.downcast_ref::<St3Error>().unwrap();
+    let error = error.downcast_ref::<FractalError>().unwrap();
     assert_eq!(error.code, "replication-envelope-too-large");
     assert!(error.message.contains("agent/plain 1"), "{}", error.message);
 }
@@ -300,7 +300,7 @@ fn an_exchange_whose_metadata_alone_passes_the_budget_is_refused_whole() {
     let budget = size(&exchange(Vec::new())) + 1_000;
     let before = oversized.inventory.envelopes.len();
     let error = fit_exchange_body(&mut oversized, budget).unwrap_err();
-    let error = error.downcast_ref::<St3Error>().unwrap();
+    let error = error.downcast_ref::<FractalError>().unwrap();
     assert_eq!(error.code, "replication-exchange-metadata-too-large");
     assert!(
         error.message.contains("listing 200 identities"),

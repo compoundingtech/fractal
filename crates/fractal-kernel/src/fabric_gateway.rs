@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use crate::fleet::transport::Fabric;
 
-/// The service name `enable` uses when none is given.
+/// The service name `enable` uses when none is given. Both native client URI
+/// spellings dial this service; accepting `fractal-client-v0` does not change exposure.
 pub const DEFAULT_SERVICE: &str = "st3-client-v0";
 const PEER_PREFIX: &str = "st-device-";
 
@@ -250,6 +251,20 @@ mod tests {
 
     fn calls(log: &Path) -> String {
         fs::read_to_string(log).unwrap_or_default()
+    }
+
+    #[test]
+    fn gateway_settings_read_both_service_names_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        for service in ["st3-client-v0", "fractal-client-v0"] {
+            let text = format!("service = '{service}'\nfabric = '/opt/fabric'\n");
+            fs::write(GatewayExposure::path(root.path()), &text).unwrap();
+            let exposure = GatewayExposure::load(root.path()).unwrap().unwrap();
+            assert_eq!(exposure.service, service);
+            assert_eq!(exposure.fabric, PathBuf::from("/opt/fabric"));
+            assert_eq!(fs::read_to_string(GatewayExposure::path(root.path())).unwrap(), text);
+        }
+        assert_eq!(DEFAULT_SERVICE, "st3-client-v0");
     }
 
     #[test]

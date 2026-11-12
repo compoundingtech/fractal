@@ -1,4 +1,4 @@
-import type { PtySize, PtyTarget } from '@fractal/sdk/effect'
+import type { PtySize, PtyTarget } from '@fractal/sdk/pty'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
@@ -6,8 +6,9 @@ import { Badge, type BadgeVariant, Note } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 import { incrDebugRuntime, RenderProfiler } from '../telemetry/meters.tsx'
 
-import type { UnobservedFeed } from '../data/FeedState.tsx'
+import type { UnobservedFeed } from '../data/unobservedFeed.ts'
 import { useDataSource, useFeedInterest, useGrants, useTerminal, useTerminalConnected } from '../data/react.tsx'
+import { credentialExpiredMessage, credentialNotice } from '../data/source.ts'
 import type { NativeSubjectProps } from '../resources/react.tsx'
 import { DomTerminal } from './DomTerminal.tsx'
 import { unavailableTerminalHistory } from './historySource.ts'
@@ -33,6 +34,7 @@ export const prepareTerminal = terminalFontsReady
 /** A terminal source publishes a human reason; a blank or placeholder detail falls back to fixed copy. */
 export const terminalUnobservedCopy = (feed: UnobservedFeed): string => {
   if (feed._tag === 'Waiting') return 'Loading terminal…'
+  if (feed.reason === 'unauthorized') return credentialExpiredMessage
   const reason = feed.detail.trim()
   if (reason !== '' && !/^(undefined|unknown|null)$/i.test(reason)) return reason
   return feed.reason === 'ungranted'
@@ -67,7 +69,10 @@ interface PinnedTarget {
  * explicit resize control. The projected feed is followed unless a live ATTACH owns the terminal.
  */
 export const TerminalDetail = React.memo(
-  ({ address, visibility }: NativeSubjectProps) => {
+  ({ address, visibility, keepConnected = false }: NativeSubjectProps & {
+    /** A hidden pane keeps its raw session and screen for an instant reveal, but takes no input and renders no new frames. */
+    readonly keepConnected?: boolean
+  }) => {
     incrDebugRuntime('Fn.terminal')
     const connected = useTerminalConnected(address.ref)
     const source = useDataSource()
@@ -102,7 +107,7 @@ export const TerminalDetail = React.memo(
       port: source.terminalRaw,
       target: current?.target,
       mode,
-      active: visible,
+      active: visible || keepConnected,
       size: current?.size ?? { cols: 80, rows: 24 },
       title: current?.title ?? 'Terminal',
     })
@@ -141,6 +146,12 @@ export const TerminalDetail = React.memo(
         <Badge variant={chipVariant[chip.tone]} size="sm" role="status" data-terminal-mode={presentation._tag} data-terminal-input-path={input._tag}>
           {chip.label}
         </Badge>
+        {raw.preparation._tag === 'Unprepared' && (
+          <button type="button" onClick={() => {
+            if (current !== undefined) setPinned({ ...current, attachLost: false })
+            raw.retry()
+          }}>Retry</button>
+        )}
         {input._tag !== 'Attach' && terminal._tag === 'Observed' && (
           <TerminalResize
             key={terminal.value.runtime_incarnation}
@@ -158,7 +169,12 @@ export const TerminalDetail = React.memo(
       input._tag === 'ReadOnly' ? input.reason : undefined,
     ].filter((reason) => reason !== undefined)
     const banner = reasons.length === 0 ? {} : { banner: <Note variant="warning" size="sm">{reasons.join(' ')}</Note> }
-    const rawScreen = raw.snapshot?.screen
+    // Output keeps feeding the emulator while hidden; the reveal paints its latest screen.
+    const lastShownScreen = React.useRef(raw.snapshot?.screen)
+    if (visible) lastShownScreen.current = raw.snapshot?.screen
+    const rawScreen = visible ? raw.snapshot?.screen : lastShownScreen.current ?? raw.snapshot?.screen
+    const refusal = credentialNotice(terminal)
+    if (refusal) return <p role="status" data-terminal-state="unauthorized" {...stylex.props(styles.unobserved)}>{refusal}</p>
     if (presentation._tag === 'Raw' && raw.handle !== undefined && rawScreen !== undefined && raw.preparation._tag === 'Session') {
       const handle = raw.handle
       const state = raw.preparation.state
@@ -186,7 +202,7 @@ export const TerminalDetail = React.memo(
                 screen={rawScreen}
                 palette={defaultTerminalPalette}
                 typing={sink}
-                live={input._tag === 'Attach' ? state._tag === 'Live' : gatewayLive}
+                live={input._tag === 'Attach' ? visible && state._tag === 'Live' : gatewayLive}
                 onTypingChange={setTyping}
                 resize={input._tag === 'Attach' ? handle.session.resize : undefined}
                 scroll={handle.view.scroll}
@@ -202,7 +218,7 @@ export const TerminalDetail = React.memo(
           <p role="status" data-terminal-state={terminal._tag === 'Waiting' ? 'loading' : terminal.reason}>
             {terminalUnobservedCopy(terminal)}
           </p>
-          {terminal._tag === 'Unavailable' && terminal.retryable === true && source.retryTerminal !== undefined ? (
+          {terminal._tag === 'Unavailable' && terminal.reason === 'failed' && terminal.retryable === true && source.retryTerminal !== undefined ? (
             <button type="button" onClick={() => source.retryTerminal?.(address.ref)}>Retry</button>
           ) : null}
         </div>
@@ -250,7 +266,8 @@ export const TerminalDetail = React.memo(
   (left, right) =>
     left.address.ref === right.address.ref &&
     left.address.presentation === right.address.presentation &&
-    left.visibility === right.visibility,
+    left.visibility === right.visibility &&
+    left.keepConnected === right.keepConnected,
 )
 
 const styles = stylex.create({

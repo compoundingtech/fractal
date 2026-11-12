@@ -18,10 +18,10 @@ for target in targets:
             record = json.load(archive.extractfile(f'{package}/BUILD.json'))
             assert record['source'] == source, 'artifacts came from a different source'
             assert record['target'] == target, 'wrong target in archive'
-            for name in ('st', 'fractal'):
+            for name in ('st', 'st3'):
                 link = archive.getmember(f'{package}/bin/{name}')
-                assert link.issym() and link.linkname == 'st3', f'{name} must be a relative st3 symlink'
-            for binary in ('st3', 'pty'):
+                assert link.issym() and link.linkname == 'fractal', f'{name} must be a relative fractal symlink'
+            for binary in ('fractal', 'pty'):
                 member = archive.getmember(f'{package}/bin/{binary}')
                 assert member.isfile() and member.mode & 0o111, f'missing executable: {binary}'
             web = archive.getmember(f'{package}/share/fractal-web/index.html')

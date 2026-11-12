@@ -1170,9 +1170,10 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         return [c for c in with_check if failed(c) and dated(c) >= dated(candidate) - FUTURE_SKEW]
 
     order = sorted((c for c in with_check if not failed(c)), key=dated, reverse=True)
-    # Preferred levels (the gate's --prefer-levels): their newest valid pass decides, unless a failure is dated after it.
-    found = first_valid([c for c in order if level_of(c) in prefer_levels]) if prefer_levels else None
-    if found is None or failed_after(found[0]):
+    # Preference cannot revive a pass shadowed by a later failure. Exclude it before validation:
+    # an obsolete preferred record's invalidity must not prevent a newer valid fallback from deciding.
+    found = first_valid([c for c in order if level_of(c) in prefer_levels and not failed_after(c)]) if prefer_levels else None
+    if found is None:
         found = first_valid(order)
     if found is not None:
         candidate, result = found

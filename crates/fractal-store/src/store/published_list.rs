@@ -25,6 +25,11 @@ pub struct Publication<R> {
     pub rows: R,
 }
 
+/// What a refresher folds from: the newest publication unless the projections were replaced
+/// since, the rows the previous fold left pending, if any, and the generation the fold must still
+/// see to publish. See [`PublishedList::base_and_pending`].
+pub type FoldStart<R> = (Option<Arc<Publication<R>>>, Option<Publication<R>>, u64);
+
 /// Numbers every list this process makes, so no two lists' publications share an identity.
 static LISTS: AtomicU64 = AtomicU64::new(0);
 
@@ -50,6 +55,10 @@ pub struct PublishedList<R> {
     generation: AtomicU64,
     /// The generation the newest publication was folded in. Written under the `newest` lock.
     newest_generation: AtomicU64,
+    /// Rows a fold refolded without reaching one cut, kept for the next fold to go on from: never
+    /// served. Taken and kept under the `newest` lock, so a forget or a refold drops them. With
+    /// whether the fold that began them began from nothing.
+    pending: Mutex<Option<(Publication<R>, bool)>>,
     /// Numbers every publication this list swapped in, from one, so two publications at one cut
     /// never share an identity. Written under the `newest` lock.
     sequence: AtomicU64,
@@ -78,6 +87,7 @@ impl<R> Default for PublishedList<R> {
             forgotten: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             newest_generation: AtomicU64::new(0),
+            pending: Mutex::new(None),
             sequence: AtomicU64::new(0),
             materializations: AtomicU64::new(0),
             completed_materialization: AtomicU64::new(0),
@@ -232,6 +242,35 @@ impl<R> PublishedList<R> {
         (newest.clone(), generation)
     }
 
+    /// [`Self::base`], with the rows the previous fold kept for this one to go on from
+    /// ([`Self::keep_pending`]), if any. A fold from nothing gets none: they were folded from
+    /// projections replaced since. Rows a fold from nothing began come with no base, as that fold
+    /// had none: the newest publication is of projections replaced since, so a fold that goes on
+    /// from them and fails leaves the next one to fold from nothing again, never from it.
+    pub fn base_and_pending(&self) -> FoldStart<R> {
+        let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = self.generation.load(Ordering::Acquire);
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if self.forgotten.swap(false, Ordering::AcqRel) {
+            return (None, None, generation);
+        }
+        match pending {
+            Some((rows, true)) => (None, Some(rows), generation),
+            Some((rows, false)) => (newest.clone(), Some(rows), generation),
+            None => (newest.clone(), None, generation),
+        }
+    }
+
+    /// Keep rows a fold began in `generation` refolded without reaching one cut, for the next
+    /// fold to go on from rather than refold them again, unless the projections were replaced
+    /// since. `from_nothing` when that fold had no base. Never served.
+    pub fn keep_pending(&self, rows: Publication<R>, generation: u64, from_nothing: bool) {
+        let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.generation.load(Ordering::Acquire) == generation {
+            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some((rows, from_nothing));
+        }
+    }
+
     /// Serve the newest publication again, as a withdrawn list whose next fold finds nothing
     /// new must, unless the projections were replaced since `generation`. Says whether it did.
     pub fn serve_again(&self, generation: u64) -> bool {
@@ -356,10 +395,12 @@ impl<R> PublishedList<R> {
     }
 }
 
-/// The claims after `?1` through `?2`, by store index, with the step a person-work claim names.
+/// The claims after `?1` through `?2`, by store index, with the step a person-work claim names;
+/// only those node `?3` wrote, unless it is null (a fold reads every claim; the local-commit
+/// scanner asks the same change check about this node's own).
 pub const CLAIMS_SINCE: &str = "SELECT subject, kind, CASE WHEN kind LIKE 'work.person-%'
         THEN json_extract(body,'$.fields.origin_step') END
- FROM claims WHERE store_index>?1 AND store_index<=?2";
+ FROM claims WHERE store_index>?1 AND store_index<=?2 AND (?3 IS NULL OR origin=?3)";
 /// The person asks the requesters in `?1`, a JSON array, made, by the kind index.
 pub const ASKS_BY_REQUESTERS: &str = "SELECT subject, json_extract(body,'$.fields.origin_step') FROM claims
  WHERE kind='work.person-asked' AND actor IN (SELECT value FROM json_each(?1))";

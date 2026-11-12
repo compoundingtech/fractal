@@ -74,11 +74,14 @@ impl Daemon {
 
     fn state(&self) -> AppState {
         AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: self.event_notify.clone(),
             node: "restart-node".into(),
+            api_socket: self.root.join("daemon").join("api.sock"),
             state_dir: self.root.join("daemon"),
             pty_root: self.root.join("pty"),
             pty_binary: PathBuf::from("pty"),
@@ -221,9 +224,10 @@ impl Daemon {
             .collect()
     }
 
+    /// Diagnostics of every code: observability codes are in the local observation log.
     fn has_diagnostic(&self, subject: &str, incarnation: &str, code: &str) -> bool {
         self.store
-            .claims_for(subject, Some("harness.diagnostic"))
+            .observations_for(subject, "harness.diagnostic")
             .unwrap_or_default()
             .into_iter()
             .any(|claim| {
@@ -283,6 +287,47 @@ fn seat_command(root: &Path, socket: &Path) -> Command {
     for directory in ["workspace", "home", "state", "config", "runtime", "drivers"] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
+    command
+}
+
+/// Keep provider supervision real while selecting the fake provider through the managed
+/// runtime contract, rather than relying on the raw executable after `--`.
+fn managed_seat_command(
+    root: &Path,
+    socket: &Path,
+    subject: &str,
+    harness: &str,
+    provider: &str,
+) -> Command {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = root.join("managed-runtime/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join(harness);
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!{}\nexec \"$FRACTAL_TEST_PROVIDER\" \"$@\"\n",
+            env!("ST3_FIXTURE_BASH"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = root.join("managed-runtime/profile.json");
+    std::fs::write(
+        &profile,
+        serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut command = seat_command(root, socket);
+    command
+        .env("AGENT_RUNTIME_PROFILE", profile)
+        .env("ST_AGENT", subject)
+        .env("FRACTAL_AGENT", subject)
+        .env("FRACTAL_TEST_PROVIDER", provider);
     command
 }
 
@@ -391,7 +436,7 @@ impl Drop for TestSeat {
 /// test's process group and temporary home; TestSeat also cleans up on a failed assertion.
 async fn native_exit_driver(root: &Path, daemon: &mut Daemon) -> TestSeat {
     let seat = "agent/grove/exit-orchid";
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "python3");
     declare_claude(daemon, seat);
     daemon.observe_running(seat, "exit-orchid:one");
     daemon.start_admitted_protocol().await;
@@ -458,7 +503,7 @@ async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached(
     daemon.start_admitted_protocol().await;
     let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped' 'Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
     let mut driver = TestSeat(Some(
-        seat_command(root, &daemon.socket)
+        managed_seat_command(root, &daemon.socket, seat, "claude", "sh")
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST3_CLAUDE_ATTACH_WINDOW_MS", "50")
@@ -707,7 +752,7 @@ async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_res
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
     let mut daemon = Daemon::new(root);
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "python3");
     declare_claude(&daemon, seat);
     daemon.observe_running(seat, incarnation);
     daemon.start_admitted_protocol().await;
@@ -755,7 +800,7 @@ time.sleep(300)
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
-            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
+            && daemon.store.observations_for(seat, "harness.diagnostic").unwrap()
                 .iter().any(|claim| {
                     claim.body["fields"]["code"] == "claude-channel-initialized"
                         && claim.body["fields"]["incarnation_id"] == incarnation
@@ -806,7 +851,7 @@ time.sleep(300)
     assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
         reason.contains(warning)
     }), "{before}");
-    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    let initialized = daemon.store.observations_for(seat, "harness.diagnostic").unwrap();
     assert!(initialized.iter().any(|claim| {
         claim.body["fields"]["code"] == "claude-channel-initialized"
             && claim.body["fields"]["incarnation_id"] == incarnation
@@ -815,10 +860,10 @@ time.sleep(300)
             })
     }));
     daemon.stop().await;
-    // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
-    // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
-    // driver's spool and mailbox fence must survive real cache loss.
-    fractal_daemon::test_support::skew_client_clock(95_000);
+    // Pass the real shared freshness horizon by advancing the client clock, not by a
+    // test-only shortened timeout or by sleeping. A fresh Store also checks cache loss.
+    let stale_after_ms = u64::try_from(fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis()).unwrap() + 5_000;
+    fractal_daemon::test_support::skew_client_clock(stale_after_ms);
     assert_alive(&mut driver, "the quiet driver");
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;
@@ -883,7 +928,7 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "sleep");
     declare_claude(&daemon, seat);
     daemon.observe_running(seat, "title-cedar:one");
     daemon.start_admitted_protocol().await;
@@ -1032,7 +1077,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     daemon.start().await;
     daemon.stop().await;
 
-    let mut driver = seat_command(root, &daemon.socket)
+    let mut driver = managed_seat_command(root, &daemon.socket, seat, "claude", "sleep")
         .args(["driver", "claude", "--subject", seat, "--", "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1093,10 +1138,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     )
     .await;
     assert_alive(&mut driver, "a running Claude driver");
-    // The graph records the delivery outage and its recovery for this incarnation.
+    // The seat's node records the delivery outage and its recovery for this incarnation, in
+    // its local observation log: they are observability codes.
     let diagnostics = daemon
         .store
-        .claims_for(seat, Some("harness.diagnostic"))
+        .observations_for(seat, "harness.diagnostic")
         .unwrap()
         .into_iter()
         .map(|claim| {
@@ -1317,13 +1363,25 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
 
+    let channel_stderr = root.join("omp-channel-stderr.log");
+    let assert_channel_alive = |channel: &mut Child| {
+        if let Some(status) = channel.try_wait().unwrap() {
+            let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+            std::fs::write(
+                root.join("omp-channel-exit.txt"),
+                format!("{status:?}\n{status}\n{stderr}"),
+            )
+            .unwrap();
+            panic!("the omp channel exited during the daemon outage: {status}; stderr: {stderr}");
+        }
+    };
     let mut channel = seat_command(root, &daemon.socket)
         .arg("--catalog")
         .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "restart-omp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&channel_stderr).unwrap()))
         .spawn()
         .unwrap();
     let mut input = channel.stdin.take().unwrap();
@@ -1346,7 +1404,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     input.flush().unwrap();
     daemon.send("message/restart-omp-mail", seat, "COPPER KITE");
     tokio::time::sleep(Duration::from_millis(2_500)).await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
     assert!(daemon.harness_states(seat, incarnation).is_empty());
 
     daemon.start().await;
@@ -1389,13 +1447,106 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
         },
     )
     .await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
 
-    let stderr = stop(channel);
+    let _ = stop(channel);
+    let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
     assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
+}
+
+/// A daemon that is stopping can answer a request with an error instead of dropping the
+/// connection: its runtime cancels the request's blocking work, and the reply is a 500. The
+/// channel's first request after its hello must take that as the outage it is, not exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pi_family_channel_outlives_an_error_from_a_stopping_daemon_after_its_hello() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = fractal_daemon::test_support::evidence_tempdir();
+    let root = root.path();
+    let seat = "agent/stopping-omp";
+    let incarnation = "4377:2026-11-01T09:00:00.000Z";
+    let mut daemon = Daemon::new(root);
+    daemon.observe_running(seat, incarnation);
+    // The channel reads the status twice before its hello and once after it. The third read is
+    // answered as a stopping daemon answers it.
+    let statuses = Arc::new(AtomicUsize::new(0));
+    let refused = Arc::new(Notify::new());
+    let app = fractal_daemon::api::router(daemon.state()).layer(axum::middleware::from_fn({
+        let statuses = statuses.clone();
+        let refused = refused.clone();
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let statuses = statuses.clone();
+            let refused = refused.clone();
+            async move {
+                if request.uri().path() == "/v1/status" && statuses.fetch_add(1, Ordering::SeqCst) == 2 {
+                    refused.notify_one();
+                    let body = json!({"code": "internal", "message": "task 7 was cancelled", "details": {}});
+                    return axum::response::IntoResponse::into_response(
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)),
+                    );
+                }
+                next.run(request).await
+            }
+        }
+    }));
+    daemon.serve(app, false).await;
+
+    let channel_stderr = root.join("omp-channel-stderr.log");
+    let mut channel = seat_command(root, &daemon.socket)
+        .arg("--catalog")
+        .arg(root.join("catalog"))
+        .args(["driver", "omp-channel", "--identity", "stopping-omp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&channel_stderr).unwrap()))
+        .spawn()
+        .unwrap();
+    let mut input = channel.stdin.take().unwrap();
+    let (frames, received) = std::sync::mpsc::channel::<Value>();
+    let output = channel.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(frame) = serde_json::from_str(&line) {
+                let _ = frames.send(frame);
+            }
+        }
+    });
+    let hello = received.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(hello["type"], "hello");
+    tokio::time::timeout(Duration::from_secs(10), refused.notified())
+        .await
+        .expect("the channel never read the status after its hello");
+
+    // The channel still runs: it takes the harness's state and delivers mail.
+    writeln!(input, "{}", json!({"type": "state", "state": "idle"})).unwrap();
+    input.flush().unwrap();
+    daemon.send("message/stopping-omp-mail", seat, "SLATE HERON");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let message = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match received.recv_timeout(remaining) {
+            Ok(frame) if frame["type"] == "message" => break frame,
+            Ok(_) => {}
+            Err(error) => {
+                let status = channel.try_wait().unwrap();
+                let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+                panic!("the channel delivered no message ({error}); exit {status:?}; stderr: {stderr}");
+            }
+        }
+    };
+    assert!(message.to_string().contains("SLATE HERON"), "{message}");
+    assert!(channel.try_wait().unwrap().is_none());
+    let _ = stop(channel);
+    let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+    assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
+    let log = driver_log(root);
+    assert!(log.contains("task 7 was cancelled"), "the channel did not log the error it kept running through: {log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2407,12 +2558,11 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
         selected.claim, before.claim,
         "component initialization changed the selected activity claim"
     );
-    let diagnostics: Vec<_> = claims
+    // Initialization is an observability code, in this node's local observation log.
+    let observed = daemon.store.observations_for("agent/quartz", "harness.diagnostic").unwrap();
+    let diagnostics: Vec<_> = observed
         .iter()
-        .filter(|claim| {
-            claim.kind == "harness.diagnostic"
-                && claim.body["fields"]["code"] == "claude-channel-initialized"
-        })
+        .filter(|claim| claim.body["fields"]["code"] == "claude-channel-initialized")
         .collect();
     assert_eq!(
         diagnostics.len(),
@@ -2471,7 +2621,7 @@ channel.stdin.flush()
 time.sleep(300)
 "#;
     let mut driver = TestSeat(Some(
-        seat_command(root, &daemon.socket)
+        managed_seat_command(root, &daemon.socket, seat, "claude", "python3")
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST3_CLAUDE_READINESS_GRACE_MS", HOOKLESS_GRACE_MS.to_string())
@@ -3100,7 +3250,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
                 || {
                     !daemon
                         .store
-                        .claims_for("agent/quartz", Some("harness.diagnostic"))
+                        .observations_for("agent/quartz", "harness.diagnostic")
                         .unwrap()
                         .is_empty()
                 },
@@ -3110,7 +3260,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
             tokio::time::sleep(Duration::from_millis(2200)).await;
             let claims = daemon
                 .store
-                .claims_for("agent/quartz", Some("harness.diagnostic"))
+                .observations_for("agent/quartz", "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims.len(), 1);
             assert_eq!(claims[0].body["fields"]["code"], "claude-channel-initialized");

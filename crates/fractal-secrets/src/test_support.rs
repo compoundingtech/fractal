@@ -91,33 +91,49 @@ fn canonical_temp_base() -> PathBuf {
 
 /// Called once, before threads start, exclusively by the fixture executable.
 #[cfg(feature = "test-support")]
-pub fn initialize_fixture() -> tempfile::TempDir {
+pub fn initialize_fixture() {
+    let home = std::env::var_os("HOME").expect("fixture HOME");
+    let shell = fixture_shell(Path::new(&home));
+    crate::startup::set_login_shell(shell);
+}
+
+/// The test owns HOME, so even SIGKILL and exec leave the shell inside its cleanup boundary.
+/// Content-addressing also bounds storage when a caller inherits the account's HOME. Publish
+/// atomically: concurrent fixture processes must never execute a partially written shell.
+#[cfg(feature = "test-support")]
+fn fixture_shell(home: &Path) -> PathBuf {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().expect("fixture shell directory");
-    let shell = root.path().join("login-shell");
-    // Bypass both /etc startup files and the real account's passwd shell. Fixture profiles
-    // still exercise PATH capture, credential changes, and slow-start retry behavior.
     let bash = env!("ST3_FIXTURE_BASH");
+    // Bypass /etc startup files and the account's passwd shell. Choose the default before
+    // launching Bash, which itself supplies a PATH when the caller has none.
     let default_path = if std::env::var_os("PATH").is_none() {
-        format!(
-            "export PATH='{}'\n",
-            env!("ST3_FIXTURE_PATH").replace('\'', "'\\''")
-        )
+        format!("export PATH='{}'\n", env!("ST3_FIXTURE_PATH").replace('\'', "'\\''"))
     } else {
         String::new()
     };
-    std::fs::write(
-        &shell,
-        format!(
-            "#!{bash}\n{default_path}[ ! -f \"$HOME/.bash_profile\" ] || . \"$HOME/.bash_profile\"\nexec '{bash}' --noprofile --norc \"$@\"\n"
-        ),
-    )
-    .expect("write fixture shell");
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700))
-        .expect("executable fixture shell");
-    crate::startup::set_login_shell(shell);
-    root
+    let source = format!(
+        "#!{bash}\n{default_path}[ ! -f \"$HOME/.bash_profile\" ] || . \"$HOME/.bash_profile\"\nexec '{bash}' --noprofile --norc \"$@\"\n"
+    );
+    let mut hash = DefaultHasher::new();
+    source.hash(&mut hash);
+    let root = home.join(".cache/fractal-fixture");
+    std::fs::create_dir_all(&root).expect("fixture shell directory");
+    let shell = root.join(format!("login-shell-{:016x}", hash.finish()));
+    if !shell.exists() {
+        let mut pending = tempfile::NamedTempFile::new_in(&root).expect("fixture shell file");
+        pending
+            .write_all(source.as_bytes())
+            .expect("write fixture shell");
+        pending
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .expect("executable fixture shell");
+        pending.persist(&shell).expect("publish fixture shell");
+    }
+    shell
 }
 
 /// Remove the launching seat's identity without changing the test runner's own environment.
@@ -173,46 +189,51 @@ fn built_in_release(executable: &Path) -> bool {
         .is_some_and(|profile| profile == "release")
 }
 
-/// Run a process-spawning integration test inside a Linux subreaper. The outer
-/// test remains the guardian's liveness owner even when nextest kills it outright.
+/// Run a test in its own process so process-global state is isolated on every platform.
+/// On Linux, a subreaper also keeps the outer test as the guardian's liveness owner,
+/// even when nextest kills it outright.
 /// Call first in the test body, before creating runtimes' tasks or fixture files.
 /// The inner test keeps all its assertions and timing bounds unchanged.
 pub fn supervise_test() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write as _;
+    use std::io::Write as _;
 
-        let thread = std::thread::current();
-        let name = thread.name().expect("libtest names each test thread");
-        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
-            return false;
-        }
+    let thread = std::thread::current();
+    let name = thread.name().expect("libtest names each test thread");
+    if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
+        return false;
+    }
+    let executable = std::env::current_exe().expect("integration test executable");
+    #[cfg(target_os = "linux")]
+    let mut command = {
         let script =
             Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal_test_process.py");
-        let output = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(script)
             .args(["--owner", &std::process::id().to_string(), "--"])
-            .arg(std::env::current_exe().expect("integration test executable"))
-            .args(["--exact", name, "--nocapture", "--include-ignored"])
-            .env_remove("ST_AGENT")
-            .env_remove("ST3_SUBJECT")
-            .env_remove("FRACTAL_AGENT")
-            .env_remove("FRACTAL_SUBJECT")
-            .env("FRACTAL_TEST_SUPERVISED", name)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .output()
-            .expect("launch isolated test guardian");
-        let _ = std::io::stdout().write_all(&output.stdout);
-        let _ = std::io::stderr().write_all(&output.stderr);
-        assert!(
-            output.status.success(),
-            "supervised test {name}: {}",
-            output.status
-        );
-        true
-    }
+            .arg(executable);
+        command
+    };
     #[cfg(not(target_os = "linux"))]
-    false
+    let mut command = Command::new(executable);
+    let output = command
+        .args(["--exact", name, "--nocapture", "--include-ignored"])
+        .env_remove("ST_AGENT")
+        .env_remove("ST3_SUBJECT")
+        .env_remove("FRACTAL_AGENT")
+        .env_remove("FRACTAL_SUBJECT")
+        .env("FRACTAL_TEST_SUPERVISED", name)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("launch isolated test");
+    let _ = std::io::stdout().write_all(&output.stdout);
+    let _ = std::io::stderr().write_all(&output.stderr);
+    assert!(
+        output.status.success(),
+        "supervised test {name}: {}",
+        output.status
+    );
+    true
 }
 
 /// The guardian captures this root after reaping its writers, even after SIGKILL.
@@ -279,6 +300,19 @@ pub fn git() -> Command {
     command
 }
 
+/// Publish one fixture barrier file whole. Existence is the reader's completion barrier, and
+/// `fs::write` creates the file empty before it writes it, so a test polling for the name could
+/// read "" (#5428). Write a temporary sibling and rename it into place instead.
+#[cfg(feature = "test-support")]
+pub fn publish_barrier(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("barrier {} has no parent", path.display()))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(contents)?;
+    file.persist(path)?;
+    Ok(())
+}
+
 /// Fixture-only barrier AFTER the actual owned provider has exited and its wrapper returned.
 /// The production binary never calls this function; a process environment cannot opt it in.
 #[cfg(feature = "test-support")]
@@ -286,7 +320,7 @@ pub fn hold_provider_completion(outcome: &anyhow::Result<()>) -> anyhow::Result<
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
         return Ok(());
     };
-    std::fs::write(root.join("provider-return.json"), serde_json::to_vec(&serde_json::json!({
+    publish_barrier(&root.join("provider-return.json"), &serde_json::to_vec(&serde_json::json!({
         "ok": outcome.is_ok(), "error": outcome.as_ref().err().map(|error| format!("{error:#}")),
     }))?)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -333,5 +367,20 @@ mod memory_tempdir_tests {
         assert!(!noexec_in("tmpfs /dev/shm tmpfs rw,nosuid,nodev,size=32465040k 0 0\n", shm));
         // Only the mount at exactly that point counts.
         assert!(!noexec_in("tmpfs /dev/shm/other tmpfs rw,noexec 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n", shm));
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    #[test]
+    fn supervision_runs_the_body_only_in_its_marked_child_on_every_platform() {
+        if super::supervise_test() {
+            return;
+        }
+        let thread = std::thread::current();
+        assert_eq!(
+            std::env::var("FRACTAL_TEST_SUPERVISED").ok().as_deref(),
+            thread.name(),
+        );
     }
 }

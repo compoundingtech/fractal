@@ -9,6 +9,89 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
+/// The visible item and its routing policy, taken from the same failure claim.
+#[derive(Clone, serde::Serialize)]
+pub(super) struct OperationalFault {
+    pub(super) item: AttentionItemView,
+    pub(super) explicit_reviewer_only: bool,
+    pub(super) suppress_generic_delivery: bool,
+}
+
+/// Phase routing is an origin-attested property of the canonical failure, not of
+/// the member which happens to project it or of an episode prefix alone.
+fn readiness_phase_delivery(
+    kind: &str,
+    actor: Option<&str>,
+    source: &str,
+    origin: &str,
+    condition: Option<&str>,
+    reviewer: Option<&str>,
+    episode: &str,
+) -> bool {
+    if kind != "operational.failure"
+        || actor != Some("daemon/runtime")
+        || source.strip_prefix("daemon/") != Some(origin)
+        || condition != Some(API_READINESS_SLO_MISSED)
+        || !reviewer.is_some_and(readiness_phase_reviewer)
+    {
+        return false;
+    }
+    let mut segments = episode.split('/');
+    if segments.next() != Some("slo-objective")
+        || segments.next() != Some("readiness-case")
+        || segments.next() != Some(origin)
+        || segments.next() != Some("fractal-api-readiness")
+    {
+        return false;
+    }
+    let (Some(member), Some(cut), None) = (segments.next(), segments.next(), segments.next()) else {
+        return false;
+    };
+    !member.is_empty()
+        && member.len() <= 64
+        && member
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        && cut.parse::<u64>().is_ok_and(|minute| {
+            minute > 0 && minute % 60_000 == 0 && minute.to_string() == cut
+        })
+}
+
+fn readiness_phase_reviewer(reviewer: &str) -> bool {
+    reviewer.strip_prefix("agent/").is_some_and(|id| {
+        !id.is_empty() && id.len() <= 128 && id.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    })
+}
+
+fn valid_opening_claim_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn linked_readiness_reviewer<'a>(
+    origin: &str,
+    episode: &str,
+    opening: &'a ClaimRecord,
+) -> Option<&'a str> {
+    let fields = &opening.body["fields"];
+    let reviewer = fields["reviewer"].as_str()?;
+    (opening.origin == origin
+        && fields["episode"].as_str() == Some(episode)
+        && opening.body["evidence"].as_array().is_some_and(Vec::is_empty)
+        && readiness_phase_delivery(
+            &opening.kind,
+            opening.actor.as_deref(),
+            &opening.subject,
+            &opening.origin,
+            fields["condition"].as_str(),
+            Some(reviewer),
+            episode,
+        ))
+    .then_some(reviewer)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
 
@@ -20,6 +103,10 @@ thread_local! {
     pub static FAULT_INCARNATION_READ_HOOK: std::cell::RefCell<Option<FaultIncarnationReadHook>> =
         const { std::cell::RefCell::new(None) };
 }
+
+/// A read that no change in the feed names: a failure whose answer rests on one is read again
+/// at every snapshot (`fault_cache`).
+pub(super) const UNKEYED_READ: &str = "fault-cache:unkeyed";
 
 /// How long a run whose cleanup failed shows that fault after it finishes.
 const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
@@ -101,22 +188,42 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
-        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
+        // upper bound to -1 by passing u128::MAX through that reducer.
+        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
         let connection = self.readers.get();
-        let mut starts = Vec::with_capacity(eventual.len());
-        for item in &eventual {
-            let mut starts_at = item.requested_at_unix_ms;
-            if item.kind == "person-step"
-                && let Some(ask) = person_work::request(&connection, &item.subject)?
-            {
-                starts_at = starts_at.max(ask.accepted_at_unix_ms);
-            }
-            starts.push(starts_at);
-        }
+        let subjects: BTreeSet<_> = eventual.iter()
+            .filter(|item| item.kind == "person-step")
+            .map(|item| item.subject.as_str())
+            .collect();
+        let accepted: BTreeMap<String, u128> = if subjects.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha8edfbce8177 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT claims.subject, claims.accepted_at_unix_ms
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=requested.value AND claims.kind='work.person-asked'
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ))?;
+            query.query_map([serde_json::to_string(&subjects)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.map(|row| {
+                let (subject, at) = row?;
+                Ok((subject, at.parse()?))
+            }).collect::<Result<_>>()?
+        };
         let mut valid_until = None;
         let rows = eventual
             .into_iter()
-            .zip(starts)
+            .map(|item| {
+                let starts_at = if item.kind == "person-step" {
+                    item.requested_at_unix_ms.max(accepted.get(&item.subject).copied().unwrap_or(0))
+                } else {
+                    item.requested_at_unix_ms
+                };
+                (item, starts_at)
+            })
             .filter(|(_, starts_at)| {
                 if *starts_at > now {
                     valid_until =
@@ -204,13 +311,21 @@ impl Store {
             {
                 continue;
             }
-            let Some(owner) = self.agent_person(&seat)? else {
-                continue;
+            let ask = harness["ask"].as_str().unwrap_or("unknown");
+            let owner = if ask == "question" {
+                self.question_principal(&seat)?
+            } else {
+                self.agent_person(&seat)?
+            };
+            let missing_principal = ask == "question" && owner.is_none();
+            let owner = match owner {
+                Some(owner) => owner,
+                None if missing_principal => String::new(),
+                None => continue,
             };
             if person.is_some_and(|person| person != owner) {
                 continue;
             }
-            let ask = harness["ask"].as_str().unwrap_or("unknown");
             let what = match ask {
                 "permission" => "permission",
                 "question" => "an answer",
@@ -221,7 +336,7 @@ impl Store {
                 .as_str()
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("its terminal shows a prompt");
-            let answerable = answerable(&harness, as_of);
+            let answerable = !missing_principal && answerable(&harness, as_of);
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(&connection, &seat, &harness)?;
             items.push(AttentionItemView {
@@ -238,38 +353,44 @@ impl Store {
                 variant_id: None,
                 message_id: None,
                 prompt_call: call,
-                answers: prompt_answers(&harness, as_of),
+                answers: if missing_principal { Vec::new() } else { prompt_answers(&harness, as_of) },
                 conversation: Some(seat.clone()),
-                title: format!("{seat} is waiting for {what}"),
+                title: if missing_principal {
+                    format!("{seat} has a human question but no principal")
+                } else {
+                    format!("{seat} is waiting for {what}")
+                },
                 // Codex names what its request asks to do, not the call: that is the pending
                 // request in the seat's conversation.
-                detail: if answerable && harness["driver"] == "codex" {
+                detail: if missing_principal {
+                    "Declare a principal person on this agent or configure the daemon's person to route this pending question. Credential owners, helper bindings, mission requesters and declaration authors do not supply question authority.".into()
+                } else if answerable && harness["driver"] == "codex" {
                     format!(
-                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.",
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.",
                         codex_approval_words(prompt)
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
-                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && subagent_prompt(&harness) {
                     format!(
-                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
                         prompt.trim_start_matches(fractal_drivers::claude_prompts::SUBAGENT_PREFIX)
                     )
                 } else if answerable && plan_approval(&harness) {
-                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && ask == "question" {
-                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable {
                     format!(
-                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else if answerable_kind(&harness) {
                     format!(
-                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else {
                     format!(
-                        "{prompt}\n\nAnswer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "{prompt}\n\nAnswer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 },
                 request: None,
@@ -313,25 +434,20 @@ impl Store {
         Ok(items)
     }
 
-    /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
-    /// `handles-faults`. It takes each fault that no step assignee or agent requester owns.
+    /// The fleet's fault agent: the one live agent whose declaration carries `handles-faults`.
+    /// It takes each fault that no step assignee or agent requester owns. Publication refuses a
+    /// second holder; when two members each accepted one, neither is the fault agent until one
+    /// is stopped or drops the flag.
     pub fn fleet_fault_agent(&self) -> Result<Option<String>> {
         let connection = self.readers.get();
-        let mut query = connection.prepare(
-            "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
-                SELECT 1 FROM json_each(desired.body, '$.children')
-                WHERE json_extract(value, '$.name')='handles-faults'
-            ) ORDER BY subject",
-        )?;
-        let agents = query
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for agent in agents {
-            if person_work::declaration_live(&connection, &agent)? {
-                return Ok(Some(agent));
-            }
-        }
-        Ok(None)
+        let mut holders = fault_agent_holders(&connection)?;
+        Ok(if holders.len() == 1 { holders.pop() } else { None })
+    }
+
+    /// Is the selected reviewer still an active declaration? Runtime reachability is separate.
+    pub fn fault_reviewer_is_declared(&self, reviewer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        fault_reviewer_is_declared(&connection, reviewer)
     }
 
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
@@ -342,16 +458,19 @@ impl Store {
         &self,
         fault: &AttentionItemView,
         fallback: Option<&str>,
+        explicit_reviewer_only: bool,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
         let owns = |agent: &str| -> Result<bool> {
-            Ok(agent.starts_with("agent/")
-                && agent != fault.subject
-                && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
-                && person_work::declaration_live(&connection, agent)?)
+            Ok(agent != fault.subject && fault_reviewer_is_declared(&connection, agent)?)
         };
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
+        }
+        // An explicitly owned SLO fault keeps its recorded reviewer.
+        // A stopped or retired declaration makes it undeliverable, not generic.
+        if explicit_reviewer_only {
+            return Ok(None);
         }
         let mut step = fault.step.clone().or_else(|| {
             fault
@@ -406,7 +525,7 @@ impl Store {
         &self,
         episode: &str,
         input: &AttentionRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         self.record_failure(episode, input, "observed")
     }
 
@@ -415,9 +534,9 @@ impl Store {
         episode: &str,
         input: &AttentionRequest,
         condition: &str,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         let source = input.targets.first().ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-failure-source",
                 "an operational failure needs its source",
             )
@@ -471,8 +590,9 @@ impl Store {
         })?;
         self.operational_failure(episode)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the failure was not recorded"))
+            .ok_or_else(|| FractalError::new("internal", "the failure was not recorded"))
     }
+
 
     pub fn operational_failure(
         &self,
@@ -711,7 +831,7 @@ impl Store {
         detail.push(' ');
         detail.push_str(&remedy);
         detail.push_str(
-            " This item closes when the loop runs again or its run is revised or cancelled.",
+            " This item closes when the loop runs again or its run is revised or cancelled; once the run has ended, a person or the fleet's fault agent dismisses it with `st missions dismiss-fault RUN --reason \"...\"`.",
         );
         let (title, reviewer, severity) = match &loop_spec.exhaustion_attention {
             Some(attention) => (
@@ -1040,12 +1160,13 @@ impl Store {
                 .unwrap_or("the observer cannot observe")
                 .to_owned();
             let code = fields["error_code"].as_str().unwrap_or("unreachable");
-            let condition = if fields["state"] == "degraded" {
+            let condition = if code == "local-observer-budget" {
+                ObserverCondition::LocalBudget(reason)
+            } else if fields["state"] == "degraded" {
                 ObserverCondition::Rejected(reason)
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
-                    "local-observer-budget" => ObserverCondition::LocalBudget(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]
@@ -1137,46 +1258,64 @@ impl Store {
         let connection = self.readers.get();
         let mut items = Vec::new();
         for failure in failures {
-            if failure.status != "pending"
-                || failure.requested_at_unix_ms > as_of
-                || person.is_some_and(|person| person != failure.reviewer)
-            {
-                continue;
-            }
-            let Some(claim) = self.claim_by_id(&failure.request)? else {
-                continue;
-            };
-            if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
-                continue;
-            }
-            let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
-                continue;
-            };
-            if !person_work::run_live(&connection, run, Some(generation), false)? {
-                continue;
-            }
-            let step = rest.first().cloned();
-            if let Some(step) = &step {
-                let Some(view) = person_work::step(&connection, step)? else {
-                    continue;
-                };
-                if matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
-                    continue;
-                }
-            }
-            let (run, result) = (run.clone(), result.clone());
-            let mut item = attention_item_from_failure(failure);
-            item.episode = claim.id;
-            item.subject = run.clone();
-            item.mission_run = Some(run.clone());
-            item.step = step;
-            item.actions = vec![
-                attention_action("inspect gate", &["st", "subject", "show", &result]),
-                attention_action("inspect run", &["st", "missions", "show", &run]),
-            ];
-            items.push(item);
+            items.extend(self.broken_gate_item(&connection, failure, person, as_of)?);
         }
         Ok(items)
+    }
+
+    /// The broken-gate item one operational failure is now, if it still is one.
+    pub(super) fn broken_gate_item(
+        &self,
+        connection: &Connection,
+        failure: AttentionRequestView,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Option<AttentionItemView>> {
+        if failure.requested_at_unix_ms > as_of {
+            smallclaims::touched::note_due(failure.requested_at_unix_ms);
+        }
+        if failure.status != "pending"
+            || failure.requested_at_unix_ms > as_of
+            || person.is_some_and(|person| person != failure.reviewer)
+        {
+            return Ok(None);
+        }
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+            return Ok(None);
+        };
+        smallclaims::touched::note_read(|| claim.subject.clone());
+        for target in &failure.targets {
+            smallclaims::touched::note_read(|| target.clone());
+        }
+        if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
+            return Ok(None);
+        }
+        let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
+            return Ok(None);
+        };
+        if !person_work::run_live(connection, run, Some(generation), false)? {
+            return Ok(None);
+        }
+        let step = rest.first().cloned();
+        if let Some(step) = &step {
+            let Some(view) = person_work::step(connection, step)? else {
+                return Ok(None);
+            };
+            if matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
+                return Ok(None);
+            }
+        }
+        let (run, result) = (run.clone(), result.clone());
+        let mut item = attention_item_from_failure(failure);
+        item.episode = claim.id;
+        item.subject = run.clone();
+        item.mission_run = Some(run.clone());
+        item.step = step;
+        item.actions = vec![
+            attention_action("inspect gate", &["st", "subject", "show", &result]),
+            attention_action("inspect run", &["st", "missions", "show", &run]),
+        ];
+        Ok(Some(item))
     }
 
     // The independently folding operational reader is now used only by parity controls.
@@ -1224,213 +1363,314 @@ impl Store {
         // Negative results matter too. This map is discarded before the next snapshot,
         // and is filled lazily at the original incarnation fence's first use.
         let mut incarnations = BTreeMap::<String, Option<String>>::new();
+        let mut items = self.operational_fault_families(person, as_of)?;
+        let failures = self.operational_failures()?;
+        for failure in &failures {
+            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?.map(|fault| fault.item));
+        }
+        Ok((items, failures))
+    }
+
+    /// The operational faults that do not come from a failure episode.
+    pub(super) fn operational_fault_families(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.missing_admission_clock_faults(person)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
-        let failures = self.operational_failures()?;
-        for failure in &failures {
-            if failure.status != "pending"
-                || failure.requested_at_unix_ms > as_of
-                || person.is_some_and(|person| person != failure.reviewer)
-            {
-                continue;
-            }
-            let Some(claim) = self.claim_by_id(&failure.request)? else {
-                continue;
-            };
-            let source = &claim.subject;
-            if source.starts_with("loop-run/") || source.starts_with("observer/") {
-                continue;
-            }
-            // `broken_gate_items` reads broken gates, for their publisher.
-            if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION {
-                continue;
-            }
-            if source.starts_with("mission-run/") {
-                if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
-                    let latest: Option<String> = connection.query_row(
-                        /* sqlite-large-value: allow-for-now lv-h70b00685de00 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                        params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
-                    ).optional()?;
-                    if latest.as_deref() != Some(claim.id.as_str())
-                        || !person_work::run_live(&connection, source, None, true)?
-                    {
-                        continue;
-                    }
-                    let run =
-                        self.mission_run_for_reconcile(source.trim_start_matches("mission-run/"))?;
-                    let generation = failure.targets.get(1);
-                    if generation != Some(&run.generation) {
-                        continue;
-                    }
-                    let Some(step) = failure
-                        .targets
-                        .get(2)
-                        .and_then(|subject| run.steps.iter().find(|s| &s.subject == subject))
-                    else {
-                        continue;
-                    };
-                    if !self.missing_agent_fault_is_current(&run, step)? {
-                        continue;
-                    }
-                    if claim.body["fields"]["episode"].as_str()
-                        != Some(mission_eligibility::episode(&run, step).as_str())
-                    {
-                        continue;
-                    }
-                }
-                // A finished run's failed cleanup is a fault on a run that completed, so the run
-                // is no longer live. It stays for a day, then the failed step is all that remains.
-                let cleanup_fault = claim.body["fields"]["episode"]
-                    .as_str()
-                    .is_some_and(|episode| episode.starts_with("final-steps:"))
-                    && as_of.saturating_sub(failure.requested_at_unix_ms) < FINAL_STEP_FAULT_MS;
-                if !cleanup_fault && !person_work::run_live(&connection, source, None, true)? {
-                    continue;
-                }
-            } else if source.starts_with("step-run/") {
-                // A timeout fault holds while its attempt is still running past the same budget:
-                // an extension, a completion, a failure or a release ends it.
-                let Some(step) = person_work::step(&connection, source)? else {
-                    continue;
-                };
-                let extension =
-                    step_timeout_extension_at(&connection, source, step.attempt, as_of)?;
-                if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
-                    || claim.body["fields"]["episode"].as_str()
-                        != Some(step_timeout_episode(source, step.attempt, extension).as_str())
-                {
-                    continue;
-                }
-            } else if claim.body["fields"]["condition"] == "stop-deferred" {
-                // A retained stop belongs to a terminal run, so declaration_live deliberately
-                // excludes it. Its own revision, incarnation and runtime fences decide instead.
-                if !self
-                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
-                    .contains_key(source)
-                {
-                    continue;
-                }
-            } else if !source.starts_with("daemon/")
-                && !person_work::declaration_live(&connection, source)?
-            {
-                continue;
-            }
-            let f = &claim.body["fields"];
-            if f["condition"] == crate::restart::WHEN_IDLE {
-                let Some(request) = crate::restart::latest_request(self, source)? else {
-                    continue;
-                };
-                if request.body["fields"]["action"] != crate::restart::WHEN_IDLE
-                    || failure.subject != crate::restart::attention_episode(&request)
-                    || self
-                        .operation_claim(&crate::restart::release_key(&request))?
-                        .is_some()
-                    || self
-                        .operation_claim(&format!("agent-restart-completed:{}", request.id))?
-                        .is_some()
-                {
-                    continue;
-                }
-            }
-            // Upgrades retain historical operational episodes. A current login with a concrete
-            // person has one derived person item; the old agent fault must not ask again.
-            if f["condition"] == "provider-auth"
-                && let Some(harness) = self.current_harness(source)?
-            {
-                let update_menu = self.claim_by_id(&harness.claim)?.is_some_and(|claim| {
-                    claim.body["fields"]["code"] == "provider-update-prompt"
-                });
-                // The visible update modal takes priority without restoring authentication.
-                // Once it clears, an unresolved login exposes its fallback fault again.
-                if update_menu
-                    || (harness.state == "needs-login" && self.agent_person(source)?.is_some())
-                {
-                    continue;
-                }
-            }
-            if matches!(
-                f["condition"].as_str(),
-                Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
-            ) {
-                if self
-                    .current_harness(source)?
-                    .is_some_and(|harness| harness.is_ready())
-                {
-                    continue;
-                }
-            }
-            if let Some(revision) = f["source_revision"].as_str() {
-                if self.selected_desired_token(source)?.as_deref() != Some(revision) {
-                    continue;
-                }
-            }
-            if let Some(incarnation) = f["incarnation"].as_str() {
-                if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
-                    let actual = self.latest_actual_value(source)?;
-                    let current = actual.as_ref().and_then(|v| {
-                        v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
-                    }).and_then(Value::as_str).map(str::to_owned);
-                    #[cfg(any(test, feature = "test-support"))]
-                    FAULT_INCARNATION_READ_HOOK.with(|hook| {
-                        if let Some(hook) = hook.borrow_mut().as_mut() {
-                            hook(source);
-                        }
-                    });
-                    incarnations.insert(source.clone(), current);
-                }
-                if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
-                    continue;
-                }
-            }
-            // Diagnostic history stays immutable; current work/runtime state decides whether
-            // this episode still needs an owner. This changes no canonical timing fold.
-            let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
-                    continue;
-                };
-                Some(context)
-            } else {
-                None
-            };
-            let mut item = attention_item_from_failure(failure.clone());
-            item.kind = "fault".into();
-            if f["condition"] == MISSING_AGENT_CONDITION {
-                item.mission_run = Some(source.clone());
-                item.step = item.targets.get(2).cloned();
-            }
-            item.subject = source.clone();
-            item.episode = claim.id;
-            item.priority = if claim.body["fields"]["severity"] == "warning" {
-                "normal"
-            } else {
-                "high"
-            }
-            .into();
-            item.actions = vec![attention_action(
-                "inspect source",
-                &["st", "subject", source],
-            )];
-            if f["condition"] == "stop-deferred" {
-                item.actions = vec![attention_action(
-                    "inspect retained seat",
-                    &["st", "agents", "show", source, "--all"],
-                )];
-            }
-            if let Some((step, diagnostic)) = wake {
-                item.step = Some(step.subject.clone());
-                item.mission_run = Some(step.run);
-                item.actions = vec![
-                    attention_action("inspect step", &["st", "work", "show", &step.subject]),
-                    attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
-                ];
-            }
-            items.push(item);
+        Ok(items)
+    }
+
+    /// The fault one operational failure is now, if it still is one.
+    pub(super) fn operational_failure_item<const MEMOIZE: bool>(
+        &self,
+        connection: &Connection,
+        failure: &AttentionRequestView,
+        person: Option<&str>,
+        as_of: u128,
+        incarnations: &mut BTreeMap<String, Option<String>>,
+    ) -> Result<Option<OperationalFault>> {
+        if failure.requested_at_unix_ms > as_of {
+            smallclaims::touched::note_due(failure.requested_at_unix_ms);
         }
-        Ok((items, failures))
+        if failure.status != "pending"
+            || failure.requested_at_unix_ms > as_of
+            || person.is_some_and(|person| person != failure.reviewer)
+        {
+            return Ok(None);
+        }
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+            return Ok(None);
+        };
+        smallclaims::touched::note_read(|| claim.subject.clone());
+        for target in &failure.targets {
+            smallclaims::touched::note_read(|| target.clone());
+        }
+        let source = &claim.subject;
+        if source.starts_with("loop-run/") || source.starts_with("observer/") {
+            return Ok(None);
+        }
+        // `broken_gate_items` reads broken gates, for their publisher.
+        if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION {
+            return Ok(None);
+        }
+        if source.starts_with("mission-run/") {
+            if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
+                // Whether any agent is eligible now rests on every declaration, not this run's.
+                smallclaims::touched::note_read(|| UNKEYED_READ.into());
+                let latest: Option<String> = connection.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h70b00685de00 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                    params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
+                ).optional()?;
+                if latest.as_deref() != Some(claim.id.as_str())
+                    || !person_work::run_live(connection, source, None, true)?
+                {
+                    return Ok(None);
+                }
+                let run =
+                    self.mission_run_for_reconcile(source.trim_start_matches("mission-run/"))?;
+                let generation = failure.targets.get(1);
+                if generation != Some(&run.generation) {
+                    return Ok(None);
+                }
+                let Some(step) = failure
+                    .targets
+                    .get(2)
+                    .and_then(|subject| run.steps.iter().find(|s| &s.subject == subject))
+                else {
+                    return Ok(None);
+                };
+                if !self.missing_agent_fault_is_current(&run, step)? {
+                    return Ok(None);
+                }
+                if claim.body["fields"]["episode"].as_str()
+                    != Some(mission_eligibility::episode(&run, step).as_str())
+                {
+                    return Ok(None);
+                }
+            }
+            // A finished run's failed cleanup is a fault on a run that completed, so the run
+            // is no longer live. It stays for a day, then the failed step is all that remains.
+            let cleanup_fault = claim.body["fields"]["episode"]
+                .as_str()
+                .is_some_and(|episode| episode.starts_with("final-steps:"))
+                && as_of.saturating_sub(failure.requested_at_unix_ms) < FINAL_STEP_FAULT_MS;
+            if cleanup_fault {
+                smallclaims::touched::note_due(failure.requested_at_unix_ms.saturating_add(FINAL_STEP_FAULT_MS));
+            }
+            if !cleanup_fault && !person_work::run_live(connection, source, None, true)? {
+                return Ok(None);
+            }
+        } else if source.starts_with("step-run/") {
+            // A timeout fault holds while its attempt is still running past the same budget:
+            // an extension, a completion, a failure or a release ends it.
+            let Some(step) = person_work::step(connection, source)? else {
+                return Ok(None);
+            };
+            let extension =
+                person_work::step_timeout_extension_in_cut(connection, source, step.attempt, as_of)?;
+            if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
+                || claim.body["fields"]["episode"].as_str()
+                    != Some(step_timeout_episode(source, step.attempt, extension).as_str())
+            {
+                return Ok(None);
+            }
+        } else if claim.body["fields"]["condition"] == "stop-deferred" {
+            // A retained stop belongs to a terminal run, so declaration_live deliberately
+            // excludes it. Its own revision, incarnation and runtime fences decide instead.
+            // They include replica repairs, which the change feed does not carry.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            if !self
+                .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
+                .contains_key(source)
+            {
+                return Ok(None);
+            }
+        } else if !source.starts_with("daemon/")
+            && !person_work::declaration_live(connection, source)?
+        {
+            return Ok(None);
+        }
+        let f = &claim.body["fields"];
+        if f["condition"] == crate::restart::WHEN_IDLE {
+            // Its release is an operation, found by key, not by a subject the feed names.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            let Some(request) = crate::restart::latest_request(self, source)? else {
+                return Ok(None);
+            };
+            if request.body["fields"]["action"] != crate::restart::WHEN_IDLE
+                || failure.subject != crate::restart::attention_episode(&request)
+                || self
+                    .operation_claim(&crate::restart::release_key(&request))?
+                    .is_some()
+                || self
+                    .operation_claim(&format!("agent-restart-completed:{}", request.id))?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        // Upgrades retain historical operational episodes. A current login with a concrete
+        // person has one derived person item; the old agent fault must not ask again.
+        if f["condition"] == "provider-auth" {
+            // The person a seat works for comes from its launcher and run, outside the feed.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+        }
+        if f["condition"] == "provider-auth"
+            && let Some(harness) = self.current_harness(source)?
+        {
+            let update_menu = self.claim_by_id(&harness.claim)?.is_some_and(|claim| {
+                claim.body["fields"]["code"] == "provider-update-prompt"
+            });
+            // The visible update modal takes priority without restoring authentication.
+            // Once it clears, an unresolved login exposes its fallback fault again.
+            if update_menu
+                || (harness.state == "needs-login" && self.agent_person(source)?.is_some())
+            {
+                return Ok(None);
+            }
+        }
+        if matches!(
+            f["condition"].as_str(),
+            Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
+        ) {
+            if self
+                .current_harness(source)?
+                .is_some_and(|harness| harness.is_ready())
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(revision) = f["source_revision"].as_str() {
+            if self.selected_desired_token(source)?.as_deref() != Some(revision) {
+                return Ok(None);
+            }
+        }
+        if let Some(incarnation) = f["incarnation"].as_str() {
+            if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
+                let actual = self.latest_actual_value(source)?;
+                let current = actual.as_ref().and_then(|v| {
+                    v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
+                }).and_then(Value::as_str).map(str::to_owned);
+                #[cfg(any(test, feature = "test-support"))]
+                FAULT_INCARNATION_READ_HOOK.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().as_mut() {
+                        hook(source);
+                    }
+                });
+                incarnations.insert(source.clone(), current);
+            }
+            if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
+                return Ok(None);
+            }
+        }
+        // Diagnostic history stays immutable; current work/runtime state decides whether
+        // this episode still needs an owner. This changes no canonical timing fold.
+        let wake = if f["condition"] == "work-wake-exhausted" {
+            let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
+                return Ok(None);
+            };
+            Some(context)
+        } else {
+            None
+        };
+        let mut item = attention_item_from_failure(failure.clone());
+        item.kind = "fault".into();
+        if f["condition"] == MISSING_AGENT_CONDITION {
+            item.mission_run = Some(source.clone());
+            item.step = item.targets.get(2).cloned();
+        }
+        item.subject = source.clone();
+        item.episode = claim.id;
+        item.priority = if claim.body["fields"]["severity"] == "warning" {
+            "normal"
+        } else {
+            "high"
+        }
+        .into();
+        item.actions = vec![attention_action(
+            "inspect source",
+            &["st", "subject", source],
+        )];
+        if f["condition"] == "stop-deferred" {
+            item.actions = vec![attention_action(
+                "inspect retained seat",
+                &["st", "agents", "show", source, "--all"],
+            )];
+        }
+        if let Some((step, diagnostic)) = wake {
+            item.step = Some(step.subject.clone());
+            item.mission_run = Some(step.run);
+            item.actions = vec![
+                attention_action("inspect step", &["st", "work", "show", &step.subject]),
+                attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
+            ];
+        }
+        let explicit_reviewer_only = source.starts_with("daemon/")
+            && claim.kind == "operational.failure"
+            && (f["condition"] == API_READINESS_SLO_MISSED
+                || f["condition"] == AGENTS_REQUEST_SLO_MISSED);
+        let phase_case = readiness_phase_delivery(
+            &claim.kind,
+            claim.actor.as_deref(),
+            source,
+            &claim.origin,
+            f["condition"].as_str(),
+            f["reviewer"].as_str(),
+            &failure.subject,
+        );
+        let suppress_generic_delivery = if phase_case {
+            match claim.body["evidence"].as_array().map(Vec::as_slice) {
+                Some([]) => true,
+                Some([early]) => {
+                    if let Some(id) = early.as_str().filter(|id| valid_opening_claim_id(id)) {
+                        match person_work::claim_in_cut(connection, id, || self.claim_by_id(id))? {
+                            Some(opening) => {
+                                let reviewer = linked_readiness_reviewer(
+                                    &claim.origin, &failure.subject, &opening,
+                                );
+                                if reviewer != Some(failure.reviewer.as_str()) {
+                                    item.person = reviewer.unwrap_or("person/operator").to_owned();
+                                    item.detail.push_str(
+                                        "\nReadiness notice routing is blocked by a contradictory opening claim.",
+                                    );
+                                }
+                                // The case namespace owns routing even if linkage is wrong.
+                                // Never fall through to a wake for the escalation's reviewer.
+                                true
+                            }
+                            None => {
+                                // Sparse replication can expose a later envelope first. Its
+                                // opening shares the source dependency recorded above.
+                                item.person = "person/operator".into();
+                                item.detail.push_str(
+                                    "\nReadiness notice routing awaits the linked opening claim.",
+                                );
+                                true
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if suppress_generic_delivery {
+            item.episode.clone_from(&failure.subject);
+        }
+        Ok(Some(OperationalFault {
+            item,
+            explicit_reviewer_only,
+            suppress_generic_delivery,
+        }))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
@@ -1445,6 +1685,9 @@ impl Store {
             return Ok(None);
         };
         let fields = &diagnostic.body["fields"];
+        if diagnostic.accepted_at_unix_ms > as_of {
+            smallclaims::touched::note_due(diagnostic.accepted_at_unix_ms);
+        }
         if diagnostic.kind != "harness.diagnostic"
             || &diagnostic.subject != agent
             || diagnostic.accepted_at_unix_ms > as_of
@@ -1462,16 +1705,18 @@ impl Store {
         let Some(step) = current else {
             return Ok(None);
         };
+        let live = person_work::run_live(&self.readers.get(), &step.run, Some(&step.generation), false)?;
+        // An open step's effective state expires its lease by the clock and reads asks on other
+        // subjects, so while its run is live the wake is read again at every snapshot. An ended
+        // step or run stays ended, keyed by its subject.
+        if live && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled") {
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+        }
         if step.status != "ready"
             || step.assigned_to.as_ref() != Some(agent)
             || fields["attempt"].as_u64() != Some(u64::from(step.attempt))
             || fields["readiness_epoch"].as_u64() != Some(u64::from(step.readiness_epoch))
-            || !person_work::run_live(
-                &self.readers.get(),
-                &step.run,
-                Some(&step.generation),
-                false,
-            )?
+            || !live
         {
             return Ok(None);
         }
@@ -1619,6 +1864,82 @@ pub fn person_attention_item(
         )],
         request,
     }))
+}
+
+/// The live agents whose declaration carries `handles-faults`, by subject.
+pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
+    let mut query = connection.prepare(
+        "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
+            SELECT 1 FROM json_each(desired.body, '$.children')
+            WHERE json_extract(value, '$.name')='handles-faults'
+        ) ORDER BY subject",
+    )?;
+    let agents = query
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut holders = Vec::new();
+    for agent in agents {
+        if person_work::declaration_live(connection, &agent)? {
+            holders.push(agent);
+        }
+    }
+    Ok(holders)
+}
+
+fn fault_reviewer_is_declared(connection: &Connection, reviewer: &str) -> Result<bool> {
+    Ok(reviewer.starts_with("agent/")
+        && current_desired_row(connection, reviewer)?.is_some_and(|row| row.kind == "agent")
+        && person_work::declaration_live(connection, reviewer)?)
+}
+
+/// Whether `desired` declares a running agent that handles faults.
+fn declares_fault_agent(desired: &crate::model::DesiredSubject) -> bool {
+    let children = desired.desired["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+    desired.kind == "agent"
+        && !matches!(children, [only] if only["name"] == "stop")
+        && children.iter().any(|child| child["name"] == "handles-faults")
+}
+
+/// Refuses a publication that would leave two live agents declaring `handles-faults`. The fault
+/// agent owns every fault no one else owns and may dismiss faults on ended runs, so the flag
+/// moves only by stopping its holder or dropping it there, in this publication or an earlier one.
+/// A publication that declares no holder is never refused, whatever the graph holds.
+pub fn refuse_second_fault_agent(
+    connection: &Connection,
+    intent: &crate::model::NormalizedIntent,
+) -> Result<(), FractalError> {
+    let declared = intent
+        .subjects
+        .values()
+        .filter(|desired| declares_fault_agent(desired))
+        .map(|desired| desired.subject.clone())
+        .collect::<Vec<_>>();
+    match declared.as_slice() {
+        [] => return Ok(()),
+        [_] => {}
+        _ => {
+            return Err(FractalError::new(
+                "fault-agent-taken",
+                format!("{} each declare `handles-faults`; only one live agent may", declared.join(", ")),
+            ));
+        }
+    }
+    let holders = fault_agent_holders(connection)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|holder| !intent.subjects.contains_key(holder))
+        .collect::<Vec<_>>();
+    if holders.is_empty() {
+        return Ok(());
+    }
+    Err(FractalError::new(
+        "fault-agent-taken",
+        format!(
+            "{} already handles faults; stop it or drop its `handles-faults` before {} declares it",
+            holders.join(", "),
+            declared[0]
+        ),
+    ))
 }
 
 /// `subject` when it names an agent: only an agent has a conversation an item can belong to.
@@ -1769,7 +2090,7 @@ impl Store {
             Some(reason) => (
                 Vec::new(),
                 format!(
-                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone."
+                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone."
                 ),
             ),
             None => (
@@ -1778,7 +2099,7 @@ impl Store {
                     .map(|(answer, _)| (*answer).to_owned())
                     .collect(),
                 format!(
-                    "{ask} here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                    "{ask} here, or in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                 ),
             ),
         };
@@ -1832,9 +2153,9 @@ pub(super) fn validate_delegated_denial(
     fields: &BTreeMap<String, Value>,
     evidence: &[String],
     proof: &crate::model::DelegationProof,
-) -> std::result::Result<(), St3Error> {
+) -> std::result::Result<(), FractalError> {
     let refused = || {
-        St3Error::new(
+        FractalError::new(
             "delegation-refused",
             "close-item only dismisses a current auto-denial for this person",
         )
@@ -1872,7 +2193,7 @@ pub(super) fn validate_delegated_denial(
             .map_err(internal)?
             .is_some()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-fence",
             "the denial was answered, the seat moved on, or the runtime changed",
         ));
@@ -1890,10 +2211,10 @@ impl Store {
         answer: &str,
         actor: &str,
         delegation: Option<&crate::model::DelegationProof>,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
+    ) -> std::result::Result<ClaimRecord, FractalError> {
         if let Some(proof) = delegation {
             if proof.episode != episode || answer != "dismiss" {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "delegation-refused",
                     "close-item does not authorize allowing a call, a kind or a native permission",
                 ));
@@ -1980,8 +2301,8 @@ impl Store {
         answer: &str,
         actor: &str,
         delegation: Option<&crate::model::DelegationProof>,
-    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<Option<ClaimRecord>, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let Some(denial) = self.claim_by_id(episode).map_err(internal)? else {
             return Ok(None);
         };
@@ -1993,7 +2314,7 @@ impl Store {
             return Ok(None);
         }
         if !DENIAL_ANSWERS.contains(&answer) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "answer approve-once, approve-kind or dismiss",
             ));
@@ -2009,7 +2330,7 @@ impl Store {
             || moved_on(last.as_ref(), index, at)
             || answered.is_some()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 "that call is no longer waiting: it was answered, the seat moved on, or it restarted",
             ));
@@ -2046,7 +2367,7 @@ impl Store {
             delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
-            return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+            return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, FractalError> {
                 // The fence above read a reader's snapshot. A concurrent dismissal may have
                 // committed its answer since: it is the answer, and a second one is not written.
                 if let Some(previous) = native_prompt_answer_claim(tx, episode).map_err(internal)? {
@@ -2064,7 +2385,7 @@ impl Store {
                         "in_reply_to":null, "tags":[format!("st3-denial:{episode}")]}, "evidence":[recorded.id]}),
                     std::slice::from_ref(&recorded.id), None, &message_key).map_err(claim_append_error)?;
                 Ok(Some(recorded))
-            }).map_err(|error| St3Error::new("internal", error))?;
+            }).map_err(|error| FractalError::new("internal", error))?;
         }
         let recorded = self.append_claim(&ClaimInput {
             subject: seat.to_owned(),
@@ -2134,7 +2455,7 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
 /// The newest observation of `seat` that began a turn or ended its session: its store position,
 /// state and when that state began. Observations of the seat at rest, which repeat as it is
 /// refreshed, lie after it and are passed over.
-fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
+pub(super) fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hded7b14f0a67 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",
@@ -2479,7 +2800,7 @@ fn same_delegated_dismissal(
     seat: &str,
     actor: &str,
     proof: &crate::model::DelegationProof,
-) -> std::result::Result<ClaimRecord, St3Error> {
+) -> std::result::Result<ClaimRecord, FractalError> {
     if previous.subject == seat
         && previous.actor.as_deref() == Some(actor)
         && previous.body["fields"]["status"] == "dismiss"
@@ -2487,7 +2808,7 @@ fn same_delegated_dismissal(
     {
         return Ok(previous);
     }
-    Err(St3Error::new(
+    Err(FractalError::new(
         "stale-fence",
         "the denial already has another answer",
     ))
@@ -2758,8 +3079,8 @@ impl Store {
         episode: &str,
         answer: &str,
         actor: &str,
-    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<Option<ClaimRecord>, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let Some(incarnation) = self
             .latest_actual_value(seat)
             .map_err(internal)?
@@ -2786,7 +3107,7 @@ impl Store {
             prompt["status"].as_str().unwrap_or_default(),
         );
         if !choices.iter().any(|(choice, _)| *choice == answer) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 format!(
                     "answer {}",
@@ -2822,11 +3143,11 @@ impl Store {
         seat: &str,
         actor: &str,
         proof: &crate::model::DelegationProof,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
+    ) -> std::result::Result<ClaimRecord, FractalError> {
         if !actor.starts_with("agent/")
             || self.agent_person(seat).map_err(internal)?.as_deref() != Some(proof.person.as_str())
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "delegation-refused",
                 "dismissal needs an agent and the seat's current person",
             ));
@@ -2839,7 +3160,7 @@ impl Store {
         }
         self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "delegation-refused",
                     "close-item only dismisses an auto-denial episode",
                 )
@@ -2854,11 +3175,16 @@ impl Store {
         episode: &str,
         answer: &str,
         actor: &str,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<ClaimRecord, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let now = now_ms();
-        if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
-            return Err(St3Error::new(
+        let current = self.newest_harness_observation(seat).map_err(internal)?;
+        let question = current.as_ref().is_some_and(|(claim, _, harness)| {
+            claim == episode && harness["ask"] == "question"
+        });
+        let recipient = if question { self.question_principal(seat) } else { self.agent_person(seat) };
+        if recipient.map_err(internal)?.as_deref() != Some(actor) {
+            return Err(FractalError::new(
                 "forbidden",
                 "only the seat's person answers its prompts",
             ));
@@ -2870,14 +3196,13 @@ impl Store {
             return Ok(answered);
         }
         if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
             ));
         }
-        let current = self.newest_harness_observation(seat).map_err(internal)?;
         let Some((claim, _, harness)) = current.filter(|(claim, _, _)| claim == episode) else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 format!(
                     "{}is no longer waiting: it was answered or replaced",
@@ -2886,7 +3211,7 @@ impl Store {
             ));
         };
         if !answerable(&harness, now) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 format!(
                     "{}can only be answered in the seat's terminal",
@@ -2895,7 +3220,7 @@ impl Store {
             ));
         }
         if answer == "allow" && subagent_prompt(&harness) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "a subagent's call is not shown in the seat's conversation: deny it here, or allow it in the terminal",
             ));
@@ -2911,7 +3236,7 @@ impl Store {
             matches!(answer, "allow" | "deny")
         };
         if !valid {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 if question {
                     "answer this question with its choices, or deny it"
@@ -2982,7 +3307,7 @@ mod native_prompt_tests {
         let store = Store::open_memory("node").unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            "version 2\nagent \"worker\" {{ workspace {:?}; principal \"person/operator\"; harness \"claude\" {{}} }}\n",
             workspace.path().display().to_string()
         );
         let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
@@ -3036,7 +3361,7 @@ mod native_prompt_tests {
         let first = append_harness_history();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
         let answered = store
-            .answer_native_prompt(seat, &first.id, choice, "person/avery")
+            .answer_native_prompt(seat, &first.id, choice, "person/operator")
             .unwrap();
         assert_eq!(answered.body["fields"]["status"], "answer");
         assert_eq!(answered.body["fields"]["reason"], choice);
@@ -3071,7 +3396,7 @@ mod native_prompt_tests {
             "driver":"claude", "incarnation_id":"one"
         }), Some(native_prompt_gone_key(&first.id)));
         store
-            .answer_native_prompt(seat, &restated.id, choice, "person/avery")
+            .answer_native_prompt(seat, &restated.id, choice, "person/operator")
             .unwrap();
         assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
@@ -3079,3 +3404,7 @@ mod native_prompt_tests {
         assert_eq!(resolve(answered.store_index), expected);
     }
 }
+
+#[cfg(test)]
+#[path = "readiness_phase_tests.rs"]
+mod readiness_phase_tests;

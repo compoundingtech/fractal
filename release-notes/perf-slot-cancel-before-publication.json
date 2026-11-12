@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The performance slot installs cancellation handling before publishing its holder record, so early SIGINT and SIGTERM wait for watchdog cleanup instead of leaving a stale holder.",
+  "replay": {"status": "none", "detail": "No persisted application data changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "A published slot holder is cancellable even before the watchdog forks. Existing synchronous cleanup and signal exit statuses are preserved."},
+  "compatibility": {"status": "none", "detail": "Command arguments and holder record format remain unchanged."},
+  "downtime": {"status": "none", "detail": "No service restart is needed."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous cancellation race; no application data recovery is needed."}
+}

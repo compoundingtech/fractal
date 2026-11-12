@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -152,6 +153,24 @@ def remove_tree(tmp, attempts=5):
             if attempt == attempts - 1:
                 raise
             time.sleep(0.2 * (attempt + 1))
+
+
+class Cleanup(unittest.TestCase):
+    def test_cleanup_records_backoff_until_success_or_exhaustion(self):
+        for failures in (0, 2, 4, 5):
+            with self.subTest(failures=failures):
+                tmp = mock.Mock()
+                tmp.cleanup.side_effect = [OSError("busy")] * failures + [None]
+                sleeps = []
+                # Override the shared no-op only here; record backoff without real waiting.
+                with mock.patch.object(time, 'sleep', side_effect=sleeps.append):
+                    if failures == 5:
+                        with self.assertRaisesRegex(OSError, "busy"):
+                            remove_tree(tmp)
+                    else:
+                        remove_tree(tmp)
+                self.assertEqual(tmp.cleanup.call_count, min(failures + 1, 5))
+                self.assertEqual(sleeps, [0.2 * step for step in range(1, min(failures, 4) + 1)])
 
 
 class FlipReady(unittest.TestCase):

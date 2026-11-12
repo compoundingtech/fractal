@@ -32,7 +32,7 @@ workspace_digest() {
 }
 
 assert_mission_is_unpublished() {
-  st3 --json status "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-status-before.json"
+  fractal --json status "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-status-before.json"
   jq -e '
     .subjects | length == 1
     and .[0].actual == null
@@ -47,7 +47,7 @@ wait_for_event() {
   local deadline=$((SECONDS + 1200))
 
   : > "$output"
-  st3 --json trace "$subject" --after-index 0 --follow > "$output" &
+  fractal --json trace "$subject" --after-index 0 --follow > "$output" &
   trace_pid=$!
   while (( SECONDS < deadline )); do
     if jq -e --arg kind "$kind" 'select(.kind == $kind)' "$output" >/dev/null 2>&1; then
@@ -67,7 +67,7 @@ wait_for_event() {
 
 before_digest=$(workspace_digest)
 
-st3 --json launch start \
+fractal --json launch start \
   --id "$MISSION_ID" \
   "$REQUEST" \
   --workspace "$TARGET_WORKSPACE" \
@@ -87,8 +87,8 @@ wait_for_event \
   "$EVAL_ROOT/planning-events.jsonl"
 assert_mission_is_unpublished
 
-variant=$(st3 --json launch show "$session_id" | jq -er '.candidate.variant')
-st3 --json launch preview "$session_id" --variant "$variant" > "$EVAL_ROOT/preview.json"
+variant=$(fractal --json launch show "$session_id" | jq -er '.candidate.variant')
+fractal --json launch preview "$session_id" --variant "$variant" > "$EVAL_ROOT/preview.json"
 preview_hash=$(jq -er '.preview.hash' "$EVAL_ROOT/preview.json")
 jq -e '
   .status == "review"
@@ -98,7 +98,7 @@ jq -e '
   and (.preview.mission.blockers | length == 0)
 ' "$EVAL_ROOT/preview.json" >/dev/null
 
-st3 --json launch approve \
+fractal --json launch approve \
   "$session_id" \
   "$preview_hash" \
   --as "$REQUESTER" \
@@ -110,14 +110,14 @@ jq -e --arg hash "$preview_hash" '
   and .published_revision == .candidate.mission_revision
 ' "$EVAL_ROOT/approved.json" >/dev/null
 
-st3 --json status "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-status-after.json"
+fractal --json status "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-status-after.json"
 jq -e --arg mission "$MISSION_ID" '
   .subjects | length == 1
   and .[0].actual.id == $mission
   and .[0].actual.state == "ready"
 ' "$EVAL_ROOT/mission-status-after.json" >/dev/null
 
-st3 --json status > "$EVAL_ROOT/all-status-after.json"
+fractal --json status > "$EVAL_ROOT/all-status-after.json"
 jq -e --arg mission "$MISSION_SUBJECT" '
   [
     .subjects[]
@@ -126,11 +126,11 @@ jq -e --arg mission "$MISSION_SUBJECT" '
   ] | length == 0
 ' "$EVAL_ROOT/all-status-after.json" >/dev/null
 
-st3 --json inspect "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-inspect.json"
+fractal --json inspect "$MISSION_SUBJECT" > "$EVAL_ROOT/mission-inspect.json"
 jq -e '
   ([.recent_claims[] | select(.kind == "mission.published")] | length) == 1
 ' "$EVAL_ROOT/mission-inspect.json" >/dev/null
-st3 --json inspect "$session_subject" > "$EVAL_ROOT/planning-session-inspect.json"
+fractal --json inspect "$session_subject" > "$EVAL_ROOT/planning-session-inspect.json"
 jq -e '
   ([.recent_claims[] | select(.kind == "planning-session.approved")] | length) == 1
 ' "$EVAL_ROOT/planning-session-inspect.json" >/dev/null
@@ -145,12 +145,12 @@ jq -e --arg markdown "$markdown_ref" --arg kdl "$kdl_ref" '
   .candidate.markdown == $markdown
   and .candidate.kdl == $kdl
 ' "$EVAL_ROOT/approved.json" >/dev/null
-st3 documents get "$markdown_ref" --output "$EVAL_ROOT/approved-mission.md" >/dev/null
-st3 documents get "$kdl_ref" --output "$EVAL_ROOT/approved-mission.kdl" >/dev/null
+fractal documents get "$markdown_ref" --output "$EVAL_ROOT/approved-mission.md" >/dev/null
+fractal documents get "$kdl_ref" --output "$EVAL_ROOT/approved-mission.kdl" >/dev/null
 test -s "$EVAL_ROOT/approved-mission.md"
 test -s "$EVAL_ROOT/approved-mission.kdl"
 
-st3 trace wait "$planner" --for stopped --timeout 2m >/dev/null
+fractal trace wait "$planner" --for stopped --timeout 2m >/dev/null
 
 after_digest=$(workspace_digest)
 [[ "$before_digest" == "$after_digest" ]]

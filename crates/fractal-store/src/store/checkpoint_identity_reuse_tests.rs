@@ -1,5 +1,5 @@
-//! A seal pass reuses the sealed-identity digest while nothing it covers has changed, and every
-//! change that can alter the digest makes it walk again (`SealedIdentityMemo` in smallclaims).
+//! A seal pass defers identity reads while waiting for a peer's first seal, then reuses the
+//! sealed-identity digest while nothing it covers has changed (`SealedIdentityMemo`).
 use super::checkpoint::*;
 use super::*;
 use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, observe, step, sync};
@@ -12,10 +12,9 @@ use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 const REUSE_STATEMENTS: u64 = 8;
 const REUSE_VM_STEPS: u64 = 400;
 
-/// A seal pass waiting on a peer that has not sealed reads the identities every few minutes. On
-/// an unchanged store it reuses the digest instead of walking every envelope again.
+/// A seal pass waiting on a peer does not need to read identities, even after memo invalidation.
 #[test]
-fn a_waiting_seal_pass_reuses_the_unchanged_identity_digest() {
+fn a_waiting_seal_pass_defers_the_changed_identity_digest_until_every_peer_seals() {
     let scratch = tempfile::tempdir().unwrap();
     let mut context = context(scratch.path(), 0);
     // A configured peer that never seals keeps alder sealed and waiting.
@@ -36,16 +35,43 @@ fn a_waiting_seal_pass_reuses_the_unchanged_identity_digest() {
         let work = scope.finish();
         assert!(work.statements <= 22 && work.vm_steps <= 3_300, "step: {work:?}");
     }
+    let birch = Store::open_memory("birch").unwrap();
+    observe(&birch, 1);
+    sync(&[&store, &birch]);
+    // The below-cut arrival invalidates the memo. Repeated waiting passes must still not walk.
+    for _ in 0..3 {
+        let scope = SqliteWorkScope::start();
+        assert!(step(&store, &context).is_empty());
+        let work = scope.finish();
+        assert!(work.statements <= 22 && work.vm_steps <= 3_300, "waiting: {work:?}");
+    }
+    // The independent paged walk does not populate the memo used by checkpoint_step.
+    let changed = store.checkpoint_sealed_identities_paged(cut, None, 64).unwrap();
+    assert_ne!(changed.digest, walked.digest);
     for _ in 0..2 {
         let scope = SqliteWorkScope::start();
         let status = store.checkpoint_status(context.now_unix_ms, &context.configured_peers).unwrap();
         let work = scope.finish();
-        assert_eq!(status.pending.unwrap().terms.sealed_digest, walked.digest);
+        assert_eq!(status.pending.unwrap().terms.unwrap().sealed_digest, walked.digest);
         assert!(work.statements <= 14 && work.vm_steps <= 3_100, "status: {work:?}");
     }
-    let (reused, work) = identities(&store, cut);
-    assert_eq!(reused, walked);
-    assert_reused(work);
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
+    sync(&[&store, &birch]);
+    let scope = SqliteWorkScope::start();
+    let actions = step(&store, &context);
+    let work = scope.finish();
+    assert!(work.vm_steps > 3_300, "resumed without walking: {work:?}");
+    let smallclaims::store::checkpoint_agreement::CheckpointAction::Sealed {
+        sealed_digest, ..
+    } = &actions[0] else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(sealed_digest, &changed.digest);
+    // Resealing takes precedence over verification, even though every peer now has a seal.
+    assert_eq!(kinds(&actions), ["sealed"]);
+    sync(&[&store, &birch]);
+    assert_eq!(kinds(&step(&store, &context)), ["verified"]);
+    assert_eq!(kinds(&step(&birch, &context)), ["verified"]);
 }
 
 /// After every kind of change the reused digest could miss, the digest a seal reads is the one

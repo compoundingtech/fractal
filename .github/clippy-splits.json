@@ -24,7 +24,6 @@
   "fractal-github-issue-component": "st2-github-issue-component",
   "fractal-github-pr-component": "st2-github-pr-component",
   "fractal-kernel": "st3-kernel",
-  "fractal-legacy-runner": "st2",
   "fractal-migrate": "st3-migrate",
   "fractal-missions": "st3-missions",
   "fractal-missions-base": "st3-missions-base",

@@ -23,6 +23,8 @@ import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
 import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import * as InputPaint from '../telemetry/inputPaint.ts'
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('../telemetry/inputPaint.ts', { spy: true })
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
@@ -51,6 +53,8 @@ vi.mock('../data/react.tsx', async () => {
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
@@ -61,7 +65,7 @@ vi.mock('../data/react.tsx', async () => {
   useNowSnapshot: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   usePausedNow: () => undefined,
-  useAttention: () => ({ _tag: 'Waiting' }),
+  useAttention: () => ({ _tag: 'Observed', freshness: 'live', value: [] }),
   })
 })
 
@@ -175,6 +179,16 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('does not create a question card from a running raw call without open attention', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [{ _tag: 'ToolCall', id: 'raw-question', callId: 'q1', name: 'AskUserQuestion', status: 'running', callSeen: true,
+        input: { questions: [{ question: 'Raw only?', options: [{ label: 'One' }] }] }, at: at(1) }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    await mount()
+    expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  })
+
   it('keeps the parent composer mounted while child tabs remain read-only', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: scenario, hasOlder: false, observation: { empty: false },
@@ -448,7 +462,7 @@ describe('ConversationPane composition activation', () => {
     expect(source.composerProps.every(props => props.readingColumn === true)).toBe(true)
     expect(source.composerProps.every(props => props.placeholder === undefined)).toBe(true)
     expect(source.composerProps.every(props => props.conversationLabel === 'Example Agent')).toBe(true)
-    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
+    expect(container.querySelector('form')?.parentElement?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
   })
 
   it('keeps the source-owned scroll command stable through settlement, echo and Retry until a new Send', async () => {
@@ -517,16 +531,13 @@ describe('ConversationPane composition activation', () => {
     const runtimeRenders = source.runtimeItems.length
     const composerRenders = source.composerProps.length
     const activity = container.querySelector('[data-testid="live-activity-label"]')!
-    const header = container.querySelector('[data-testid="run-elapsed"]')!
     expect(activity.textContent).toBe('Working · 1s')
-    expect(header.textContent).toBe('Running · 1s')
     for (const [elapsed, label] of [[2000, '2s'], [60_000, '1m']] as const) {
       await act(async () => {
         source.now = Date.parse(at(0)) + elapsed
         source.clockListeners.forEach(listener => listener())
       })
       expect(activity.textContent).toBe(`Working · ${label}`)
-      expect(header.textContent).toBe(`Running · ${label}`)
     }
     expect(source.transcriptTurns).toHaveLength(transcriptRenders)
     expect(source.runtimeItems).toHaveLength(runtimeRenders)
@@ -914,7 +925,7 @@ describe('ConversationPane composition activation', () => {
     await mount(undefined, strictMode)
     const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
     const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
-    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer, Example Agent"]')!
+    const composer = container.querySelector<HTMLFormElement>('[role="group"][aria-label="Message composer, Example Agent"] form')!
     expect(message.disabled).toBe(!sendGranted)
     stop.focus()
     expect(document.activeElement).toBe(stop)

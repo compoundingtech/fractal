@@ -1,5 +1,6 @@
 //! Viewer-side framing keeps the initial snapshot's geometry at its wire boundary.
 //! SessionConnection's effective dimensions include read-ahead frames after SCREEN.
+use super::Trace;
 use pty_client::connection::SessionEvent;
 use pty_core::protocol::{self, MessageType, PacketReader};
 use std::collections::VecDeque;
@@ -14,6 +15,7 @@ pub(super) struct Connection {
     screen: Vec<u8>,
     rows: u16,
     cols: u16,
+    trace: Option<Trace>,
 }
 
 impl Connection {
@@ -22,6 +24,7 @@ impl Connection {
         rows: u16,
         cols: u16,
         timeout: Duration,
+        trace: Option<Trace>,
     ) -> io::Result<Self> {
         socket.write_all(&protocol::encode_attach(rows, cols))?;
         let mut connection = Self {
@@ -31,6 +34,7 @@ impl Connection {
             screen: Vec::new(),
             rows,
             cols,
+            trace,
         };
         let deadline = Instant::now() + timeout;
         let mut before_screen = VecDeque::new();
@@ -91,6 +95,9 @@ impl Connection {
                 MessageType::Exit => SessionEvent::Exit(protocol::decode_exit(&packet.payload)),
                 _ => continue,
             };
+            if let Some(trace) = self.trace.take() {
+                trace.milestone("first-frame-decoded");
+            }
             self.pending.push_back(event);
         }
         Ok(self.pending.pop_front())
@@ -116,4 +123,42 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) { self.disconnect(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_and_partial_frames_do_not_claim_a_decoded_frame() {
+        let (trace, events) = Trace::captured("agent/fragmented");
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut connection = Connection {
+            socket,
+            reader: PacketReader::new(),
+            pending: VecDeque::new(),
+            screen: Vec::new(),
+            rows: 4,
+            cols: 20,
+            trace: Some(trace.clone()),
+        };
+        let geometry = protocol::encode_geometry(4, 20);
+        let split = geometry.len() - 1;
+        peer.write_all(&geometry[..split]).unwrap();
+        assert!(connection.next_event(Some(Duration::from_secs(1))).unwrap().is_none());
+        assert_eq!(events.lock().unwrap().len(), 1, "raw bytes are not decoded frames");
+        peer.write_all(&geometry[split..]).unwrap();
+        assert!(matches!(connection.next_event(Some(Duration::from_secs(1))).unwrap(),
+            Some(SessionEvent::Geometry { rows: 4, cols: 20 })));
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1]["phase"], "first-frame-decoded");
+            assert!(!events.iter().any(|event| event["phase"] == "first-screen-rendered"));
+        }
+        peer.write_all(&protocol::encode_packet(MessageType::Screen, b"snapshot")).unwrap();
+        assert!(matches!(connection.next_event(Some(Duration::from_secs(1))).unwrap(),
+            Some(SessionEvent::Screen(_))));
+        assert_eq!(events.lock().unwrap().len(), 2, "decoding later frames is one-shot");
+    }
 }

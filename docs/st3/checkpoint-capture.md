@@ -104,7 +104,7 @@ matches resumes.
 **One capture per directory.** A capture takes an exclusive, non-blocking `flock` on
 `capture.lock` in its directory for as long as it holds its staging file. A second capture of the
 same directory fails at once with "another checkpoint capture is running"; its pass ends with that
-error and the next pass tries again. It never waits. The dry run (`st replication checkpoint
+error and the next pass tries again. It never waits. The dry run (`fractal replication checkpoint
 plan`) captures into a directory of its own under the scratch directory and deletes its file when
 it is done, so it never replaces the scheduler's resumable capture.
 
@@ -134,8 +134,8 @@ consistent prefix and its cursor. The phases, in order:
    writes one compact row: canonical position, ID, envelope, kind, subject, actor, operation,
    validity, whether it is a first occurrence, its field names, and its rule and slot key or
    status seat, which the runtime computes from the body. It also writes the claim's blob hashes,
-   the IDs it cites as evidence or pins as a run input, and any request it closes. The body is
-   dropped when the page is written.
+   the IDs it cites as evidence, pins as a run input or names as a request's discovery, and any
+   request it closes. The body is dropped when the page is written.
 4. **Protection.** The protected-claim queries, by rowid, into a table of protected IDs.
 5. **Earlier tombstones.** `checkpoint_envelopes` and `checkpoint_claims` before the cut, by
    rowid, as today's filter selects them.

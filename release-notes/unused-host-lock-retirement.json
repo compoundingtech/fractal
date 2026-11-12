@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the unused catalog supervisor HostLock type",
+  "replay": {
+    "status": "none",
+    "detail": "No replay, recovery or diagnostic processing changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored record or wire schema changes. This change performs no filesystem cleanup."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The retired single-supervisor pid-file guard has no tracked current caller. Current daemon admission, native process checks and catalog compatibility readers are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes the unused workspace Rust HostLock type, its methods and crate-root re-export. Any external source consumer must remove that usage; absence of unknown external consumers is not claimed. The host_lock module and process_alive helper retain their current path and behavior for native Codex tests."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon restart required by removal of uncalled code."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action, lock-file deletion or state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the Rust type and re-export without rewriting stored state."
+  }
+}

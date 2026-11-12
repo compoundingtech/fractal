@@ -1,7 +1,9 @@
 //! The store's SQLite connections: one writer thread that batches writes, and a pool of read
 //! connections that a thread can pin to one snapshot.
 
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -127,7 +129,7 @@ fn configured_read_cache_kib(value: Option<&str>) -> usize {
 /// How much of the store file each reader maps, in MiB. In WAL mode SQLite drops a reader's whole
 /// page cache when its next transaction sees any commit, so on a busy store every request
 /// fetched every page it touched again with one `read()` call each: 87,500 calls a second
-/// across 73 readers on dev3 (#3343). A mapped page is the kernel's one shared copy and costs
+/// across 73 readers on one host (#3343). A mapped page is the kernel's one shared copy and costs
 /// no call. The default covers any store; the bundled SQLite's ceiling is raised to match.
 pub const READ_MMAP_MIB: u64 = 1 << 20;
 
@@ -363,6 +365,20 @@ pub fn truncate_idle_wal(connection: &Connection) -> Result<bool> {
     Ok(busy == 0)
 }
 
+/// Wait up to `busy` for readers on older snapshots, then make the next write start the WAL from
+/// its beginning. RESTART takes SQLite's writer lock, so the daemon calls this only while it has
+/// borrowed the Store's sole writer; it keeps the file, unlike TRUNCATE, which costs a writer hold
+/// to free it.
+pub fn restart_wal(connection: &Connection, busy: std::time::Duration) -> Result<bool> {
+    connection.busy_timeout(busy)?;
+    let restarted = {
+        let _checkpoint = telemetry::CheckpointGuard::start(connection);
+        connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| row.get::<_, i32>(0))
+    };
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    Ok(restarted? == 0)
+}
+
 /// The store's only write connection, owned by one writer thread. Writes queue in front of it in
 /// foreground arrival order: a batched write runs on the writer thread with the others queued behind it, each
 /// in a savepoint of one transaction that commits once for all of them, and its caller hears back
@@ -441,6 +457,8 @@ pub struct WriterGuard<'a> {
     mutation_observer: Option<&'a Arc<writer_observer::MutationState>>,
     /// When profiling, when this thread took the writer.
     pub acquired: Option<std::time::Instant>,
+    writer_operation: Option<telemetry::WriterOperation>,
+    receive_hold: Option<crate::receive_metrics::WriterSample>,
     /// The connection's changed-row count when it was lent, so the rows this thread changed are
     /// noted for it when it gives the connection back; see `touched::writes`.
     pub changes_at_lend: u64,
@@ -469,7 +487,8 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         policy: Option<writer_budget::OwnedHandlerPolicy>,
     ) -> Result<Self> {
-        Self::new_inner_admitted(connection, committed_index, observer, policy, None)
+        Self::new_inner_admitted(connection, committed_index, observer, policy, None,
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(
@@ -478,7 +497,18 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         admitted: Arc<crate::store::AdmittedStore>,
     ) -> Result<Self> {
-        Self::new_inner_admitted(connection, committed_index, observer, None, Some(admitted))
+        Self::new_inner_admitted(connection, committed_index, observer, None, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(
+        connection: Connection,
+        committed_index: Arc<AtomicU64>,
+        observer: Option<Arc<dyn WriterObserver>>,
+        directory: Option<Arc<tempfile::TempDir>>,
+    ) -> Result<Self> {
+        Self::new_inner_admitted(connection, committed_index, observer, None, None, directory)
     }
 
     fn new_inner_admitted(
@@ -487,6 +517,8 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         policy: Option<writer_budget::OwnedHandlerPolicy>,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         if let Some(policy) = &policy {
             policy.install(&connection)?;
@@ -527,6 +559,10 @@ impl WriterConnection {
                     &observed_fifo,
                 );
                 drop(directory_admission);
+                // A final observer can drop the store on this writer thread. Keep
+                // its scratch until write_queue has closed SQLite, including its WAL.
+                #[cfg(any(test, feature = "test-support"))]
+                drop(temporary_directory);
             })
             .expect("the writer thread starts");
         Ok(Self {
@@ -620,7 +656,11 @@ impl WriterConnection {
         self.finalizers.install_runtime(callback)
     }
 
+    #[track_caller]
     pub fn send(&self, mut job: WriterJob) {
+        if let WriterJob::Batched { wait, .. } = &mut job {
+            *wait = crate::profile::WriterWait::with_writer_operation(wait.take());
+        }
         if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
             *wait = Some(crate::profile::writer_waiting_for(wait.take(), writer.holder(),
                 telemetry::current_origin().unwrap_or_else(telemetry::Origin::other)));
@@ -632,7 +672,7 @@ impl WriterConnection {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         let send = || jobs.as_ref()
             .expect("the writer queue is open while the store is")
-            .send(job);
+            .send(job).map_err(Box::new);
         match enqueued {
             Some(enqueued) => self.fifo.send_at(enqueued, send),
             None => send(),
@@ -677,6 +717,10 @@ impl WriterConnection {
         let (give_back, returned) = std::sync::mpsc::sync_channel(1);
         let enqueued = std::time::Instant::now();
         let origin = telemetry::current_origin();
+        let mut writer_operation = telemetry::WriterOperation::start(
+            if matches!(class, writer_queue::LoanClass::Background) { "background" } else { "foreground" },
+            "write.lend",
+        );
         match class {
             writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
             writer_queue::LoanClass::Background => {
@@ -705,7 +749,7 @@ impl WriterConnection {
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
                     .expect("the writer queue is open while the store is")
-                    .send(job))
+                    .send(job).map_err(Box::new))
                     .expect("the writer thread runs while the store is open");
             }
         }
@@ -714,6 +758,9 @@ impl WriterConnection {
             .expect("the writer thread lends its connection");
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
+        if let Some(operation) = &mut writer_operation {
+            operation.acquired(enqueued.elapsed());
+        }
         WriterGuard {
             changes_at_lend: connection.total_changes(),
             connection: Some(connection),
@@ -724,6 +771,9 @@ impl WriterConnection {
             handler_policy: &self.handler_policy,
             mutation_observer: self.mutation_observer.as_ref(),
             acquired: crate::profile::writer_acquired(wait),
+            writer_operation,
+            receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
+                crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
         }
     }
 
@@ -754,6 +804,8 @@ impl WriterConnection {
     /// queued with it, and answer once that transaction commits. An `Err` from `job` rolls back
     /// only its own savepoint. The outer `Err` is a commit that failed, which undid every write in
     /// the batch.
+    /// Each callback inherits its caller's raw clock overrides and restores the writer's
+    /// context before shared transaction finalizers run; an unset clock stays execution-time.
     #[track_caller]
     pub fn batched<'job, T: Send + 'job, E: Send + 'job>(
         &self,
@@ -766,6 +818,7 @@ impl WriterConnection {
         let changed = &changed_rows;
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
+        let clock = crate::store::ClockContext::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -773,13 +826,17 @@ impl WriterConnection {
         let run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send + '_> = Box::new(move |tx| {
             drop(waiting);
             let before = tx.total_changes();
+            let job = || {
+                let _clock = clock.enter();
+                job(tx)
+            };
             let (result, written) = if capture {
                 crate::touched::record_wrote(|| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx)))
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
                 })
             } else {
                 (
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx))),
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)),
                     Vec::new(),
                 )
             };
@@ -910,7 +967,7 @@ fn write_queue(
 /// writer), fails, or meets a lending write, which it returns to run next.
 fn run_write_batch(
     connection: &mut Connection,
-    first: WriterJob,
+    mut first: WriterJob,
     // Where the batch takes more writes from, and for how long.
     intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration),
     committed_index: &AtomicU64,
@@ -923,8 +980,13 @@ fn run_write_batch(
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
+    let _receive_shared = crate::receive_metrics::enter_shared();
     let (queue, window) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    // The first caller owns transaction setup too; later jobs acquire at their savepoint.
+    if let WriterJob::Batched { wait: Some(wait), enqueued, .. } = &mut first {
+        wait.writer_operation_acquired(enqueued.elapsed());
+    }
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,
@@ -945,6 +1007,8 @@ fn run_write_batch(
     let transaction_timer = crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction);
     let mut answers = Vec::new();
     let mut lend = None;
+    let mut receive_shared = crate::receive_metrics::SharedFinalization::new();
+    let prepare_started = std::time::Instant::now();
     let (transaction, mut failure) = {
         let _scope = crate::task_cpu::blocking_scope("writer.batch.setup");
         {
@@ -966,6 +1030,7 @@ fn run_write_batch(
             (transaction, failure)
         }
     };
+    receive_shared.prepared(prepare_started.elapsed());
     let mut job = Some(first);
     while let Some(current) = job.take() {
         let WriterJob::Batched {
@@ -980,6 +1045,7 @@ fn run_write_batch(
             lend = Some(current);
             break;
         };
+        receive_shared.participant(holder.receive());
         if let Some(batch) = &mut attribution {
             let waited = enqueued.elapsed();
             if waited >= batch.wait {
@@ -988,6 +1054,10 @@ fn run_write_batch(
             }
         }
         let origin = wait.as_mut().map(crate::profile::WriterWait::take_trace_origin);
+        let mut writer_operation = wait.as_mut().and_then(crate::profile::WriterWait::take_writer_operation);
+        if let Some(operation) = &mut writer_operation {
+            operation.acquired(enqueued.elapsed());
+        }
         if let Some(writer) = writer_telemetry {
             writer.set_holder(origin.clone());
         }
@@ -997,12 +1067,16 @@ fn run_write_batch(
         }
         match (&transaction, &failure) {
             (Some(transaction), None) => {
+                let _request = writer_operation.as_ref().map(telemetry::WriterOperation::enter);
                 let operation_started = attribution.as_ref().map(|_| std::time::Instant::now());
                 // The caller's operation waited until now, holds the writer while its write
                 // runs, and shares the commit below with the rest of the batch.
                 let _entered = crate::profile::enter(profile.as_ref());
                 let acquired = crate::profile::writer_acquired(wait);
                 let running = std::time::Instant::now();
+                let _receive = holder.receive().map(crate::receive_metrics::Context::enter);
+                let receive_hold = holder.receive().map(|context|
+                    crate::receive_metrics::WriterSample::start(context, enqueued.elapsed()));
                 hold.running(&holder);
                 // Include SQLite savepoint bookkeeping, not only the submitted callback.
                 // The captured profile remains current; nested CPU wrappers leave their CPU
@@ -1017,6 +1091,7 @@ fn run_write_batch(
                             .execute_batch(/* sqlite-large-value: allow-for-now lv-h2013f7d4439f owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK TO batched_write; RELEASE batched_write")
                     }
                 })();
+                drop(receive_hold);
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);
@@ -1030,9 +1105,14 @@ fn run_write_batch(
                 }
             }
             // A batch that failed to begin answers its first write with the error.
-            _ => drop(run),
+            _ => {
+                if let Some(context) = holder.receive() {
+                    context.writer_wait(enqueued.elapsed());
+                }
+                drop(run);
+            }
         }
-        answers.push(done);
+        answers.push((done, writer_operation));
         if failure.is_none()
             && answers.len() < WRITE_BATCH_LIMIT
             && started.elapsed() < window
@@ -1045,6 +1125,13 @@ fn run_write_batch(
     let op_count = answers.len();
     // Shared transaction work has its own operation, never the first submitter's. Do not
     // keep this scope entered while running jobs: Op::enter preserves an existing origin.
+    if let Some(batch_id) = receive_shared.batch_id() {
+        hold.shared_receive_batch(batch_id);
+        if let Some(writer) = writer_telemetry {
+            writer.set_holder(None);
+        }
+    }
+    receive_shared.finalizing();
     let committed = {
         // A lexical guard does not capture connection while transaction still borrows it.
         // Consume the transaction first, then borrow connection for postcommit observers.
@@ -1097,11 +1184,14 @@ fn run_write_batch(
         }
         committed.map_err(|error| format!("{error:#}"))
     };
+    let _ = receive_shared.finish();
     // Finish samples before callers snapshot their operations. End holds before ACK
     // delivery too: channel backpressure is no longer counted as writer-held time.
     drop(hold);
     drop(_holder);
-    for done in answers {
+    for (done, writer_operation) in answers {
+        // Include shared finalizers, COMMIT and observers, but not ACK backpressure.
+        drop(writer_operation);
         let _ = done.send(committed.clone());
     }
     lend
@@ -1173,7 +1263,12 @@ impl Drop for WriterGuard<'_> {
                 .saturating_sub(self.changes_at_lend),
         );
         crate::profile::writer_released(self.acquired.take());
+        // Complete before returning the connection: the receive can snapshot immediately after
+        // this guard drops, before the writer thread has observed the return.
+        drop(self.receive_hold.take());
         let _ = self.give_back.send(connection);
+        // The loan remains held through finalization, observer notification and return.
+        drop(self.writer_operation.take());
     }
 }
 
@@ -1193,6 +1288,8 @@ pub struct ReadPool {
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
     admitted: Option<Arc<crate::store::AdmittedStore>>,
+    #[cfg(any(test, feature = "test-support"))]
+    temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 /// A Send, pool-specific capacity token. Once lent to a request, it follows that reader
@@ -1218,6 +1315,9 @@ pub struct ReadConnection {
     // Last: close SQLite before returning capacity if this connection is not pooled.
     permit: Option<ReadPermit>,
     _admitted: Option<Arc<crate::store::AdmittedStore>>,
+    // Last: a retained connection must close before its scratch is deleted.
+    #[cfg(any(test, feature = "test-support"))]
+    _temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Deref for ReadConnection {
@@ -1268,7 +1368,13 @@ thread_local! {
     static REQUEST_READER: RefCell<Vec<RequestLoan>> = const { RefCell::new(Vec::new()) };
     /// The snapshot pins this thread holds, innermost last, including pins of other stores:
     /// the single authority for pin membership and reuse.
-    static PINNED_STACK: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
+    static PINNED_STACK: RefCell<Vec<SnapshotPin>> = const { RefCell::new(Vec::new()) };
+}
+
+struct SnapshotPin {
+    pool: usize,
+    connection: Rc<ReadConnection>,
+    memo: RefCell<HashMap<(TypeId, u64), Rc<dyn Any>>>,
 }
 
 struct RequestLoan {
@@ -1303,21 +1409,25 @@ pub(crate) fn pinned_reader_for(pool: usize) -> Option<Rc<ReadConnection>> {
             .borrow()
             .iter()
             .rev()
-            .find(|(key, _)| *key == pool)
-            .map(|(_, connection)| connection.clone())
+            .find(|pin| pin.pool == pool)
+            .map(|pin| pin.connection.clone())
     })
 }
 
 /// Register a snapshot pin once its transaction has begun.
 pub(crate) fn push_pinned_reader(pool: usize, connection: Rc<ReadConnection>) {
-    PINNED_STACK.with(|stack| stack.borrow_mut().push((pool, connection)));
+    PINNED_STACK.with(|stack| stack.borrow_mut().push(SnapshotPin {
+        pool,
+        connection,
+        memo: RefCell::new(HashMap::new()),
+    }));
 }
 
 /// Unregister a snapshot pin, leaving any outer or other-store pin below it.
 fn pop_pinned_reader(pool: usize) {
     PINNED_STACK.with(|stack| {
         let popped = stack.borrow_mut().pop();
-        debug_assert_eq!(popped.map(|(key, _)| key), Some(pool));
+        debug_assert_eq!(popped.map(|pin| pin.pool), Some(pool));
     });
 }
 
@@ -1398,12 +1508,24 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None)
+        Self::new_with(path, shared_memory, None,
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted))
+        Self::new_with(&path, false, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
+        Self::new_with(path, false, None, directory)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn temporary_directory(&self) -> Option<Arc<tempfile::TempDir>> {
+        self.temporary_directory.clone()
     }
 
     pub(crate) fn is_admitted(&self) -> bool {
@@ -1418,6 +1540,8 @@ impl ReadPool {
         path: &Path,
         shared_memory: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         let mut pool = Self {
             idle: Arc::new(Mutex::new(Vec::new())),
@@ -1428,6 +1552,8 @@ impl ReadPool {
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
             admitted,
+            #[cfg(any(test, feature = "test-support"))]
+            temporary_directory,
         };
         // Open one now, so a store that cannot be read fails to open.
         let connection = pool.open_connection()?;
@@ -1470,6 +1596,8 @@ impl ReadPool {
             counts: self.counts.clone(),
             permit: None,
             _admitted: self.admitted.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            _temporary_directory: self.temporary_directory.clone(),
         })
     }
 
@@ -1536,6 +1664,34 @@ impl ReadPool {
     /// a cached read is valid only while this pool's own pin is registered.
     pub fn has_pinned_reader(&self) -> bool {
         pinned_reader_for(self.key()).is_some()
+    }
+
+    /// Memoize a derived read at a logical cut only within this thread's pinned SQLite
+    /// snapshot. Entries die when the pin is popped, even if its connection is pooled and
+    /// a later snapshot reads the same cut after repair. Never consults request-only loans.
+    pub fn pinned_memo<T: 'static>(
+        &self,
+        cut: u64,
+        build: impl FnOnce() -> Result<T>,
+    ) -> Result<Rc<T>> {
+        let key = (TypeId::of::<T>(), cut);
+        let cached = PINNED_STACK.with(|stack| {
+            let stack = stack.borrow();
+            let pin = stack.iter().rev().find(|pin| pin.pool == self.key());
+            pin.and_then(|pin| pin.memo.borrow().get(&key).cloned())
+        });
+        if let Some(cached) = cached {
+            return Ok(cached.downcast::<T>().unwrap_or_else(|_| unreachable!("snapshot memo type matches its key")));
+        }
+        anyhow::ensure!(self.has_pinned_reader(), "snapshot memo requires a pinned read");
+        let value = Rc::new(build()?);
+        PINNED_STACK.with(|stack| {
+            let stack = stack.borrow();
+            let pin = stack.iter().rev().find(|pin| pin.pool == self.key())
+                .expect("the pinned read remains registered during its memo build");
+            pin.memo.borrow_mut().insert(key, value.clone());
+        });
+        Ok(value)
     }
 
     /// Whether this thread already holds this pool's request loan or a pinned snapshot,
@@ -1850,19 +2006,33 @@ pub mod histogram {
 
     static SHAPES: Mutex<BTreeMap<String, Shape>> = Mutex::new(BTreeMap::new());
 
+    thread_local! {
+        static THREAD_SHAPES: std::cell::RefCell<BTreeMap<String, Shape>> =
+            const { std::cell::RefCell::new(BTreeMap::new()) };
+    }
+
     pub fn record(statement: &str, duration: Duration) {
         let shape = crate::performance::normalize_query(statement);
-        let mut shapes = SHAPES.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = shapes.entry(shape).or_default();
         let ns = duration.as_nanos() as u64;
-        entry.count += 1;
-        entry.total_ns += ns;
-        entry.max_ns = entry.max_ns.max(ns);
+        let add = |shapes: &mut BTreeMap<String, Shape>| {
+            let entry = shapes.entry(shape.clone()).or_default();
+            entry.count += 1;
+            entry.total_ns += ns;
+            entry.max_ns = entry.max_ns.max(ns);
+        };
+        add(&mut SHAPES.lock().unwrap_or_else(PoisonError::into_inner));
+        THREAD_SHAPES.with(|shapes| add(&mut shapes.borrow_mut()));
     }
 
     /// The shapes recorded so far, emptying the table.
     pub fn take() -> BTreeMap<String, Shape> {
         std::mem::take(&mut *SHAPES.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The shapes this thread recorded so far, emptying its table: a test that asks what its own
+    /// call ran, while other tests in the process run theirs.
+    pub fn take_on_this_thread() -> BTreeMap<String, Shape> {
+        THREAD_SHAPES.with(|shapes| std::mem::take(&mut *shapes.borrow_mut()))
     }
 }
 
@@ -2163,6 +2333,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_batch_links_two_receive_requests_and_restores_callback_context() {
+        use crate::receive_metrics::{RequestMetrics, Stage, Timer, capture};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
+        let fifo = crate::fifo::Queue::enabled_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let requests = [
+            RequestMetrics::new("receive-a".into()),
+            RequestMetrics::new("receive-b".into()),
+        ];
+        let mut answers = Vec::new();
+        for (metrics, stage) in requests.iter().zip([Stage::ReceiptIngest, Stage::Repairs]) {
+            let _request = metrics.enter();
+            let _stage = Timer::start(stage);
+            let expected_id = capture().unwrap().correlation_id().to_owned();
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let enqueued = std::time::Instant::now();
+            fifo.send_at(enqueued, || sender.send(WriterJob::Batched {
+                run: Box::new(move |_| {
+                    let context = capture().expect("the callback inherits its request");
+                    assert_eq!(context.correlation_id(), expected_id);
+                    assert_eq!(context.stage(), stage);
+                    true
+                }),
+                profile: None,
+                wait: None,
+                holder: crate::windows::holds::Holder::current(),
+                enqueued,
+                done,
+            }).map_err(Box::new)).unwrap();
+            answers.push(answer);
+        }
+        assert!(capture().is_none());
+        let first = receiver.recv().unwrap();
+        drop(sender);
+        assert!(run_write_batch(
+            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &AtomicU64::new(0), &(AtomicU64::new(0), AtomicU64::new(0)),
+            (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+            &fifo,
+        ).is_none());
+        assert!(capture().is_none(), "shared work never keeps a submitter's context");
+        for answer in answers {
+            answer.recv().unwrap().unwrap();
+        }
+        let first = requests[0].snapshot();
+        let second = requests[1].snapshot();
+        assert_eq!(first.shared_finalizations, 1);
+        assert_eq!(second.shared_finalizations, 1);
+        assert!(first.first_shared_batch.is_some());
+        assert_eq!(first.first_shared_batch, second.first_shared_batch);
+        assert_eq!(first.last_shared_batch, second.last_shared_batch);
+        assert_eq!(first.phases[Stage::Repairs as usize].writer_hold, std::time::Duration::ZERO);
+        assert_eq!(second.phases[Stage::ReceiptIngest as usize].writer_hold, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn one_batch_keeps_each_jobs_clock_and_restores_the_enclosing_context() {
+        use crate::store::{ClockContext, clock_snapshot, now_ms, set_thread_clock};
+
+        let original = ClockContext::capture();
+        let _restore = original.enter();
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
+        let fifo = crate::fifo::Queue::enabled_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut answers = Vec::new();
+        for at in [100, 200] {
+            let clock = {
+                let _restore = original.enter();
+                set_thread_clock(Some(at));
+                let _snapshot = clock_snapshot();
+                set_thread_clock(Some(at + 1));
+                ClockContext::capture()
+            };
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let enqueued = std::time::Instant::now();
+            fifo.send_at(enqueued, || sender.send(WriterJob::Batched {
+                run: Box::new(move |_| {
+                    assert_eq!(ClockContext::capture(), original);
+                    {
+                        let _clock = clock.enter();
+                        assert_eq!(ClockContext::capture(), clock);
+                        assert_eq!(now_ms(), at);
+                    }
+                    assert_eq!(ClockContext::capture(), original);
+                    true
+                }),
+                profile: None,
+                wait: None,
+                holder: crate::windows::holds::Holder::current(),
+                enqueued,
+                done,
+            }).map_err(Box::new)).unwrap();
+            answers.push(answer);
+        }
+        let first = receiver.recv().unwrap();
+        drop(sender);
+        let batches = (AtomicU64::new(0), AtomicU64::new(0));
+        assert!(run_write_batch(
+            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &AtomicU64::new(0), &batches,
+            (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+            &fifo,
+        ).is_none());
+        for answer in answers {
+            answer.recv().unwrap().unwrap();
+        }
+        assert_eq!(batches.0.load(Ordering::Relaxed), 1);
+        assert_eq!(batches.1.load(Ordering::Relaxed), 2);
+        assert_eq!(ClockContext::capture(), original);
+    }
+
+    #[test]
     fn roster_reader_timing_is_scoped_and_restored_on_unwind() {
         thread_local! {
             static REPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2448,7 +2733,7 @@ mod tests {
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
                 done,
-            })).unwrap();
+            }).map_err(Box::new)).unwrap();
             callers.push((label, operation, answer));
         }
         let first = receiver.recv().unwrap();
@@ -2541,7 +2826,7 @@ mod tests {
                     true
                 }),
                 profile: None, wait: None, holder: crate::windows::holds::Holder::current(), enqueued, done,
-            })).unwrap();
+            }).map_err(Box::new)).unwrap();
             answers.push(answer);
         }
         let observed = fifo.clone();
@@ -2791,7 +3076,17 @@ mod commit_observer_tests {
         let writer = writer();
         let (recorded, observations) = mpsc::channel();
         let index = writer.committed_index.clone();
+        let metrics = crate::receive_metrics::RequestMetrics::new("receive-loan".into());
+        let observer_metrics = metrics.clone();
         let observer = writer.observe_commits(move |connection| {
+            let context = crate::receive_metrics::capture().expect("loan observer keeps receive context");
+            assert_eq!(context.correlation_id(), "receive-loan");
+            assert_eq!(context.stage(), crate::receive_metrics::Stage::Projection);
+            assert_eq!(
+                observer_metrics.snapshot().phases[crate::receive_metrics::Stage::Projection as usize].writer_hold,
+                std::time::Duration::ZERO,
+                "hold accounting must not finish before observer cleanup",
+            );
             let authority: i64 = connection
                 .query_row("SELECT authority FROM claims", [], |row| row.get(0))
                 .unwrap();
@@ -2804,6 +3099,8 @@ mod commit_observer_tests {
                 .unwrap();
         });
         {
+            let _request = metrics.enter();
+            let _phase = crate::receive_metrics::Timer::start(crate::receive_metrics::Stage::Projection);
             let mut connection = writer.write();
             let transaction = connection.transaction().unwrap();
             transaction
@@ -2813,6 +3110,11 @@ mod commit_observer_tests {
             assert!(matches!(observations.try_recv(), Err(TryRecvError::Empty)));
         }
         assert_eq!(observations.recv().unwrap(), (true, 1, 1));
+        assert!(
+            metrics.snapshot().phases[crate::receive_metrics::Stage::Projection as usize].writer_hold
+                > std::time::Duration::ZERO,
+            "loan accounting finishes synchronously before guard drop returns",
+        );
         drop(observer);
         writer
             .batched(|transaction| transaction.execute("UPDATE claims SET authority=2", []))

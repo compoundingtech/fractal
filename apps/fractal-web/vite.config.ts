@@ -1,16 +1,21 @@
 import { defineConfig } from 'vite'
 import { createBuildIdentityPlugin } from '@overeng/utils/node/vite-build-identity'
 import react from '@vitejs/plugin-react'
+import { englishAriaLocales } from './scripts/aria-locales.mjs'
 import { createStylexVitePlugins, deferBuiltStylesheets } from './scripts/stylex.mjs'
 import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
 import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
 import { fractalDevReplay } from './scripts/vite-replay.mjs'
+import { pierreLanguagesPlugin } from '../../packages/fractal-ui/scripts/pierre-languages.mjs'
+import { fractalLazyChunks } from './scripts/vite-lazy-chunks.mjs'
 
 export default defineConfig({
   root: 'src/web',
   plugins: [
+    englishAriaLocales(),
+    pierreLanguagesPlugin(),
     fractalContentSecurityPolicy(),
     fractalDevReplay(),
     {
@@ -33,6 +38,10 @@ export default defineConfig({
     react(),
     webfractalGateway(),
     fractalCssAssets(),
+    fractalLazyChunks({
+      conversation: new URL('./src/web/ConversationPane.tsx', import.meta.url).pathname,
+      terminal: new URL('./src/terminal/TerminalDetail.tsx', import.meta.url).pathname,
+    }),
   ],
   server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },
   resolve: { dedupe: ['effect', 'react', 'react-dom', '@stylexjs/stylex'] },
@@ -49,6 +58,9 @@ export default defineConfig({
           includeDependenciesRecursively: false,
           groups: [
             { name: 'react', test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/, entriesAware: true },
+            // New lazy roots must not fragment the already-eager Effect payload.
+            // Lazy-only Effect modules remain in the entries-aware group below.
+            { name: 'effect-eager', test: /node_modules[\\/](?:effect[\\/]|@effect[\\/])/, tags: ['$initial'], priority: 1, entriesAware: false },
             { name: 'effect', test: /node_modules[\\/](?:effect|@effect[\\/]atom-react)[\\/]/, entriesAware: true },
             { name: 'aria', test: /node_modules[\\/](?:react-aria|react-aria-components|react-stately|@react-aria|@react-stately|@internationalized)[\\/]/, entriesAware: true },
           ],

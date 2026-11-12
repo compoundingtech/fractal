@@ -1,5 +1,6 @@
 //! A run that names a reporter tells it about a failed, cancelled or stalled run, and a completed
-//! one if asked, once for each event. A run that names no reporter says nothing to anyone.
+//! one if asked, once for each event. A run that names no reporter tells only of a stall, and only
+//! to its requesting agent or the stuck agent's supervisor.
 use super::*;
 
 /// Where the frozen test clock starts: now, because step rows are stamped by the real clock and
@@ -16,6 +17,11 @@ version 2
 
 agent "reporter" { workspace "/tmp"; command "true" }
 agent "builder" { workspace "/tmp"; command "true" }
+agent "worker" {
+  under "reporter" reason="the reporter hears of the worker's stalls"
+  workspace "/tmp"
+  command "true"
+}
 resource "loop-result" { kind "custom.test.loop-result" }
 
 mission "watched" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
@@ -52,10 +58,57 @@ mission "unwatched" state="ready" {
   step "build" { assigned-to "agent/node.builder" }
 }
 
+mission "supervised" state="ready" {
+  concurrent-runs
+  goal "Name no reporter; the worker is under the reporter."
+  step "build" { assigned-to "agent/node.worker" }
+  step "ship" {
+    assigned-to "agent/node.worker"
+    depends-on { step "build" completed }
+  }
+}
+
+mission "loop-unnamed" state="ready" {
+  concurrent-runs
+  goal "Name no reporter; the work is in child rounds."
+  loop "rounds" {
+    max-rounds 3
+    until { gate "done" { field "state" "resource/loop-result" is "done" } }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "work" { assigned-to "agent/node.worker" }
+    }
+  }
+}
+
+mission "observed" state="ready" {
+  concurrent-runs
+  goal "Wait on a fact by design, with no agent and no reporter."
+  step "observe" {
+    agentless
+    gate "signal" { field "status" "resource/loop-result" is "ready" }
+  }
+}
+
 mission "absent-reporter" state="ready" report-to="agent/node.nobody" {
   concurrent-runs
   goal "Name an agent that is not declared."
   step "build" { assigned-to "agent/node.builder" }
+}
+mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
+  concurrent-runs
+  goal "Wait on a person and on a fact."
+  step "review" {
+    agentless
+    gate "accept" type="human" {
+      reviewer "person/example"
+      question "Accept this?"
+    }
+  }
+  step "observe" {
+    agentless
+    gate "signal" { field "status" "resource/loop-result" is "ready" }
+  }
 }
 mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
   concurrent-runs
@@ -283,10 +336,11 @@ fn a_quiet_parent_counts_child_round_progress_and_then_reports_real_silence() {
         );
         assert_eq!(
             fixture.reconciler.incremental.next_due(&parent.subject),
-            Some(progress_at + 20 * MINUTE)
+            Some(progress_at + 10 * MINUTE),
+            "the lease that progress renewed for ten minutes is not a sign of life"
         );
-        // The live worker's progress renews its lease for ten minutes. Release it before
-        // checking true silence, so a later lease-expiry transition cannot count as activity.
+        // Release the step before checking true silence, so the stall is the parent's own and a
+        // later lease-expiry transition cannot count as activity.
         fixture
             .store
             .work_action(
@@ -575,6 +629,162 @@ fn a_stalled_run_is_reported_once_and_again_only_after_more_progress() {
             .count(),
         2
     );
+}
+
+/// A live seat's driver renews its lease every minute. Renewals move the lease end and the step's
+/// last change, and neither is work: a held step that records nothing stalls like any other.
+#[test]
+fn a_held_step_that_only_renews_its_lease_stalls() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "held-quiet-run");
+    let build = Fixture::step(&run, "build");
+    fixture.passes(3);
+    let builder = fixture
+        .reconciler
+        .runtime
+        .started_members
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|member| member.runtime_id.ends_with("builder"))
+        .unwrap()
+        .clone();
+    fixture
+        .reconciler
+        .runtime
+        .ptys
+        .lock()
+        .unwrap()
+        .push(RuntimeObservation {
+            runtime_id: builder.runtime_id,
+            terminal: builder.terminal,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("quiet-worker".into()),
+        });
+    fixture.passes(1);
+    let act = |action: &str, key: &str, summary: Option<&str>| {
+        fixture
+            .store
+            .work_action(
+                &build,
+                action,
+                &crate::model::WorkRequest {
+                    actor: Some("agent/node.builder".into()),
+                    incarnation: Some("quiet-worker".into()),
+                    summary: summary.map(str::to_owned),
+                    reason: None,
+                    evidence: Vec::new(),
+                    wait_ms: None,
+                    idempotency_key: key.into(),
+                },
+            )
+            .unwrap();
+    };
+    let stalled = || {
+        fixture
+            .reports(REPORTER)
+            .into_iter()
+            .filter(|message| message.tags.contains(&"st3-run-report:stalled".to_owned()))
+            .count()
+    };
+    let claimed_at = start() + MINUTE;
+    {
+        let _at = Clock::at(&fixture.store, claimed_at);
+        act("claim", "claim-quiet", None);
+        fixture.passes(2);
+    }
+    for minute in 1..=9 {
+        let _at = Clock::at(&fixture.store, claimed_at + minute * MINUTE);
+        act("renew", &format!("renew-quiet-{minute}"), None);
+        fixture.passes(1);
+    }
+    let held = fixture.store.step_run(&build).unwrap().unwrap();
+    assert!(held.claim_expires_at_unix_ms.unwrap() > claimed_at + 10 * MINUTE);
+    assert_eq!(stalled(), 0, "nine minutes into a ten-minute limit");
+    assert_eq!(
+        fixture.reconciler.incremental.next_due(&run.subject),
+        Some(claimed_at + 10 * MINUTE),
+        "the limit counts from the claim, not from the renewed lease"
+    );
+    {
+        let _at = Clock::at(&fixture.store, claimed_at + 11 * MINUTE);
+        act("renew", "renew-quiet-11", None);
+        fixture.passes(2);
+        assert_eq!(stalled(), 1);
+    }
+    {
+        // More renewals are the same silence, so the same event.
+        let _at = Clock::at(&fixture.store, claimed_at + 12 * MINUTE);
+        act("renew", "renew-quiet-12", None);
+        fixture.passes(2);
+        assert_eq!(stalled(), 1);
+    }
+    {
+        let _at = Clock::at(&fixture.store, claimed_at + 13 * MINUTE);
+        act("progress", "progress-quiet", Some("Building."));
+        fixture.passes(2);
+        assert_eq!(stalled(), 1, "progress is a sign of life");
+    }
+    // Keep the ten-minute lease alive through the next silence, as a driver does.
+    for minute in 14..=22 {
+        let _at = Clock::at(&fixture.store, claimed_at + minute * MINUTE);
+        act("renew", &format!("renew-quiet-{minute}"), None);
+        fixture.passes(1);
+        assert_eq!(stalled(), 1, "minute {minute} is inside the limit after progress");
+    }
+    let _at = Clock::at(&fixture.store, claimed_at + 24 * MINUTE);
+    act("renew", "renew-quiet-24", None);
+    fixture.passes(2);
+    assert_eq!(stalled(), 2, "silence after progress is a new stall");
+}
+
+/// The runtime holds an agentless gate step without a claimant or a lease, so it is not a held
+/// step and nothing renews it: its last change is its sign of life, as before lease renewals
+/// stopped counting. A run that only waits on open gates therefore stalls at its limit, once;
+/// `report-stalls=#false` is how a run that intends such a wait says so.
+#[test]
+fn a_gate_step_the_runtime_holds_is_not_a_held_step() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("gated", "gated-run");
+    fixture.passes(4);
+    let view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(view.steps.len(), 2);
+    for step in &view.steps {
+        assert!(step.agentless, "{}", step.step);
+        assert_eq!(step.status, "working", "{}", step.step);
+        assert!(step.claimant.is_none(), "{}", step.step);
+        assert!(step.claim_expires_at_unix_ms.is_none(), "{}", step.step);
+    }
+    // No held step: the stall clock is the newest change of the run or of a step.
+    let quiet_since = crate::reconcile::run_report::run_activity(&view);
+    let last_change = view
+        .steps
+        .iter()
+        .map(|step| step.updated_at_unix_ms)
+        .chain([view.created_at_unix_ms, view.updated_at_unix_ms])
+        .max()
+        .unwrap();
+    assert_eq!(quiet_since, last_change);
+    assert_eq!(
+        fixture.reconciler.incremental.next_due(&run.subject),
+        Some(quiet_since + 10 * MINUTE)
+    );
+    let stalled = || {
+        fixture
+            .reports(REPORTER)
+            .into_iter()
+            .filter(|message| message.tags.contains(&"st3-run-report:stalled".to_owned()))
+            .count()
+    };
+    {
+        let _inside = Clock::at(&fixture.store, quiet_since + 9 * MINUTE);
+        fixture.passes(2);
+        assert_eq!(stalled(), 0);
+    }
+    let _later = Clock::at(&fixture.store, quiet_since + 3 * 24 * 60 * MINUTE);
+    fixture.passes(3);
+    assert_eq!(stalled(), 1, "one report, however long the gates stay open");
 }
 
 #[test]
@@ -1176,4 +1386,189 @@ mission "parent" state="ready" report-to="agent/node.reporter" report-stalls=#fa
     .skipping_unneeded(true);
     fixture.passes(2);
     assert_eq!(fixture.reports(REPORTER).len(), reports.len());
+}
+
+impl Fixture {
+    fn stalled_reports(&self, to: &str, run: &crate::model::MissionRunView) -> Vec<crate::model::MessageView> {
+        self.reports(to)
+            .into_iter()
+            .filter(|message| message.tags.contains(&format!("mission-run:{}", run.subject)))
+            .collect()
+    }
+
+    fn quiet_since(&self, run: &crate::model::MissionRunView) -> u128 {
+        crate::reconcile::run_report::run_activity(&self.store.mission_run(&run.id).unwrap().unwrap())
+    }
+}
+
+/// A run that names no reporter tells its requesting agent once that it stalled, after the
+/// default 30 minutes, and nothing about its failure.
+#[test]
+fn a_run_that_names_no_reporter_tells_its_requesting_agent_of_a_stall_only() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start_by("unwatched", "default-requester", REPORTER);
+    fixture.passes(3);
+    let quiet_since = fixture.quiet_since(&run);
+
+    let early = Clock::at(&fixture.store, quiet_since + 29 * MINUTE);
+    fixture.passes(3);
+    assert_eq!(fixture.report_claims(), 0);
+
+    let late = Clock::at(&fixture.store, quiet_since + 31 * MINUTE);
+    fixture.passes(4);
+    let reports = fixture.stalled_reports(REPORTER, &run);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].tags.contains(&"st3-run-report:stalled".to_owned()));
+    assert!(reports[0].content.contains("its limit is 30m"), "{}", reports[0].content);
+    assert!(reports[0].content.contains("you requested the run"), "{}", reports[0].content);
+    assert!(reports[0].content.contains("--clear"), "{}", reports[0].content);
+
+    // A failure is not reported by default.
+    drop((early, late));
+    fixture
+        .store
+        .set_step_state(&Fixture::step(&run, "build"), "failed", Some("broken"))
+        .unwrap();
+    fixture.passes(6);
+    assert_eq!(fixture.report_claims(), 1);
+    assert!(fixture.faults(&run).is_empty());
+}
+
+/// A person cannot be messaged, so a run a person requested tells an agent the stuck agent is
+/// `under`, never the stuck agent itself; neither does an agent that requested its own stuck work.
+#[test]
+fn a_person_or_stuck_requester_falls_back_to_the_stuck_agents_supervisor() {
+    let (_clock, fixture) = fixture();
+    let by_person = fixture.start("supervised", "default-supervisor");
+    let by_worker = fixture.start_by("supervised", "default-self", "agent/node.worker");
+    fixture.passes(3);
+    let quiet_since = fixture.quiet_since(&by_person).max(fixture.quiet_since(&by_worker));
+    let _late = Clock::at(&fixture.store, quiet_since + 31 * MINUTE);
+    fixture.passes(4);
+    for run in [&by_person, &by_worker] {
+        let reports = fixture.stalled_reports(REPORTER, run);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(
+            reports[0].content.contains("agent/node.worker is `under` you"),
+            "{}",
+            reports[0].content
+        );
+    }
+    assert!(fixture.reports("agent/node.worker").is_empty());
+    assert_eq!(fixture.report_claims(), 2);
+}
+
+#[test]
+fn an_explicit_reporter_wins_over_the_default() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start_by("unwatched", "explicit-wins", REPORTER);
+    fixture.report_to(
+        &run,
+        REPORTER,
+        Some("agent/node.builder"),
+        Some(10 * MINUTE as u64),
+        "explicit-wins-report",
+    );
+    fixture.passes(3);
+    let quiet_since = fixture.quiet_since(&run);
+    let _late = Clock::at(&fixture.store, quiet_since + 60 * MINUTE);
+    fixture.passes(4);
+    assert!(fixture.reports(REPORTER).is_empty());
+    let reports = fixture.stalled_reports("agent/node.builder", &run);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].content.contains("names you in `report-to`"), "{}", reports[0].content);
+}
+
+#[test]
+fn clearing_or_muting_stalls_suppresses_the_default() {
+    let (_clock, fixture) = fixture();
+    let cleared = fixture.start_by("unwatched", "default-cleared", REPORTER);
+    let muted = fixture.start_by("unwatched", "default-muted", REPORTER);
+    fixture.report_to(&cleared, REPORTER, None, None, "default-cleared-report");
+    fixture
+        .store
+        .set_mission_run_report(&muted.subject, REPORTER, Some(REPORTER), None, Some(false), false, "default-muted-report")
+        .unwrap();
+    fixture.passes(3);
+    let _late = Clock::at(&fixture.store, start() + 24 * 60 * MINUTE);
+    fixture.passes(4);
+    assert_eq!(fixture.report_claims(), 0);
+}
+
+/// A run whose open work waits on a gate by design has no stuck agent, so even an agent that
+/// requested it is not told, and its run carries no stall deadline.
+#[test]
+fn an_agentless_observer_run_has_no_default_reporter() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start_by("observed", "default-observer", REPORTER);
+    fixture.passes(3);
+    let _late = Clock::at(&fixture.store, start() + 24 * 60 * MINUTE);
+    fixture.passes(4);
+    assert_eq!(fixture.report_claims(), 0);
+    assert!(fixture.faults(&run).is_empty());
+}
+
+/// Turning the default on, by upgrading or in the config, does not report silences that were
+/// already past their limit; a silence that begins later is reported.
+#[test]
+fn turning_the_default_on_does_not_report_old_silences() {
+    let (_clock, mut fixture) = fixture();
+    fixture.reconciler.set_default_stall_reports(false);
+    let run = fixture.start("supervised", "default-upgrade");
+    fixture.passes(3);
+    let quiet_since = fixture.quiet_since(&run);
+    let upgraded = Clock::at(&fixture.store, quiet_since + 120 * MINUTE);
+    fixture.passes(3);
+    assert_eq!(fixture.report_claims(), 0);
+
+    // A config change turns it on, and a restarted daemon starts with it on: neither reports.
+    fixture.reconciler.set_default_stall_reports(true);
+    fixture.passes(3);
+    assert_eq!(fixture.report_claims(), 0);
+    fixture.reconciler = Reconciler::new(
+        fixture.store.clone(),
+        Arc::new(FakeRuntime::default()),
+        "node".into(),
+        Arc::new(Notify::new()),
+    )
+    .skipping_unneeded(true);
+    fixture.passes(3);
+    assert_eq!(fixture.report_claims(), 0);
+
+    // A silence that begins after the default came on is reported once it passes the limit.
+    let fresh = fixture.start("supervised", "default-after-upgrade");
+    fixture.passes(3);
+    let fresh_since = fixture.quiet_since(&fresh);
+    assert!(fresh_since >= quiet_since + 120 * MINUTE);
+    drop(upgraded);
+    let _later = Clock::at(&fixture.store, fresh_since + 31 * MINUTE);
+    fixture.passes(4);
+    assert_eq!(fixture.stalled_reports(REPORTER, &fresh).len(), 1);
+    assert!(fixture.stalled_reports(REPORTER, &run).is_empty());
+}
+
+/// A loop parent's work is in its rounds: the parent reports their stuck agent's stall, once,
+/// and the round itself does not report it again.
+#[test]
+fn a_parent_reports_the_stall_of_its_rounds_by_default_and_the_round_does_not() {
+    let (_clock, fixture) = fixture();
+    let parent = fixture.start("loop-unnamed", "default-loop");
+    fixture.passes(10);
+    let loop_step = parent
+        .steps
+        .iter()
+        .find(|step| step.step.ends_with("rounds"))
+        .unwrap();
+    let child = fixture
+        .store
+        .mission_run_for_parent_step(&loop_step.subject)
+        .unwrap()
+        .unwrap();
+    let quiet_since = fixture.quiet_since(&parent).max(fixture.quiet_since(&child));
+    let _late = Clock::at(&fixture.store, quiet_since + 31 * MINUTE);
+    fixture.passes(4);
+    let reports = fixture.stalled_reports(REPORTER, &parent);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].content.contains("agent/node.worker is `under` you"), "{}", reports[0].content);
+    assert_eq!(fixture.report_claims(), 1);
 }

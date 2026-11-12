@@ -57,6 +57,7 @@ struct Asked {
     observer: Option<Arc<Observed>>,
     /// The `Stages` scope this thread was in when it asked.
     stages: Option<Arc<Mutex<StageClock>>>,
+    receive: Option<crate::receive_metrics::Context>,
 }
 
 impl Holder {
@@ -83,7 +84,12 @@ impl Holder {
             asked: Instant::now(),
             observer,
             stages,
+            receive: crate::receive_metrics::capture(),
         }))
+    }
+
+    pub(crate) fn receive(&self) -> Option<&crate::receive_metrics::Context> {
+        self.0.receive.as_ref()
     }
 
     fn json(&self) -> Value {
@@ -292,8 +298,12 @@ impl Record {
                     row["held_ms"] = json!(ms(long.held));
                     if let Some(kind) = long.kind {
                         row["kind"] = json!(kind.name());
-                        row["writes"] = json!(long.writes);
-                        row["longest_write_ms"] = json!(ms(long.longest_write));
+                        // A lend's borrower writes on the connection itself, uncounted; only a
+                        // batch knows its writes, so a lend reports none rather than 0.
+                        if kind == HoldKind::Batch {
+                            row["writes"] = json!(long.writes);
+                            row["longest_write_ms"] = json!(ms(long.longest_write));
+                        }
                     }
                     if let Some(stages) = &long.stages {
                         let staged = stages.iter().map(|(_, spent)| *spent).sum::<Duration>();
@@ -321,7 +331,9 @@ impl Record {
                 row["kind"] = json!(current.kind.name());
                 row["started_unix_ms"] = json!(wall_ms.saturating_sub(us(held) / 1000));
                 row["held_ms"] = json!(ms(held));
-                row["writes"] = json!(current.writes);
+                if current.kind == HoldKind::Batch {
+                    row["writes"] = json!(current.writes);
+                }
                 if let Some(stage) = current.stage() {
                     row["stage"] = json!(stage);
                 }
@@ -360,6 +372,7 @@ pub struct WriterHold {
     stages: Option<Vec<(&'static str, Duration)>>,
     /// A staged lend's rebuilt aggregates, taken when the hold ends.
     rebuilt: Vec<(&'static str, Rebuilt)>,
+    receive_shared_batch: Option<u64>,
 }
 
 impl WriterHold {
@@ -381,7 +394,12 @@ impl WriterHold {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
+    }
+
+    pub(crate) fn shared_receive_batch(&mut self, batch_id: u64) {
+        self.receive_shared_batch = Some(batch_id);
     }
 
     /// A batched write from `holder` begins in this hold.
@@ -420,11 +438,21 @@ impl WriterHold {
         tracing::warn!(
             holder = &*holder.label,
             client = holder.client.as_deref().unwrap_or("-"),
+            correlation_id = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(crate::receive_metrics::Context::correlation_id)
+            } else { None },
+            receive_phase = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(|context| context.stage().name())
+            } else { None },
+            shared_batch_id = self.receive_shared_batch,
             at = %format_args!("{}:{}", holder.at.file(), holder.at.line()),
             kind = self.kind.name(),
             held_ms = ms(held).round() as u64,
             waited_ms = ms(self.started.saturating_duration_since(holder.asked)).round() as u64,
-            writes = self.writes,
+            writes = %match self.kind {
+                HoldKind::Batch => self.writes.to_string(),
+                HoldKind::Lend => "-".to_owned(),
+            },
             stages = stages.as_deref().unwrap_or("-"),
             "a write held the store's writer over 1 s",
         );
@@ -560,8 +588,9 @@ pub fn covered(unit: &'static str, count: usize) {
     });
 }
 
-/// Stages a lend keeps; a later stage adds to `other`, the last.
-const STAGES_KEPT: usize = 16;
+/// Stages a lend keeps; a later stage adds to `other`, the last. A replicated projection pass
+/// has 19: its own five, a flush hook each, the lease reapply, health, commit and release.
+const STAGES_KEPT: usize = 24;
 
 /// The aggregates one stage of a staged lend rebuilt, and the claims they replayed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -838,6 +867,7 @@ mod tests {
             asked: Instant::now(),
             observer: None,
             stages: None,
+            receive: None,
         }))
     }
 
@@ -851,6 +881,7 @@ mod tests {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
     }
 
@@ -938,6 +969,7 @@ mod tests {
         assert_eq!(line["kind"], "lend");
         assert!(line["held_ms"].parse::<u64>().unwrap() >= 1_200, "{line:?}");
         assert_eq!(line["waited_ms"], "300");
+        assert_eq!(line["writes"], "-", "a lend does not count the writes its borrower makes");
         // A batch names its longest write, not the first one in it.
         let mut batch = hold(HoldKind::Batch, "POST /v1/messages");
         batch.ran(&holder("task replication.receive"), Duration::from_millis(1_100));
@@ -1095,14 +1127,16 @@ mod tests {
         assert_eq!(oldest["kind"], "lend");
         assert_eq!(oldest["held_ms"], 101_800.0);
         assert_eq!(oldest["started_unix_ms"], 9_000_000 - 101_800);
+        assert!(oldest.get("writes").is_none(), "a lend does not count the writes its borrower makes");
         assert_eq!(report["in_progress"][1]["writes"], 3);
     }
 
     #[test]
     fn a_staged_lend_keeps_a_bounded_set_of_stages_and_stops_at_its_end() {
-        const NAMES: [&str; 20] = [
+        const NAMES: [&str; 28] = [
             "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13",
-            "s14", "s15", "s16", "s17", "s18", "s19",
+            "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24", "s25",
+            "s26", "s27",
         ];
         let mut clock = StageClock::default();
         for name in NAMES {
@@ -1115,7 +1149,7 @@ mod tests {
             ("other", Duration::from_millis(folded))
         );
         let total = clock.spent.iter().map(|(_, spent)| *spent).sum::<Duration>();
-        assert_eq!(total, Duration::from_millis(20));
+        assert_eq!(total, Duration::from_millis(28));
         // A stage entered after the writer closed the clock is not counted.
         let stages = Stages::begin();
         stages.enter("begin");
@@ -1149,6 +1183,7 @@ mod tests {
                     claims: 40,
                 },
             )],
+            receive_shared_batch: None,
         };
         record.held(now, 1_000_000, &mut lend, Duration::from_millis(200), true);
         std::mem::forget(lend);

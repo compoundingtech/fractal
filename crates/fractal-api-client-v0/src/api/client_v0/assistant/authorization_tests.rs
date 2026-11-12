@@ -25,12 +25,20 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     fixture_for_owner(scopes,pin_trust,OWNER).await
 }
 
+async fn fixture_principal(scopes: &[&str], pin_trust: bool, principal: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, OWNER, principal).await
+}
+
 async fn fixture_for_owner(scopes: &[&str], pin_trust: bool, owner: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, owner, PRINCIPAL).await
+}
+
+async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner: &str, principal: &str) -> Fixture {
     let root=tempfile::tempdir().unwrap();
     let mut state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
     state.owning_person=Some(owner.into());
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
-        "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":scopes,
+        "device_name":"assistant","assistant_id":principal,"scopes":scopes,
         "disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap();
     let Json(challenge)=begin(state.clone(),ClientSession::local(Some(owner)).unwrap(),request).await.unwrap();
     let device_key=signing_key();
@@ -63,7 +71,8 @@ impl Fixture {
     fn payload(&self, route: &str, query: &str) -> ReadPayload {
         let uri=format!("/v1/client/assistant/{route}{query}").parse::<axum::http::Uri>().unwrap();
         let parameters=parameters(&uri).unwrap();
-        ReadPayload {issuer:"scg/approval-host".into(),identity:"chatgpt".into(),assistant_id:PRINCIPAL.into(),
+        let principal = self.session().authority_actor;
+        ReadPayload {issuer:"scg/approval-host".into(),identity:principal.strip_prefix("assistant/").unwrap().into(),assistant_id:principal,
             grant_id:self.grant.clone(),policy_revision:self.revision,key_id:"approval-key/test".into(),
             approval_id:"approval/test".into(),execution_id:"execution/test".into(),projection:route.into(),
             max_response_bytes:parameters.get("max_response_bytes").map(|value| value.parse().unwrap()).unwrap_or(DEFAULT_RESPONSE_BYTES),
@@ -90,6 +99,64 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
     let status=response.status();
     let bytes=to_bytes(response.into_body(),64*1024).await.unwrap();
     (status,serde_json::from_slice(&bytes).unwrap(),bytes.len())
+}
+
+#[tokio::test]
+async fn scg_read_accepts_header_aliases_and_binds_presented_domain() {
+    let fixture = fixture(SCOPES, true).await;
+    let path = "/v1/client/assistant/summary";
+    for name in [HEADER, "x-fractal-scg-read-authorization"] {
+        // Omission preserves the deployed proof bytes. Explicit domains bind their own prefix.
+        for domain in [None, Some("st3.scg-read.v1"), Some("fractal.scg-read.v1")] {
+            let payload = fixture.payload("summary", "");
+            let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+            let message = format!("{}\n{canonical}", domain.unwrap_or("st3.scg-read.v1"));
+            if domain.is_none() { assert_eq!(message, signing_bytes(&payload).unwrap()); }
+            let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fixture.attestor.sign(message.as_bytes()).as_ref());
+            let mut proof = json!({"payload":payload,"signature":signature});
+            if let Some(domain) = domain { proof["domain"] = json!(domain); }
+            let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&proof).unwrap());
+            let response = super::super::super::super::fabric_router(fixture.state.clone()).oneshot(
+                Request::builder().uri(path).header(AUTHORIZATION, format!("Bearer {}", fixture.credential))
+                    .header(name, &header).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{name}, {domain:?}");
+        }
+    }
+    for (signed, presented) in [
+        ("st3.scg-read.v1", "fractal.scg-read.v1"),
+        ("fractal.scg-read.v1", "st3.scg-read.v1"),
+        ("st3.scg-read.v1", "unknown.scg-read.v1"),
+    ] {
+        let payload = fixture.payload("summary", "");
+        let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+        let message = format!("{signed}\n{canonical}");
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fixture.attestor.sign(message.as_bytes()).as_ref());
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+            &json!({"domain":presented,"payload":payload,"signature":signature})).unwrap());
+        assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::FORBIDDEN,
+            "signed {signed}, presented {presented}");
+    }
+    // Missing domain must not reinterpret a signature made over the new domain.
+    let payload = fixture.payload("summary", "");
+    let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+    let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(fixture.attestor.sign(format!("fractal.scg-read.v1\n{canonical}").as_bytes()).as_ref());
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+        &json!({"payload":payload,"signature":signature})).unwrap());
+    assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::FORBIDDEN);
+
+    let payload = fixture.payload("summary", "");
+    let header = fixture.header(&payload, &fixture.attestor);
+    let response = super::super::super::super::fabric_router(fixture.state.clone()).oneshot(
+        Request::builder().uri(path).header(AUTHORIZATION, format!("Bearer {}", fixture.credential))
+            .header(HEADER, &header).header("x-fractal-scg-read-authorization", "conflict")
+            .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // Conflict refusal must not consume an otherwise valid deployed proof.
+    assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -135,6 +202,30 @@ async fn assistant_all_six_reads_require_proof_even_on_native_router() {
 }
 
 #[tokio::test]
+async fn proof_principal_and_identity_must_match_the_persisted_grant() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        let fixture = fixture_principal(SCOPES, true, principal).await;
+        let payload = fixture.payload("summary", "");
+        let parameters = payload.parameters.clone();
+        for identity_only in [false, true] {
+            let mut forged = payload.clone();
+            let other = if principal == MCP_PRINCIPAL { PRINCIPAL } else { MCP_PRINCIPAL };
+            if identity_only {
+                forged.identity = other.strip_prefix("assistant/").unwrap().into();
+            } else {
+                forged.assistant_id = other.into();
+            }
+            let authorization = ReadAuthorization { domain:ReadDomain::default(), signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fixture.attestor.sign(signing_bytes(&forged).unwrap().as_bytes()).as_ref()), payload:forged };
+            assert!(verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).is_err());
+        }
+        let authorization = ReadAuthorization { domain:ReadDomain::default(), signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref()), payload };
+        verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn assistant_read_proofs_reject_unpinned_fabricated_shim_expired_and_wrong_filter() {
     let unpinned=fixture(SCOPES,false).await;
     let payload=unpinned.payload("summary","");
@@ -171,6 +262,18 @@ async fn assistant_read_trust_rejects_shim_as_attestor_and_remote_pinning() {
 }
 
 #[tokio::test]
+async fn assistant_read_trust_accepts_legacy_and_fractal_versions() {
+    let fixture=fixture(SCOPES,false).await;
+    for version in ["st3.client.v0", "fractal.client.v0"] {
+        let mut trust=fixture.trust_request();
+        trust.api_version=version.into();
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap();
+        assert!(grant["policy_revision"].as_u64().is_some());
+    }
+}
+
+#[tokio::test]
 async fn assistant_read_nonce_is_atomic_and_private_results_never_replay_after_restart() {
     let fixture=fixture(SCOPES,true).await;
     let payload=fixture.payload("summary","");let header=fixture.header(&payload,&fixture.attestor);
@@ -200,7 +303,7 @@ async fn assistant_response_budget_includes_envelope_and_supports_downward_polic
     let query=format!("?max_response_bytes={envelope_budget}");
     let payload=fixture.payload("summary",&query);
     let receipt=verify(&fixture.state,&fixture.session(),"/v1/client/assistant/summary",
-        &payload.parameters,&ReadAuthorization {payload:payload.clone(),signature:
+        &payload.parameters,&ReadAuthorization {domain:ReadDomain::default(),payload:payload.clone(),signature:
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref())}).unwrap().1;
     let header=fixture.header(&payload,&fixture.attestor);
     let (status,value,_)=fixture.request(&format!("/v1/client/assistant/summary{query}"),Some(&header)).await;
@@ -634,6 +737,29 @@ async fn projection_read_mode(fixture: &mut Fixture, mode: &str) {
     let Json(grant)=super::super::update_policy(State(fixture.state.clone()),
         Extension(ClientSession::local(fixture.state.owning_person.as_deref()).unwrap()),AxumPath(fixture.grant.clone()),Json(policy)).await.unwrap();
     fixture.revision=grant["policy_revision"].as_u64().unwrap();
+}
+
+#[tokio::test]
+async fn assistant_read_receipts_keep_the_grant_principal_in_both_read_modes() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        for caller_bound in [false, true] {
+            let mut fixture = fixture_principal(SCOPES, !caller_bound, principal).await;
+            if caller_bound {
+                projection_read_mode(&mut fixture, "caller-bound-allow").await;
+            }
+            let payload = fixture.payload("summary", "");
+            let header = (!caller_bound).then(|| fixture.header(&payload, &fixture.attestor));
+            let (status, value, _) = fixture.request("/v1/client/assistant/summary", header.as_deref()).await;
+            assert_eq!(status, StatusCode::OK, "{principal}: {value}");
+            fixture.state.assistant_receipts.flush().await.unwrap();
+            for kind in ["custom.client.assistant.v1.read-used", OUTCOME] {
+                let claims = fixture.state.store.claims_for_kind_at(kind, None, true, 100).unwrap().claims;
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].actor.as_deref(), Some(fixture.session().actor.as_str()));
+                assert_eq!(claims[0].body["fields"]["principal"], principal);
+            }
+        }
+    }
 }
 
 #[tokio::test]

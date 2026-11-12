@@ -36,8 +36,8 @@ pub struct Extras {
     /// model holds is a cache from an earlier run, and nothing built on it is shown as current.
     pub attention_live: bool,
     pub agents_live: bool,
-    /// st's own counts, when it serves them.
-    pub summary: Option<fractal_client::Summary>,
+    /// Counts and their source cut, scoped to the current connection.
+    pub summary: Option<(fractal_client::Summary, fractal_client::Snapshot)>,
     pub inventory_supported: Option<bool>,
     pub inventory_partial: Vec<String>,
     /// Objectives and budgets read on demand while the Usage view shows, and the history of
@@ -46,6 +46,17 @@ pub struct Extras {
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
     /// Why the last refresh failed, while `slo` still holds the rows of an earlier read.
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, from the same `slo.list` read.
+    pub slo_otel_url: Option<String>,
+}
+
+impl Extras {
+    pub fn reset_connection(&mut self) {
+        self.summary = None;
+        self.live = false;
+        self.attention_live = false;
+        self.agents_live = false;
+    }
 }
 
 fn age(then: &str, now: &str) -> String {
@@ -122,12 +133,12 @@ fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
 /// How long st may stay silent before the screen calls the link offline, not reconnecting.
 pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// `OFFLINE_GRACE`, unless `STUI_OFFLINE_GRACE_MS` says otherwise. Only the end-to-end tests set it,
+/// `OFFLINE_GRACE`, unless `FRACTAL_TUI_OFFLINE_GRACE_MS` says otherwise. Only the end-to-end tests set it,
 /// so they need not wait a minute to see the offline word.
 pub fn offline_grace() -> std::time::Duration {
     static GRACE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
     *GRACE.get_or_init(|| {
-        std::env::var("STUI_OFFLINE_GRACE_MS")
+        std::env::var("FRACTAL_TUI_OFFLINE_GRACE_MS")
             .ok()
             .and_then(|ms| ms.parse().ok())
             .map(std::time::Duration::from_millis)
@@ -228,7 +239,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         .window_errors
         .iter()
         .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
-            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals", "ReadPositions", "ReadPositionsList"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -246,7 +257,13 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         behind,
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
-        active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
+        unread: Default::default(),
+        active_missions: extras.summary.as_ref().map(|(summary, _)| summary.active_missions as usize),
+        inbox_alerts: extras.summary.as_ref()
+            .filter(|(_, summary)| model.now.truncated && model.now.snapshot.as_ref().is_some_and(|attention| {
+                summary.host_id == attention.host_id && summary.store_index >= attention.store_index
+            }))
+            .and_then(|(summary, _)| summary.alerts.map(|alerts| alerts as usize)),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
@@ -290,6 +307,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         slo: extras.slo.clone(),
         slo_history: extras.slo_history.clone(),
         slo_stale: extras.slo_stale.clone(),
+        slo_otel_url: extras.slo_otel_url.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
@@ -324,8 +342,8 @@ fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>
     }
 }
 
-/// Whether a client's reported build is an older version than the member's own. Only st's own
-/// builds share the member's version line ("stui 0.1.0+ab12cd3", "st 0.1.0+ab12cd3"); any other
+/// Whether a client's reported build is an older version than the member's own. Only Fractal's own
+/// builds share the member's version line ("fractal-tui 0.1.0+ab12cd3", "fractal 0.1.0+ab12cd3"); any other
 /// client, and any build that does not parse, is never called older.
 fn older_than_member(client: &str, member: &str) -> bool {
     fn version(build: &str) -> Option<Vec<u64>> {
@@ -335,9 +353,11 @@ fn older_than_member(client: &str, member: &str) -> bool {
     let Some((name, build)) = client.split_once(' ') else {
         return false;
     };
-    if !matches!(name, "stui" | "st") {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    if !matches!(name, "stui" | "fractal-tui" | "st") {
         return false;
     }
+    // LIVE-MIGRATION END
     match (version(build), version(member)) {
         (Some(client), Some(member)) => client < member,
         _ => false,
@@ -617,6 +637,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
+                requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
@@ -853,6 +874,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                     .presentation
                     .is_none()
                     .then(|| agent.state.clone()),
+                last_prose_ms: agent.last_prose_at.as_deref().and_then(super::read_store::at_ms),
             }
         })
         .collect::<Vec<_>>();
@@ -890,6 +912,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
             terminal: false,
             subagents: Vec::new(),
             reported: None,
+            last_prose_ms: None,
         }
     }));
     agents
@@ -1034,6 +1057,39 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_badge_inbox_uses_summary_only_for_truncated_attention() {
+        let mut model = Model::default();
+        model.now = window(Vec::new());
+        let snapshot = model.now.snapshot.clone().unwrap();
+        let mut extras = Extras {
+            summary: Some((serde_json::from_value(serde_json::json!({
+                "id": "summary", "kind": "summary", "revision": "one",
+                "updated_at": "2026-11-02T00:00:00Z",
+                "needs_you": 251, "alerts": 251, "working_agents": 0,
+                "active_missions": 0,
+                "machines": {"connected": 0, "indirect": 0, "offline": 0}
+            })).unwrap(), snapshot)),
+            ..Extras::default()
+        };
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        model.now.truncated = true;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, Some(251));
+        model.now.snapshot.as_mut().unwrap().store_index = 2;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().1.store_index = 2;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, Some(251));
+        extras.summary.as_mut().unwrap().1.host_id = "host/other".into();
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().1.host_id = model.now.snapshot.as_ref().unwrap().host_id.clone();
+        extras.summary.as_mut().unwrap().0.alerts = None;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().0.alerts = Some(0);
+        extras.reset_connection();
+        assert!(extras.summary.is_none());
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+    }
 
     #[test]
     fn identity_labels_show_fallback_ids_only_once() {
@@ -1425,6 +1481,7 @@ mod tests {
     fn both_delivery_sentences_are_sts_notes_not_the_persons_words() {
         for note in [
             "The person reads replies in st, not in the agent's session.",
+            "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
             "Answer the person in this conversation; people have no inbox, so do not reply with st.",
         ] {
             let delivery = format!("<smalltalk-message id=\"e6\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/e6\">\nis this a watcher?\n</smalltalk-message>\n{note}");
@@ -1455,7 +1512,7 @@ mod tests {
 
     #[test]
     fn a_delivery_by_the_current_channel_plugin_leaves_no_empty_shell_behind() {
-        // Nathan, 2026-10-05: "I see xml in stui tonight": plugin:st-channel:st was not a name
+        // Nathan, 2026-10-05: "I see xml in the terminal UI tonight": plugin:st-channel:st was not a name
         // the delivery recognised, so its envelope was taken out and `<channel …></channel>` stayed.
         let delivery = "<channel source=\"plugin:st-channel:st\" from=\"person/example\" messageId=\"message/c4\" threadId=\"message/c4\" identity=\"fleet/example/quay\">\n<smalltalk-message id=\"c4\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c4\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
         let shown = BTreeSet::from(["message/c4".to_owned()]);
@@ -2915,18 +2972,29 @@ mod tests {
     }
 
     #[test]
-    fn only_an_older_st_build_is_called_older_than_its_member() {
-        assert!(older_than_member("stui 0.0.9+77d0a13", "0.1.0+1ecae71"));
+    fn only_an_older_fractal_build_is_called_older_than_its_member() {
+        assert!(older_than_member("fractal-tui 0.0.9+77d0a13", "0.1.0+1ecae71"));
         assert!(older_than_member("st 0.1.0+local.ab12cd3", "0.2.0+1ecae71"));
-        assert!(!older_than_member("stui 0.1.0+77d0a13", "0.1.0+1ecae71"));
-        assert!(!older_than_member("stui 0.2.0+77d0a13", "0.1.0+1ecae71"));
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        assert!(older_than_member(
+            "fractal-tui 0.0.9+77d0a13",
+            "0.1.0+1ecae71"
+        ));
+        assert!(!older_than_member(
+            "fractal-tui 0.1.0+77d0a13",
+            "0.1.0+1ecae71"
+        ));
+        assert!(!older_than_member("fractal-tui dev", "0.1.0+1ecae71"));
+        // LIVE-MIGRATION END
+        assert!(!older_than_member("fractal-tui 0.1.0+77d0a13", "0.1.0+1ecae71"));
+        assert!(!older_than_member("fractal-tui 0.2.0+77d0a13", "0.1.0+1ecae71"));
         // Another client's version line is its own, and an unnamed or odd build is never older.
         assert!(!older_than_member(
             "smalltalk-ios 0.0.1 (3)",
             "0.1.0+1ecae71"
         ));
         assert!(!older_than_member("", "0.1.0+1ecae71"));
-        assert!(!older_than_member("stui dev", "0.1.0+1ecae71"));
+        assert!(!older_than_member("fractal-tui dev", "0.1.0+1ecae71"));
     }
 
     #[test]
@@ -2945,7 +3013,7 @@ mod tests {
             .collect();
         let text = text.join("\n");
         assert!(text.contains("CONNECTED CLIENTS"), "{text}");
-        assert!(text.contains("stui 0.1.0+1ecae71"), "{text}");
+        assert!(text.contains("fractal-tui 0.1.0+1ecae71"), "{text}");
         assert!(text.contains("person/robin · Robin's phone"), "{text}");
         // The follows list may wrap, so its words are checked apart.
         assert!(text.contains("follows now,"), "{text}");

@@ -33,6 +33,8 @@ struct Runtime {
     /// Refuse each start with this launcher error, as a launcher this build cannot use does.
     refuse_with: Mutex<Option<String>>,
     attempts: Mutex<Vec<MemberSpec>>,
+    /// The system time of each attempt, in milliseconds since the epoch, as the reconciler reads it.
+    attempted_at: Mutex<Vec<u128>>,
     exit_on_start: Mutex<bool>,
     before_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     snapshot_unavailable: Mutex<bool>,
@@ -77,6 +79,7 @@ impl RuntimeControl for Runtime {
     }
     fn start(&self, member: &MemberSpec) -> anyhow::Result<()> {
         self.attempts.lock().unwrap().push(member.clone());
+        self.attempted_at.lock().unwrap().push(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
         anyhow::ensure!(
             !*self.refuse_start.lock().unwrap(),
             "fixture rejected launch"
@@ -254,7 +257,7 @@ impl Fixture {
                 source: Source { repository: "acme/example".into(), r#ref: "refs/heads/main".into(), sha: "a".repeat(40), sequence: 1 },
                 expected_set: "absent".into(), rollout: None,
                 adopt: std::collections::BTreeSet::from(["agent/example/worker".into()]),
-                allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+                allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
             };
             options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
             store.apply_owned_set(&intent, &options, "own-fixture", "person/avery").unwrap();
@@ -279,11 +282,14 @@ impl Fixture {
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
             node: "restart-test".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),
@@ -939,6 +945,7 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         adopt: std::collections::BTreeSet::from([subject.clone()]),
         allow_empty: false,
         confirm_retire: None,
+        policy: None,
         expected_subjects: Default::default(),
     };
     options.expected_subjects = fixture
@@ -3884,47 +3891,85 @@ fn fresh_passes(fixture: &Fixture, passes: usize) {
     }
 }
 
+/// The recorded claims the reconciler times the next crash-loop retry from: the latest crash-loop
+/// decision or failed start, and how many retries came before it.
+fn retry_clock(fixture: &Fixture, subject: &str) -> (u128, usize) {
+    let decisions = fixture.store.claims_for(subject, Some("runtime.reconcile-decision")).unwrap();
+    let key = |claim: &ClaimRecord| claim.body["fields"]["key"].as_str().unwrap_or_default().to_owned();
+    let retries = decisions.iter().filter(|claim| key(claim).starts_with("runtime-crash-loop-retry:")).count();
+    let failed = fixture.store.observations_for(subject, "runtime.action.failed").unwrap();
+    let since = decisions
+        .iter()
+        .filter(|claim| key(claim).starts_with("runtime-crash-loop:") || key(claim).starts_with("runtime-crash-loop-retry:"))
+        .chain(failed.iter().filter(|claim| claim.body["fields"]["action"] == "start"))
+        .map(|claim| claim.accepted_at_unix_ms)
+        .max()
+        .expect("a parked launch has its decision");
+    (since, retries)
+}
+
+fn wait_until(unix_ms: u128) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    wait_ms(u64::try_from(unix_ms.saturating_sub(now)).unwrap());
+}
+
+/// Wait until the next crash-loop retry is due: the base wait doubled once per retry so far.
+fn wait_for_the_next_retry(fixture: &Fixture, subject: &str, base: u128) {
+    let (since, retries) = retry_clock(fixture, subject);
+    wait_until(since + (base << retries));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_restarts_always() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(300, std::sync::atomic::Ordering::SeqCst);
+    let base = 1500;
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(1500, std::sync::atomic::Ordering::SeqCst);
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
     park(&fixture, &subject, "claude");
     *fixture.runtime.refuse_start.lock().unwrap() = true;
     hang_up(&fixture);
     assert!(parked_fault(&fixture, &subject), "the park is a fault until a retry succeeds");
 
-    // Parked: no launch is tried before the first wait is over.
+    // The first retry fails, and says so. Passes run in wall time, so a slow host's passes can
+    // outlast a wait and make the next retry too: each wait is judged from the attempts' times below.
     fresh_passes(&fixture, 4);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1, "only the first launch so far");
-    assert!(retry_decisions(&fixture, &subject).is_empty());
-
-    // The first retry fails, and says so; the next waits twice as long.
-    wait_ms(350);
+    wait_for_the_next_retry(&fixture, &subject, base);
     fresh_passes(&fixture, 4);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
-    assert_eq!(retry_decisions(&fixture, &subject).len(), 1);
+    let retries = retry_decisions(&fixture, &subject).len();
+    assert!(retries >= 1);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1 + retries, "each retry is one attempt");
     assert!(parked_fault(&fixture, &subject));
+    // The second wait is longer: passes once the first wait is over again start no retry yet. A
+    // retry these passes do start is judged below against the doubled wait.
+    let (since, _) = retry_clock(&fixture, &subject);
+    wait_until(since + base);
     fresh_passes(&fixture, 4);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2, "the second wait is longer");
 
     // Once the launcher works, the next retry starts the seat and the fault is gone.
     *fixture.runtime.refuse_start.lock().unwrap() = false;
-    wait_ms(700);
+    wait_for_the_next_retry(&fixture, &subject, base);
     fresh_passes(&fixture, 4);
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2, "the retry started the seat");
     let retries = retry_decisions(&fixture, &subject);
-    assert_eq!(retries.len(), 2, "{retries:?}");
-    let reason = retries[1].body["fields"]["reason"].as_str().unwrap();
+    let reason = retries.last().unwrap().body["fields"]["reason"].as_str().unwrap();
     assert!(
-        reason.contains("retry 2 of") && reason.contains("fixture rejected launch"),
+        reason.contains(&format!("retry {} of", retries.len())) && reason.contains("fixture rejected launch"),
         "each retry reports the failure before it: {reason}"
     );
     assert!(!parked_fault(&fixture, &subject), "a retry that started the seat resolves the fault");
     fresh_passes(&fixture, 4);
-    assert_eq!(retry_decisions(&fixture, &subject).len(), 2, "a running seat is not retried");
+    assert_eq!(retry_decisions(&fixture, &subject).len(), retries.len(), "a running seat is not retried");
+
+    // No launch came before its wait was over, and each wait doubled the one before it.
+    let attempted_at = fixture.runtime.attempted_at.lock().unwrap().clone();
+    assert_eq!(attempted_at.len(), 1 + retries.len());
+    assert!(attempted_at.len() >= 3, "the seat started on a second retry at the earliest");
+    for (retry, pair) in attempted_at.windows(2).enumerate() {
+        let wait = base << retry;
+        assert!(pair[1] - pair[0] >= wait, "retry {} came {} ms after the attempt before it, inside its {wait} ms wait", retry + 1, pair[1] - pair[0]);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

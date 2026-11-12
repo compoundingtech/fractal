@@ -116,14 +116,6 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
   </div>
 }
 
-/** Restores a persisted size once, client-side only. */
-export const usePersistedSize = (id: string, fallback: number) => {
-  const [size, setSize] = React.useState(() => {
-    try { const value = Number(window.localStorage.getItem(`composition.${id}`)); return Number.isFinite(value) && value > 0 ? value : fallback } catch { return fallback }
-  })
-  return [size, setSize] as const
-}
-
 // Controlled header: the host supplies every displayed fact.
 export function ThreadHeader({
   folder,
@@ -142,12 +134,13 @@ export function ThreadHeader({
   statusSince,
   freshness,
   panelOpen,
-  drawerOpen,
+  terminalOpen,
   onTogglePanel,
-  onToggleDrawer,
+  onToggleTerminal,
   sidebarCollapsed = false,
   onToggleSidebar,
   sidebarToggleRef,
+  panelToggleRef,
   sidebarSheet,
   narrow = false,
 }: {
@@ -172,9 +165,12 @@ export function ThreadHeader({
   onOpen?: () => void
   onCommit?: () => void
   panelOpen: boolean
-  drawerOpen: boolean
+  /** The main pane shows the terminal in place of the conversation; the toggle then offers the way back. */
+  terminalOpen: boolean
   onTogglePanel: () => void
-  onToggleDrawer: () => void
+  onToggleTerminal: () => void
+  /** The wide header's Toggle right panel button: the opener a host returns focus to when an explicit close unmounts the focused panel control. */
+  panelToggleRef?: React.Ref<HTMLButtonElement>
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
@@ -192,24 +188,27 @@ export function ThreadHeader({
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <ChromeControl ref={sidebarToggleRef} icon="chevron-right" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
-      <nav aria-label={breadcrumbLabel} {...stylex.props(styles.breadcrumb)}>
+      {/* The status mark sits beside the title, outside the breadcrumb landmark so the crumb reads as names only. */}
+      <div {...stylex.props(styles.titleGroup)}>
+      <nav aria-label={breadcrumbLabel} {...stylex.props(styles.breadcrumb, styles.breadcrumbFit)}>
         {folder !== undefined ? <>
           <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink, !narrow && styles.desktopFolder)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash, !narrow && styles.desktopFolder)}>/</span>
         </> : null}
         <span role={narrow ? undefined : 'heading'} aria-level={narrow ? undefined : 2} {...stylex.props(styles.crumbTitle)}>{title}</span>
       </nav>
+      {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
+      </div>
       <div {...stylex.props(styles.actions)}>
-        {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
         {elapsed !== undefined ? <span role="timer" aria-label="Current conversation turn elapsed">{elapsed}</span> : null}
         <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(styles.actionSlot)}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Commit <Icon name="chevron-down" size={12} /></button>}
-        {!narrow && terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
-        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
+        {!narrow && terminalAvailable && <ChromeControl icon={terminalOpen ? 'message' : 'terminal'} label={terminalOpen ? 'Show conversation' : 'Show terminal'} active={terminalOpen} onPress={onToggleTerminal} />}
+        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="terminal" label="Show terminal" disabledReason={terminalDisabledReason} />}
         {narrow
           ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
-          : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
+          : <ChromeControl ref={panelToggleRef} icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
       </div>
     </header>
     </NarrowLayoutContext.Provider>
@@ -224,13 +223,14 @@ export function ThreadHeader({
  */
 export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { readonly pressed: boolean; readonly onPress: () => void; readonly disabledReason?: string }) {
   const reasonId = React.useId()
-  const content = <><Icon name="drawer" /><span>Terminal</span></>
+  // The name says what a press shows next; the fill says the terminal is showing now. `aria-pressed` would read "Show conversation, pressed".
+  const content = <><Icon name={pressed ? 'message' : 'terminal'} /><span>{pressed ? 'Conversation' : 'Terminal'}</span></>
   if (disabledReason === undefined) {
-    return <AriaButton aria-label="Terminal" aria-pressed={pressed} onPress={onPress} data-narrow-terminal {...stylex.props(styles.terminalTouch, pressed && styles.terminalPressed)}>{content}</AriaButton>
+    return <AriaButton aria-label={pressed ? 'Show conversation' : 'Show terminal'} onPress={onPress} data-narrow-terminal {...stylex.props(styles.terminalTouch, pressed && styles.terminalPressed)}>{content}</AriaButton>
   }
   return <DialogTrigger>
     <Pressable>
-      <button type="button" aria-label="Terminal" aria-pressed={false} aria-disabled="true" aria-describedby={reasonId} data-narrow-terminal {...stylex.props(styles.terminalTouch, styles.terminalDisabled)}>{content}</button>
+      <button type="button" aria-label="Show terminal" aria-disabled="true" aria-describedby={reasonId} data-narrow-terminal {...stylex.props(styles.terminalTouch, styles.terminalDisabled)}>{content}</button>
     </Pressable>
     <span id={reasonId} hidden>{disabledReason}</span>
     <Popover placement="bottom end">
@@ -240,16 +240,6 @@ export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { read
 }
 
 
-export function TerminalDrawer({ lines, open, height, onHeight }: { lines: readonly string[]; open: boolean; height: number; onHeight: (value: number) => void }) {
-  if (!open) return null
-  return <section aria-label="Terminal drawer" data-testid="terminal-drawer" style={{ height }} {...stylex.props(styles.drawer)}>
-    <div {...stylex.props(styles.drawerHead)}><span {...stylex.props(styles.drawerLabel)}>terminal</span><span {...stylex.props(styles.drawerHint)}>Drag the header edge, or focus it and use ↑/↓</span></div>
-    <div {...stylex.props(styles.drawerBody)}>
-      {lines.map((line, index) => <div key={index} {...stylex.props(styles.drawerLine)}>{line}</div>)}
-    </div>
-    <label {...stylex.props(styles.drawerRangeLabel)}>height<input type="range" aria-label="Drawer height" min={120} max={480} value={height} onChange={event => onHeight(Number(event.target.value))} {...stylex.props(styles.drawerRange)} /></label>
-  </section>
-}
 
 const styles = stylex.create({
   // Full 1px layout rules; fixed chrome owns the last raster row and the sidebar owns the crossing hit area.
@@ -262,6 +252,8 @@ const styles = stylex.create({
   desktopFolder: { display: { default: 'inline', '@container thread-header (max-width: 560px)': 'none' } },
   // A landscape phone's notch sits beside the header; the gutter stays the minimum.
   headerNarrow: { paddingInlineStart: `max(${g.gutter}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${g.gutter}, env(safe-area-inset-right, 0px))` },
+  titleGroup: { display: 'flex', flex: '1 1 0', alignItems: 'center', gap: 6, minWidth: 0 },
+  breadcrumbFit: { flex: '0 1 auto' },
   breadcrumb: { display: 'flex', flex: '1 1 0', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
@@ -276,12 +268,4 @@ const styles = stylex.create({
   terminalPressed: { backgroundColor: c.rowActive, color: c.fg, ':hover': { backgroundColor: c.rowActive, color: c.fg } },
   terminalDisabled: { opacity: 0.64, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: c.fgMuted } },
   terminalReason: { maxWidth: 280, padding: 8, fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fg, outline: 'none' },
-  drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },
-  drawerHead: { height: 32, display: 'flex', alignItems: 'center', gap: 12, paddingInline: 12 },
-  drawerLabel: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, fontWeight: t.weightMedium },
-  drawerHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, marginInlineStart: 'auto' },
-  drawerBody: { paddingInline: 12, paddingBottom: 4, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: '20px', whiteSpace: 'pre-wrap' },
-  drawerLine: { color: c.fgMuted },
-  drawerRangeLabel: { display: 'flex', alignItems: 'center', gap: 8, marginInline: 12, marginBottom: 8, fontSize: t.metaSize, color: c.fgMuted },
-  drawerRange: { accentColor: c.primary, flexGrow: 1 },
 })

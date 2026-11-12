@@ -5,6 +5,87 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The only files belonging to the separately configurable SQLite store directory.
 pub use smallclaims::store::STORE_DATABASE_FILES;
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Resolve a TUI read without changing its legacy write path. Any legacy entry,
+/// including a dangling symlink or unreadable entry, wins; parse failures never
+/// fall through. Selection is per file (or per directory for directory readers).
+pub fn tui_read_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    if !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let Some(tui) = path
+        .ancestors()
+        .find(|part| part.file_name().is_some_and(|name| name == "stui"))
+    else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let Some(product) = tui.parent() else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let target = product
+        .join("tui")
+        .join(path.strip_prefix(tui).expect("ancestor"));
+    if matches!(std::fs::symlink_metadata(&target), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        std::borrow::Cow::Owned(target)
+    }
+}
+
+#[cfg(test)]
+mod tui_tests {
+    use super::*;
+
+    #[test]
+    fn tui_read_matrix_preserves_both_families() {
+        for directory in [false, true] {
+            for (old_present, new_present) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let root = tempfile::tempdir().unwrap();
+                let old = root.path().join("stui").join("state");
+                let new = root.path().join("tui").join("state");
+                for (path, present, bytes) in
+                    [(&old, old_present, b"old"), (&new, new_present, b"new")]
+                {
+                    if present {
+                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        if directory {
+                            std::fs::create_dir(path).unwrap();
+                        } else {
+                            std::fs::write(path, bytes).unwrap();
+                        }
+                    }
+                }
+                let target_only = !old_present && new_present;
+                let expected = if target_only { &new } else { &old };
+                assert_eq!(tui_read_path(&old).as_ref(), expected);
+                assert_eq!(old.exists(), old_present);
+                assert_eq!(new.exists(), new_present);
+                if !directory && old_present {
+                    assert_eq!(std::fs::read(&old).unwrap(), b"old");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_legacy_entry_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("stui").join("prefs.json");
+        let new = root.path().join("tui").join("prefs.json");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("missing", &old).unwrap();
+        std::fs::write(new, b"{}").unwrap();
+        assert_eq!(tui_read_path(&old).as_ref(), old);
+    }
+}
+// LIVE-MIGRATION END
+
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032
 /// A destination-local receipt: exact migration ID followed by a newline.

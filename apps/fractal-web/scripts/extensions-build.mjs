@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { assertBundleBoundary } from '../src/extensions/bundle-policy.mjs'
-import { assertPublicChangelogBoundary, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
+import { assertPublicChangelogBoundary, defaultChangelogRegistries, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
 
 const changelogManifestModule = fileURLToPath(new URL('../src/changelog/build.ts', import.meta.url))
 const changelogMetadataModule = fileURLToPath(new URL('../src/changelog/metadata.ts', import.meta.url))
@@ -15,8 +15,10 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
   let changelog
   let manifest
   let identityId
+  let machineVersion
   const compile = async (identityCode) => {
-    const { machineVersion } = await evaluateBuildIdentityModule(identityCode)
+    const identity = await evaluateBuildIdentityModule(identityCode)
+    machineVersion = identity.machineVersion
     manifest = changelog.compile({ machineVersion })
   }
   return {
@@ -34,6 +36,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       manifest = undefined
       changelog = undefined
       identityId = undefined
+      machineVersion = undefined
       if (!building) return
       changelog = await prepareChangelogBuild({
         privateBuild,
@@ -45,12 +48,26 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       identityId = identity.id
     },
     resolveId(source, importer) {
+      // Development selects its prose registry independently of the eager extension composition.
+      if (source === '../../.changelog/mod.ts' && (importer === changelogManifestModule || importer === changelogMetadataModule))
+        return (changelogRegistries ?? defaultChangelogRegistries)[privateBuild ? 'private' : 'public']
       if (source.endsWith('/extensions/build.ts') ||
         (source === './build.ts' && importer?.includes('/src/extensions/')))
         return new URL(entry, import.meta.url).pathname
     },
     async transform(code, id) {
       if (changelog !== undefined && id === identityId) await compile(code)
+    },
+    // Early sockets open before any module executes: embed the exact bundle identity in HTML.
+    transformIndexHtml: {
+      order: 'post',
+      async handler(html, context) {
+        if (!html.includes('"__FRACTAL_WEB_CLIENT__"')) return html
+        const version = context.server === undefined ? machineVersion
+          : (await context.server.ssrLoadModule('virtual:build-identity')).buildIdentity.machineVersion
+        if (typeof version !== 'string') throw new Error('Early client requires the canonical build identity')
+        return html.replaceAll('"__FRACTAL_WEB_CLIENT__"', JSON.stringify(`fractal-web ${version}`).replaceAll('<', '\\u003c'))
+      },
     },
     async load(id) {
       if (changelog === undefined) return
@@ -64,7 +81,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
         if (manifest === undefined && typeof info?.code === 'string') await compile(info.code)
         if (manifest === undefined) throw new Error('virtual:build-identity produced no code to compile the changelog manifest against')
       }
-      return `export const changelogManifest = ${JSON.stringify(manifest)};\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
+      return `const manifest = ${JSON.stringify(manifest)};\nexport const getChangelogManifest = () => manifest;\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
     },
     generateBundle(_options, bundle) {
       const modules = [...this.getModuleIds()]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Separate generated read codecs from mutation and PTY validators",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes; generated TypeScript validators are partitioned by read dependencies."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Existing client exports remain available with identical read validator instances. An additive schema/read entrypoint excludes mutation and PTY codecs."},
+  "downtime": {"status": "none", "detail": "No service interruption or startup migration required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration change required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions."}
+}

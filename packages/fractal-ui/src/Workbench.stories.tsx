@@ -248,7 +248,7 @@ export const HostToolReveal: Story = { tags: ['critical'], args: { state: 'two' 
   await expect(file).toHaveAttribute('aria-expanded', 'true')
   await expect(fileDiff.getByTestId('diff-code')).toBeVisible()
 } }
-export const AllStates: Story = { tags: ['critical'], render: args => <main aria-label="Workbench states" {...stylex.props(styles.matrix)}>{(['one', 'two', 'three', 'dragging'] as const).map(state => <section key={state} {...stylex.props(styles.specimen)}><h2>{state} · W3/H1/P3/D2</h2><WorkbenchStory {...args} state={state} persist={false} /></section>)}</main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical', 'both-widths'], render: args => <main aria-label="Workbench states" {...stylex.props(styles.matrix)}>{(['one', 'two', 'three', 'dragging'] as const).map(state => <section key={state} {...stylex.props(styles.specimen)}><h2>{state} · W3/H1/P3/D2</h2><WorkbenchStory {...args} state={state} persist={false} /></section>)}</main>, play: async ({ canvasElement }) => {
   await settle()
   // Syntax tokens belong to kit A; these assertions target newly reachable UI counts, markers and washes.
   const chrome = canvasElement.querySelectorAll('[data-testid="pane-header"] span, [data-testid="diff-panel"] span, [data-testid="diff-code"] > div')
@@ -261,7 +261,7 @@ export const AllStates: Story = { tags: ['critical'], render: args => <main aria
     }
   }
 } }
-export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
+export const AllStatesLight: Story = { ...AllStates, tags: ['critical', '!both-widths'], args: { scheme: 'light' } }
 const styles = stylex.create({
   canvas: { display: 'flex', flexDirection: 'column', height: '100vh', minWidth: 0, overflow: 'hidden', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   toolbar: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.lg, padding: s.sm, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border }, workspace: { display: 'flex', flex: '1 1 0', minHeight: 0, minWidth: 0 },

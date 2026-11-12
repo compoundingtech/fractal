@@ -36,7 +36,7 @@ pub async fn rollout_agent(
                     .map(|o| o.old_member)
             })
             .ok_or_else(|| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "rollout-launch-unknown",
                     "the named incarnation has no original launch receipt",
                 ))
@@ -69,6 +69,12 @@ pub struct AgentRestartRequest {
     /// handoff that is ready since its last turn, which its new session is given first.
     #[serde(default)]
     fresh_session: bool,
+    /// Start the seat now even if its lane does not fit the host (docs/st3/seat-lanes.md,
+    /// "Admission by fit"). Needs a reason, recorded on the request with its actor.
+    #[serde(default)]
+    ignore_fit: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 pub async fn restart_agent(
@@ -76,6 +82,14 @@ pub async fn restart_agent(
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
+    let ignore_fit_reason = match (request.ignore_fit, request.reason.as_deref().map(str::trim)) {
+        (false, _) => None,
+        (true, Some(reason)) if !reason.is_empty() => Some(reason.to_owned()),
+        (true, _) => return Err(ApiError::bad(FractalError::new(
+            "restart-ignore-fit-reason",
+            "starting a seat despite its lane's fit needs a reason, which is recorded with who asked",
+        ))),
+    };
     let subject = if request.subject.starts_with("agent/") {
         request.subject
     } else {
@@ -100,7 +114,7 @@ pub async fn restart_agent(
             .map_err(ApiError::internal)?
             .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -109,7 +123,7 @@ pub async fn restart_agent(
         .map_err(ApiError::internal)?
         .is_some_and(|suspension| suspension.holds_seat())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "restart-suspended",
             "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
@@ -123,13 +137,13 @@ pub async fn restart_agent(
         .iter()
         .find(|item| item.subject == subject)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-agent",
                 format!("no seat `{subject}`"),
             ))
         })?;
     if !current.conflicts.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "restart-conflict",
             "resolve the seat's conflicting declarations before restarting",
         )));
@@ -141,23 +155,32 @@ pub async fn restart_agent(
         .map(|(desired, _)| desired)
         .filter(|desired| desired.kind == "agent")
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "restart-not-declared",
                 "restart needs an active seat declaration; start a stopped seat first",
             ))
         })?;
+    if let Some(run) = desired.owner_run.as_deref()
+        && let Some(view) = state.store.mission_run(run).map_err(ApiError::internal)?
+        && let Some(ended) = view.ended()
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "restart-run-ended",
+            format!("the seat's run {run} has ended ({ended}); a seat of an ended run is not started again"),
+        )));
+    }
     let member = desired
         .member
         .as_ref()
         .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "restart-no-launch",
                 "the seat has no readable service launch declaration",
             ))
         })?;
     let token = current.desired_token.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "restart-not-declared",
             "the seat has no selected declaration",
         ))
@@ -172,7 +195,7 @@ pub async fn restart_agent(
     if request.fresh_session
         && !crate::handoff::ready_since_last_turn(&state.store, &subject).map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "restart-fresh-session-no-handoff",
             "a fresh session starts from the seat's handoff: write it with `st agents handoff write`, or mark the current one current with `st agents handoff ready`, then restart again",
         )));
@@ -215,6 +238,10 @@ pub async fn restart_agent(
                 )
             }))
             .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
+            .chain(ignore_fit_reason.into_iter().flat_map(|reason| [
+                ("ignore_fit".to_owned(), Value::Bool(true)),
+                ("reason".to_owned(), Value::String(reason)),
+            ]))
             .collect(),
             evidence: vec![token],
             expected_subject: None,
@@ -308,7 +335,7 @@ pub async fn seat_snapshot_chunk(
         || suspension.requested_by.as_deref() != Some(&request.actor)
         || !matches!(suspension.phase.as_str(), "fencing-source" | "transferring")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-fence",
             "snapshot read does not name the current move",
         )));
@@ -321,7 +348,7 @@ pub async fn seat_snapshot_chunk(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("source is not suspended"))?;
     if completed.origin != state.node {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-fence",
             "snapshot belongs to another source",
         )));
@@ -332,7 +359,7 @@ pub async fn seat_snapshot_chunk(
         .get(&state.node)
         .is_some_and(|claim| crate::placement::field(claim, "status") == Some("stopped"))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-fence",
             "source runtime has not acknowledged its stop",
         )));
@@ -340,6 +367,147 @@ pub async fn seat_snapshot_chunk(
     crate::seat_snapshot::chunk(&state.state_dir, &request.suspend_operation, request.offset)
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+pub struct AgentLaneQuery {
+    pub agent: String,
+}
+
+/// The slice this host's runtime gives the agent's lane, named by the daemon so no caller copies
+/// the naming: `st-test` puts a check that a seat started outside its lane (a unit of its own) back
+/// in it. The name says where the lane is when the seat has one; whether the slice exists and is
+/// capped is the kernel's to say, so a caller reads that from the cgroup tree. `sccache_server_uds`
+/// is the lane's own sccache server, as a laned task's environment names it from the daemon's
+/// runtime directory (null without one): a job in the lane that names no server would compile in
+/// the host's, outside the lane.
+pub async fn agent_lane(
+    State(state): State<AppState>,
+    Query(query): Query<AgentLaneQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let subject = agent_subject(query.agent);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let lookup = subject.clone();
+    let desired = super::blocking_store(move || state.store.desired_subject_with_writer(&lookup)).await?;
+    let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
+        return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
+    };
+    let slice = fractal_runtime::seat_slice(&member.runtime_id);
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    Ok(Json(json!({
+        "agent": subject,
+        "host": member.host,
+        "runtime_id": member.runtime_id,
+        "slice": slice,
+        "sccache_server_uds": sccache,
+        "lanes_enforced": fractal_runtime::lanes_enforced(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct LaneBurstRequest {
+    pub agent: String,
+    pub actor: String,
+    #[serde(default)]
+    pub cores: Option<u32>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// The holder was granted this burst: a daemon with no record of it (one that restarted)
+    /// restores it while the seat's slice still holds it.
+    #[serde(default)]
+    pub held: bool,
+}
+
+/// Asks for or renews a lane burst: the agent's lane raised to `cores`/`memory` for one command's
+/// run (docs/st3/seat-lanes.md, "Bursts"). Each call renews its lease; the holder calls again within
+/// the lease while it runs. Answers `granted`, `waiting` with why, `refused` with why (it can never
+/// be held), or `none` with why the agent holds no lane here. Only the agent itself asks, and only
+/// its own host answers.
+pub async fn hold_lane_burst(
+    State(state): State<AppState>,
+    Json(request): Json<LaneBurstRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (subject, member) = lane_burst_seat(&state, &request).await?;
+    let (Some(cores), Some(memory)) = (request.cores, request.memory.as_deref()) else {
+        return Err(ApiError::bad(FractalError::new("lane-burst-size", "a lane burst names its cores and memory")));
+    };
+    let capacity = fractal_runtime::Capacity::declared(Some(cores), Some(memory))
+        .map_err(|error| ApiError::bad(FractalError::new("lane-burst-size", format!("{error:#}"))))?;
+    let none = |why: String| Ok(Json(json!({"agent": subject, "state": "none", "why": why})));
+    if !fractal_runtime::lanes_enforced() {
+        return none("lanes are off on this host".into());
+    }
+    if member.capacity.is_none() {
+        return none(format!("{subject} declares no lane"));
+    }
+    let Some(live) = fractal_runtime::live_lane(&member.runtime_id) else {
+        return none(format!("{subject}'s lane is not in place on this host: it started without one"));
+    };
+    let now = u64::try_from(crate::gate_check::now_ms() / 1000).unwrap_or(u64::MAX);
+    let reason = request.reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()).unwrap_or("a command");
+    // A renewal of a grant the daemon before this one gave is restored (burst_ask), so the holder's
+    // run goes on in the lane it was granted (2026-11-05, on a build host: a daemon roll forgot a
+    // granted burst, set the seat's lane back to its own and the run's compiles were OOM-killed).
+    let (burst, restored) = state.seat_admission.burst_ask(&subject, capacity, reason, now, request.held, live);
+    if restored {
+        eprintln!("st3: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
+            capacity.cores, capacity.memory);
+        super::signal_changed(&state);
+    }
+    let lane = json!({"cores": capacity.cores, "memory": capacity.memory});
+    if let Some(why) = burst.refused {
+        state.seat_admission.burst_release(&subject);
+        return Ok(Json(json!({"agent": subject, "state": "refused", "why": why, "lane": lane})));
+    }
+    if burst.granted {
+        return Ok(Json(json!({"agent": subject, "state": "granted", "lane": lane,
+            "lease_secs": fractal_runtime::seat_admission_status::BURST_LEASE_SECS})));
+    }
+    super::signal_changed(&state);
+    Ok(Json(json!({"agent": subject, "state": "waiting", "lane": lane,
+        "why": burst.wait.unwrap_or_else(|| "asked; this host has not judged it yet".into()),
+        "lease_secs": fractal_runtime::seat_admission_status::BURST_LEASE_SECS})))
+}
+
+/// Gives the agent's lane burst back: its lane comes down to its own and its steps' (cores at once,
+/// memory once the lane holds less).
+pub async fn release_lane_burst(
+    State(state): State<AppState>,
+    Json(request): Json<LaneBurstRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (subject, _) = lane_burst_seat(&state, &request).await?;
+    let released = state.seat_admission.burst_release(&subject);
+    if released {
+        super::signal_changed(&state);
+    }
+    Ok(Json(json!({"agent": subject, "released": released})))
+}
+
+/// The agent a burst request names, when the agent asks for itself and is placed on this host.
+async fn lane_burst_seat(state: &AppState, request: &LaneBurstRequest) -> Result<(String, crate::model::MemberSpec), ApiError> {
+    let subject = agent_subject(request.agent.clone());
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let actor = person_or_agent_actor(&request.actor, "invalid-lane-burst-actor")?;
+    if actor != subject {
+        return Err(ApiError::bad(FractalError::new("lane-burst-actor",
+            format!("only {subject} asks for its own lane burst, not {actor}"))));
+    }
+    let lookup = subject.clone();
+    let store = state.store.clone();
+    let desired = super::blocking_store(move || store.desired_subject_with_writer(&lookup)).await?;
+    let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
+        return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
+    };
+    if member.host != state.node {
+        return Err(ApiError::bad(FractalError::new("lane-burst-other-host",
+            format!("{subject} runs on {}, and only its own host holds its lane burst", member.host))));
+    }
+    Ok((subject, member))
 }
 
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
@@ -379,13 +547,13 @@ pub async fn report_native_session(
         request.actor
     };
     if actor != subject {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "a seat reports only its own native session",
         )));
     }
     if request.session_id.is_empty() || request.incarnation_id.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-native-session",
             "a native session report needs a session ID and an incarnation",
         )));
@@ -450,7 +618,7 @@ pub async fn rename_agent(
     let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     if !request.actor.starts_with("person/") {
         normalized_agent_actor(&request.actor).ok_or_else(|| {
-            ApiError::bad(St3Error::new("invalid-rename-actor", "rename needs a person or agent actor"))
+            ApiError::bad(FractalError::new("invalid-rename-actor", "rename needs a person or agent actor"))
         })?;
     }
     let response = state.store.rename_agent(
@@ -497,4 +665,43 @@ async fn rename_identity_id(
     let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
     signal_changed(&state);
     Ok(Json(receipt))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofExportRequest {
+    name: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    include_co_batched_claims: bool,
+}
+
+pub async fn export_agent_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn export_mission_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn export_identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: RenameProofExportRequest,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    if !request.include_co_batched_claims {
+        return Err(ApiError::bad(FractalError::new("rename-proof-disclosure-consent-required",
+            "export requires include_co_batched_claims=true: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues")));
+    }
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.export_rename_proof(kind, &request.name, request.revision.as_deref())
+    }).await.map(Json)
 }

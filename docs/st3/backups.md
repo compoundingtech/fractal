@@ -1,6 +1,6 @@
 # Claim backups
 
-`st backup create FILE` saves one live daemon snapshot as a private file. It reads signed sync
+`fractal backup create FILE` saves one live daemon snapshot as a private file. It reads signed sync
 envelopes on a pooled read worker in pages of 512, then downloads the completed archive. Writes
 and other requests continue while it reads. The server returns headers after a bounded health
 check; archive preparation follows the response stream lifetime, rather than the ordinary
@@ -22,8 +22,8 @@ such an incomplete export but may show a generic format error. Successful archiv
 the restore format are unchanged.
 
 ```sh
-st backup create before-upgrade.jsonl
-st backup restore before-upgrade.jsonl --database /var/lib/example/recovery/claims.sqlite3
+fractal backup create before-upgrade.jsonl
+fractal backup restore before-upgrade.jsonl --database /var/lib/example/recovery/claims.sqlite3
 ```
 
 Restore runs offline, builds a temporary database at the current schema, and publishes it only
@@ -41,13 +41,14 @@ claims name in all, since another member owns the rest.
 An explicit `--database` matching the configured database still reads or restores bodies in
 `state_dir`. For an arbitrary `--database` override, its parent remains the auxiliary product
 root, preserving standalone rehearsal behavior. For an offline export of a copied database,
-copy its `message-bodies` alongside it too if those bodies should be archived.
+copy its `message-bodies` alongside it too if those bodies should be archived, and its
+`shards` directory beside it if its stream items should be.
 
 For rehearsals, make a consistent SQLite copy first, then export that copy:
 
 ```sh
-st backup create rehearsal.jsonl --database /var/lib/example/copy/claims.sqlite3
-st backup restore rehearsal.jsonl --database /var/lib/example/restored/claims.sqlite3 --json
+fractal backup create rehearsal.jsonl --database /var/lib/example/copy/claims.sqlite3
+fractal backup restore rehearsal.jsonl --database /var/lib/example/restored/claims.sqlite3 --json
 ```
 
 The offline exporter migrates and finishes upgrade recovery on its input, so use a copy. Its header identifies the exporting
@@ -59,7 +60,9 @@ that its envelope inventory, claim sources and all graph table digests match.
 
 `store_dir = "/absolute/path"` in the daemon's TOML config, or `fractal up --store-dir
 /absolute/path`, selects the directory for exactly `claims.sqlite3`, `claims.sqlite3-wal`,
-and `claims.sqlite3-shm`. Unset configuration keeps the database in `state_dir`; there is no
+and `claims.sqlite3-shm`, and for the messages shard the daemon opens beside them at
+`shards/messages/claims.sqlite3`. A store moved without its `shards` directory opens a new,
+empty shard, which then receives the stream again from peers. Unset configuration keeps the database in `state_dir`; there is no
 automatic file move. Keep the product state directory and its identity, keys, sockets,
 message bodies, transcripts, PTYs, runtime files and caches unchanged.
 
@@ -160,6 +163,45 @@ WAL or SHM files from different snapshots. A database rollback does not roll bac
 product state, so retain the unchanged state root throughout.
 
 
+## Preserve suspected unsigned history before maintenance
+
+A populated v0.3.4 store can contain sealed delegation grants without claim
+signatures. Preserve raw state and keys **before** doctor, restart, checkpoint,
+or offline export: those operations can seal pending work or migrate their input.
+A claim archive does not preserve private keys or all pending unsealed work.
+
+Keep the original database, keys, configuration and exact binary together with
+checksums and capture times. A consistent SQLite copy must include committed WAL
+state; copying only the live database file is insufficient. Use SQLite's read-only
+source connection and backup API, or a consistent filesystem snapshot that also
+accounts for keys and configuration. Retain an untouched original and inspect a copy.
+
+From a clean checkout, use Python 3 to run the bounded stored-evidence audit:
+
+```sh
+python3 scripts/audit-claim-signatures /path/to/preserved/claims.sqlite3 > audit.json
+```
+
+The path is an invented example. The script opens SQLite with `mode=ro`,
+`query_only` and one read transaction; it never opens the store through Fractal,
+seals claims or changes verdicts. A missing database fails without creating one.
+Its `--help` lists query, row and payload caps. Optional `cbor2` enables inspection
+of original sealed payload maps; without it, payload inspection is incomplete.
+Install dependencies away from the specimen or inspect a preserved copy elsewhere.
+
+Exit 0 means the bounded audit completed, including when it found unsigned grants;
+exit 2 means incomplete evidence. Read `complete` and `limitations` along with the
+stored-signature, sealed-payload and cached-invalid counts. This tool does not
+recompute cryptographic validity, and retained history on one replica does not
+establish the state of its peers. Keep raw results private.
+
+Preserved unsealed work needs an isolated upgrade rehearsal with its original keys
+and a verified build before any rollout. Already-sealed unsigned delegations remain
+affected: restoring their envelopes, signing an outer wrapper or issuing a child
+grant cannot supply the missing inner signature. Do not rewrite envelopes, insert
+signature rows, delete verdicts or reset identities to clear warnings. Preserve the
+evidence and obtain an operator's recovery decision for the affected authority chain.
+
 ## Rehearse a restore
 
 Use a healthy current daemon and a separate empty directory. These commands neither start a
@@ -170,9 +212,9 @@ daemon nor connect the recovered state to your live fleet:
   set -eu
   umask 077
   st_recovery_root=$(mktemp -d "${TMPDIR:-/tmp}/st-recovery.XXXXXX")
-  st backup create "$st_recovery_root/claims.jsonl"
+  fractal backup create "$st_recovery_root/claims.jsonl"
   mkdir -p "$st_recovery_root/restored"
-  st backup restore "$st_recovery_root/claims.jsonl" \
+  fractal backup restore "$st_recovery_root/claims.jsonl" \
     --database "$st_recovery_root/restored/claims.sqlite3" --json \
     > "$st_recovery_root/restore-report.json"
   printf 'Private rehearsal files: %s\n' "$st_recovery_root"
@@ -200,12 +242,13 @@ until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
-The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2` or `3`. Each record is limited
+The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1` to `5`. Each record is limited
 to 128 MiB; export refuses a larger record before publishing a file:
 
 - `header`: format version, exporting build, database schema and claim registry digest, fleet ID
   and public anchor, complete admitted envelope-log digest, graph digest, each shared table's digest and row count,
-  and from version `3` each permanent ledger's digest and row count.
+  and from version `3` each permanent ledger's digest and row count; from version `5`, for each
+  carried shard, its admitted envelope-log digest, envelope count and local table digests.
 - `envelope`: the unchanged `ReplicaEnvelope` sync wire record, including writer, sequence,
   previous batch hash, payload hash, accept time, base64 CBOR claims and document bytes, and the
   writer's public key and signature when present. Envelopes sort by writer, sequence, hash;
@@ -215,12 +258,75 @@ to 128 MiB; export refuses a larger record before publishing a file:
   tombstones. Restore initializes empty checkpoint state through the normal certificate checks,
   even if the source knew a newer certificate it had not applied yet.
 - `ledger`: one page of one permanent ledger, in its primary-key order (see below).
-- `end`: envelope count and SHA-256 of all preceding bytes, including line endings.
+- `shard-envelope`, `shard-signatures`, `shard-local`: a shard's envelopes in its own sync wire
+  form, their signatures, and pages of its local tables, each naming its shard (version `5`).
+- `end`: the graph's envelope count and SHA-256 of all preceding bytes, including line endings.
 
 An archive that carries the long-message texts of its member is version `2`. An archive that
-carries permanent ledger rows is version `3`. A build that predates a version refuses its
-archives cleanly instead of restoring part of them; an archive with neither keeps version `1`,
-so every build restores it.
+carries permanent ledger rows is version `3`. An archive that carries local message marks is
+version `4`. An archive that carries the messages shard is version `5`. A build that predates a
+version refuses its archives cleanly ("unsupported claim backup format/version"; from version `5`
+builds, followed by the version found and the versions the build restores) instead of restoring
+part of them; an archive with none of these keeps version `1`, so every build restores it.
+
+### The messages shard
+
+The messages shard beside the database (`shards/messages/claims.sqlite3`, see
+[replication](replication.md#the-messages-shard)) holds stream items as envelopes of its own,
+and this member's staging, delivery, read and close of each one in a local table,
+`stream_lifecycle`. Version `5` carries the shard's admitted envelopes with their signatures and
+its lifecycle rows, once the shard holds either. A shard that is opened but empty adds nothing:
+the archive is byte for byte the one an earlier build writes, at the version it would choose.
+
+Export reads the shard in its own snapshot, pinned just after the graph's and held while the
+archive is written. The shard only grows, so it holds every stream item the graph snapshot could
+know of, and perhaps a few that arrived after it; those restore as an item that arrives ahead of
+its graph context does on any member.
+
+Restore rebuilds the graph first, then the shard beside the restored database, bound to the
+restored graph's fleet. Each shard signature is verified in the shard's signing domain. The
+shard's admission admits the envelopes on the source's authority, as the graph's restore does,
+so a member removed or rekeyed since keeps its stream items; every envelope must be admitted.
+Lifecycle rows are added by union, so a restored item is never behind where the archive had it:
+a read item stays read and is not delivered again. The shard's envelope-log digest, envelope
+count and lifecycle digest then have to equal the header's, or nothing is published. Every
+restore, whatever its version, refuses a destination whose messages shard holds anything or is
+open; an empty one is replaced by a version `5` restore and left in place by an earlier one.
+Publication is not atomic across the two databases: the shard is placed first, and if the graph
+then fails to publish, only a shard this restore created is removed. An empty shard it replaced
+is not put back, and the restored shard left in its place holds stream items, so move that shard
+aside before restoring again. `stream_arrivals`, where each item fell in this member's graph
+order, is not carried: the restored graph's order is new, and readers record each item again at
+its first read. Nor is `stream_operations`, the idempotency keys this member's own stream sends
+used: a send retried after a restore writes its message again. The graph's mirror of the shard
+(`local_stream_sent` and `local_stream_lifecycle`, which the graph's idle, unread, held and usage
+indexes read) is not carried either; the restored member's daemon rebuilds it from the restored
+shard when it starts, and the mirror's triggers queue each stream item's client selector header
+as it goes, so the phone's list holds the restored stream mail once the mirror has caught up.
+
+### Message marks
+
+A consumer's delivery, read and close of a message can be a local mark instead of a lifecycle
+claim (`local_message_marks`, db break-up step 4b): it never replicates, so only a backup can
+carry it. Version `4` lists the table among its ledgers and restores its rows by union, after the
+claims, so each mark folds into the member's local projections as it did when it was recorded;
+without them a restore would redeliver every message a mark covers. A build older than marks
+refuses the archive, and marks inside an archive that declares an earlier version are refused
+before restore.
+
+### The message outbox
+
+A message a graph write sends waits in `local_message_outbox` until the daemon writes it to the
+messages shard (db break-up step 4c). The archive does not carry the outbox: a live export first
+drains it, and refuses while a message remains ("backup waits for the messages in the outbox to
+drain"), so pending mail is never left out of an archive silently and no format version changes.
+The offline exporter never drains, even when the copy's `shards` directory is beside it and it
+opens the copy's shard: the exporter is not the member, and a drain would write the member's
+mail into the copy under the copy's writer. It refuses a copy whose outbox is not empty and names
+the waiting messages (`offline export refuses a copy whose message outbox holds 2 message(s) not
+yet in its messages shard (...)`); start the member's daemon so it writes them, then copy the
+database again. In this build nothing queues messages, so the outbox is always empty and archives
+are unchanged.
 
 ### Permanent ledgers
 
@@ -243,13 +349,22 @@ Restore verifies signatures, envelope and claim hashes through normal admission,
 chains, reapplies replicated repairs, and replays projections with the current code. Pre-membership envelopes retain their
 unsigned legacy wire representation. As in normal replication, later membership changes do not
 revoke envelopes already admitted. Missing or undecodable envelopes fail the restore. Unknown
-or quarantined claim records retain the normal admission behavior; the admitted source digest
-must still match exactly.
+claim records retain the normal admission behavior. Operation envelopes without portable
+member admission remain quarantined: their bytes are preserved, but their claims provide no
+authority. `operation_envelopes_quarantined` reports the count, and a counts-only warning
+indicates that pairing or terminal attachment must be repeated. On a standalone daemon,
+pairings and terminal attachments do not survive backup restoration.
+This quarantine is permanent: later member signatures do not restore admission.
+The append-only `replica_restore_quarantine` ledger survives subsequent archives
+and restores. Any archive carrying quarantine uses version `6`, which older
+readers refuse; archives without quarantine retain their existing version.
 
 The complete envelope-log digest always has to match, including certified tombstone identities.
-With the same registry fingerprint, the claim source digest and count also have to match. The
-fingerprint covers the known claim kinds and shared projection layout, as it does for sync.
-With the same schema and fingerprint, all table digests and the graph digest also have to match.
+Without quarantined operation envelopes, the same registry fingerprint requires the claim
+source digest and count to match. The fingerprint covers known claim kinds and shared
+projection layout, as it does for sync. With the same schema and fingerprint, all table and
+graph digests must also match. Quarantining operation envelopes reports rebuilt digests and
+`projections_match: false`; other invalid or unknown claim history still refuses that restore.
 An older schema or registry can produce
 new projections after an upgrade, including previously unknown claims: JSON output reports the source and rebuilt graph digests,
 `projections_match`, and rebuilt table digests so that this difference is visible. Envelope payloads
@@ -264,7 +379,8 @@ state directory, generate new local keys, and join the fleet as that new member.
 signing a sequence that the original writer already used, including writes after the backup.
 
 The archive contains durable shared claims, their referenced blobs, public signature material,
-checkpoint tombstones and the permanent ledgers. It does not contain private node keys, invite secrets, device capabilities,
+checkpoint tombstones, the permanent ledgers and, from version `5`, the messages shard's stream
+items and their lifecycle on this member. It does not contain private node keys, invite secrets, device capabilities,
 driver state, active terminals, local observations, lease renewals, transcripts, staged blobs,
 configuration, or other local caches. Protect the file like the original graph: claims and document
 bytes can contain private information. A restored standalone graph can be inspected immediately;

@@ -6,7 +6,7 @@ order: 3
 
 # Configuration and KDL
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS and Effect samples declare the same file with the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Use KDL for the runnable commands in these guides.
 
 Local configuration selects the person, node, access mode, state paths, and runtime settings. Declarations describe agents, missions, and other graph subjects. Keep these responsibilities separate.
 
@@ -16,30 +16,61 @@ Setup owns the ordinary configuration and user-service installation. Home Manage
 
 Agents inherit the daemon user's environment and account access. A provider permission mode is not sandboxing. Never silently switch the user to unrestricted execution while troubleshooting.
 
+Browser pairing is opt-in through the daemon's optional top-level
+`browser_pairing_login` setting, alongside `person`:
+
+```toml
+person = "person/ada"
+browser_pairing_login = "ada@example.com"
+```
+
+Leaving `browser_pairing_login` unset disables browser pairing. When configured,
+the login must match the identity admitted by the tailnet for the pairing request.
+
+The publisher creates a five-minute browser request with a random request-key
+digest. The owning person receives an ordinary decision ask showing the device,
+login, request ID, and display code, with **Approve** and **Deny** answers in the
+TUI and native inbox. Approval requires a paired device with `control.pairing`,
+checked at the completion boundary. The existing paired native inbox can answer
+the ask. Local-owner Unix sessions and the embedded local browser cannot approve;
+neither can an agent, assistant, attention-only device, or browser grant.
+The person must compare the display code with the browser they are using:
+device labels and login text are requester-supplied metadata, not identity proof.
+
+Approval permits one redemption into a 30-day device grant with
+`read.projections`, `read.declarations`, `read.glasses`, `read.arrangements`,
+`terminal.read`, and `control.messages`. The declaration, glass, arrangement,
+and terminal scopes preserve the web's existing detail views. No other control
+scope is granted. The normal device-pairing limited scope list is unchanged.
+Browser grants use the existing bearer-device path, with no device signing key;
+only devices presenting a real signing public key enroll one. Devices can be
+revoked through the existing device revocation action, and a browser can revoke
+its own grant through `POST /v1/client/pairing/browser-requests/revoke-current`.
+
 ## KDL documents
 
 Every declaration file starts with `version 2`. Declarations follow directly:
 
 ```ts group=worker variant=effect
-import { Fractal } from 'fractal/effect'
+// example/worker/agent.ts
+import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'example/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/example',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```
 
 ```ts group=worker variant=ts
+// example/worker/agent.ts
 import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'example/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/example',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```
@@ -112,6 +143,44 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
+Supported `omp`, `claude`, and `codex` agent-seat driver launches read the absolute path in
+`AGENT_RUNTIME_PROFILE`, or
+`$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
+when that variable is unset. Each launch reads the current profile through its
+stable link and executes `<personas.launch.<persona>.harnessBin>/<harness>`
+directly. `AGENT_PERSONA`, when set, selects the persona; otherwise `generalist`
+is the internal lookup default. Fractal does not export that default as
+`AGENT_PERSONA`. The selected `harnessBin` is prepended to the
+provider child's PATH, so provider subprocesses also resolve managed wrappers;
+the driver's own PATH is unchanged. Before spawning a managed provider child,
+any present `ST_AGENT` or `FRACTAL_AGENT` must equal the fenced driver subject;
+empty or mismatched values refuse launch. Both child aliases are then set to
+that subject. The profile publisher selects the
+directory; Fractal does not duplicate persona-to-path rules. A missing persona entry,
+`harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
+There is no fallback to a raw provider or to a different persona.
+Only a confirmed missing Agent Spec permits treating the declaration as absent.
+Authorization, malformed-response, and server errors refuse managed launch.
+During a classified daemon outage, startup waits without spawning a provider
+and retries the authenticated read; it never falls back to native execution.
+Prelaunch contract capture measures the selected wrapper, not a
+raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
+commands while adopting, without restarting the running provider.
+
+Supported agent-seat driver invocations use this contract, including flagless
+legacy driver re-exec. There is no caller-supplied opt-in flag. Declaration reads
+use the driver's authenticated client context, not an anonymous projection client.
+
+Person-owned `bind-terminal` sessions retain their native harness and environment.
+The authenticated declaration read determines this exemption; agent-owned
+bindings and declarations without a binding use managed launch. Read failures
+refuse rather than silently selecting native launch. Prelaunch contract capture
+uses the same binding rule.
+
+Before upgrading a host to this launch contract, publish and activate a runtime
+profile containing `personas.launch.<persona>.harnessBin` for its managed seats.
+Existing provider processes are not changed by the upgrade.
+
 To change lookup for one agent, set its `PATH` (the literal `${PATH}` expands to
 the captured shell PATH):
 
@@ -119,22 +188,23 @@ the captured shell PATH):
 env { PATH "/opt/codex/bin:${PATH}"; }
 ```
 
-To bypass PATH lookup and version-manager shims entirely for the native program,
-set `executable` inside the harness:
+For `pi` and `opencode`, bypass PATH lookup and version-manager shims by setting
+`executable` inside the harness. For example:
 
 ```kdl
-harness "codex" {
-  executable "/opt/codex/bin/codex"
+harness "pi" {
+  executable "/opt/pi/bin/pi"
   effort "high"
 }
 ```
 
 `executable` is one executable name or path, not a shell command. Spaces in a
-path are preserved; put arguments in `args`, not in this string. An absolute
-path is recommended for a pinned installation. A plain name uses the seat's
-PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN` as executable
-overrides, and there is no separate per-harness executable setting in local
-daemon configuration. A native harness may still read its own configuration
+path are preserved; put arguments in `args`, not in this string. For managed
+`omp`, `claude`, and `codex`, Fractal replaces even an explicit raw executable
+with the profile's managed wrapper, preserving the remaining provider arguments.
+For other harnesses, an absolute path selects a pinned installation and a plain
+name uses the seat's PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN`
+as executable overrides. A native harness may still read its own configuration
 and environment variables after it starts.
 
 ## Preview and gate checks
@@ -156,6 +226,20 @@ Mission-owned runtime declarations follow their owner lifetime; independent top-
 ## Free mode
 
 Within a fleet, an agent may publish, start, and revise missions and move agent queues as itself without a separate grant. This is broad authority, not isolation: review declarations before publication and give agents only access you intend them to use. A bound harness must retain its own identity; free mode does not allow it to impersonate a person or bypass operation-specific fences, human review, or a claimed producing step.
+
+A mission run is the exception. A program step acts as `mission-run/RUN` and holds only what its
+mission's `authority` block grants, intersected with the authority of whoever started the run. The
+daemon's `[programs]` table says what a write outside it does:
+
+```toml
+[programs]
+authority = "enforce"   # the default: the write is refused with `run-authority-denied`
+# authority = "audit"    # the write proceeds and `rule.audited` records it on `rule/run-authority`
+```
+
+Audit lets you discover the grants a new program needs: read them with
+`fractal rules audit run-authority`, declare them, then return to enforce. The setting is read
+when the daemon starts.
 
 ## Definitions do not start work
 

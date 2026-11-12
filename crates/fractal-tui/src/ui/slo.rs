@@ -191,6 +191,9 @@ fn day_of(path: &Path) -> i64 {
         .unwrap_or(i64::MIN)
 }
 fn files(dir: &Path) -> Vec<PathBuf> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let dir = fractal_client::product_dirs::tui_read_path(dir);
+    // LIVE-MIGRATION END
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -209,7 +212,7 @@ fn private_open(path: &Path) -> io::Result<std::fs::File> {
     }
     options.open(path)
 }
-/// Writers from simultaneous stuis add to the same hour under a disk lock. Daily files
+/// Writers from simultaneous TUIs add to the same hour under a disk lock. Daily files
 /// rotate on the hour boundary; exactly 336 hourly rows survive, including partial hours.
 fn write_line(dir: &Path, line: Line) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;

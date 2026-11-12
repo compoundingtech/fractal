@@ -4,32 +4,34 @@ import { Button as AriaButton } from 'react-aria-components'
 import { interactionVars as interaction, textVars as text, borderVars as border, surfaceVars as surface, spaceVars as s, geometryVars as g, typeVars as t, radiusVars as r, motionVars as m } from '../composition-tokens.stylex'
 import { Markdown } from './Markdown'
 import { Icon } from './Icons'
+import { LiveRing } from './LiveRing'
+import { useRevealOpen } from './transcript-reveal'
 import type { ReasoningItem } from '../embrace-data/model'
 
 const reasoningType = stylex.createTheme(t, { bodySize: t.codeSize, bodyLeading: t.uiLeading })
 
-/** Muted reasoning as a work row: glyph slot, label, and the shared pinned disclosure; the opened body starts on the text column. */
+/** Muted reasoning as a work row: the shared leading disclosure, glyph slot and label; the opened body starts one nesting step in. */
 export function ThinkingEntry({ text: value, streaming = false }: { text: string; streaming?: boolean }) {
   return <ThinkingDisclosure streaming={streaming}><Markdown text={value} streaming={streaming} tone="muted" /></ThinkingDisclosure>
 }
 
 /** One disclosure for a turn's reasoning; source ids and individual Markdown boundaries remain intact. */
 export function ThinkingRun({ items }: { readonly items: readonly ReasoningItem[] }) {
-  return <ThinkingDisclosure streaming={items.some(item => item.streaming)}>
+  return <ThinkingDisclosure streaming={items.some(item => item.streaming)} sourceIds={items.map(item => item.id)}>
     {items.map(item => <div key={item.id} data-conversation-entry-id={item.id}><Markdown text={item.text} streaming={item.streaming} tone="muted" /></div>)}
   </ThinkingDisclosure>
 }
 
-function ThinkingDisclosure({ children, streaming }: { readonly children: React.ReactNode; readonly streaming: boolean }) {
+function ThinkingDisclosure({ children, streaming, sourceIds }: { readonly children: React.ReactNode; readonly streaming: boolean; readonly sourceIds?: readonly string[] }) {
   const [open, setOpen] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId !== undefined && sourceIds?.includes(reveal.entryId) === true, open, setOpen)
   const contentId = React.useId()
   return <div data-testid="thinking-entry" data-streaming={streaming} {...stylex.props(styles.thinking)}>
     <AriaButton aria-expanded={open} aria-controls={contentId} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.thinkingControl)}>
-      <span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={streaming ? 'spinner' : 'thought'} spinning={streaming} size={14} /></span>
-      <span data-call-title {...stylex.props(styles.label)}>Thinking</span>
-      <span data-call-word />
       <span aria-hidden="true" data-row-disclosure={open ? 'open' : 'closed'} {...stylex.props(styles.slot, styles.disclosure)}><span {...stylex.props(styles.chevron, open && styles.disclosureOpen)}><Icon name="chevron-right" size={12} /></span></span>
-      <span data-call-duration />
+      <span aria-hidden="true" {...stylex.props(styles.slot)}>{streaming ? <LiveRing /> : <Icon name="thought" size={14} />}</span>
+      <span data-call-title {...stylex.props(styles.label)}>Thinking</span>
+      <span data-call-meta />
     </AriaButton>
     {open ? <div id={contentId} data-testid="thinking-body" {...stylex.props(styles.body, reasoningType)}>{children}</div> : null}
   </div>

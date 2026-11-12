@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
+use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
-use crate::model::{DesiredSubject, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation, NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation, PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec, ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType, RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec};
+use crate::model::{DesiredSubject, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation, NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation, PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec, ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType, RuntimeResetOperation, ScheduleSpec, FractalError, SubscriptionConditionSpec, SubscriptionSpec};
 
 const ROOT_NODES: &[&str] = &[
     "account",
@@ -26,6 +27,7 @@ const ROOT_NODES: &[&str] = &[
     "mission-run",
     "planning-session",
     "message",
+    "objective",
     "repair",
     "schedule",
     "stop",
@@ -43,7 +45,7 @@ pub struct ParseContext {
     replica_repairs: Vec<ReplicaRepairDeclaration>,
 }
 
-pub fn parse_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
+pub fn parse_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, FractalError> {
     let intent = parse_intent_with_owner(source, default_host, None, false, false)?;
     validate_mission_runtimes(&intent, default_host)?;
     Ok(intent)
@@ -52,7 +54,7 @@ pub fn parse_intent(source: &str, default_host: &str) -> Result<NormalizedIntent
 pub fn parse_internal_intent(
     source: &str,
     default_host: &str,
-) -> Result<NormalizedIntent, St3Error> {
+) -> Result<NormalizedIntent, FractalError> {
     parse_intent_with_owner(source, default_host, None, true, false)
 }
 
@@ -60,7 +62,7 @@ pub fn parse_internal_intent(
 pub fn parse_test_intent(
     source: &str,
     default_host: &str,
-) -> Result<NormalizedIntent, St3Error> {
+) -> Result<NormalizedIntent, FractalError> {
     parse_internal_intent(source, default_host)
 }
 
@@ -68,7 +70,7 @@ pub fn parse_execution_intent(
     source: &str,
     default_host: &str,
     run_id: &str,
-) -> Result<NormalizedIntent, St3Error> {
+) -> Result<NormalizedIntent, FractalError> {
     let owner = format!(
         "mission-run/{}",
         run_id.strip_prefix("mission-run/").unwrap_or(run_id)
@@ -126,42 +128,86 @@ pub fn runtime_proof_variables(
 pub fn validate_mission_runtimes(
     intent: &NormalizedIntent,
     default_host: &str,
-) -> Result<BTreeSet<String>, St3Error> {
+) -> Result<BTreeSet<String>, FractalError> {
+    type Lanes = BTreeMap<String, Option<fractal_runtime::Capacity>>;
+
     fn validate_mission(
         mission: &crate::model::MissionSpec,
         default_host: &str,
         subjects: &mut BTreeSet<String>,
-    ) -> Result<(), St3Error> {
+        beside: &Lanes,
+    ) -> Result<(), FractalError> {
         fn validate_source(
             source: &str,
+            capacity: Option<fractal_runtime::Capacity>,
             variables: &BTreeMap<String, String>,
             default_host: &str,
             subjects: &mut BTreeSet<String>,
-        ) -> Result<(), St3Error> {
+            lanes: &mut Lanes,
+        ) -> Result<(), FractalError> {
             let source = crate::mission::interpolate_kdl(source, variables)?;
+            let source = crate::mission::with_mission_capacity(&source, capacity)?;
             let runtime = parse_execution_intent(&source, default_host, "migration-proof")?;
             subjects.extend(runtime.subjects.keys().cloned());
+            lanes.extend(agent_lanes(&runtime.subjects));
             Ok(())
         }
 
         let variables = runtime_proof_variables(mission);
+        let mut lanes = beside.clone();
         if let Some(source) = &mission.declarations_kdl {
-            validate_source(source, &variables, default_host, subjects)?;
+            validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
         }
         for step in mission.steps.values() {
             if let Some(source) = &step.declarations_kdl {
-                validate_source(source, &variables, default_host, subjects)?;
+                validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
             }
+        }
+        validate_step_capacities(mission, &variables, &lanes)?;
+        for step in mission.steps.values() {
             if let Some(nested) = &step.nested_mission {
-                validate_mission(nested, default_host, subjects)?;
+                validate_mission(nested, default_host, subjects, beside)?;
             }
         }
         Ok(())
     }
 
+    fn agent_lanes(subjects: &BTreeMap<String, DesiredSubject>) -> impl Iterator<Item = (String, Option<fractal_runtime::Capacity>)> + '_ {
+        subjects.iter()
+            .filter(|(_, desired)| desired.kind == "agent")
+            .filter_map(|(subject, desired)| desired.member.as_ref().map(|member| (subject.clone(), member.capacity)))
+    }
+
+    /// A step only raises the lane of a seat declared in this publication; one declared elsewhere
+    /// is held to the same rule when the step is delivered.
+    fn validate_step_capacities(
+        mission: &crate::model::MissionSpec,
+        variables: &BTreeMap<String, String>,
+        lanes: &Lanes,
+    ) -> Result<(), FractalError> {
+        for step in mission.steps.values() {
+            let Some(raise) = step.capacity else { continue };
+            let agents = match step.work_selector.as_ref().or(mission.work_selector.as_ref()) {
+                Some(crate::model::WorkSelector::Assigned { agent }) => std::slice::from_ref(agent),
+                Some(crate::model::WorkSelector::Available { agents }) => agents.as_slice(),
+                _ => &[],
+            };
+            for agent in agents {
+                let agent = crate::mission::interpolate(agent, variables)?;
+                let Some(base) = lanes.get(&agent) else { continue };
+                // An undeclared seat counts at the base lane.
+                raise.over(base.unwrap_or(fractal_runtime::Capacity::DEFAULT)).map_err(|error| {
+                    FractalError::new("invalid-capacity", format!("step `{}` for `{agent}`: {error:#}", step.path))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    let beside = agent_lanes(&intent.subjects).collect::<Lanes>();
     let mut subjects = BTreeSet::new();
     for mission in intent.missions.values() {
-        validate_mission(mission, default_host, &mut subjects)?;
+        validate_mission(mission, default_host, &mut subjects, &beside)?;
     }
     Ok(subjects)
 }
@@ -176,20 +222,21 @@ pub fn parse_intent_with_owner(
     owner_run: Option<&str>,
     allow_execution_root: bool,
     allow_empty: bool,
-) -> Result<NormalizedIntent, St3Error> {
+) -> Result<NormalizedIntent, FractalError> {
     if source.len() > 16 * 1024 * 1024 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "intent-too-large",
             "an intent cannot exceed 16 MiB",
         ));
     }
     let mut document: KdlDocument = source
         .parse::<KdlDocument>()
-        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
     fractal_drivers::kdl_version::ensure_kdl_schema_version(&document)
-        .map_err(|error| St3Error::new("unsupported-kdl-version", error.to_string()))?;
+        .map_err(|error| FractalError::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
+    lower_context_references(&mut document);
     let canonical_document = document.clone();
     lower_terminal_declarations(&mut document);
     let declarations = document
@@ -198,7 +245,7 @@ pub fn parse_intent_with_owner(
         .filter(|node| node.name().value() != "version")
         .collect::<Vec<_>>();
     if declarations.is_empty() && !allow_empty {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-root",
             "an st publication must contain at least one declaration after `version 2`",
         ));
@@ -207,7 +254,7 @@ pub fn parse_intent_with_owner(
         .iter()
         .any(|node| node.name().value() == "subgraph")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "removed-subgraph",
             "`subgraph` is not part of st KDL; publish declarations directly after `version 2`",
         ));
@@ -302,11 +349,11 @@ fn parse_desired_node(
     node: &KdlNode,
     enclosing_host: Option<&str>,
     context: &mut ParseContext,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     reject_type(node)?;
     let kind = node.name().value();
     if !ROOT_NODES.contains(&kind) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unknown-node",
             format!("unknown desired-state node `{kind}`"),
         ));
@@ -314,7 +361,7 @@ fn parse_desired_node(
     let owned_terminal = kind == "pty"
         && context.owner_run.is_none()
         && fractal_schema::owned_terminals::owner(&format!("pty/{}", one_string_with_children(node)?))
-            .map_err(|e| St3Error::new(e.code, e.message))?
+            .map_err(|e| FractalError::new(e.code, e.message))?
             .is_some();
     if !context.allow_execution_root
         && !owned_terminal
@@ -324,15 +371,21 @@ fn parse_desired_node(
             "exec" | "pty" | "lane" | "observer" | "subscription"
         )
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "runtime-outside-mission",
             format!("`{kind}` must be inside a mission or step"),
         ));
     }
     if kind == "account" && context.owner_run.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
+        ));
+    }
+    if kind == "objective" && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
         ));
     }
     match kind {
@@ -372,13 +425,13 @@ fn public_message_subscription(node: &KdlNode) -> bool {
 fn parse_mission_run_declaration(
     node: &KdlNode,
     context: &mut ParseContext,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     let subject = namespaced("mission-run", &id);
     validate_full_subject(&subject)?;
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "empty-mission-run",
             "a mission-run declaration needs a body",
         )
@@ -419,7 +472,7 @@ fn parse_mission_run_declaration(
         let (mission, revision) = exact_mission_revision(&mission_ref)?;
         let workspace = required_child_string(body, "workspace", &subject)?;
         if !workspace.starts_with('/') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "relative-mission-run-workspace",
                 "a published mission-run workspace must be absolute",
             ));
@@ -427,14 +480,14 @@ fn parse_mission_run_declaration(
         let requester = required_child_string(body, "requester", &subject)?;
         validate_full_subject(&requester)?;
         if !matches!(requester.split('/').next(), Some("person" | "agent")) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-mission-run-requester",
                 "a mission-run requester must be a person or agent subject",
             ));
         }
         let mode = child_string(body, "mode")?.unwrap_or_else(|| "run".into());
         if !matches!(mode.as_str(), "run" | "eval") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-run-mode",
                 format!("run mode `{mode}` is not registered"),
             ));
@@ -449,7 +502,7 @@ fn parse_mission_run_declaration(
             ensure_no_children(input)?;
             let values = positional_values(input);
             if values.len() != 2 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-run-input",
                     "a mission-run input needs a name and a value",
                 ));
@@ -457,7 +510,7 @@ fn parse_mission_run_declaration(
             let name = value_string(values[0])?;
             let value = value_string(values[1])?;
             if inputs.insert(name.clone(), value).is_some() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "duplicate-mission-run-input",
                     format!("mission run `{subject}` repeats input `{name}`"),
                 ));
@@ -467,7 +520,7 @@ fn parse_mission_run_declaration(
         if let Some(after) = &after {
             validate_full_subject(after)?;
             if after == &subject {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-run-after",
                     format!("mission run `{subject}` cannot wait for itself"),
                 ));
@@ -481,14 +534,14 @@ fn parse_mission_run_declaration(
             None => false,
             Some("true") => true,
             Some(other) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-report-completed",
                     format!("`report-completed` is `true` when present, not `{other}`"),
                 ));
             }
         };
         if report_completed && report_to.is_none() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "report-without-recipient",
                 format!("mission run `{subject}` sets `report-completed` but no `report-to` agent"),
             ));
@@ -536,9 +589,9 @@ fn parse_mission_run_declaration(
     merge_mission_run_declaration(context, incoming)
 }
 
-fn exact_mission_revision(value: &str) -> Result<(String, String), St3Error> {
+fn exact_mission_revision(value: &str) -> Result<(String, String), FractalError> {
     let (mission, revision) = value.rsplit_once('@').ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "unpinned-mission-run",
             "a mission-run must name an exact mission revision as `mission/ID@REVISION`",
         )
@@ -546,7 +599,7 @@ fn exact_mission_revision(value: &str) -> Result<(String, String), St3Error> {
     let mission = mission.strip_prefix("mission/").unwrap_or(mission);
     validate_name(mission, false)?;
     if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-revision",
             "a mission revision must be a 64-character SHA-256 hash",
         ));
@@ -554,13 +607,13 @@ fn exact_mission_revision(value: &str) -> Result<(String, String), St3Error> {
     Ok((mission.into(), revision.to_ascii_lowercase()))
 }
 
-fn parse_mission_revision(node: &KdlNode) -> Result<MissionRevisionOperation, St3Error> {
+fn parse_mission_revision(node: &KdlNode) -> Result<MissionRevisionOperation, FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     validate_name(&id, false)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-revision", format!("revision `{id}` needs a body")))?;
+        .ok_or_else(|| FractalError::new("empty-revision", format!("revision `{id}` needs a body")))?;
     reject_unknown_children(
         body,
         &["mission", "from", "reason", "cancellation"],
@@ -584,13 +637,13 @@ fn parse_mission_revision(node: &KdlNode) -> Result<MissionRevisionOperation, St
     })
 }
 
-fn parse_runtime_reset(node: &KdlNode) -> Result<RuntimeResetOperation, St3Error> {
+fn parse_runtime_reset(node: &KdlNode) -> Result<RuntimeResetOperation, FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     validate_name(&id, false)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-reset", format!("reset `{id}` needs a body")))?;
+        .ok_or_else(|| FractalError::new("empty-reset", format!("reset `{id}` needs a body")))?;
     reject_unknown_children(body, &["runtime", "from", "reason"], "reset", &id)?;
     let from_generation = namespaced("run-generation", &required_child_string(body, "from", &id)?);
     validate_full_subject(&from_generation)?;
@@ -602,12 +655,12 @@ fn parse_runtime_reset(node: &KdlNode) -> Result<RuntimeResetOperation, St3Error
     })
 }
 
-fn parse_named_cancellation(node: &KdlNode) -> Result<NamedCancellation, St3Error> {
+fn parse_named_cancellation(node: &KdlNode) -> Result<NamedCancellation, FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     validate_name(&id, false)?;
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "empty-cancellation",
             format!("cancellation `{id}` needs a body"),
         )
@@ -623,10 +676,10 @@ fn required_nonempty_child(
     body: &KdlDocument,
     name: &str,
     owner: &str,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let value = required_child_string(body, name, owner)?;
     if value.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-operation-value",
             format!("`{owner}` needs a non-empty `{name}`"),
         ));
@@ -638,12 +691,12 @@ fn insert_named_operation<T: Eq>(
     target: &mut BTreeMap<String, T>,
     id: String,
     operation: T,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if let Some(current) = target.get(&id) {
         if current == &operation {
             return Ok(());
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "immutable-operation-id",
             format!("operation `{id}` repeats with different content"),
         ));
@@ -655,7 +708,7 @@ fn insert_named_operation<T: Eq>(
 fn merge_mission_run_declaration(
     context: &mut ParseContext,
     incoming: MissionRunDeclaration,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let subject = incoming.subject.clone();
     let current = context
         .mission_runs
@@ -670,7 +723,7 @@ fn merge_mission_run_declaration(
             .as_ref()
             .is_some_and(|value| value != &creation)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "immutable-mission-run",
                 format!(
                     "mission run `{}` repeats with different creation fields",
@@ -702,7 +755,7 @@ pub fn planning_planner_subject(session: &str) -> String {
 /// one URI shares one subject. The owner keeps only the typed edge to that subject.
 pub(crate) fn parse_declared_resource(
     node: &KdlNode,
-) -> Result<(crate::model::DeclaredResourceReference, Option<DesiredSubject>), St3Error> {
+) -> Result<(crate::model::DeclaredResourceReference, Option<DesiredSubject>), FractalError> {
     let reference = parse_declared_resource_reference(node)?;
     if reference.kind != crate::model::ResourceReferenceKind::Uri {
         return Ok((reference, None));
@@ -739,7 +792,7 @@ pub(crate) fn parse_declared_resource(
 fn insert_declared_resource(
     context: &mut ParseContext,
     resource: DesiredSubject,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if context.subjects.get(&resource.subject) == Some(&resource) {
         return Ok(());
     }
@@ -748,7 +801,7 @@ fn insert_declared_resource(
 
 /// A published mission's resource references become desired subjects with the publication, as
 /// an agent's do. Only a top-level mission names resources.
-fn collect_mission_resources(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+fn collect_mission_resources(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
     if node.name().value() != "mission" {
         return Ok(());
     }
@@ -789,13 +842,13 @@ pub fn declared_uri(resource: &Value) -> Option<&str> {
         .flatten()
 }
 
-fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let name = one_string_with_children(node)?;
     validate_name(&name, false)?;
     let resource = namespaced("resource", &name);
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-resource-body",
             "a resource needs a kind or a refresh operation",
         )
@@ -814,7 +867,7 @@ fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Res
             .find(|current| current.resource == resource && current.id == operation.id)
         {
             if current != &operation {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "immutable-operation-id",
                     format!(
                         "refresh `{}` for `{resource}` repeats with different content",
@@ -844,13 +897,13 @@ fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Res
         .iter()
         .any(|child| child.name().value() != "refresh")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-resource-operation",
             format!("resource `{resource}` has a field but no kind"),
         ));
     }
     if !has_kind && refresh_count == 0 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-resource-operation",
             format!("resource `{resource}` has no declaration or operation"),
         ));
@@ -861,13 +914,13 @@ fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Res
 fn parse_resource_refresh(
     resource: &str,
     node: &KdlNode,
-) -> Result<ResourceRefreshOperation, St3Error> {
+) -> Result<ResourceRefreshOperation, FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     validate_name(&id, false)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-refresh", format!("refresh `{id}` needs a body")))?;
+        .ok_or_else(|| FractalError::new("empty-refresh", format!("refresh `{id}` needs a body")))?;
     reject_unknown_children(body, &["timeout"], "refresh", &id)?;
     let timeout_ms = child_string(body, "timeout")?
         .map(|value| parse_duration(&value, true))
@@ -880,29 +933,29 @@ fn parse_resource_refresh(
     })
 }
 
-fn parse_replica_repair(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+fn parse_replica_repair(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let record_ref = one_string_with_children(node)?;
     let record_id = record_ref.strip_prefix("record/").ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-replica-record",
             "a repair target must use the `record/HASH` form",
         )
     })?;
     if record_id.len() != 64 || !record_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-replica-record",
             "a repair target must contain one 64-character hexadecimal hash",
         ));
     }
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-repair", "a repair needs a replacement and reason"))?;
+        .ok_or_else(|| FractalError::new("empty-repair", "a repair needs a replacement and reason"))?;
     reject_unknown_children(body, &["replacement", "reason"], "repair", &record_ref)?;
     let replacement_claim_id = required_child_string(body, "replacement", &record_ref)?;
     let reason = required_child_string(body, "reason", &record_ref)?;
     if replacement_claim_id.trim().is_empty() || reason.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-repair-field",
             "a repair replacement and reason cannot be empty",
         ));
@@ -912,7 +965,7 @@ fn parse_replica_repair(node: &KdlNode, context: &mut ParseContext) -> Result<()
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-replacement-claim",
             "a repair replacement must be one 64-character claim ID",
         ));
@@ -928,7 +981,7 @@ fn parse_replica_repair(node: &KdlNode, context: &mut ParseContext) -> Result<()
         .find(|existing| existing.record_ref == record_ref)
     {
         if existing != &repair {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "conflicting-repair",
                 format!("repair `{record_ref}` repeats with different content"),
             ));
@@ -942,13 +995,13 @@ fn parse_replica_repair(node: &KdlNode, context: &mut ParseContext) -> Result<()
 fn parse_planning_session_declaration(
     node: &KdlNode,
     context: &mut ParseContext,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let id = one_string_with_children(node)?;
     let subject = namespaced("planning-session", &id);
     validate_full_subject(&subject)?;
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "empty-planning-session",
             "a planning-session declaration needs a body",
         )
@@ -991,28 +1044,28 @@ fn parse_planning_session_declaration(
         let request = required_child_string(body, "request", &subject)?;
         validate_document_ref(&request)?;
         if !request.starts_with("doc/") || !request.contains('@') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unpinned-planning-request",
                 "a planning request must name an exact document version",
             ));
         }
         let workspace = required_child_string(body, "workspace", &subject)?;
         if !workspace.starts_with('/') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "relative-planning-workspace",
                 "a published planning-session workspace must be absolute",
             ));
         }
         let requester = required_child_string(body, "requester", &subject)?;
         if !(requester.starts_with("person/") || requester.starts_with("agent/")) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-planning-requester",
                 "a planning requester must be a person or agent subject",
             ));
         }
         validate_full_subject(&requester)?;
         let planner_node = unique_child(body, "planner")?.ok_or_else(|| {
-            St3Error::new("missing-planner", "a planning-session needs a planner")
+            FractalError::new("missing-planner", "a planning-session needs a planner")
         })?;
         ensure_no_properties(planner_node)?;
         let provider = one_string_with_children(planner_node)?;
@@ -1020,21 +1073,21 @@ fn parse_planning_session_declaration(
             provider.as_str(),
             "codex" | "claude" | "pi" | "omp" | "opencode"
         ) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unsupported-planner",
                 "the planner must use an eligible typed harness driver",
             ));
         }
         let planner_body = planner_node
             .children()
-            .ok_or_else(|| St3Error::new("empty-planner", "a planner needs a body"))?;
+            .ok_or_else(|| FractalError::new("empty-planner", "a planner needs a body"))?;
         reject_unknown_children(planner_body, &["model", "effort"], "planner", &provider)?;
         let target_run =
             child_string(body, "target-run")?.map(|value| namespaced("mission-run", &value));
         let target_generation = child_string(body, "target-generation")?
             .map(|value| namespaced("run-generation", &value));
         if target_run.is_some() != target_generation.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "incomplete-planning-target",
                 "a targeted launch needs both target-run and target-generation",
             ));
@@ -1075,7 +1128,7 @@ fn parse_planning_session_declaration(
                 let operation_id = one_string_with_children(child)?;
                 validate_name(&operation_id, false)?;
                 let feedback_body = child.children().ok_or_else(|| {
-                    St3Error::new(
+                    FractalError::new(
                         "empty-planning-feedback",
                         format!("feedback `{operation_id}` needs a body"),
                     )
@@ -1089,7 +1142,7 @@ fn parse_planning_session_declaration(
                 let document = required_child_string(feedback_body, "document", &operation_id)?;
                 validate_document_ref(&document)?;
                 if !document.starts_with("doc/") || !document.contains('@') {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "unpinned-planning-feedback",
                         "planning feedback must name an exact document version",
                     ));
@@ -1128,7 +1181,7 @@ fn parse_planning_session_declaration(
             .as_ref()
             .is_some_and(|value| value != &creation)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "immutable-planning-session",
                 format!(
                     "launch `{}` repeats with different creation fields",
@@ -1201,7 +1254,7 @@ fn string_node(name: &str, value: &str) -> KdlNode {
     node
 }
 
-fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let name = placement_host(one_string_with_children(node)?, &context.default_host);
     validate_name(&name, false)?;
@@ -1229,7 +1282,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
                 let reference = one_string(child)?;
                 validate_document_ref(&reference)?;
                 if !reference.starts_with("doc/") || !reference.contains('@') {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "unpinned-host-document",
                         "a host document must name an exact doc/NAME@HASH version",
                     ));
@@ -1239,7 +1292,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
             if matches!(child.name().value(), "agent" | "exec" | "pty") {
                 parse_desired_node(child, Some(&name), context)?;
             } else {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-host-child",
                     format!("host `{name}` cannot contain `{}`", child.name().value()),
                 ));
@@ -1253,11 +1306,11 @@ fn parse_agent(
     node: &KdlNode,
     enclosing_host: Option<&str>,
     context: &mut ParseContext,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let node_name = one_string_with_children(node)?;
     let children = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-agent-body",
             format!("agent `{node_name}` has no body"),
         )
@@ -1266,7 +1319,7 @@ fn parse_agent(
     if let Some(policy) = unique_child(children, "rollout")? {
         ensure_no_properties(policy)?;
         if one_string(policy)? != "manual" {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-seat-rollout",
                 "seat rollout must be manual",
             ));
@@ -1294,6 +1347,7 @@ fn parse_agent(
         || format!("agent/{bus_id}"),
         |run| format!("agent/{}/{identity}", owner_run_id(run)),
     );
+    let admission = fractal_missions_base::declared_admission::parse(children, "agent", &subject)?;
     let runtime_id = context.owner_run.as_ref().map_or_else(
         || bounded_runtime_id(&bus_id.replace('/', ".")),
         |run| {
@@ -1324,13 +1378,13 @@ fn parse_agent(
     let command = child_string(children, "command")?;
     let argv = child_strings(children, "argv")?;
     if driver_nodes.len() > 1 || command.is_some() as usize + argv.is_some() as usize > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "multiple-agent-launches",
             format!("agent `{bus_id}` has multiple compact launches or drivers"),
         ));
     }
     if !driver_nodes.is_empty() && (command.is_some() || argv.is_some()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "multiple-agent-launches",
             format!("agent `{bus_id}` mixes a driver and a compact launch"),
         ));
@@ -1374,6 +1428,9 @@ fn parse_agent(
             driver: None,
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         });
     }
 
@@ -1393,7 +1450,7 @@ fn parse_agent(
             .iter()
             .any(|name| children.nodes().iter().any(|n| n.name().value() == *name))
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-terminal-binding",
                 "bind-terminal requires a top-level harness seat without managed side effects",
             ));
@@ -1401,10 +1458,10 @@ fn parse_agent(
         ensure_only_properties(binding, &["incarnation", "id", "runtime-id"])?;
         let terminal = one_string(binding)?;
         if fractal_schema::owned_terminals::owner(&terminal)
-            .map_err(|e| St3Error::new(e.code, e.message))?
+            .map_err(|e| FractalError::new(e.code, e.message))?
             .is_none_or(|owner| !owner.starts_with("person/"))
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-terminal-binding",
                 "bind-terminal needs a person's terminal subject",
             ));
@@ -1412,7 +1469,7 @@ fn parse_agent(
         let incarnation = property_string(binding, "incarnation")?
             .filter(|s| !s.is_empty() && s.len() <= 256)
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-terminal-binding",
                     "bind-terminal needs its PTY incarnation",
                 )
@@ -1420,7 +1477,7 @@ fn parse_agent(
         let id = property_string(binding, "id")?
             .filter(|id| uuid::Uuid::parse_str(id).is_ok())
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-terminal-binding",
                     "bind-terminal needs a unique invocation UUID",
                 )
@@ -1438,6 +1495,9 @@ fn parse_agent(
     }
 
     if let Some(member) = primary.as_mut() {
+        member.declared_priority = admission.priority;
+        member.declared_lane = admission.lane;
+        member.declared_budgets = admission.budgets;
         member.one_shot = unique_child(children, "one-shot")?.is_some();
         member.capacity = unique_child(children, "capacity")?
             .map(parse_capacity)
@@ -1462,7 +1522,7 @@ fn parse_agent(
     {
         let (reference, resource) = parse_declared_resource(child)?;
         if !resource_names.insert(reference.name.clone()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-resource-name",
                 format!("agent `{subject}` repeats resource `{}`", reference.name),
             ));
@@ -1481,9 +1541,9 @@ fn parse_agent(
     }
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
     let accountable = fractal_schema::accountable::from_desired(&desired)
-        .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+        .map_err(|e| FractalError::new(e.code, e.message))?.map(str::to_owned);
     if accountable.is_some() && context.owner_run.is_some() {
-        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+        return Err(FractalError::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
     }
     insert_subject(
         context,
@@ -1506,7 +1566,7 @@ fn parse_agent(
         }
         let task_name = first_string(child)?;
         if !task_names.insert(task_name.clone()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-task",
                 format!("agent `{bus_id}` repeats task `{task_name}`"),
             ));
@@ -1559,7 +1619,7 @@ fn parse_agent(
         .is_some_and(|subject| subject.member.is_none())
         && task_names.is_empty()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-agent-launch",
             format!("agent `{bus_id}` has no launch"),
         ));
@@ -1572,7 +1632,7 @@ fn parse_standalone_member(
     kind: &str,
     enclosing_host: Option<&str>,
     context: &mut ParseContext,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let name = one_string_with_children(node)?;
     validate_name(&name, false)?;
@@ -1581,7 +1641,7 @@ fn parse_standalone_member(
         |run| format!("{kind}/{}/{name}", owner_run_id(run)),
     );
     let children = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-member-body",
             format!("{kind} `{name}` has no body"),
         )
@@ -1631,11 +1691,12 @@ fn parse_standalone_member(
     )
 }
 
-fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Result<(), St3Error> {
+fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Result<(), FractalError> {
     let name = first_string(node)?;
     validate_name(&name, false)?;
     match kind {
         "account" => validate_account(node)?,
+        "objective" => validate_objective(node)?,
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -1651,6 +1712,8 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     }
     let subject = match kind {
         "doc" => format!("doc/{name}"),
+        // The kernel reader names the subject, so `objective "objective/x"` is not `objective/x`.
+        "objective" => format!("objective/{name}"),
         "lane" | "observer" | "subscription" | "schedule" if context.owner_run.is_some() => {
             format!(
                 "{kind}/{}/{}",
@@ -1690,12 +1753,29 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     Ok(())
 }
 
-fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
+/// An objective a fleet declares: the kernel's strict reader, and only an interval over claims
+/// named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
+fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
+    let objective = crate::objective::parse(&canonical_node(node)?)?;
+    if !objective.declarable() {
+        return Err(FractalError::new(
+            "objective-not-declarable",
+            format!(
+                "objective `{}`: a fleet declares an `interval` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
+                objective.name,
+                objective.indicator.kind()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_account(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-account-body", "an account needs a body"))?;
+        .ok_or_else(|| FractalError::new("missing-account-body", "an account needs a body"))?;
     reject_unknown_children(
         body,
         &[
@@ -1717,7 +1797,7 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(credits) = child_integer(body, "monthly-credits-usd")?
         && !(1..=1_000_000).contains(&credits)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-account-credits",
             "an account's monthly credits are whole dollars, from 1 to 1000000",
         ));
@@ -1731,7 +1811,7 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
                 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
         if !valid {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-account-identity",
                 format!("an account identity is a provider label like `claude/0123456789abcdef`; got `{identity}`"),
             ));
@@ -1741,14 +1821,14 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(auth) = child_string(body, "auth-type")?
         && !matches!(auth.as_str(), "subscription" | "api-key")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-auth-type",
             format!("invalid account auth type `{auth}`"),
         ));
     }
     if let Some(owner) = child_string(body, "owner")? {
         if !owner.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-account-owner",
                 format!("an account owner is a person, like `person/ada`; got `{owner}`"),
             ));
@@ -1758,7 +1838,7 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(plan) = child_string(body, "plan")?
         && (plan.trim().is_empty() || plan.len() > 64)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-account-plan",
             "an account plan is a short nonempty name",
         ));
@@ -1777,7 +1857,7 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
             || path.len() > 1024
             || path.contains('\0')
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-account-login",
                 format!(
                     "an account login is an absolute directory or one under `~/`; got `{path}`"
@@ -1789,7 +1869,7 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
             validate_name(host, false)?;
         }
         if !hosts.insert(host) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-account-login",
                 "an account has one login per host, and at most one for every host",
             ));
@@ -1804,7 +1884,7 @@ fn validate_account_binding(
     harness: &KdlNode,
     agent: &KdlDocument,
     owner: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(body) = harness.children() else {
         return Ok(());
     };
@@ -1814,14 +1894,14 @@ fn validate_account_binding(
         return Ok(());
     }
     if account.is_some() && pool.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "account-and-pool",
             format!("agent `{owner}` binds an account and a pool; choose one"),
         ));
     }
     let provider = one_string_with_children(harness)?;
     let variable = crate::accounts::login_environment_name(&provider).ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "account-unsupported-harness",
             format!("harness `{provider}` has no login directory st can select"),
         )
@@ -1836,7 +1916,7 @@ fn validate_account_binding(
         ensure_no_children(pool)?;
         let person = one_string(pool)?;
         if !person.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-account-pool",
                 format!("an account pool names its owner, like `person/ada`; got `{person}`"),
             ));
@@ -1859,7 +1939,7 @@ fn validate_account_binding(
                         || argument.starts_with("--session-id=")
                 });
             if resumes {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "account-pool-resume",
                     format!(
                         "agent `{owner}` is bound to a pool and cannot resume a native session: a restart on another account starts fresh, since its work lives in the graph"
@@ -1875,7 +1955,7 @@ fn validate_account_binding(
                 .any(|entry| entry.name().value() == variable)
         })
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "account-env-conflict",
             format!("agent `{owner}` binds an account, so st sets {variable}; remove it from env"),
         ));
@@ -1883,7 +1963,16 @@ fn validate_account_binding(
     Ok(())
 }
 
-fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+/// The observer name of `observer/github/OWNER/REPO`, the one standing observer every watch of
+/// that repository uses, in the lowercase spelling its subject has.
+pub(crate) fn standing_github_observer(subject: &str) -> Option<String> {
+    let repository = subject.strip_prefix("observer/github/")?;
+    let (owner, repo) = repository.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/'))
+        .then(|| format!("github/{}", repository.to_ascii_lowercase()))
+}
+
+fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let subject = one_string_with_children(node)?;
     // Why the seat stops, as its author gave it: the card shows it beside who stopped it.
@@ -1895,12 +1984,32 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
         None => None,
     };
     if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
-        return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
+        return Err(FractalError::new("empty-stop-reason", "a stop reason cannot be blank"));
+    }
+    // A person stops a repository's standing GitHub observer so that a watch on another member
+    // declares it there, which then polls on from the observer's cursor (#5182). It declares
+    // what a host writes when the observer falls unused, which every build reads, so it carries
+    // no reason. Publication admits it from a person only.
+    if let Some(name) = standing_github_observer(&subject)
+        && context.owner_run.is_none()
+    {
+        if reason.is_some() {
+            return Err(FractalError::new(
+                "observer-stop-reason",
+                format!("a stop of `{subject}` takes no reason: it declares the observer stopped, as a host does when nothing uses it"),
+            ));
+        }
+        let mut observer = KdlNode::new("observer");
+        observer.entries_mut().push(kdl::KdlEntry::new(name));
+        let mut body = KdlDocument::new();
+        body.nodes_mut().push(KdlNode::new("stop"));
+        observer.set_children(body);
+        return parse_structure(&observer, "observer", context);
     }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject; got `{subject}`"),
+            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();
@@ -2039,7 +2148,7 @@ fn driver_member(
     restart: RestartType,
     restart_intensity: RestartIntensity,
     shutdown_timeout_ms: u64,
-) -> Result<MemberSpec, St3Error> {
+) -> Result<MemberSpec, FractalError> {
     let name = one_string_with_children(driver)?;
     let defaults = KdlDocument::new();
     let children = driver.children().unwrap_or(&defaults);
@@ -2073,7 +2182,7 @@ fn driver_member(
             "codex" => provider.extend(["-c".into(), format!("model_reasoning_effort={effort}")]),
             "pi" | "omp" => provider.extend(["--thinking".into(), effort]),
             "opencode" => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-driver-child",
                     "opencode does not accept effort",
                 ));
@@ -2106,7 +2215,7 @@ fn driver_member(
             || [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV]
                 .iter().any(|key| environment.contains_key(*key))
         {
-            return Err(St3Error::new("invalid-native-seed", "seed requires an absolute OMP transcript path and cannot accompany session selectors or resume environment"));
+            return Err(FractalError::new("invalid-native-seed", "seed requires an absolute OMP transcript path and cannot accompany session selectors or resume environment"));
         }
         wrapper.extend(["--seed".into(), seed]);
     }
@@ -2133,6 +2242,9 @@ fn driver_member(
         driver: Some(name),
         terminal_size: None,
         capacity: None,
+        declared_priority: None,
+        declared_lane: None,
+        declared_budgets: None,
     })
 }
 
@@ -2150,9 +2262,9 @@ fn task_member(
     default_intensity: RestartIntensity,
     default_shutdown_timeout_ms: u64,
     standalone: bool,
-) -> Result<MemberSpec, St3Error> {
+) -> Result<MemberSpec, FractalError> {
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-task-body",
             format!("member `{subject}` has no body"),
         )
@@ -2182,7 +2294,7 @@ fn task_member(
     let command = child_string(body, "command")?;
     let argv = child_strings(body, "argv")?;
     let launch = compact_launch(command, argv)?.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-task-launch",
             format!("member `{subject}` needs command or argv"),
         )
@@ -2226,38 +2338,41 @@ fn task_member(
         driver: None,
         terminal_size: None,
         capacity: None,
+        declared_priority: None,
+        declared_lane: None,
+        declared_budgets: None,
     })
 }
 
 fn compact_launch(
     command: Option<String>,
     argv: Option<Vec<String>>,
-) -> Result<Option<LaunchSpec>, St3Error> {
+) -> Result<Option<LaunchSpec>, FractalError> {
     match (command, argv) {
         (Some(command), None) => Ok(Some(LaunchSpec::Shell(command))),
         (None, Some(argv)) if !argv.is_empty() => Ok(Some(LaunchSpec::Argv(argv))),
         (None, None) => Ok(None),
-        (Some(_), Some(_)) => Err(St3Error::new(
+        (Some(_), Some(_)) => Err(FractalError::new(
             "multiple-launches",
             "a member cannot contain both command and argv",
         )),
-        (None, Some(_)) => Err(St3Error::new("empty-argv", "argv needs a program")),
+        (None, Some(_)) => Err(FractalError::new("empty-argv", "argv needs a program")),
     }
 }
 
-fn parse_restart_type(value: Option<String>) -> Result<RestartType, St3Error> {
+fn parse_restart_type(value: Option<String>) -> Result<RestartType, FractalError> {
     match value.as_deref() {
         None | Some("always") => Ok(RestartType::Always),
         Some("on-failure") => Ok(RestartType::OnFailure),
         Some("never") => Ok(RestartType::Never),
-        Some(value) => Err(St3Error::new(
+        Some(value) => Err(FractalError::new(
             "invalid-restart",
             format!("invalid restart type `{value}`"),
         )),
     }
 }
 
-fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, St3Error> {
+fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, FractalError> {
     let nodes = document
         .nodes()
         .iter()
@@ -2267,7 +2382,7 @@ fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, S
         return Ok(RestartIntensity::default());
     };
     if nodes.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-child",
             "a restart intensity block repeats",
         ));
@@ -2275,7 +2390,7 @@ fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, S
     let body = node.children().expect("checked");
     let attempts = child_integer(body, "attempts")?.unwrap_or(3);
     if attempts <= 0 || attempts > u32::MAX as i128 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-restart-attempts",
             "restart attempts must be a positive u32",
         ));
@@ -2290,7 +2405,7 @@ fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, S
         .unwrap_or(0);
     let mode = child_string(body, "mode")?.unwrap_or_else(|| "delay".into());
     if !matches!(mode.as_str(), "delay" | "fail") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-restart-mode",
             format!("invalid restart mode `{mode}`"),
         ));
@@ -2303,7 +2418,7 @@ fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, S
     })
 }
 
-fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, St3Error> {
+fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, FractalError> {
     let nodes = document
         .nodes()
         .iter()
@@ -2312,12 +2427,15 @@ fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, St3Error
     match nodes.as_slice() {
         [] => Ok(None),
         [node] => one_string(node).map(Some),
-        _ => Err(St3Error::new("duplicate-child", "a restart type repeats")),
+        _ => Err(FractalError::new("duplicate-child", "a restart type repeats")),
     }
 }
 
-fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Error> {
+fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), FractalError> {
     const ALLOWED: &[&str] = &[
+        "declared-priority",
+        "declared-lane",
+        "declared-budgets",
         "identity",
         "name",
         "description",
@@ -2341,7 +2459,9 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "one-shot",
         "capacity",
         "handles-faults",
+        "notice-runtime",
         "accountable",
+        "principal",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2356,7 +2476,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         .iter()
         .any(|child| child.name().value() == "constraint")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "agent-constraint-outside-mission",
             format!(
                 "agent `{owner}` declares a constraint; only an agent declared inside a mission can scope constraints to its steps"
@@ -2385,6 +2505,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "one-shot",
         "capacity",
         "handles-faults",
+        "notice-runtime",
         "accountable",
         "mission-authority",
         "queue-authority",
@@ -2393,12 +2514,23 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
     ] {
         unique_child(document, child)?;
     }
+    if let Some(principal) = unique_child(document, "principal")? {
+        ensure_no_properties(principal)?;
+        ensure_no_children(principal)?;
+        let person = one_string(principal)?;
+        if !fractal_schema::accountable::person(&person) {
+            return Err(FractalError::new(
+                "invalid-agent-principal",
+                "principal must name one concrete person/NAME",
+            ));
+        }
+    }
     if let Some(accountable) = unique_child(document, "accountable")? {
         ensure_no_properties(accountable)?;
         ensure_no_children(accountable)?;
         let person = one_string(accountable)?;
         if !fractal_schema::accountable::person(&person) {
-            return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
+            return Err(FractalError::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
         }
     }
     if let Some(lifecycle) = unique_child(document, "lifecycle")? {
@@ -2406,7 +2538,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         ensure_no_children(lifecycle)?;
         let value = one_string(lifecycle)?;
         if crate::model::AgentLifecycle::parse(&value).is_none() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-agent-lifecycle",
                 format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
             ));
@@ -2414,6 +2546,10 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
     }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
+    }
+    if let Some(flag) = unique_child(document, "notice-runtime")? {
+        ensure_bare(flag)?;
+        ensure_no_children(flag)?;
     }
     if let Some(flag) = unique_child(document, "one-shot")? {
         ensure_bare(flag)?;
@@ -2488,7 +2624,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         if let Some(reason) = property_string(under, "reason")?
             && (reason.is_empty() || reason.len() > 500)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-under-reason",
                 "an under reason must contain 1 through 500 bytes",
             ));
@@ -2498,17 +2634,20 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
     if let Some(name) = child_string(document, "name")?
         && name.len() > 160
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "display-name-too-long",
             "an agent display name cannot exceed 160 bytes",
         ));
     }
     if let Some(description) = child_string(document, "description")?
-        && description.len() > 1_000
+        && description.len() > agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "description-too-long",
-            "an agent description cannot exceed 1,000 bytes",
+            format!(
+                "an agent description, its charter, cannot exceed {} bytes",
+                agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
+            ),
         ));
     }
     parse_workspace(document)?;
@@ -2534,25 +2673,25 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
 
 /// `checkout "REPOSITORY" base="REF" branch="NAME" remove-at-run-end=#true` creates the agent's
 /// workspace as a Git worktree before the agent starts.
-fn validate_checkout(node: &KdlNode, agent: &KdlDocument, owner: &str) -> Result<(), St3Error> {
+fn validate_checkout(node: &KdlNode, agent: &KdlDocument, owner: &str) -> Result<(), FractalError> {
     ensure_only_properties(node, &["base", "branch", "remove-at-run-end"])?;
     ensure_no_children(node)?;
     one_string(node)?;
     if unique_child(agent, "workspace")?.is_none() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-checkout",
             format!("agent `{owner}` checkout needs a workspace for the worktree"),
         ));
     }
     for property in ["base", "branch"] {
         let value = property_string(node, property)?.ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-checkout",
                 format!("agent `{owner}` checkout needs {property}=\"...\""),
             )
         })?;
         if !checkout_ref_is_valid(&value) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkout",
                 format!("agent `{owner}` checkout {property} `{value}` is not a Git ref name"),
             ));
@@ -2580,16 +2719,16 @@ fn checkout_ref_is_valid(value: &str) -> bool {
         })
 }
 
-fn validate_mission_authority_pattern(pattern: &str) -> Result<(), St3Error> {
+fn validate_mission_authority_pattern(pattern: &str) -> Result<(), FractalError> {
     if pattern.starts_with("mission/") || pattern.contains('*') && !pattern.ends_with("/*") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-authority-pattern",
             "mission authority needs an exact mission ID or a terminal `/*` namespace",
         ));
     }
     let mission = pattern.strip_suffix("/*").unwrap_or(pattern);
     if mission.is_empty() || mission.contains('*') {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-authority-pattern",
             "mission authority needs an exact mission ID or a terminal `/*` namespace",
         ));
@@ -2597,9 +2736,9 @@ fn validate_mission_authority_pattern(pattern: &str) -> Result<(), St3Error> {
     crate::mission::validate_mission_id(mission)
 }
 
-fn validate_queue_authority_pattern(pattern: &str) -> Result<(), St3Error> {
+fn validate_queue_authority_pattern(pattern: &str) -> Result<(), FractalError> {
     let invalid = || {
-        St3Error::new(
+        FractalError::new(
             "invalid-queue-authority-pattern",
             "queue authority needs an exact seat identity or a terminal `/*` namespace, without `agent/`",
         )
@@ -2614,8 +2753,8 @@ fn validate_queue_authority_pattern(pattern: &str) -> Result<(), St3Error> {
     validate_name(seat, false).map_err(|_| invalid())
 }
 
-fn validate_agent_authority_pattern(pattern: &str) -> Result<(), St3Error> {
-    validate_queue_authority_pattern(pattern).map_err(|_| St3Error::new(
+fn validate_agent_authority_pattern(pattern: &str) -> Result<(), FractalError> {
+    validate_queue_authority_pattern(pattern).map_err(|_| FractalError::new(
         "invalid-agent-authority-pattern",
         "agent authority needs an exact agent identity or a terminal `/*` namespace, without `agent/`",
     ))
@@ -2623,7 +2762,7 @@ fn validate_agent_authority_pattern(pattern: &str) -> Result<(), St3Error> {
 
 /// Whether `mission-authority "none"` withholds all mission authority, including the default
 /// of a top-level project seat. Any other value is refused; a block of rules is not a value.
-fn declares_no_mission_authority(authority: &KdlNode) -> Result<bool, St3Error> {
+fn declares_no_mission_authority(authority: &KdlNode) -> Result<bool, FractalError> {
     if authority.entries().is_empty() {
         return Ok(false);
     }
@@ -2631,7 +2770,7 @@ fn declares_no_mission_authority(authority: &KdlNode) -> Result<bool, St3Error> 
     if one_string(authority)? == "none" {
         Ok(true)
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-mission-authority",
             "mission authority needs a block of rules or the value \"none\"",
         ))
@@ -2644,17 +2783,17 @@ struct AuthorityBlock {
     verbs: &'static [&'static str],
     empty: &'static str,
     duplicate: &'static str,
-    pattern: fn(&str) -> Result<(), St3Error>,
+    pattern: fn(&str) -> Result<(), FractalError>,
 }
 
 fn validate_authority_block(
     authority: &KdlNode,
     block: AuthorityBlock,
     owner: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     ensure_bare(authority)?;
     let empty = || {
-        St3Error::new(
+        FractalError::new(
             block.empty,
             format!("{} needs at least one rule", block.name),
         )
@@ -2668,7 +2807,7 @@ fn validate_authority_block(
         let pattern = one_string(rule)?;
         (block.pattern)(&pattern)?;
         if !rules.insert((rule.name().value().to_owned(), pattern.clone())) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 block.duplicate,
                 format!(
                     "agent `{owner}` repeats {} `{} {pattern}`",
@@ -2688,7 +2827,7 @@ fn validate_task_body(
     document: &KdlDocument,
     owner: &str,
     standalone: bool,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut allowed = vec!["id", "command", "argv", "cwd", "tags", "env", "unset"];
     if standalone {
         allowed.extend([
@@ -2723,7 +2862,7 @@ fn validate_task_body(
     }
     let environment = parse_map_child(document, "env")?;
     if let Some(name) = unset.iter().find(|name| environment.contains_key(*name)) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "environment-set-and-unset",
             format!("member `{owner}` both sets and unsets `{name}`"),
         ));
@@ -2734,7 +2873,7 @@ fn validate_task_body(
     Ok(())
 }
 
-fn validate_restart_forms(document: &KdlDocument) -> Result<(), St3Error> {
+fn validate_restart_forms(document: &KdlDocument) -> Result<(), FractalError> {
     let nodes = document
         .nodes()
         .iter()
@@ -2749,7 +2888,7 @@ fn validate_restart_forms(document: &KdlDocument) -> Result<(), St3Error> {
         .filter(|node| node.children().is_some())
         .count();
     if scalar > 1 || block > 1 || nodes.len() > 2 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-child",
             "a restart type or intensity block repeats",
         ));
@@ -2757,7 +2896,7 @@ fn validate_restart_forms(document: &KdlDocument) -> Result<(), St3Error> {
     if let Some(node) = nodes.iter().find(|node| node.children().is_some()) {
         ensure_no_properties(node)?;
         if !positional_values(node).is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unexpected-value",
                 "a restart intensity block cannot have values",
             ));
@@ -2776,7 +2915,7 @@ fn validate_restart_forms(document: &KdlDocument) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_driver(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let provider = one_string_with_children(node)?;
     let defaults = KdlDocument::new();
@@ -2804,14 +2943,14 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
         "pi" => &["executable", "model", "effort", "args", "message"],
         "omp" => &["executable", "model", "effort", "args", "message", "seed"],
         "opencode" => &["executable", "model", "args", "message"],
-        _ => return Err(St3Error::new("unknown-driver", "unknown typed driver")),
+        _ => return Err(FractalError::new("unknown-driver", "unknown typed driver")),
     };
     if body
         .nodes()
         .iter()
         .any(|child| child.name().value() == "prompt")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "harness-prompt-removed",
             format!(
                 "harness `{provider}` cannot take a prompt: a seat starts idle and takes no turn until a person types or a message is posted; put the instruction in a step goal or send the seat a message"
@@ -2830,7 +2969,7 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
             || id.is_empty()
             || id.len() > 256
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-initial-message",
                 "message needs nonempty text up to 64 KiB and a stable id",
             ));
@@ -2843,7 +2982,7 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(executable) = child_string(body, "executable")?
         && (executable.trim().is_empty() || executable.contains('\0'))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-harness-executable",
             "harness executable must be a nonempty executable name or path without NUL bytes",
         ));
@@ -2852,7 +2991,7 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
         && let Some(node) = unique_child(body, "dev-channels")?
         && !one_bool(node)?
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "native-channel-required",
             "a typed Claude harness always requires the st native channel; use `exec` for an unmanaged non-interactive process",
         ));
@@ -2860,11 +2999,11 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_render(node: &KdlNode) -> Result<(), FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-render", "a render block cannot be empty"))?;
+        .ok_or_else(|| FractalError::new("empty-render", "a render block cannot be empty"))?;
     for operation in body.nodes() {
         reject_type(operation)?;
         let name = operation.name().value();
@@ -2884,7 +3023,7 @@ fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
                 let args = positional_strings_without_children(operation)?;
                 let child_content = operation.children().is_some();
                 if !matches!((args.len(), child_content), (2, false) | (1, true)) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-render-operation",
                         format!("render `{name}` needs a destination and exactly one content form"),
                     ));
@@ -2897,7 +3036,7 @@ fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
                     if let Some(arrays) = property_string(operation, "arrays")?
                         && !matches!(arrays.as_str(), "replace" | "union")
                     {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-json-array-mode",
                             format!("invalid JSON array mode `{arrays}`"),
                         ));
@@ -2912,9 +3051,9 @@ fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
                         )?
                     };
                     let value: Value = serde_json::from_str(&source)
-                        .map_err(|error| St3Error::new("invalid-render-json", error.to_string()))?;
+                        .map_err(|error| FractalError::new("invalid-render-json", error.to_string()))?;
                     if !value.is_object() {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-render-json",
                             "json-upsert content must be an object",
                         ));
@@ -2930,14 +3069,14 @@ fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
                 ensure_no_properties(operation)?;
                 let values = positional_strings(operation)?;
                 if values.is_empty() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-git-exclude",
                         "git-exclude needs at least one path",
                     ));
                 }
             }
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unknown-render-operation",
                     format!("unknown render operation `{other}`"),
                 ));
@@ -2950,16 +3089,16 @@ fn validate_render(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_doc(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_doc(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let name = one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-doc-body", format!("doc `{name}` needs a hash")))?;
+        .ok_or_else(|| FractalError::new("missing-doc-body", format!("doc `{name}` needs a hash")))?;
     reject_unknown_children(body, &["hash"], "doc", &name)?;
     let hash = required_child_string(body, "hash", &name)?;
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-document-hash",
             format!("doc `{name}` needs a 64-character SHA-256 hash"),
         ));
@@ -2967,24 +3106,24 @@ fn validate_doc(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_resource(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_resource(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-resource-body", "a resource needs a kind"))?;
+        .ok_or_else(|| FractalError::new("missing-resource-body", "a resource needs a kind"))?;
     reject_unknown_children(body, &["kind", "uri"], "resource", "resource")?;
     let kind = required_child_string(body, "kind", "resource")?;
     fractal_schema::registry()
         .validate_resource_kind(&kind)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     let uri = child_string(body, "uri")?;
     match (kind.as_str(), uri) {
         ("uri.reference", Some(uri)) => {
             validate_resource_uri(&uri)?;
             let name = first_string(node)?;
             if name != uri_reference_name(&uri) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-resource-uri",
                     format!(
                         "a uri.reference resource is named `{}` after its exact URI",
@@ -2994,13 +3133,13 @@ fn validate_resource(node: &KdlNode) -> Result<(), St3Error> {
             }
         }
         ("uri.reference", None) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-resource-uri",
                 "a uri.reference resource needs `uri`",
             ));
         }
         (_, Some(_)) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-resource-uri",
                 "only a uri.reference resource declares `uri`",
             ));
@@ -3010,12 +3149,12 @@ fn validate_resource(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_observer(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_observer(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-observer-body", "an observer needs a body"))?;
+        .ok_or_else(|| FractalError::new("missing-observer-body", "an observer needs a body"))?;
     if body.nodes().len() == 1 && body.nodes()[0].name().value() == "stop" {
         ensure_bare(&body.nodes()[0])?;
         return Ok(());
@@ -3029,7 +3168,7 @@ fn validate_observer(node: &KdlNode) -> Result<(), St3Error> {
     let resource = required_child_string(body, "resource", "observer")?;
     validate_full_subject(&resource)?;
     if !resource.starts_with("resource/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-observer-resource",
             "an observer resource must use a `resource/` subject",
         ));
@@ -3039,13 +3178,13 @@ fn validate_observer(node: &KdlNode) -> Result<(), St3Error> {
     }
     let fields = repeated_child_strings(body, "field")?;
     if fields.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-observer-field",
             "an observer needs at least one field",
         ));
     }
     if fields.iter().collect::<BTreeSet<_>>().len() != fields.len() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-observer-field",
             "an observer field repeats",
         ));
@@ -3056,12 +3195,12 @@ fn validate_observer(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_subscription(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-subscription-body", "a subscription needs a body"))?;
+        .ok_or_else(|| FractalError::new("missing-subscription-body", "a subscription needs a body"))?;
     if body.nodes().len() == 1 && body.nodes()[0].name().value() == "stop" {
         ensure_bare(&body.nodes()[0])?;
         return Ok(());
@@ -3075,7 +3214,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
     let observer = required_child_string(body, "observer", "subscription")?;
     validate_full_subject(&observer)?;
     if !observer.starts_with("observer/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subscription-observer",
             "a subscription observer must use an `observer/` subject",
         ));
@@ -3083,13 +3222,13 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
     unique_child(body, "delivery")?;
     let fields = repeated_child_strings(body, "on")?;
     if fields.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-subscription-field",
             "a subscription needs at least one `on` field",
         ));
     }
     if fields.iter().collect::<BTreeSet<_>>().len() != fields.len() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-subscription-field",
             "a subscription field repeats",
         ));
@@ -3108,33 +3247,33 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
         ensure_no_children(mention)?;
         let entries = positional_values(mention);
         let [login] = entries.as_slice() else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-subscription-mention",
                 "a subscription mention names one GitHub login",
             ));
         };
         let login = value_string(login)?;
         if login.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-subscription-mention",
                 "a subscription mention names one GitHub login",
             ));
         }
         if !logins.insert(login.to_ascii_lowercase()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-subscription-mention",
                 format!("the mention of `{login}` repeats"),
             ));
         }
     }
     if !logins.is_empty() && !fields.iter().any(|field| field == "mentions") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subscription-mention",
             "a subscription that names mentions needs `on \"mentions\"`",
         ));
     }
     let delivery = unique_child(body, "delivery")?.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-subscription-delivery",
             "a subscription needs delivery",
         )
@@ -3159,7 +3298,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                     unique_child(delivery_body, "owner")?;
                     validate_owner_route(delivery_body)?;
                     let every = child_string(delivery_body, "every")?.ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "invalid-batch-delivery",
                             "a message delivery with a body batches `every` some interval",
                         )
@@ -3173,7 +3312,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                     !matches!(field.as_str(), "pull_requests" | "issues" | "mentions")
                 })
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-batch-delivery",
                     format!("a batched delivery hears repository items, not `{field}`"),
                 ));
@@ -3182,13 +3321,13 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                 && fields.iter().any(|field| field == "mentions")
                 && logins.is_empty()
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mention-delivery",
                     "a batched delivery hears the mentions of at least one `mention`",
                 ));
             }
             if !logins.is_empty() && every.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-subscription-mention",
                     "only a batched delivery hears the mentions a `mention` names",
                 ));
@@ -3200,13 +3339,13 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
             let target = required_child_string(body, "to", "subscription")?;
             validate_full_subject(&target)?;
             if !target.starts_with("agent/") {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-watch-delivery",
                     "a watch wakes one agent",
                 ));
             }
             if unique_child(body, "when")?.is_some() || !logins.is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-watch-delivery",
                     "a watch hears every event of its item, with no `when` or `mention`",
                 ));
@@ -3215,13 +3354,13 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                 .iter()
                 .find(|field| !crate::github_watch::WATCH_FIELDS.contains(&field.as_str()))
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-watch-delivery",
                     format!("a watch hears comments, issues and pull requests, not `{field}`"),
                 ));
             }
             let delivery_body = delivery.children().ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-watch-delivery",
                     "a watch delivery names its `item` and `since`",
                 )
@@ -3240,7 +3379,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                 })
                 .filter(|item| *item > 0);
             if item.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-watch-delivery",
                     "a watch delivery names one positive `item` number",
                 ));
@@ -3251,7 +3390,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                     Some(at) if crate::github_watch::parse_rfc3339_ms(&at).is_some() => {}
                     None if !required => {}
                     _ => {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-watch-delivery",
                             format!("a watch delivery's `{name}` is an RFC 3339 time"),
                         ));
@@ -3261,13 +3400,13 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
         }
         "mission" => {
             if child_string(body, "to")?.is_some() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-subscription-target",
                     "a mission delivery cannot contain `to`",
                 ));
             }
             let delivery_body = delivery.children().ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-mission-delivery",
                     "a mission delivery needs a body",
                 )
@@ -3304,7 +3443,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                 if let Some(field) = fields.iter().find(|field| {
                     !matches!(field.as_str(), "pull_requests" | "issues" | "mentions")
                 }) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-batch-delivery",
                         format!("a batched delivery hears repository items, not `{field}`"),
                     ));
@@ -3313,7 +3452,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
             if fields.iter().any(|field| field == "mentions")
                 && (text.is_none() || logins.is_empty())
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mention-delivery",
                     "a mission delivery hears the mentions of at least one `mention` through a `text` input",
                 ));
@@ -3324,7 +3463,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
             validate_name(&input, false)?;
             let workspace = required_child_string(delivery_body, "workspace", "mission delivery")?;
             if workspace.trim().is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-delivery-workspace",
                     "a mission delivery workspace cannot be empty",
                 ));
@@ -3332,7 +3471,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
             if let Some(requester) = child_string(delivery_body, "requester")? {
                 validate_full_subject(&requester)?;
                 if !requester.starts_with("agent/") && !requester.starts_with("person/") {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-mission-delivery-requester",
                         "a mission delivery requester must use an `agent/` or `person/` subject",
                     ));
@@ -3340,7 +3479,7 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
             }
         }
         _ => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unsupported-subscription-delivery",
                 "a subscription delivery must be `message` or `mission`",
             ));
@@ -3350,26 +3489,26 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
 }
 
 /// `owner "message"` sends an item that a live agent owns to that agent instead.
-fn validate_owner_route(delivery_body: &KdlDocument) -> Result<(), St3Error> {
+fn validate_owner_route(delivery_body: &KdlDocument) -> Result<(), FractalError> {
     match child_string(delivery_body, "owner")?.as_deref() {
         None | Some("message") => Ok(()),
-        Some(other) => Err(St3Error::new(
+        Some(other) => Err(FractalError::new(
             "invalid-owner-route",
             format!("a delivery's owner route must be `message`, not `{other}`"),
         )),
     }
 }
 
-fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionSpec, St3Error> {
+fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionSpec, FractalError> {
     ensure_bare(node)?;
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-subscription-condition",
             "subscription `when` needs one predicate",
         )
     })?;
     let [predicate] = body.nodes() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subscription-condition",
             "subscription `when` needs exactly one predicate",
         ));
@@ -3381,7 +3520,7 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
         "field" => {
             ensure_no_children(predicate)?;
             if entries.len() != 3 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-subscription-condition",
                     "a subscription field condition requires path, operator, and value",
                 ));
@@ -3397,7 +3536,7 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
         }
         "every" | "not-every" => {
             if entries.len() != 1 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-subscription-condition",
                     "a quantified subscription condition requires one list field path",
                 ));
@@ -3405,13 +3544,13 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
             let path = value_string(entries[0])?;
             validate_field_path(&path)?;
             let body = predicate.children().ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "empty-subscription-condition",
                     "a quantified subscription condition needs at least one field predicate",
                 )
             })?;
             if body.nodes().is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "empty-subscription-condition",
                     "a quantified subscription condition needs at least one field predicate",
                 ));
@@ -3419,7 +3558,7 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
             let mut fields = Vec::with_capacity(body.nodes().len());
             for field in body.nodes() {
                 if field.name().value() != "field" {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-subscription-condition",
                         "every and not-every accept only field predicates",
                     ));
@@ -3429,7 +3568,7 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
                 ensure_no_children(field)?;
                 let entries = positional_values(field);
                 if entries.len() != 3 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-subscription-condition",
                         "a quantified field requires path, operator, and value",
                     ));
@@ -3448,42 +3587,42 @@ fn parse_subscription_condition(node: &KdlNode) -> Result<SubscriptionConditionS
                 Ok(SubscriptionConditionSpec::NotEvery { path, fields })
             }
         }
-        other => Err(St3Error::new(
+        other => Err(FractalError::new(
             "unknown-subscription-condition",
             format!("unknown subscription condition `{other}`"),
         )),
     }
 }
 
-fn validate_field_path(path: &str) -> Result<(), St3Error> {
+fn validate_field_path(path: &str) -> Result<(), FractalError> {
     if valid_field_path(path) {
         Ok(())
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-field-path",
             format!("invalid field path `{path}`"),
         ))
     }
 }
 
-fn predicate_operator(value: &KdlValue) -> Result<String, St3Error> {
+fn predicate_operator(value: &KdlValue) -> Result<String, FractalError> {
     let operator = value_string(value)?;
     if matches!(operator.as_str(), "is" | "starts-with" | "contains") {
         Ok(operator)
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-field-operator",
             format!("invalid field operator `{operator}`"),
         ))
     }
 }
 
-fn validate_message(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_message(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-message-body", "a message needs a body"))?;
+        .ok_or_else(|| FractalError::new("missing-message-body", "a message needs a body"))?;
     reject_unknown_children(
         body,
         &["from", "to", "content", "title", "in-reply-to", "tag"],
@@ -3496,27 +3635,27 @@ fn validate_message(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(parent) = child_string(body, "in-reply-to")?
         && !parent.starts_with("message/")
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-reference",
             "a message reply must use a full `message/ID` subject",
         ));
     }
     let tags = repeated_child_strings(body, "tag")?;
     if tags.iter().collect::<BTreeSet<_>>().len() != tags.len() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-message-tag",
             "a message tag repeats",
         ));
     }
     let content = required_child_string(body, "content", "message")?;
     if content.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-message",
             "a message needs nonempty content",
         ));
     }
     if content.len() > 4_096 && !content.starts_with("doc/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "message-too-large",
             "an inline message cannot exceed 4 KiB",
         ));
@@ -3524,12 +3663,12 @@ fn validate_message(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error> {
+fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-schedule-body", "a schedule needs a body"))?;
+        .ok_or_else(|| FractalError::new("missing-schedule-body", "a schedule needs a body"))?;
     if body.nodes().len() == 1 && body.nodes()[0].name().value() == "stop" {
         ensure_bare(&body.nodes()[0])?;
         ensure_no_children(&body.nodes()[0])?;
@@ -3567,7 +3706,7 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     if let Some(standby) = unique_child(body, "standby")? {
         ensure_bare(standby)?;
         let settings = standby.children().ok_or_else(|| {
-            St3Error::new("invalid-schedule-standby", "standby needs host and after children")
+            FractalError::new("invalid-schedule-standby", "standby needs host and after children")
         })?;
         reject_unknown_children(settings, &["host", "after"], "standby", "standby")?;
         for setting in settings.nodes() { ensure_no_properties(setting)?; }
@@ -3577,11 +3716,11 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
         validate_name(&host, false)?;
         let primary = placement_host(child_string(body, "host")?.unwrap_or_else(|| default_host.into()), default_host);
         if host == "local" || host == primary || host.contains('/') {
-            return Err(St3Error::new("invalid-schedule-standby", "standby needs an explicit member name distinct from the primary"));
+            return Err(FractalError::new("invalid-schedule-standby", "standby needs an explicit member name distinct from the primary"));
         }
         let after = parse_duration(&required_child_string(settings, "after", "standby")?, true)?;
         if after > i64::MAX as u64 {
-            return Err(St3Error::new("duration-range", "standby after is too large"));
+            return Err(FractalError::new("duration-range", "standby after is too large"));
         }
     }
     let at = child_string(body, "at")?;
@@ -3590,14 +3729,14 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     if usize::from(at.is_some()) + usize::from(every.is_some()) + usize::from(calendar.is_some())
         != 1
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-time",
             "a schedule needs exactly one of `at`, `every`, and `calendar`",
         ));
     }
     let anchor = child_string(body, "anchor")?;
     if anchor.is_some() != every.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-anchor",
             "only an interval schedule has an anchor, and it requires one",
         ));
@@ -3611,7 +3750,7 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     if let Some(calendar) = calendar {
         ensure_bare(calendar)?;
         let calendar_body = calendar.children().ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-schedule-calendar",
                 "a calendar needs `at` and `timezone`",
             )
@@ -3622,7 +3761,7 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
         parse_calendar_time(&required_child_string(calendar_body, "at", "calendar")?)?;
         let timezone = required_child_string(calendar_body, "timezone", "calendar")?;
         timezone.parse::<chrono_tz::Tz>().map_err(|_| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-schedule-timezone",
                 format!("unknown IANA timezone `{timezone}`"),
             )
@@ -3631,26 +3770,26 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     let catch_up = child_string(body, "catch-up")?;
     let max = child_integer(body, "max-catch-up")?;
     if at.is_some() && (catch_up.is_some() || max.is_some()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-catch-up",
             "a one-time schedule cannot have catch-up controls",
         ));
     }
     if let Some(policy) = catch_up.as_deref() {
         if !matches!(policy, "all" | "latest" | "skip") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-schedule-catch-up",
                 format!("invalid catch-up policy `{policy}`"),
             ));
         }
         if (policy == "all") != max.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-schedule-catch-up",
                 "catch-up `all` requires max-catch-up, and other policies forbid it",
             ));
         }
     } else if max.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-catch-up",
             "max-catch-up requires catch-up `all`",
         ));
@@ -3658,18 +3797,18 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     if let Some(max) = max
         && (max <= 0 || max > u32::MAX as i128)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-catch-up",
             "max-catch-up must be a positive u32",
         ));
     }
     let work = unique_child(body, "work")?.ok_or_else(|| {
-        St3Error::new("missing-schedule-work", "a schedule needs a work template")
+        FractalError::new("missing-schedule-work", "a schedule needs a work template")
     })?;
     ensure_bare(work)?;
     let work_body = work
         .children()
-        .ok_or_else(|| St3Error::new("missing-schedule-work", "schedule work is empty"))?;
+        .ok_or_else(|| FractalError::new("missing-schedule-work", "schedule work is empty"))?;
     reject_unknown_children(
         work_body,
         &["mission", "workspace", "input"],
@@ -3688,7 +3827,7 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     }
     let workspace = required_child_string(work_body, "workspace", "schedule work")?;
     if workspace.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-workspace",
             "schedule work needs a workspace",
         ));
@@ -3703,14 +3842,14 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
         ensure_no_children(input)?;
         let values = positional_strings(input)?;
         if values.len() != 2 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-schedule-input",
                 "a schedule input needs a name and value",
             ));
         }
         validate_name(&values[0], false)?;
         if !inputs.insert(values[0].clone()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-schedule-input",
                 "a schedule input repeats",
             ));
@@ -3719,17 +3858,17 @@ fn validate_schedule(node: &KdlNode, default_host: &str) -> Result<(), St3Error>
     Ok(())
 }
 
-fn validate_exact_mission_reference(reference: &str) -> Result<(), St3Error> {
+fn validate_exact_mission_reference(reference: &str) -> Result<(), FractalError> {
     let reference = reference.strip_prefix("mission/").unwrap_or(reference);
     let (mission, revision) = reference.rsplit_once('@').ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "unpinned-mission-reference",
             "a mission delivery needs an exact MISSION@REVISION reference",
         )
     })?;
     crate::mission::validate_mission_id(mission)?;
     if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-revision",
             "a mission revision must be a 64-character hexadecimal hash",
         ));
@@ -3737,7 +3876,7 @@ fn validate_exact_mission_reference(reference: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_subscription_mission_reference(reference: &str) -> Result<(), St3Error> {
+fn validate_subscription_mission_reference(reference: &str) -> Result<(), FractalError> {
     if reference.contains('@') {
         validate_exact_mission_reference(reference)
     } else {
@@ -3745,11 +3884,11 @@ fn validate_subscription_mission_reference(reference: &str) -> Result<(), St3Err
     }
 }
 
-fn validate_tags(node: &KdlNode) -> Result<(), St3Error> {
+fn validate_tags(node: &KdlNode) -> Result<(), FractalError> {
     reject_type(node)?;
     ensure_no_children(node)?;
     if node.entries().iter().any(|entry| entry.name().is_none()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-tags",
             "a tags entry needs a property name",
         ));
@@ -3758,7 +3897,7 @@ fn validate_tags(node: &KdlNode) -> Result<(), St3Error> {
     for entry in node.entries() {
         let name = entry.name().expect("checked").value();
         if !names.insert(name) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-tag",
                 format!("tag `{name}` repeats"),
             ));
@@ -3768,19 +3907,19 @@ fn validate_tags(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn parse_utc_time(value: &str) -> Result<i64, St3Error> {
+fn parse_utc_time(value: &str) -> Result<i64, FractalError> {
     if !value.ends_with('Z') {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-utc-time",
             "an absolute time must use the UTC `Z` offset",
         ));
     }
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|time| time.timestamp_millis())
-        .map_err(|error| St3Error::new("invalid-utc-time", error.to_string()))
+        .map_err(|error| FractalError::new("invalid-utc-time", error.to_string()))
 }
 
-fn parse_calendar_time(value: &str) -> Result<(Option<u8>, u16), St3Error> {
+fn parse_calendar_time(value: &str) -> Result<(Option<u8>, u16), FractalError> {
     let (weekday, clock) = value
         .split_once(' ')
         .map_or((None, value), |(day, clock)| (Some(day), clock));
@@ -3794,14 +3933,14 @@ fn parse_calendar_time(value: &str) -> Result<(Option<u8>, u16), St3Error> {
         Some("Sat") => Some(6),
         Some("Sun") => Some(7),
         Some(_) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-schedule-calendar",
                 "calendar `at` must be HH:MM or Mon HH:MM (Mon–Sun)",
             ));
         }
     };
     let (hours, minutes) = clock.split_once(':').ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-schedule-calendar",
             "calendar `at` must be HH:MM or Mon HH:MM (Mon–Sun)",
         )
@@ -3813,19 +3952,19 @@ fn parse_calendar_time(value: &str) -> Result<(Option<u8>, u16), St3Error> {
             .chain(minutes.bytes())
             .all(|byte| byte.is_ascii_digit())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-calendar",
             "calendar `at` must use 24-hour HH:MM",
         ));
     }
     let hour: u16 = hours
         .parse()
-        .map_err(|_| St3Error::new("invalid-schedule-calendar", "invalid hour"))?;
+        .map_err(|_| FractalError::new("invalid-schedule-calendar", "invalid hour"))?;
     let minute: u16 = minutes
         .parse()
-        .map_err(|_| St3Error::new("invalid-schedule-calendar", "invalid minute"))?;
+        .map_err(|_| FractalError::new("invalid-schedule-calendar", "invalid minute"))?;
     if hour >= 24 || minute >= 60 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-schedule-calendar",
             "calendar `at` must be a valid local time",
         ));
@@ -4215,52 +4354,31 @@ fn canonical_child_values(value: &Value, name: &str) -> Vec<String> {
         .collect()
 }
 
-fn one_bool(node: &KdlNode) -> Result<bool, St3Error> {
+fn one_bool(node: &KdlNode) -> Result<bool, FractalError> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     let [entry] = node.entries() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-argument-count",
             format!("node `{}` needs one Boolean", node.name().value()),
         ));
     };
     match entry.value() {
         KdlValue::Bool(value) => Ok(*value),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "expected-boolean",
             format!("node `{}` needs one Boolean", node.name().value()),
         )),
     }
 }
 
-/// `capacity cores=N memory="SIZE"`: the seat's lane (docs/st3/seat-lanes.md). What it leaves
-/// out is the base lane's.
-fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, St3Error> {
-    let invalid = |message: String| St3Error::new("invalid-capacity", message);
-    ensure_only_properties(node, &["cores", "memory"])?;
-    ensure_no_children(node)?;
-    if node.entries().iter().any(|entry| entry.name().is_none()) {
-        return Err(invalid("capacity takes only cores= and memory=".into()));
-    }
-    let cores = match node.get("cores") {
-        None => None,
-        Some(KdlValue::Integer(cores)) => Some(
-            u32::try_from(*cores).map_err(|_| invalid(format!("capacity cores {cores} is out of range")))?,
-        ),
-        Some(_) => return Err(invalid("capacity cores must be a whole number".into())),
-    };
-    let memory = property_string(node, "memory")?;
-    fractal_runtime::Capacity::declared(cores, memory.as_deref())
-        .map_err(|error| invalid(format!("{error:#}")))
-}
-
-fn property_bool(node: &KdlNode, property: &str) -> Result<Option<bool>, St3Error> {
+fn property_bool(node: &KdlNode, property: &str) -> Result<Option<bool>, FractalError> {
     node.entries()
         .iter()
         .find(|entry| entry.name().is_some_and(|name| name.value() == property))
         .map(|entry| match entry.value() {
             KdlValue::Bool(value) => Ok(*value),
-            _ => Err(St3Error::new(
+            _ => Err(FractalError::new(
                 "expected-boolean",
                 format!("property `{property}` needs a Boolean"),
             )),
@@ -4268,10 +4386,10 @@ fn property_bool(node: &KdlNode, property: &str) -> Result<Option<bool>, St3Erro
         .transpose()
 }
 
-fn require_string_count(node: &KdlNode, count: usize) -> Result<Vec<String>, St3Error> {
+fn require_string_count(node: &KdlNode, count: usize) -> Result<Vec<String>, FractalError> {
     let values = positional_strings_without_children(node)?;
     if values.len() != count {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-argument-count",
             format!("node `{}` needs {count} string values", node.name().value()),
         ));
@@ -4279,25 +4397,25 @@ fn require_string_count(node: &KdlNode, count: usize) -> Result<Vec<String>, St3
     Ok(values)
 }
 
-fn positional_strings_without_children(node: &KdlNode) -> Result<Vec<String>, St3Error> {
+fn positional_strings_without_children(node: &KdlNode) -> Result<Vec<String>, FractalError> {
     positional_values(node)
         .into_iter()
         .map(value_string)
         .collect()
 }
 
-fn parse_tags(document: &KdlDocument) -> Result<BTreeMap<String, String>, St3Error> {
+fn parse_tags(document: &KdlDocument) -> Result<BTreeMap<String, String>, FractalError> {
     let Some(node) = unique_child(document, "tags")? else {
         return Ok(BTreeMap::new());
     };
     let mut tags = BTreeMap::new();
     for entry in node.entries() {
         let name = entry.name().ok_or_else(|| {
-            St3Error::new("invalid-tags", "a tags entry must have a property name")
+            FractalError::new("invalid-tags", "a tags entry must have a property name")
         })?;
         let value = value_string(entry.value())?;
         if tags.insert(name.value().into(), value).is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-tag",
                 format!("tag `{}` repeats", name.value()),
             ));
@@ -4306,7 +4424,7 @@ fn parse_tags(document: &KdlDocument) -> Result<BTreeMap<String, String>, St3Err
     Ok(tags)
 }
 
-fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Result<(), St3Error> {
+fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Result<(), FractalError> {
     for entry in node.entries() {
         if let KdlValue::String(value) = entry.value()
             && value.starts_with("doc/")
@@ -4319,7 +4437,10 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
         let gate = node.name().value() == "gate";
         let mission = node.name().value() == "mission";
         for child in children.nodes() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 collect_document_refs(child, output)?;
             }
         }
@@ -4327,10 +4448,10 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
     Ok(())
 }
 
-fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result<(), St3Error> {
+fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result<(), FractalError> {
     let name = subject.subject.clone();
     if context.subjects.insert(name.clone(), subject).is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-subject",
             format!("one publish declares `{name}` more than once"),
         ));
@@ -4338,60 +4459,12 @@ fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result
     Ok(())
 }
 
-fn canonical_node(node: &KdlNode) -> Result<Value, St3Error> {
-    let mut properties = BTreeMap::<String, Value>::new();
-    let mut arguments = Vec::new();
-    for entry in node.entries() {
-        let value = json_value(entry.value())?;
-        if let Some(name) = entry.name() {
-            if properties.insert(name.value().into(), value).is_some() {
-                return Err(St3Error::new(
-                    "duplicate-property",
-                    format!(
-                        "node `{}` repeats property `{}`",
-                        node.name().value(),
-                        name.value()
-                    ),
-                ));
-            }
-        } else {
-            arguments.push(value);
-        }
-    }
-    let children = node
-        .children()
-        .map(|document| {
-            document
-                .nodes()
-                .iter()
-                .map(canonical_node)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut output = Map::new();
-    output.insert("name".into(), Value::String(node.name().value().into()));
-    if !arguments.is_empty() {
-        output.insert("arguments".into(), Value::Array(arguments));
-    }
-    if !properties.is_empty() {
-        output.insert(
-            "properties".into(),
-            serde_json::to_value(properties).expect("BTreeMap serializes"),
-        );
-    }
-    if !children.is_empty() {
-        output.insert("children".into(), Value::Array(children));
-    }
-    Ok(Value::Object(output))
-}
-
 fn hash_json(value: &Value) -> String {
     let bytes = serde_json::to_vec(value).expect("normalized JSON serializes");
     hex::encode(Sha256::digest(bytes))
 }
 
-fn parse_workspace(document: &KdlDocument) -> Result<Option<(String, bool)>, St3Error> {
+fn parse_workspace(document: &KdlDocument) -> Result<Option<(String, bool)>, FractalError> {
     let Some(node) = unique_child(document, "workspace")? else {
         return Ok(None);
     };
@@ -4401,7 +4474,7 @@ fn parse_workspace(document: &KdlDocument) -> Result<Option<(String, bool)>, St3
     Ok(Some((workspace, create)))
 }
 
-fn repeated_child_strings(document: &KdlDocument, name: &str) -> Result<Vec<String>, St3Error> {
+fn repeated_child_strings(document: &KdlDocument, name: &str) -> Result<Vec<String>, FractalError> {
     document
         .nodes()
         .iter()
@@ -4443,6 +4516,28 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
+        let agent = |description: &str| {
+            format!("version 2\nagent \"example/chartered\" {{\n  description {description:?}\n  command \"true\"\n}}\n")
+        };
+        // Nine bytes per line: a three-byte character, ASCII, and a newline.
+        let at_limit = format!("{}ab", "界 line\n".repeat(910));
+        assert_eq!(at_limit.len(), agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES);
+        let intent = parse_intent(&agent(&at_limit), "node").unwrap();
+        assert_eq!(
+            crate::model::canonical_child_string(
+                &intent.subjects["agent/example/chartered"].desired,
+                "description"
+            )
+            .as_deref(),
+            Some(at_limit.as_str())
+        );
+        let error = parse_intent(&agent(&format!("{at_limit}c")), "node").unwrap_err();
+        assert_eq!(error.code, "description-too-long");
+        assert!(error.message.contains("8192 bytes"), "{}", error.message);
+    }
 
     #[test]
     fn an_agent_checkout_needs_a_workspace_and_git_ref_names() {
@@ -4687,6 +4782,72 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    const OBJECTIVE: &str = r#"
+version 2
+
+objective "ops/change-rollout" {
+  about "A change, from its author marking it ready to every member that serves it"
+  indicator "interval" {
+    subject-prefix "custom/acme/change/"
+    start "custom.acme.change-ready" at="ready_at"
+    expect "custom.acme.change-merged" set="hosts" at="merged_at"
+    stop "custom.acme.change-applied" member="host" at="applied_at"
+    cancel "custom.acme.change-abandoned"
+    label "class"
+  }
+  window "7d" min-samples=3
+  target "p50" within="60s"
+  target "p95" within="5m"
+  on-breach "fault" owner="agent/ops/release-manager" backup="agent/ops/observability" condition="change-rollout-slo-missed"
+}
+"#;
+
+    #[test]
+    fn an_objective_is_a_root_declaration_the_kernel_reads() {
+        let intent = parse_intent(OBJECTIVE, "node").unwrap();
+        let desired = &intent.subjects["objective/ops/change-rollout"];
+        assert_eq!((desired.kind.as_str(), desired.member.is_none()), ("objective", true));
+        let objective = crate::objective::parse(&desired.desired).unwrap();
+        assert_eq!(objective.name, "ops/change-rollout");
+        assert!(objective.declarable());
+
+        let nested = parse_execution_intent(OBJECTIVE, "node", "run-1").expect_err("a run cannot own an objective");
+        assert_eq!(nested.code, "objective-inside-mission");
+        let body = OBJECTIVE.trim_start().trim_start_matches("version 2").trim();
+        for inside in [
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  {body}\n  step \"work\" {{ agentless }}\n}}\n"),
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  step \"work\" {{\n    {body}\n  }}\n}}\n"),
+        ] {
+            assert_eq!(parse_intent(&inside, "node").unwrap_err().code, "objective-inside-mission", "{inside}");
+        }
+    }
+
+    #[test]
+    fn only_an_interval_named_namespace_slash_name_is_declarable() {
+        let one_segment = OBJECTIVE.replace("\"ops/change-rollout\"", "\"change-rollout\"");
+        assert_eq!(parse_intent(&one_segment, "node").unwrap_err().code, "objective-not-declarable");
+
+        let native = r#"
+version 2
+objective "ops/statement" {
+  about "One SQL statement"
+  indicator "statement"
+  target "p99" within="25ms"
+  target "max" within="250ms"
+}
+"#;
+        assert_eq!(parse_intent(native, "node").unwrap_err().code, "objective-not-declarable");
+
+        for broken in [
+            OBJECTIVE.replace("  window \"7d\" min-samples=3\n", ""),
+            OBJECTIVE.replace("target \"p95\" within=\"5m\"", "target \"p95\" max=5"),
+            OBJECTIVE.replace("    label \"class\"\n", "    label \"class\"\n    retry \"x\"\n"),
+            OBJECTIVE.replace("backup=\"agent/ops/observability\"", "backup=\"agent/ops/release-manager\""),
+        ] {
+            assert_eq!(parse_intent(&broken, "node").unwrap_err().code, "invalid-objective", "{broken}");
+        }
     }
 
     #[test]
@@ -4987,6 +5148,166 @@ agent "seat" {
         ] {
             assert!(seat(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn a_mission_lanes_its_agents_and_a_step_only_raises_its_seats_lane() {
+        const G: u64 = 1 << 30;
+        let mission = |mission_capacity: &str, step: &str| {
+            parse_intent(
+                &format!(
+                    "version 2\nagent \"example/beside\" {{ capacity cores=4; command \"true\" }}\nmission \"example/laned\" state=\"ready\" {{\n  goal \"Work.\"\n  {mission_capacity}\n  agent \"worker\" {{ command \"true\" }}\n  agent \"big\" {{ capacity cores=4 memory=\"8G\"; command \"true\" }}\n  step \"work\" {{\n    goal \"Work.\"\n    {step}\n  }}\n}}\n"
+                ),
+                "node",
+            )
+        };
+        let worker = r#"assigned-to "agent/${ST_MISSION_RUN}/worker""#;
+
+        // The mission's lane goes to each of its agents that declares none of its own.
+        let intent = mission(r#"capacity cores=2 memory="4G""#, worker).unwrap();
+        let spec = &intent.missions["example/laned"];
+        assert_eq!(spec.capacity, Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        let source = crate::mission::interpolate_kdl(
+            spec.declarations_kdl.as_deref().unwrap(),
+            &runtime_proof_variables(spec),
+        )
+        .unwrap();
+        let source = crate::mission::with_mission_capacity(&source, spec.capacity).unwrap();
+        // Only the lane is added; the rest is the author's text.
+        let kept = "version 2\nagent \"worker\"  {   command \"true\" // kept\n}\n";
+        let added = crate::mission::with_mission_capacity(kept, spec.capacity).unwrap();
+        assert!(added.starts_with("version 2\nagent \"worker\"  {   command \"true\" // kept\n"), "{added}");
+        assert!(parse_execution_intent(&added, "node", "migration-proof").unwrap().subjects
+            .values().any(|desired| desired.member.as_ref().is_some_and(|member| member.capacity == spec.capacity)));
+        let seats = parse_execution_intent(&source, "node", "migration-proof").unwrap();
+        let lane = |name: &str| seats.subjects[&format!("agent/migration-proof/{name}")].member.as_ref().unwrap().capacity;
+        assert_eq!(lane("worker"), Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        assert_eq!(lane("big"), Some(fractal_runtime::Capacity { cores: 4, memory: 8 * G }));
+        // Without one, the declarations are what the author wrote and nothing more is stored.
+        let undeclared = mission("", worker).unwrap();
+        let undeclared = &undeclared.missions["example/laned"];
+        assert!(matches!(
+            crate::mission::with_mission_capacity("version 2", undeclared.capacity).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let stored = serde_json::to_value(undeclared).unwrap();
+        assert!(stored.get("capacity").is_none());
+        assert!(stored["steps"]["work"].get("capacity").is_none());
+
+        // A step raises what it names and keeps the rest of its seat's lane.
+        let raised = mission(r#"capacity cores=2 memory="4G""#, &format!("{worker}\n    capacity memory=\"16G\"")).unwrap();
+        assert_eq!(
+            raised.missions["example/laned"].steps["work"].capacity,
+            Some(fractal_runtime::Raise { cores: None, memory: Some(16 * G) })
+        );
+        // It may not lower the lane of a seat this publication declares, wherever its lane comes
+        // from: the mission, the agent itself, an agent beside the mission, or the base lane.
+        for (mission_capacity, step) in [
+            (r#"capacity cores=2 memory="4G""#, format!("{worker}\n    capacity memory=\"2G\"")),
+            ("", r#"assigned-to "agent/${ST_MISSION_RUN}/big"
+    capacity cores=2"#.to_owned()),
+            ("", r#"available-to "agent/example/beside"
+    capacity cores=2"#.to_owned()),
+            ("", format!("{worker}\n    capacity memory=\"2G\"")),
+        ] {
+            let error = mission(mission_capacity, &step).unwrap_err();
+            assert_eq!(error.code, "invalid-capacity", "{step}");
+            assert!(error.message.contains("a step may only raise its seat's lane"), "{}", error.message);
+        }
+        mission("", &format!("{worker}\n    capacity memory=\"3G\"")).unwrap();
+        // A seat declared elsewhere is checked when the step is delivered.
+        mission("", "assigned-to \"agent/example/elsewhere\"\n    capacity cores=1").unwrap();
+
+        for (mission_capacity, step) in [
+            ("", "agentless\n    capacity cores=2"),
+            ("", &format!("{worker}\n    capacity")),
+            ("", &format!("{worker}\n    capacity cores=0")),
+            ("", &format!("{worker}\n    capacity cores=2\n    capacity cores=3")),
+            ("capacity cores=2\n  capacity cores=3", worker),
+            ("capacity cores=0", worker),
+        ] {
+            assert!(mission(mission_capacity, step).is_err(), "{mission_capacity} / {step}");
+        }
+    }
+
+    #[test]
+    fn a_revision_of_only_a_missions_capacity_changes_its_header() {
+        let spec = |capacity: &str| {
+            parse_intent(
+                &format!("version 2\nmission \"example/laned\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" {{\n  goal \"Work.\"\n  {capacity}\n  step \"work\" {{\n    agentless\n    goal \"Work.\"\n  }}\n}}\n"),
+                "node",
+            )
+            .unwrap()
+            .missions
+            .remove("example/laned")
+            .unwrap()
+        };
+        for (old, new) in [("", "capacity cores=2"), ("capacity cores=2", "capacity cores=3"), ("capacity cores=2", "")] {
+            // Accepted, with the header's reviewers, and the step itself carries unchanged.
+            let (compatible, reviewers) =
+                crate::store::analyze_mission_revision(&spec(old), &spec(new), "person/requester").unwrap();
+            assert_eq!(compatible, BTreeSet::from(["work".to_owned()]), "{old} -> {new}");
+            assert!(reviewers.contains("person/reviewer"), "{old} -> {new}: {reviewers:?}");
+        }
+        let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/requester").unwrap_err();
+        assert_eq!(unchanged.code, "unchanged-mission-revision");
+    }
+
+    #[test]
+    fn agent_principal_is_optional_and_retained_in_canonical_desired_state() {
+        for person in [None, Some("person/operator"), Some("person/operator-2_name.test")] {
+            let principal = person.map_or(String::new(), |person| format!("principal {person:?};"));
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ {principal} command \"true\" }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let children = intent.subjects["agent/example/worker"].desired["children"]
+                .as_array()
+                .unwrap();
+            let principals = children.iter()
+                .filter(|child| child["name"] == "principal")
+                .collect::<Vec<_>>();
+            match person {
+                None => assert!(principals.is_empty()),
+                Some(person) => assert_eq!(
+                    principals,
+                    vec![&json!({ "name": "principal", "arguments": [person] })],
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn agent_principal_rejects_noncanonical_people_and_invalid_shapes() {
+        for principal in [
+            "principal",
+            "principal #true",
+            "principal 42",
+            "principal \"person/operator\" \"person/other\"",
+            "principal \"agent/example/worker\"",
+            "principal \"operator\"",
+            "principal \"person/\"",
+            "principal \"person/..\"",
+            "principal \"person/operator/child\"",
+            "principal \"person/operator name\"",
+            "principal \"person/operator*\"",
+            "principal \"person/operator\" extra=\"value\"",
+            "principal person=\"person/operator\"",
+            "principal \"person/operator\" {}",
+            "principal \"person/operator\" { name \"operator\"; }",
+            "principal \"person/operator\"; principal \"person/operator\"",
+            "principal \"person/operator\"; principal \"person/other\"",
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ {principal}; command \"true\" }}"
+            );
+            assert!(parse_intent(&source, "node").is_err(), "{principal}");
+        }
+        let error = parse_intent(
+            "version 2\nagent \"example/worker\" principal=\"person/operator\" { command \"true\" }",
+            "node",
+        ).unwrap_err();
+        assert_eq!(error.code, "unknown-property");
     }
 
     #[test]
@@ -5543,6 +5864,51 @@ version 2
     }
 
     #[test]
+    fn fractal_context_references_publish_the_same_mission_as_st_references() {
+        let source = |run: &str, workspace: &str, step: &str| {
+            format!(
+                r#"version 2
+agent "helper" {{ workspace "/tmp"; command "echo ${{FRACTAL_MISSION_RUN}}"; }}
+mission "spelling" state="ready" {{
+  goal "Work in {workspace}; keep $${{FRACTAL_MISSION_RUN}} literal."
+  agent "builder" {{ workspace "{workspace}/builder"; command "true"; }}
+  step "build" {{
+    assigned-to "agent/{run}/builder"
+    goal "Build {step} of {run}."
+    gate "prepared" {{ field "exit_code" "exec/{run}/prepare" is 0; }}
+  }}
+}}
+"#
+            )
+        };
+        let st = parse_test_intent(
+            &source("${ST_MISSION_RUN}", "${ST_WORKSPACE}", "${ST_STEP}"),
+            "node",
+        )
+        .unwrap();
+        let fractal = parse_test_intent(
+            &source("${FRACTAL_MISSION_RUN}", "${FRACTAL_WORKSPACE}", "${FRACTAL_STEP}"),
+            "node",
+        )
+        .unwrap();
+        assert_eq!(fractal.missions, st.missions);
+        assert_eq!(fractal.missions["spelling"].revision, st.missions["spelling"].revision);
+        assert_eq!(fractal.source_hash, st.source_hash);
+        assert_eq!(fractal.normalized, st.normalized);
+        assert!(fractal.missions["spelling"].goals[0].contains("$${FRACTAL_MISSION_RUN}"));
+        // Outside a mission `${…}` is shell text, not a context reference.
+        assert!(serde_json::to_string(&fractal.subjects["agent/node.helper"].desired)
+            .unwrap()
+            .contains("${FRACTAL_MISSION_RUN}"));
+        let unknown = parse_test_intent(
+            "version 2\nmission \"unknown\" state=\"ready\" { goal \"Use ${FRACTAL_UNKNOWN}.\"; step \"work\" { agentless; goal \"Work.\"; } }\n",
+            "node",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code, "unknown-variable");
+    }
+
+    #[test]
     fn under_is_repeatable_non_owning_agent_metadata() {
         let source = r#"
 version 2
@@ -6072,5 +6438,181 @@ schedule "orchard" {{ host "ivory"; {standby}
         let parsed = parse_intent(&local, "ivory").unwrap();
         assert_eq!(schedule_spec(&parsed.subjects["schedule/orchard"].desired, "ivory").unwrap().host, "ivory");
         assert!(parse_intent(&source(r#"standby { host "ivory"; after "5m" }"#).replace("host \"ivory\";", "host \"local\";"), "ivory").is_err());
+    }
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+    use crate::model::{DeclaredBudgets, DeclaredLane, DeclaredPriority};
+
+    const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { memory-max "8G"; disk-max "20G"; }"#;
+
+    #[test]
+    fn agent_and_mission_authoring_roundtrip() {
+        let source = format!(
+            "version 2\nagent \"example/worker\" {{ command \"true\"; {FIELDS} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {FIELDS} }}"
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let member = intent.subjects["agent/example/worker"].member.as_ref().unwrap();
+        let mission = &intent.missions["example/work"];
+        assert_eq!(member.declared_priority, Some(DeclaredPriority::Normal));
+        assert_eq!(member.declared_lane, Some(DeclaredLane::Check));
+        assert_eq!(member.declared_budgets, mission.declared_budgets);
+        assert_eq!(mission.declared_budgets.as_ref().unwrap().memory_max.as_deref(), Some("8G"));
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+        let json = serde_json::to_value(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets, mission.declared_budgets);
+        assert_eq!(decoded.subjects["agent/example/worker"].member.as_ref().unwrap().declared_lane, member.declared_lane);
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.subjects["agent/example/worker"].member.as_ref().unwrap().declared_budgets, member.declared_budgets);
+    }
+
+    #[test]
+    fn mission_numeric_budgets_authoring_roundtrip() {
+        let source = r#"version 2
+mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seconds 300; token-budget 100000; attention "person/reviewer" asks=3; } }
+"#;
+        let intent = parse_intent(source, "node").unwrap();
+        let budgets = intent.missions["example/work"].declared_budgets.as_ref().unwrap();
+        assert_eq!(budgets.cpu_seconds, Some(300));
+        assert_eq!(budgets.token_budget, Some(100_000));
+        assert_eq!(budgets.attention[0].person, "person/reviewer");
+        assert_eq!(budgets.attention[0].asks, 3);
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+    }
+
+    #[test]
+    fn agent_authoring_refuses_mission_only_numeric_budgets() {
+        for (child, field) in [("cpu-seconds", "cpu_seconds"), ("token-budget", "token_budget")] {
+            let source = format!("version 2\nagent \"example/worker\" {{ command \"true\"; declared-budgets {{ {child} 300; }} }}");
+            let error = parse_intent(&source, "node").unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], format!("declared_budgets.{field}"));
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
+    }
+
+    #[test]
+    fn both_declaration_kinds_refuse_invalid_fields() {
+        for fields in [
+            "declared-priority \"urgent\"",
+            "declared-lane \"other\"",
+            "declared-budgets { cpu-seconds 0; }",
+            "declared-budgets { disk-max \"16777216T\"; }",
+            "declared-budgets { memory-max \"8GB\"; }",
+        ] {
+            for source in [
+                format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields}; }}"),
+                format!("version 2\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields}; }}"),
+            ] {
+                assert_eq!(parse_intent(&source, "node").unwrap_err().code, "invalid-declared-admission");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_publication_validation_cannot_bypass_kdl_rules() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }\nmission \"example/work\" state=\"ready\" { goal \"Work.\"; }",
+            "node",
+        ).unwrap();
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = Some(DeclaredPriority::Unknown("urgent".into()));
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_priority");
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = None;
+        for (budgets, field) in [
+            (DeclaredBudgets { cpu_seconds: Some(300), ..DeclaredBudgets::default() }, "declared_budgets.cpu_seconds"),
+            (DeclaredBudgets { token_budget: Some(100_000), ..DeclaredBudgets::default() }, "declared_budgets.token_budget"),
+            (DeclaredBudgets { attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 3 }], ..Default::default() }, "declared_budgets.attention"),
+        ] {
+            intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = Some(budgets);
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], field);
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = None;
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets { token_budget: Some(0), ..DeclaredBudgets::default() });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_budgets.token_budget");
+        assert_eq!(error.details["subject"], "mission/example/work");
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets {
+            attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 0 }], ..Default::default()
+        });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.code, "invalid-declared-admission");
+        assert_eq!(error.details["field"], "declared_budgets.attention[person/reviewer].asks");
+        assert_eq!(error.details["subject"], "mission/example/work");
+    }
+
+    #[test]
+    fn omission_and_empty_budgets_do_not_serialize_new_fields() {
+        for fields in ["", "declared-budgets {}"] {
+            let intent = parse_intent(&format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields} }}"), "node").unwrap();
+            let member = serde_json::to_value(intent.subjects["agent/example/worker"].member.as_ref().unwrap()).unwrap();
+            let mission = serde_json::to_value(&intent.missions["example/work"]).unwrap();
+            for value in [&member, &mission] {
+                for key in ["declared_priority", "declared_lane", "declared_budgets"] {
+                    assert!(value.get(key).is_none(), "{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_publication_refuses_admission_representation_drift() {
+        for fields in ["", "declared-priority \"normal\";"] {
+            let mut intent = parse_intent(
+                &format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}"),
+                "node",
+            ).unwrap();
+            fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+            let member = intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap();
+            member.declared_priority = if fields.is_empty() { Some(DeclaredPriority::Normal) } else { None };
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_priority");
+        }
+    }
+
+    #[test]
+    fn non_agent_desired_children_pass_both_typed_entrypoints() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let desired = intent.subjects.get_mut("agent/example/worker").unwrap();
+        desired.kind = "resource".into();
+        desired.member = None;
+        desired.desired = serde_json::json!({"children": [{"name": "declared-priority"}]});
+        let body = serde_json::to_value(&*desired).unwrap();
+        fractal_missions_base::declared_admission::validate_claim(
+            "intent.desired", &desired.subject, &body,
+        ).unwrap();
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+    }
+    #[test]
+    fn attention_refuses_agents_steps_and_deferred_agents() {
+        let fields = r#"declared-budgets { attention "person/reviewer" asks=3; }"#;
+        for declaration in [
+            format!(r#"agent "example/worker" {{ command "true"; {fields}; }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; step "one" {{ goal "Work."; {fields}; }} }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; agent "worker" {{ command "true"; {fields}; }}; step "work" {{ goal "Work."; }} }}"#),
+        ] {
+            let error = parse_intent(&format!("version 2\n{declaration}"), "node")
+                .and_then(|intent| fractal_missions_base::declared_admission::validate_publication(&intent).map(|()| intent))
+                .unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_budgets.attention");
+            assert!(error.details["subject"].is_string());
+        }
     }
 }

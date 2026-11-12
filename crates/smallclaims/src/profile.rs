@@ -942,6 +942,7 @@ pub struct WriterWait {
     holder: Option<Arc<str>>,
     // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
     trace: Option<Box<WriterTrace>>,
+    writer_operation: Option<crate::sqlite::telemetry::WriterOperation>,
 }
 
 struct WriterTrace {
@@ -959,6 +960,7 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
         trace: None,
+        writer_operation: None,
     })
 }
 
@@ -968,13 +970,35 @@ pub(crate) fn writer_waiting_for(
     trace_origin: crate::sqlite::telemetry::Origin,
 ) -> WriterWait {
     let mut wait = wait.unwrap_or_else(|| WriterWait {
-        started: Instant::now(), holder: None, trace: None,
+        started: Instant::now(), holder: None, trace: None, writer_operation: None,
     });
     wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
     wait
 }
 
 impl WriterWait {
+    pub(crate) fn writer_operation_acquired(&mut self, waited: Duration) {
+        if let Some(operation) = &mut self.writer_operation {
+            operation.acquired(waited);
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn with_writer_operation(wait: Option<Self>) -> Option<Self> {
+        if wait.as_ref().is_some_and(|wait| wait.writer_operation.is_some()) { return wait; }
+        let operation = crate::sqlite::telemetry::WriterOperation::start("foreground", "write.batched");
+        if wait.is_none() && operation.is_none() { return None; }
+        let mut wait = wait.unwrap_or_else(|| Self {
+            started: Instant::now(), holder: None, trace: None, writer_operation: None,
+        });
+        wait.writer_operation = operation;
+        Some(wait)
+    }
+
+    pub(crate) fn take_writer_operation(&mut self) -> Option<crate::sqlite::telemetry::WriterOperation> {
+        self.writer_operation.take()
+    }
+
     pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
         self.trace.as_ref().and_then(|trace| trace.holder.clone())
     }
@@ -1626,11 +1650,11 @@ mod tests {
         );
     }
 
-    fn unfinished_op(label: &str, age: Duration) -> Arc<OpInner> {
+    fn unfinished_op(label: &str, started: Instant) -> Arc<OpInner> {
         Arc::new(OpInner {
             label: label.into(),
             caller: Some("test caller".into()),
-            started: Instant::now() - age,
+            started,
             acc: Mutex::new(Acc::default()),
             recorded: AtomicBool::new(false),
         })
@@ -1639,7 +1663,7 @@ mod tests {
     #[test]
     fn in_flight_snapshot_reports_unfinished_work_without_retaining_it() {
         let registry = Mutex::new(InFlight::default());
-        let op = unfinished_op("queued read", Duration::from_secs(20));
+        let op = unfinished_op("queued read", Instant::now() - Duration::from_secs(20));
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());
         assert_eq!(sample["tracked_live"], 1);
@@ -1659,11 +1683,13 @@ mod tests {
     #[test]
     fn in_flight_registry_and_output_are_bounded_and_keep_oldest_work() {
         let mut registry = InFlight::default();
+        // Keep the fixture's age order independent of scheduling during construction.
+        let now = Instant::now();
         let ops = (0..IN_FLIGHT_LIMIT + 3)
             .map(|index| {
                 unfinished_op(
                     &format!("read {index}"),
-                    Duration::from_millis(index as u64),
+                    now - Duration::from_millis(index as u64),
                 )
             })
             .collect::<Vec<_>>();
@@ -1671,7 +1697,7 @@ mod tests {
             registry.insert(op);
         }
         let registry = Mutex::new(registry);
-        let sample = in_flight_snapshot(&registry, Instant::now());
+        let sample = in_flight_snapshot(&registry, now);
         assert_eq!(sample["tracked_live"], IN_FLIGHT_LIMIT);
         assert_eq!(sample["untracked_starts"], 3);
         assert_eq!(
@@ -1697,7 +1723,7 @@ mod tests {
     #[test]
     fn in_flight_text_is_bounded_and_preserves_utf8_with_visible_truncation() {
         let registry = Mutex::new(InFlight::default());
-        let mut op = unfinished_op(&"☃".repeat(100), Duration::from_secs(2));
+        let mut op = unfinished_op(&"☃".repeat(100), Instant::now() - Duration::from_secs(2));
         Arc::get_mut(&mut op).unwrap().caller = Some("🧬".repeat(100).into());
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());

@@ -7,6 +7,3 @@ and sends messages through the public client/feed/model packages. Its
 Use [`fractal/`](fractal/) for Fractal seats, missions, and current Fractal patterns. Its
 [README](fractal/README.md) indexes the examples by task. The test suite parses and previews every
 tracked Fractal KDL example.
-
-Use [`native/`](native/) only for legacy st2 agent declarations. Read the
-[st2 legacy guide](../README.st2.md) before publishing them.

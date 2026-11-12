@@ -422,6 +422,14 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
+    /// A trim stopped before its end: a local trim deleted the day's claims (`[trim]
+    /// daily_claims`) and goes on the next day, or a trim could not restart the WAL (`TrimWal`)
+    /// and goes on at the next step. The cut stays `trimming`. The counts are this step's.
+    TrimDeferred {
+        checkpoint: String,
+        envelopes: usize,
+        claims: usize,
+    },
     /// Signature and verdict rows of claims an earlier build's trim dropped were deleted.
     SweptTrimmedClaimRows {
         rows: usize,
@@ -463,6 +471,9 @@ pub struct CheckpointStatusView {
     /// Display metadata only; this may differ from the build named by a checkpoint seal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub machine_version: BTreeMap<String, String>,
+    /// Latest local verification attempt, including phases completed before a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,8 +481,12 @@ pub struct PendingCheckpointView {
     pub checkpoint: String,
     pub cut_unix_ms: u128,
     pub due_at_unix_ms: u128,
-    /// This node's current terms, which every participant's newest seal must match.
-    pub terms: SealTerms,
+    /// Warm local terms, or this node's last published seal. Absent until either is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<SealTerms>,
+    /// Whether the local digest is warm/verified, rather than only last published or unknown.
+    #[serde(default)]
+    pub local_digest_state: String,
     /// Participants whose newest seal matches `terms`.
     pub sealed: BTreeSet<String>,
     /// Participants with a seal that differs, and how.
@@ -593,6 +608,7 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
 /// order as well as the plan. A build change may fix reader/projection semantics without
 /// changing the drop rules. Rowids, live projections and later claims are not proof inputs.
 fn proof_input_digest(staged: &StagedSet, plan: &StagedPlan) -> Result<String> {
+    let _phase = super::checkpoint_accounting::Phase::start("input_digest", "checkpoint.input_digest");
     staged.proof_input_digest(plan, checkpoint_executable_digest()?, &checkpoint_build(), CHECKPOINT_PROTOCOL)
 }
 
@@ -637,6 +653,12 @@ impl Store {
         &self,
         configured_peers: &[String],
     ) -> Result<BTreeSet<String>> {
+        self.checkpoint_known_writers_with_membership(configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_known_writers_with_membership(
+        &self, configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
             // Both primary keys start with the writer, so step from one writer to the next with
@@ -667,7 +689,6 @@ impl Store {
         };
         known.insert(self.origin.clone());
         known.extend(configured_peers.iter().cloned());
-        let membership = self.fleet_membership()?;
         known.extend(
             membership
                 .incarnations()
@@ -679,12 +700,15 @@ impl Store {
     /// Writers that left the fleet: every incarnation ended with a drained `leave`. A removal
     /// does not count; see section 3 of the design.
     pub fn checkpoint_left_writers(&self) -> Result<BTreeSet<String>> {
-        let membership = self.fleet_membership()?;
+        Ok(Self::checkpoint_left_writers_from_membership(&self.fleet_membership()?))
+    }
+
+    fn checkpoint_left_writers_from_membership(membership: &crate::fleet::Membership) -> BTreeSet<String> {
         let names = membership
             .incarnations()
             .map(|incarnation| incarnation.name.clone())
             .collect::<BTreeSet<_>>();
-        Ok(names
+        names
             .into_iter()
             .filter(|name| {
                 matches!(
@@ -693,7 +717,7 @@ impl Store {
                         if incarnation.ended.as_deref() == Some("left")
                 )
             })
-            .collect())
+            .collect()
     }
 
     pub fn checkpoint_participants(
@@ -701,8 +725,14 @@ impl Store {
         claims: &[CheckpointClaim],
         configured_peers: &[String],
     ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        let known = self.checkpoint_known_writers(configured_peers)?;
-        let left = self.checkpoint_left_writers()?;
+        self.checkpoint_participants_with_membership(claims, configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_participants_with_membership(
+        &self, claims: &[CheckpointClaim], configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let known = self.checkpoint_known_writers_with_membership(configured_peers, membership)?;
+        let left = Self::checkpoint_left_writers_from_membership(membership);
         Ok((
             participants_for_rules(
                 &known,
@@ -897,12 +927,18 @@ impl Store {
         if rows > 0 {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
+        // What a trim deferred and a crash left before its rebuild.
+        self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
             return Ok(actions);
         }
         // A member that trims locally takes no part in checkpoints: it finishes a trim it had
         // already committed, then trims its own due cut.
         if self.trims_locally() {
+            self.trim_day.store(
+                u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.finish_interrupted_trims(&mut actions)?;
             self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
@@ -954,6 +990,14 @@ impl Store {
             return Ok(actions);
         }
         if !verified.contains_key(&self.origin) {
+            // Our first seal lets peers advance, but refreshing it cannot enable verification
+            // while a participant has no seal. Defer the identity walk even if history changed:
+            // once every seal exists we recompute and reseal before comparing terms to verify.
+            if seals.contains_key(&self.origin)
+                && participants.iter().any(|writer| !seals.contains_key(writer))
+            {
+                return Ok(actions);
+            }
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
             // until that history changes. It writes only when a bound grows.
@@ -1046,6 +1090,7 @@ impl Store {
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
+        let _accounting = super::checkpoint_accounting::Scope::start(&self.checkpoint_verify_latest, checkpoint);
         let staged = self.checkpoint_staged_set(terms.cut_unix_ms, Some(seal_rowid), &context.scratch)?;
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
@@ -1062,6 +1107,7 @@ impl Store {
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
+        let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
             let input_digest = match input_digest {
                 Some(input) => input,
@@ -1137,7 +1183,7 @@ impl Store {
 
     /// A person looked at a trim that stopped because the graph would change. The rows stay
     /// as they are, and checkpoints go on from the next one.
-    pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), FractalError> {
         self.resume_checkpoints_allowing(actor, reason, None)
     }
 
@@ -1149,12 +1195,12 @@ impl Store {
         actor: &str,
         reason: &str,
         agent: Option<&str>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
         let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
         if !allowed || reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-resume",
                 "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
@@ -1188,7 +1234,9 @@ impl Store {
             .iter()
             .next_back()
             .and_then(|(_, certificates)| certificates.first().cloned());
-        let (mut participants, left) = self.checkpoint_participants(&claims, configured_peers)?;
+        let (mut participants, left) = self.checkpoint_participants_with_membership(
+            &claims, configured_peers, &self.fleet_membership_sealed()?,
+        )?;
         participants.insert(self.origin.clone());
         let cut = newest_due_cut(now_unix_ms);
         let pending = (cut > 0
@@ -1198,23 +1246,33 @@ impl Store {
         .then(|| -> Result<PendingCheckpointView> {
             let checkpoint = checkpoint_name(cut);
             let verified = first_verifications(&claims, &checkpoint);
+            let seals = newest_seals(&claims, &checkpoint);
+            let cached_digest = if verified.contains_key(&self.origin) {
+                None
+            } else {
+                self.checkpoint_cached_sealed_digest(cut)?
+            };
+            let local_digest_state = if verified.contains_key(&self.origin) || cached_digest.is_some() {
+                "ready"
+            } else {
+                "unavailable"
+            }.into();
             // Once this node verified, its seal round is over: seals compare with the terms it
             // verified, not with a rules digest a later build of this node carries.
             let terms = match verified.get(&self.origin) {
-                Some((_, ours)) => SealTerms {
+                Some((_, ours)) => Some(SealTerms {
                     cut_unix_ms: ours.cut_unix_ms,
                     participants: ours.participants.clone(),
                     sealed_digest: ours.sealed_digest.clone(),
                     rules_digest: ours.rules_digest.clone(),
-                },
-                None => SealTerms {
+                }),
+                None => cached_digest.map(|sealed_digest| SealTerms {
                     cut_unix_ms: cut,
                     participants: participants.clone(),
-                    sealed_digest: self.checkpoint_sealed_identities(cut, None)?.digest,
+                    sealed_digest,
                     rules_digest: self.runtime.checkpoint_rules_digest(),
-                },
+                }).or_else(|| seals.get(&self.origin).cloned()),
             };
-            let seals = newest_seals(&claims, &checkpoint);
             let reference = verified
                 .get(&self.origin)
                 .or_else(|| verified.values().next())
@@ -1236,15 +1294,16 @@ impl Store {
                 due_at_unix_ms: cut + 2 * DAY_MS,
                 sealed: participants
                     .iter()
-                    .filter(|writer| seals.get(*writer) == Some(&terms))
+                    .filter(|writer| terms.as_ref().is_some_and(|terms| seals.get(*writer) == Some(terms)))
                     .cloned()
                     .collect(),
                 disagreeing: participants
                     .iter()
                     .filter_map(|writer| {
+                        let terms = terms.as_ref()?;
                         let theirs = seals.get(writer)?;
-                        (theirs != &terms)
-                            .then(|| (writer.clone(), seal_difference(&terms, theirs)))
+                        (theirs != terms)
+                            .then(|| (writer.clone(), seal_difference(terms, theirs)))
                     })
                     .collect(),
                 unsealed: participants
@@ -1264,6 +1323,7 @@ impl Store {
                 checkpoint,
                 cut_unix_ms: cut,
                 terms,
+                local_digest_state,
             })
         })
         .transpose()?;
@@ -1286,6 +1346,7 @@ impl Store {
             participants,
             left,
             machine_version: BTreeMap::new(),
+            verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
         })
     }
 
@@ -1295,22 +1356,22 @@ impl Store {
     pub fn excuse_checkpoint_writer(
         &self,
         request: &CheckpointExcuseRequest,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         let actor = normalize_actor(&request.actor, "person");
         if !actor.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "only a person can excuse a writer from checkpoints",
             ));
         }
         if request.writer.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "an excusal needs a writer and a reason",
             ));
         }
         if request.writer == self.origin {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "a node cannot excuse itself; excuse it from another machine",
             ));

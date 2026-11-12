@@ -13,9 +13,33 @@ const EMPTY_DESIRED_AUTHORITY_QUERY: &str =
         AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='agent.retired'
                        AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))";
 
+/// Effective members of one set revision, by member key.
+pub type EffectiveMembers = BTreeMap<String, (Member, bool, bool)>;
+
+/// Owned-set reads memoized for one fixed read snapshot. Status reads ask for the selection of
+/// every member; without this each of them re-validates every member of every set.
+#[derive(Default)]
 struct SnapshotRows {
     connection: usize,
     rows: BTreeMap<Option<u64>, Vec<View>>,
+    selected: BTreeMap<Option<u64>, Vec<View>>,
+    /// Keyed by the set revision's claim and the bound.
+    effective: BTreeMap<(String, Option<u64>), EffectiveMembers>,
+}
+
+/// Read from the snapshot cache, when `connection` holds the snapshot it was made for.
+fn snapshot_cached<T>(connection: &Connection, read: impl FnOnce(&SnapshotRows) -> Option<T>) -> Option<T> {
+    let key = connection as *const Connection as usize;
+    SNAPSHOT_ROWS.with(|slot| slot.borrow().as_ref().filter(|s| s.connection == key).and_then(read))
+}
+
+fn snapshot_cache(connection: &Connection, write: impl FnOnce(&mut SnapshotRows)) {
+    let key = connection as *const Connection as usize;
+    SNAPSHOT_ROWS.with(|slot| {
+        if let Some(snapshot) = slot.borrow_mut().as_mut().filter(|s| s.connection == key) {
+            write(snapshot);
+        }
+    });
 }
 
 thread_local! {
@@ -39,7 +63,7 @@ fn with_snapshot_rows<T>(connection: &Connection, read: impl FnOnce() -> T) -> T
     let _restore = Restore(SNAPSHOT_ROWS.with(|slot| {
         slot.replace(Some(SnapshotRows {
             connection: connection as *const Connection as usize,
-            rows: BTreeMap::new(),
+            ..SnapshotRows::default()
         }))
     }));
     read()
@@ -75,6 +99,9 @@ pub struct Revision {
     pub members: BTreeMap<String, Member>,
     pub retired: BTreeMap<String, Member>,
     pub adoptions: BTreeMap<String, Vec<String>>,
+    /// The publisher's source policy; absent is `off`. A publication that omits it keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SourcePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -93,6 +120,9 @@ pub struct Options {
     pub confirm_retire: Option<String>,
     #[serde(default)]
     pub expected_subjects: BTreeMap<String, Vec<String>>,
+    /// Changes to the selected source policy; omitted keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -101,6 +131,12 @@ pub struct Request {
     pub options: Options,
     pub actor: String,
     pub idempotency_key: String,
+    /// The program bundles the set declares, base64 by sha256, as `ApplyRequest` carries them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
+    /// Apply only: recorded beside the commit, excluded from every digest and the preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_map: Option<fractal_schema::source_map::SourceMap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,6 +158,18 @@ pub struct Preview {
     pub empty: bool,
     pub blockers: Vec<String>,
     pub noop: bool,
+    /// The source policy this publication selects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SourcePolicy>,
+    /// Open source debt against the previous revision that this publication closes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_debts: Vec<crate::model::SourceDebt>,
+    /// The missions whose exact revision this store does not hold yet. Publication checks only
+    /// their exec gates: a held revision is not checked again, even if it was published with
+    /// --no-gate-check or replicated from another daemon (`fractal missions check` checks it).
+    /// Absent from older daemons, whose publications check every mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_check: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -141,10 +189,12 @@ pub struct Plan {
     pub retired: BTreeMap<String, Member>,
     pub adoptions: BTreeMap<String, Vec<String>>,
     bundle_digest: String,
+    /// The selected revision's policy, whose `publisher` list this publication must satisfy.
+    prior_policy: Option<SourcePolicy>,
     pub materialize: BTreeSet<String>,
 }
 
-pub fn manual_member(connection: &Connection, member: &Member) -> Result<bool, St3Error> {
+pub fn manual_member(connection: &Connection, member: &Member) -> Result<bool, FractalError> {
     manual_member_at(connection, member, None)
 }
 
@@ -152,14 +202,14 @@ pub fn manual_member_at(
     connection: &Connection,
     member: &Member,
     at: Option<u64>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     Ok(member.manual_rollout
         || claim(connection, &member.claim, at)?
             .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok())
             .is_some_and(|desired| crate::rollout::manual(&desired)))
 }
 
-pub fn subject(name: &str) -> Result<String, St3Error> {
+pub fn subject(name: &str) -> Result<String, FractalError> {
     let name = name.strip_prefix("owned-set/").unwrap_or(name);
     if name.is_empty()
         || name
@@ -167,7 +217,7 @@ pub fn subject(name: &str) -> Result<String, St3Error> {
             .any(|part| part.is_empty() || part == "." || part == "..")
         || name.chars().any(|c| c.is_whitespace() || c == '@')
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "set needs a nonempty graph name",
         ));
@@ -175,15 +225,9 @@ pub fn subject(name: &str) -> Result<String, St3Error> {
     Ok(format!("owned-set/{name}"))
 }
 
-pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
+pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
-    let connection_key = connection as *const Connection as usize;
-    if let Some(rows) = SNAPSHOT_ROWS.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .filter(|snapshot| snapshot.connection == connection_key)
-            .and_then(|snapshot| snapshot.rows.get(&at).cloned())
-    }) {
+    if let Some(rows) = snapshot_cached(connection, |snapshot| snapshot.rows.get(&at).cloned()) {
         return Ok(rows);
     }
     let mut statement = connection.prepare(
@@ -220,20 +264,14 @@ pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Er
             updated_at: chrono::DateTime::from_timestamp_millis(
                 accepted.parse().map_err(internal)?,
             )
-            .ok_or_else(|| St3Error::new("invalid-set-time", "invalid receipt time"))?
+            .ok_or_else(|| FractalError::new("invalid-set-time", "invalid receipt time"))?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             receipt,
             blockers: Vec::new(),
         });
     }
-    SNAPSHOT_ROWS.with(|slot| {
-        if let Some(snapshot) = slot
-            .borrow_mut()
-            .as_mut()
-            .filter(|snapshot| snapshot.connection == connection_key)
-        {
-            snapshot.rows.insert(at, views.clone());
-        }
+    snapshot_cache(connection, |snapshot| {
+        snapshot.rows.insert(at, views.clone());
     });
     Ok(views)
 }
@@ -242,7 +280,7 @@ fn known_members(
     connection: &Connection,
     set: &str,
     at: Option<u64>,
-) -> Result<BTreeMap<String, Member>, St3Error> {
+) -> Result<BTreeMap<String, Member>, FractalError> {
     let mut history = rows(connection, at)?
         .into_iter()
         .filter(|v| v.id == set)
@@ -262,10 +300,36 @@ fn known_members(
     Ok(members)
 }
 
-fn stop_declaration(subject: &str) -> Result<DesiredSubject, St3Error> {
+/// The agent a nested `exec` or `pty` task belongs to. A set carries such tasks as members with
+/// their agent; standalone tasks stay outside sets.
+fn task_parent(desired: &DesiredSubject) -> Option<&str> {
+    if !matches!(desired.kind.as_str(), "exec" | "pty") {
+        return None;
+    }
+    desired.member.as_ref()?.tags.get("st3.agent").map(String::as_str)
+}
+
+/// The effect of keeping an agent retired ad hoc retired; `declared` when the source still
+/// declares it.
+fn kept_retired(retirement: &ClaimRecord, declared: bool) -> String {
+    format!(
+        "keep terminally retired by {}: {}{}",
+        retirement.actor.as_deref().unwrap_or("unknown"),
+        retirement.body["fields"]["reason"].as_str().unwrap_or_default(),
+        if declared { "; drop it from the source" } else { "" },
+    )
+}
+
+fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
+    // A schedule or subscription retires through its stopped form, keeping its kind.
     let source = if let Some(name) = subject.strip_prefix("schedule/") {
         format!(
             "version 2\nschedule {} {{ stop }}\n",
+            serde_json::to_string(name).map_err(internal)?
+        )
+    } else if let Some(name) = subject.strip_prefix("subscription/") {
+        format!(
+            "version 2\nsubscription {} {{ stop }}\n",
             serde_json::to_string(name).map_err(internal)?
         )
     } else {
@@ -277,7 +341,7 @@ fn stop_declaration(subject: &str) -> Result<DesiredSubject, St3Error> {
     crate::graph::parse_internal_intent(&source, "unused")?
         .subjects
         .remove(subject)
-        .ok_or_else(|| St3Error::new("invalid-set-member", "invalid retirement subject"))
+        .ok_or_else(|| FractalError::new("invalid-set-member", "invalid retirement subject"))
 }
 
 /// A complete winning membership also retires subjects learned only from losing branches.
@@ -286,7 +350,24 @@ pub fn effective_members(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
-) -> Result<BTreeMap<String, (Member, bool, bool)>, St3Error> {
+) -> Result<EffectiveMembers, FractalError> {
+    let key = (view.claim.clone(), at);
+    if let Some(members) = snapshot_cached(connection, |snapshot| snapshot.effective.get(&key).cloned()) {
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        return Ok(members);
+    }
+    let members = effective_members_uncached(connection, view, at)?;
+    snapshot_cache(connection, |snapshot| {
+        snapshot.effective.insert(key, members.clone());
+    });
+    Ok(members)
+}
+
+fn effective_members_uncached(
+    connection: &Connection,
+    view: &View,
+    at: Option<u64>,
+) -> Result<EffectiveMembers, FractalError> {
     let mut members = BTreeMap::new();
     for (subject, member) in known_members(connection, &view.id, at)? {
         if view.receipt.members.contains_key(&subject)
@@ -307,6 +388,7 @@ pub fn effective_members(
         };
         members.insert(subject, (member, true, true));
     }
+    let overrides = debt_overrides(connection, view, at)?;
     for (s, m) in &view.receipt.members {
         let retirement = if m.one_shot {
             one_shot_retirement(connection, &view.id, s, m, at)?
@@ -321,6 +403,18 @@ pub fn effective_members(
                     ..m.clone()
                 },
                 true,
+                false,
+            )
+        } else if let Some((claim, revision)) = overrides.get(s) {
+            // A forced ad hoc declaration holds until the set publishes its next revision.
+            // A forced stop is not a set retirement: ownership and the source stay unchanged.
+            (
+                Member {
+                    claim: claim.clone(),
+                    revision: revision.clone(),
+                    ..m.clone()
+                },
+                false,
                 false,
             )
         } else {
@@ -345,7 +439,7 @@ fn one_shot_retirement(
     subject: &str,
     member: &Member,
     at: Option<u64>,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let Some(declaration) = claim(connection, &member.claim, at)? else {
         return Ok(None);
     };
@@ -369,7 +463,7 @@ pub fn one_shot_retirement_owner(
     connection: &Connection,
     desired: &DesiredSubject,
     origin: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let Some(set) = owner(connection, &desired.subject, None)? else {
         return Ok(None);
     };
@@ -392,7 +486,7 @@ pub fn claim(
     connection: &Connection,
     id: &str,
     at: Option<u64>,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     connection.query_row(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE id=?1 AND store_index<=?2 AND NOT EXISTS
@@ -401,7 +495,19 @@ pub fn claim(
     ).optional().map_err(internal)
 }
 
-pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
+pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
+    if let Some(views) = snapshot_cached(connection, |snapshot| snapshot.selected.get(&at).cloned()) {
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        return Ok(views);
+    }
+    let views = selected_uncached(connection, at)?;
+    snapshot_cache(connection, |snapshot| {
+        snapshot.selected.insert(at, views.clone());
+    });
+    Ok(views)
+}
+
+fn selected_uncached(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     let rows = rows(connection, at)?;
     let references: BTreeMap<_, _> = rows.iter().map(|v| (reference(v), v)).collect();
     let mut winners: BTreeMap<String, View> = BTreeMap::new();
@@ -488,6 +594,10 @@ pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, S
                                     desired.kind == "schedule"
                                         && crate::graph::schedule_spec(&desired.desired, "unused")
                                             .is_some_and(|spec| spec.stopped)
+                                } else if retired && m.kind == "subscription" {
+                                    desired.kind == "subscription"
+                                        && crate::graph::subscription_spec(&desired.desired)
+                                            .is_some_and(|spec| spec.stopped)
                                 } else {
                                     desired.kind == if retired { "stop" } else { &m.kind }
                                 }
@@ -508,7 +618,7 @@ pub fn owner(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let owners: BTreeSet<_> = rows(connection, at)?
         .into_iter()
         .filter(|v| {
@@ -517,7 +627,7 @@ pub fn owner(
         .map(|v| v.id)
         .collect();
     if owners.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "owned-set-conflict",
             format!("{member} has conflicting set owners"),
         ));
@@ -530,7 +640,7 @@ pub fn owner(
 pub fn owners_at(
     connection: &Connection,
     at: Option<u64>,
-) -> Result<BTreeMap<String, BTreeSet<String>>, St3Error> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, FractalError> {
     let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
     for view in rows(connection, at)? {
         for member in view.receipt.members.keys().chain(view.receipt.retired.keys()) {
@@ -540,9 +650,9 @@ pub fn owners_at(
     Ok(owners)
 }
 
-pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), FractalError> {
     if let Some(set) = owner(connection, member, None)? {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "set-managed-subject",
             format!("{member} is managed by {set}; publish its declaration through that set"),
         ));
@@ -550,19 +660,743 @@ pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3
     Ok(())
 }
 
+/// One accepted ad hoc change to an owned-set member (`--force --reason`).
+pub const DEBT_KIND: &str = "source.debt.recorded";
+/// The set publication that converged one recorded debt, written in that publication.
+pub const DEBT_CLOSED_KIND: &str = "source.debt.closed";
+/// A write an `enforce` set would refuse, accepted by an `audit` set.
+pub const AUDITED_KIND: &str = "source.audited";
+
+/// How a set routes desired-state writes to its members through its source.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Enforce {
+    /// Today's owned-set behaviour: plain declarations of members are refused, nothing else.
+    #[default]
+    Off,
+    /// Nothing is refused beyond `off`; each write `enforce` would refuse is recorded.
+    Audit,
+    /// Ad hoc writes are refused, or forced with `--force --reason` as source debt.
+    Enforce,
+}
+
+impl Enforce {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Enforce::Off => "off",
+            Enforce::Audit => "audit",
+            Enforce::Enforce => "enforce",
+        }
+    }
+}
+
+/// A set's source policy, declared by its publisher and carried in its revision.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourcePolicy {
+    #[serde(default)]
+    pub enforce: Enforce,
+    /// Actors allowed to publish the set; empty allows any publisher.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publisher: Vec<String>,
+    /// Globs (`*` matches any run) claiming new top-level subjects for the set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<String>,
+    /// Globs exempting subjects inside `namespaces`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmanaged_allow: Vec<String>,
+}
+
+/// A publication's policy change. Each omitted field keeps the selected revision's value.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PolicyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<Enforce>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmanaged_allow: Option<Vec<String>>,
+}
+
+/// The policy a publication selects: the prior one with each requested field replaced. A policy
+/// equal to the default (`off`, no lists) is absent.
+pub fn resolve_policy(
+    prior: Option<&SourcePolicy>,
+    requested: Option<&PolicyRequest>,
+) -> Result<Option<SourcePolicy>, FractalError> {
+    let Some(requested) = requested else {
+        return Ok(prior.cloned());
+    };
+    let prior = prior.cloned().unwrap_or_default();
+    let policy = SourcePolicy {
+        enforce: requested.enforce.unwrap_or(prior.enforce),
+        publisher: requested.publisher.clone().unwrap_or(prior.publisher),
+        namespaces: requested.namespaces.clone().unwrap_or(prior.namespaces),
+        unmanaged_allow: requested.unmanaged_allow.clone().unwrap_or(prior.unmanaged_allow),
+    };
+    let invalid = |message: String| Err(FractalError::new("invalid-source-policy", message));
+    if let Some(actor) = policy
+        .publisher
+        .iter()
+        .find(|a| !(a.starts_with("person/") || a.starts_with("agent/")) || a.ends_with('/'))
+    {
+        return invalid(format!("publisher {actor:?} is not a person/ or agent/ subject"));
+    }
+    if let Some(glob) = policy.namespaces.iter().chain(&policy.unmanaged_allow).find(|g| {
+        !NAMESPACE_KINDS.iter().any(|kind| g.starts_with(kind)) || g.len() > 512
+    }) {
+        return invalid(format!(
+            "namespace glob {glob:?} must start with one of {}",
+            NAMESPACE_KINDS.join(", ")
+        ));
+    }
+    Ok((policy != SourcePolicy::default()).then_some(policy))
+}
+
+/// Top-level subject families a set namespace can claim.
+const NAMESPACE_KINDS: [&str; 4] = ["agent/", "schedule/", "subscription/", "mission/"];
+
+/// The set's source enforcement; a set without a policy is `off`.
+pub fn enforcement(view: &View) -> Enforce {
+    view.receipt.policy.as_ref().map_or(Enforce::Off, |p| p.enforce)
+}
+
+/// A desired-state write a set's source owns, as refusals and debt name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verb {
+    /// A plain declaration of a member.
+    Apply,
+    /// A plain declaration of a new subject in a claimed namespace.
+    Create,
+    /// A stop declaration (`agents stop`, a stopped schedule or subscription).
+    Stop,
+    /// A declaration that starts a stopped member (`agents start`).
+    Start,
+    MissionPublish,
+    MissionRetire,
+    Hold,
+    Suspend,
+    Resume,
+    /// Terminal `agents retire`; never forced.
+    Retire,
+}
+
+impl Verb {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verb::Apply => "apply",
+            Verb::Create => "create",
+            Verb::Stop => "stop",
+            Verb::Start => "start",
+            Verb::MissionPublish => "mission publish",
+            Verb::MissionRetire => "mission retire",
+            Verb::Hold => "hold",
+            Verb::Suspend => "suspend",
+            Verb::Resume => "resume",
+            Verb::Retire => "retire",
+        }
+    }
+
+    /// Declarations: an owned set refuses these on its members whatever its policy.
+    fn declares(self) -> bool {
+        matches!(
+            self,
+            Verb::Apply | Verb::Create | Verb::Stop | Verb::Start | Verb::MissionPublish | Verb::MissionRetire
+        )
+    }
+
+    /// The verb of a plain declaration of `desired`, against its current projection.
+    pub fn of_declaration(
+        connection: &Connection,
+        desired: &DesiredSubject,
+    ) -> Result<Verb, FractalError> {
+        let stopped = desired.kind == "stop"
+            || (desired.kind == "schedule"
+                && crate::graph::schedule_spec(&desired.desired, "unused").is_some_and(|s| s.stopped))
+            || (desired.kind == "subscription"
+                && crate::graph::subscription_spec(&desired.desired).is_some_and(|s| s.stopped));
+        if stopped {
+            return Ok(Verb::Stop);
+        }
+        let current = current_desired_row(connection, &desired.subject).map_err(internal)?;
+        Ok(if current.is_some_and(|row| row.kind == "stop") {
+            Verb::Start
+        } else {
+            Verb::Apply
+        })
+    }
+}
+
+/// `*` matches any run of characters, including `/`.
+fn glob(pattern: &str, subject: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == subject,
+        Some((head, rest)) => {
+            let Some(tail) = subject.strip_prefix(head) else { return false };
+            (0..=tail.len()).filter(|i| tail.is_char_boundary(*i)).any(|i| glob(rest, &tail[i..]))
+        }
+    }
+}
+
+/// The set claiming a new top-level subject through its namespaces, unless an allow glob
+/// exempts it. Only `audit` and `enforce` sets claim.
+fn namespace_claimant(connection: &Connection, subject: &str) -> Result<Option<View>, FractalError> {
+    if !NAMESPACE_KINDS.iter().any(|kind| subject.starts_with(kind)) {
+        return Ok(None);
+    }
+    Ok(selected(connection, None)?.into_iter().find(|view| {
+        view.blockers.is_empty()
+            && enforcement(view) != Enforce::Off
+            && view.receipt.policy.as_ref().is_some_and(|p| {
+                p.namespaces.iter().any(|g| glob(g, subject))
+                    && !p.unmanaged_allow.iter().any(|g| glob(g, subject))
+            })
+    }))
+}
+
+fn source_line(view: &View) -> String {
+    let source = &view.receipt.source;
+    format!(
+        "{} from {} {} at {} (source sequence {}, enforce {})",
+        view.id,
+        source.repository,
+        source.r#ref,
+        source.sha,
+        source.sequence,
+        enforcement(view).as_str()
+    )
+}
+
+fn refusal(view: &View, subject: &str, verb: Verb, message: String) -> FractalError {
+    FractalError::new("set-managed-subject", message)
+        .with_detail("subject", subject)
+        .with_detail("verb", verb.as_str())
+        .with_detail("set", view.id.clone())
+        .with_detail("set_revision", reference(view))
+        .with_detail("source", json!(view.receipt.source))
+        .with_detail("enforce", enforcement(view).as_str())
+}
+
+fn namespace_refusal(view: &View, subject: &str) -> FractalError {
+    refusal(view, subject, Verb::Create, format!(
+        "{subject} is in a namespace claimed by {}; declare it in that set's source, or accept \
+         this ad hoc create as source debt with --force --reason TEXT",
+        source_line(view),
+    ))
+    .with_detail("escape", "--force --reason TEXT")
+}
+
+fn retire_refusal(view: &View, member: &str) -> FractalError {
+    refusal(view, member, Verb::Retire, format!(
+        "{member} is a live member of {}; retirement is terminal and cannot be forced: omit \
+         {member} from the set publication, then retire it",
+        source_line(view),
+    ))
+}
+
+fn ad_hoc_refusal(view: &View, member: &str, verb: Verb) -> FractalError {
+    refusal(view, member, verb, format!(
+        "{member} is managed by {}; ad hoc {} is refused: publish the change through that set, \
+         or accept this ad hoc {} as source debt with --force --reason TEXT",
+        source_line(view),
+        verb.as_str(),
+        verb.as_str(),
+    ))
+    .with_detail("escape", "--force --reason TEXT")
+}
+
+fn force_refused(message: String) -> FractalError {
+    FractalError::new("source-force-refused", message)
+}
+
+/// What a desired-state write to `subject` may do under its owning set's source policy.
+pub enum Gate {
+    /// No source policy applies.
+    Allow,
+    /// An `audit` set accepts the write; record the refusal `enforce` would return.
+    Audit(Box<View>, Box<FractalError>),
+    /// A forced write: record source debt against this set.
+    Force(Box<View>),
+}
+
+/// Decide one write to `subject`. `force` is the `--force` reason; it must be nonempty.
+pub fn gate(
+    connection: &Connection,
+    subject: &str,
+    verb: Verb,
+    force: Option<&str>,
+) -> Result<Gate, FractalError> {
+    let force = force.map(str::trim);
+    if force == Some("") {
+        return Err(force_refused("--force needs a nonempty --reason".into()));
+    }
+    let Some(set) = owner(connection, subject, None)? else {
+        if verb != Verb::Create {
+            return Ok(Gate::Allow);
+        }
+        // A new subject: only a claimed namespace routes it through source.
+        return match namespace_claimant(connection, subject)? {
+            None => Ok(Gate::Allow),
+            Some(view) if force.is_some() => Ok(Gate::Force(Box::new(view))),
+            Some(view) if enforcement(&view) == Enforce::Audit => {
+                let refused = namespace_refusal(&view, subject);
+                Ok(Gate::Audit(Box::new(view), Box::new(refused)))
+            }
+            Some(view) => Err(namespace_refusal(&view, subject)),
+        };
+    };
+    let view = selected(connection, None)?.into_iter().find(|v| v.id == set);
+    let live = match &view {
+        Some(view) if view.blockers.is_empty() => effective_members(connection, view, None)?
+            .get(subject)
+            .is_some_and(|(_, retired, _)| !retired),
+        _ => false,
+    };
+    let (Some(view), true) = (view, live) else {
+        // A pending, blocked or retired membership: declarations keep today's refusal.
+        if verb.declares() {
+            if force.is_some() {
+                return Err(force_refused(format!(
+                    "{subject}: {set} is pending, blocked or has retired it; publish it through the set"
+                )));
+            }
+            refuse_unmanaged(connection, subject)?;
+        }
+        return Ok(Gate::Allow);
+    };
+    let mode = enforcement(&view);
+    if mode == Enforce::Off {
+        if !verb.declares() {
+            return Ok(Gate::Allow);
+        }
+        if force.is_some() {
+            return Err(force_refused(format!(
+                "{subject}: {} declares no source policy, so it has no force path; publish the \
+                 change through that set",
+                view.id
+            )));
+        }
+        return refuse_unmanaged(connection, subject).map(|()| Gate::Allow);
+    }
+    if verb == Verb::Retire {
+        let refused = retire_refusal(&view, subject);
+        return match mode {
+            Enforce::Audit => Ok(Gate::Audit(Box::new(view), Box::new(refused))),
+            _ => Err(refused),
+        };
+    }
+    if force.is_some() {
+        return Ok(Gate::Force(Box::new(view)));
+    }
+    let refused = ad_hoc_refusal(&view, subject, verb);
+    // An unforced declaration cannot take effect over the set's own member reference.
+    if mode == Enforce::Enforce || verb.declares() {
+        return Err(refused);
+    }
+    Ok(Gate::Audit(Box::new(view), Box::new(refused)))
+}
+
+/// What a forced write changed: a declaration the set's member reference yields to until the
+/// next publication, or a runtime request (hold, suspend, resume) that publication reverts.
+#[derive(Clone, Copy, Debug)]
+pub enum Forced<'a> {
+    Declaration { claim: &'a str, revision: &'a str },
+    Request(&'a str),
+}
+
+/// Record one ad hoc change as source debt against the selected set revision.
+#[allow(clippy::too_many_arguments)]
+pub fn record_debt_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    view: &View,
+    subject: &str,
+    verb: Verb,
+    forced: Forced<'_>,
+    diff: Option<&declarations::DeclarationDiff>,
+    actor: Option<&str>,
+    reason: &str,
+    batch: Option<&str>,
+) -> Result<crate::model::SourceDebt, FractalError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(force_refused("--force needs a nonempty --reason".into()));
+    }
+    let source = &view.receipt.source;
+    let mut fields = json!({
+        "set": view.id, "set_revision": reference(view), "repository": source.repository,
+        "ref": source.r#ref, "sha": source.sha, "verb": verb.as_str(), "reason": reason,
+        "pointers": diff.map(|d| d.fields.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+    });
+    match forced {
+        Forced::Declaration { claim, revision } => {
+            fields["claim"] = json!(claim);
+            fields["revision"] = json!(revision);
+        }
+        Forced::Request(request) => fields["request"] = json!(request),
+    }
+    if let Some(diff) = diff {
+        fields["before"] = diff.before.clone().unwrap_or(Value::Null);
+        fields["after"] = diff.after.clone();
+    }
+    let record = append_claim_tx(
+        transaction,
+        origin,
+        subject,
+        DEBT_KIND,
+        actor,
+        &json!({ "fields": fields }),
+        &[],
+        batch,
+    )
+    .map_err(internal)?;
+    debt_view(&record).ok_or_else(|| FractalError::new("internal", "unreadable source debt"))
+}
+
+/// Record a write an `enforce` set would have refused, with that refusal.
+#[allow(clippy::too_many_arguments)]
+pub fn record_audit_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    view: &View,
+    subject: &str,
+    verb: Verb,
+    actor: Option<&str>,
+    refused: &FractalError,
+    batch: Option<&str>,
+) -> Result<ClaimRecord, FractalError> {
+    append_claim_tx(
+        transaction,
+        origin,
+        subject,
+        AUDITED_KIND,
+        actor,
+        &json!({"fields": {"set": view.id, "set_revision": reference(view), "verb": verb.as_str(),
+            "refusal": refused.message}}),
+        &[],
+        batch,
+    )
+    .map_err(internal)
+}
+
+fn debt_view(record: &ClaimRecord) -> Option<crate::model::SourceDebt> {
+    let f = &record.body["fields"];
+    let text = |name: &str| f[name].as_str().map(str::to_owned);
+    Some(crate::model::SourceDebt {
+        id: record.id.clone(),
+        subject: record.subject.clone(),
+        verb: text("verb")?,
+        set: text("set")?,
+        set_revision: text("set_revision")?,
+        repository: text("repository")?,
+        r#ref: text("ref")?,
+        sha: text("sha")?,
+        claim: text("claim"),
+        actor: record.actor.clone(),
+        reason: text("reason")?,
+        fields: f["pointers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str().map(str::to_owned))
+            .collect(),
+        recorded_at: chrono::DateTime::from_timestamp_millis(record.accepted_at_unix_ms as i64)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        outcome: None,
+        closed_by: None,
+    })
+}
+
+/// Every debt recorded against `set` (any set when `None`) that no `source.debt.closed` claim
+/// closes, newest first.
+fn open_debt_records(
+    connection: &Connection,
+    set: Option<&str>,
+    at: Option<u64>,
+) -> Result<Vec<ClaimRecord>, FractalError> {
+    let mut statement = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb491fd4d2964 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims WHERE kind='source.debt.recorded' AND store_index<=?1
+             AND (?2 IS NULL OR json_extract(body,'$.fields.set')=?2)
+             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')
+             AND NOT EXISTS (SELECT 1 FROM claims closed WHERE closed.subject=claims.subject
+                 AND closed.kind='source.debt.closed' AND closed.store_index<=?1
+                 AND json_extract(closed.body,'$.fields.debt')=claims.id)
+             ORDER BY CANONICAL_DESC(claims)",
+        ))
+        .map_err(internal)?;
+    statement
+        .query_map(params![at.unwrap_or(u64::MAX).min(i64::MAX as u64), set], claim_from_row)
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)
+}
+
+/// The newest open forced declaration per member against exactly this selected revision. Sets
+/// without an `audit` or `enforce` policy carry no debt and read nothing.
+fn debt_overrides(
+    connection: &Connection,
+    view: &View,
+    at: Option<u64>,
+) -> Result<BTreeMap<String, (String, String)>, FractalError> {
+    let mut overrides = BTreeMap::new();
+    if enforcement(view) == Enforce::Off {
+        return Ok(overrides);
+    }
+    let current = reference(view);
+    for record in open_debt_records(connection, Some(&view.id), at)? {
+        let f = &record.body["fields"];
+        let (Some(claim_id), Some(revision)) = (f["claim"].as_str(), f["revision"].as_str()) else {
+            continue;
+        };
+        if f["set_revision"].as_str() != Some(current.as_str())
+            || overrides.contains_key(&record.subject)
+            || !view.receipt.members.contains_key(&record.subject)
+        {
+            continue;
+        }
+        let valid = claim(connection, claim_id, at)?.is_some_and(|c| {
+            c.subject == record.subject
+                && if c.kind == "mission.published" {
+                    c.body["revision"].as_str() == Some(revision)
+                } else {
+                    c.kind == "intent.desired"
+                        && serde_json::from_value::<DesiredSubject>(c.body).is_ok_and(|d| {
+                            desired_revision(&d) == revision
+                                && d.owner_run.is_none()
+                                && d.owner_step.is_none()
+                        })
+                }
+        });
+        if valid {
+            overrides.insert(record.subject.clone(), (claim_id.to_owned(), revision.to_owned()));
+        }
+    }
+    Ok(overrides)
+}
+
+/// Whether the runtime request a forced hold or suspension recorded is still the subject's
+/// latest of its kind. The publication that closes such debt reverts it.
+fn forced_request_in_place(connection: &Connection, debt: &ClaimRecord) -> Result<bool, FractalError> {
+    let fields = &debt.body["fields"];
+    let Some(request) = fields["request"].as_str() else {
+        return Ok(false);
+    };
+    let latest = match fields["verb"].as_str() {
+        Some("hold") => connection
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha652f7f9027c owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id,json_extract(body,'$.fields.held') FROM claims WHERE subject=?1 AND kind='delivery.hold'
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                [&debt.subject],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<bool>>(1)?)),
+            )
+            .optional()
+            .map_err(internal)?
+            .filter(|(_, held)| *held == Some(true))
+            .map(|(id, _)| id),
+        Some("suspend") => connection
+            .query_row(/* sqlite-large-value: allow-for-now lv-h19840d31732b owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND actor IS NOT NULL
+                 AND json_extract(body,'$.fields.action') IN ('suspend','resume')
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                [&debt.subject],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(internal)?,
+        _ => None,
+    };
+    Ok(latest.as_deref() == Some(request))
+}
+
+/// Close every open debt of the set this plan publishes: one `source.debt.closed` per debt in
+/// the publication transaction, naming the revision that closed it. A forced hold still in
+/// place is released and a forced suspension still in place is resumed, in the same transaction.
+fn close_debts_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    plan: &Plan,
+    closing: &str,
+    actor: Option<&str>,
+    batch: &str,
+) -> Result<(), FractalError> {
+    for debt in &plan.preview.reverted_debts {
+        let outcome = debt.outcome.as_deref().unwrap_or("closed");
+        append_claim_tx(
+            transaction,
+            origin,
+            &debt.subject,
+            DEBT_CLOSED_KIND,
+            actor,
+            &json!({"fields": {"debt": debt.id, "set": plan.preview.set, "outcome": outcome,
+                "set_revision": closing, "publisher": actor}}),
+            &[],
+            Some(batch),
+        )
+        .map_err(internal)?;
+        if outcome != "reverted" {
+            continue;
+        }
+        let revert_reason = format!(
+            "source {} reverted the ad hoc {}: {}",
+            plan.preview.source.sha, debt.verb, debt.reason
+        );
+        if debt.verb == Verb::Hold.as_str() {
+            append_claim_tx(
+                transaction,
+                origin,
+                &debt.subject,
+                "delivery.hold",
+                actor,
+                &json!({"fields": {"held": false, "until_unix_ms": 0, "legacy_adoption": false,
+                    "reason": revert_reason}}),
+                &[],
+                Some(batch),
+            )
+            .map_err(internal)?;
+        } else if debt.verb == Verb::Suspend.as_str() {
+            resume_forced_suspension_tx(transaction, origin, debt, actor, &revert_reason, batch)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resume the seat a forced suspension holds, as `agents resume` on its own host would: the
+/// request names the seat's current launch and the suspend it resumes.
+fn resume_forced_suspension_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    debt: &crate::model::SourceDebt,
+    actor: Option<&str>,
+    reason: &str,
+    batch: &str,
+) -> Result<(), FractalError> {
+    let request = claim(transaction, &debt.id, None)?
+        .and_then(|record| record.body["fields"]["request"].as_str().map(str::to_owned))
+        .ok_or_else(|| FractalError::new("internal", "a forced suspension debt without its request"))?;
+    let Some(row) = current_desired_row(transaction, &debt.subject).map_err(internal)? else {
+        return Ok(());
+    };
+    let Some(member) = row.member.as_deref() else {
+        return Ok(());
+    };
+    let member: MemberSpec = serde_json::from_str(member).map_err(internal)?;
+    let predecessors = latest_claim_id_tx(transaction, &debt.subject)
+        .map_err(internal)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    append_claim_tx(
+        transaction,
+        origin,
+        &debt.subject,
+        "runtime.action.requested",
+        actor,
+        &json!({"fields": {"action": "resume", "runtime_id": member.runtime_id, "reason": reason},
+            "evidence": [row.claim_id, request]}),
+        &predecessors,
+        Some(batch),
+    )
+    .map_err(internal)?;
+    Ok(())
+}
+
+/// The debt each of `set_revisions` closed, newest closure first.
+fn closed_debts(
+    connection: &Connection,
+    set_revisions: &BTreeSet<String>,
+) -> Result<Vec<crate::model::SourceDebt>, FractalError> {
+    let mut statement = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h80b258f37688 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT debt.id,debt.store_index,debt.batch_id,debt.subject,debt.kind,debt.origin,debt.actor,debt.body,
+                    debt.predecessors,debt.accepted_at_unix_ms,
+                    json_extract(closed.body,'$.fields.outcome'),json_extract(closed.body,'$.fields.set_revision'),closed.id
+             FROM claims closed JOIN claims debt ON debt.id=json_extract(closed.body,'$.fields.debt')
+             WHERE closed.kind='source.debt.closed' AND debt.kind='source.debt.recorded'
+             AND json_extract(closed.body,'$.fields.set_revision') IN (SELECT value FROM json_each(?1))
+             ORDER BY closed.store_index DESC",
+        ))
+        .map_err(internal)?;
+    let revisions = serde_json::to_string(set_revisions).map_err(internal)?;
+    let rows = statement
+        .query_map([revisions], |row| {
+            Ok((claim_from_row(row)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?, row.get::<_, String>(12)?))
+        })
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(record, outcome, closing, closure)| {
+            let mut debt = debt_view(&record)?;
+            debt.outcome = Some(outcome);
+            debt.closed_by = Some(json!({"set_revision": closing, "claim": closure}));
+            Some(debt)
+        })
+        .collect())
+}
+
+/// `fractal source status --audit` shows at most this many audit records, newest first.
+const AUDIT_STATUS_LIMIT: i64 = 200;
+
+/// `fractal source status`: every selected set's policy, all open debt, the debt each set's
+/// current revision closed, and with `audit` the newest audit records.
+pub fn source_status(connection: &Connection, audit: bool) -> Result<Value, FractalError> {
+    let views = selected(connection, None)?;
+    let sets = views
+        .iter()
+        .map(|view| {
+            json!({"set": view.id, "revision": view.revision, "enforce": enforcement(view).as_str(),
+                "policy": view.receipt.policy, "source": view.receipt.source,
+                "members": view.receipt.members.len(), "blockers": view.blockers})
+        })
+        .collect::<Vec<_>>();
+    let open = open_debt_records(connection, None, None)?
+        .iter()
+        .filter_map(debt_view)
+        .collect::<Vec<_>>();
+    let closed = closed_debts(connection, &views.iter().map(reference).collect())?;
+    let mut status = json!({"sets": sets, "open": open, "closed": closed});
+    if audit {
+        let mut statement = connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd1fb700a1544 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                 FROM claims WHERE kind='source.audited' ORDER BY CANONICAL_DESC(claims) LIMIT ?1",
+            ))
+            .map_err(internal)?;
+        let audited = statement
+            .query_map([AUDIT_STATUS_LIMIT], claim_from_row)
+            .map_err(internal)?
+            .map(|row| {
+                row.map(|c| {
+                    let f = &c.body["fields"];
+                    json!({"id": c.id, "subject": c.subject, "verb": f["verb"], "actor": c.actor,
+                        "set": f["set"], "set_revision": f["set_revision"], "refusal": f["refusal"],
+                        "accepted_at_unix_ms": c.accepted_at_unix_ms})
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        status["audited"] = json!(audited);
+        status["audited_limit"] = json!(AUDIT_STATUS_LIMIT);
+    }
+    Ok(status)
+}
+
 /// A member's conflicts come from its owning set, rather than independent declaration leaves.
 pub fn conflicts_at(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
-) -> Result<Option<Vec<String>>, St3Error> {
+) -> Result<Option<Vec<String>>, FractalError> {
     let Some(set) = owner(connection, member, at)? else {
         return Ok(None);
     };
     let view = selected(connection, at)?
         .into_iter()
         .find(|v| v.id == set)
-        .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+        .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
     Ok(Some(if view.blockers.is_empty() {
         Vec::new()
     } else {
@@ -570,13 +1404,13 @@ pub fn conflicts_at(
     }))
 }
 
-pub fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn guard_member(connection: &Connection, member: &str) -> Result<(), FractalError> {
     if owner(connection, member, None)?.is_none() {
         let staged: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND json_extract(body,'$.owned_set') IS NOT NULL)",
             [member], |row|row.get(0)).map_err(internal)?;
         if staged {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "owned-set-pending",
                 "staged member awaits its owning set revision",
             ));
@@ -586,15 +1420,15 @@ pub fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Erro
         let view = selected(connection, None)?
             .into_iter()
             .find(|v| v.id == set)
-            .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+            .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
         if !view.blockers.is_empty() {
-            return Err(St3Error::new("owned-set-pending", view.blockers.join("; ")));
+            return Err(FractalError::new("owned-set-pending", view.blockers.join("; ")));
         }
     }
     Ok(())
 }
 
-pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), St3Error> {
+pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), FractalError> {
     let subject = format!(
         "mission/{}",
         mission.strip_prefix("mission/").unwrap_or(mission)
@@ -606,7 +1440,7 @@ pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(),
             .find(|v| v.id == set)
             .unwrap();
         if !view.receipt.members.contains_key(&subject) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "mission-retired",
                 format!("{subject} was retired by {set}"),
             ));
@@ -619,12 +1453,12 @@ pub fn plan_tx(
     transaction: &Transaction<'_>,
     input: &NormalizedIntent,
     options: &Options,
-) -> Result<Plan, St3Error> {
+) -> Result<Plan, FractalError> {
     let set = subject(&options.set)?;
     if let Some(policy) = &options.rollout {
         policy
             .validate()
-            .map_err(|e| St3Error::new("invalid-rollout-policy", e.to_string()))?;
+            .map_err(|e| FractalError::new("invalid-rollout-policy", e.to_string()))?;
     }
     if options.source.repository.split('/').count() != 2
         || options.source.repository.split('/').any(str::is_empty)
@@ -633,7 +1467,7 @@ pub fn plan_tx(
         || !matches!(options.source.sha.len(), 40 | 64)
         || !options.source.sha.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-set-source",
             "source needs repository, full branch ref and immutable hex SHA",
         ));
@@ -643,15 +1477,18 @@ pub fn plan_tx(
         || !input.resource_refreshes.is_empty()
         || !input.replica_repairs.is_empty()
         || input.subjects.values().any(|s| {
-            (!matches!(s.kind.as_str(), "agent" | "schedule")
-                && !(s.kind == "resource" && crate::graph::declared_uri(&s.desired).is_some()))
+            (!matches!(s.kind.as_str(), "agent" | "schedule" | "subscription")
+                && !(s.kind == "resource" && crate::graph::declared_uri(&s.desired).is_some())
+                && task_parent(s).is_none_or(|parent| {
+                    input.subjects.get(parent).is_none_or(|p| p.kind != "agent")
+                }))
                 || s.owner_run.is_some()
                 || s.owner_step.is_some()
         })
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unsupported-set-member",
-            "owned sets manage top-level agents, missions and schedules only",
+            "owned sets manage top-level agents with their exec and pty tasks, missions, schedules and subscriptions only",
         ));
     }
     let old = selected(transaction, None)?
@@ -668,10 +1505,25 @@ pub fn plan_tx(
         })
     };
     let bundle_digest = canonical_hash(&(&input.subjects, &input.missions)).map_err(internal)?;
+    let prior_policy = old.as_ref().and_then(|v| v.receipt.policy.clone());
+    let policy = resolve_policy(prior_policy.as_ref(), options.policy.as_ref())?;
+    // Every debt this set still carries; this publication converges and closes all of it, except
+    // an ad hoc terminal retirement of a member the source still declares.
+    let open_debts = match &old {
+        Some(old) => open_debt_records(transaction, Some(&old.id), None)?,
+        None => Vec::new(),
+    };
+    // An ad hoc creation forced into a claimed namespace is adopted when the source declares it.
+    let created: BTreeSet<String> = open_debts
+        .iter()
+        .filter(|r| r.body["fields"]["verb"] == Verb::Create.as_str())
+        .map(|r| r.subject.clone())
+        .collect();
     let noop = old.as_ref().is_some_and(|v| {
         v.receipt.source == options.source
             && v.receipt.bundle_digest == bundle_digest
             && v.receipt.rollout == options.rollout
+            && v.receipt.policy == policy
     });
     let mut blockers = Vec::new();
     let mut manual_seats = input.subjects.values().any(crate::rollout::manual);
@@ -690,34 +1542,57 @@ pub fn plan_tx(
             blockers.push(format!("{}: manual rollout needs a typed native harness launch", desired.subject));
         }
     }
+    // Older daemons refuse replicated set revisions whose members include agent tasks.
+    let tasks = input.subjects.values().any(|s| task_parent(s).is_some())
+        || old.as_ref().is_some_and(|view| {
+            view.receipt
+                .members
+                .values()
+                .chain(view.receipt.retired.values())
+                .any(|m| matches!(m.kind.as_str(), "exec" | "pty"))
+        });
+    // Older daemons drop revisions carrying a policy (the receipt hash covers it) or
+    // subscription members, and ignore debt.
+    let source_enforcement = policy.is_some()
+        || input.subjects.values().any(|s| s.kind == "subscription")
+        || old.as_ref().is_some_and(|view| {
+            view.receipt
+                .members
+                .values()
+                .chain(view.receipt.retired.values())
+                .any(|m| m.kind == "subscription")
+        });
     let membership = fleet_membership_tx(transaction).map_err(internal)?;
     for member in membership.incarnations().filter(|m| m.end.is_none()) {
-        let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h3aa13911c459 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(body,'$.fields.features.owned_sets')=1 FROM claims
-             WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-            params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-        if options.rollout.is_some() || manual_seats {
-            let rollout_supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h188e337d37e4 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT json_extract(body,'$.fields.features.seat_rollout')=1 FROM claims
+        let advertised = |feature: &str| -> Result<bool, FractalError> {
+            let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h8f1e878eb088 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT json_extract(body,?3)=1 FROM claims
                  WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-            if rollout_supported != Some(true) {
-                blockers.push(format!(
-                    "host/{} has not advertised seat-rollout support; upgrade before activation",
-                    member.name
-                ));
-            }
+                params![format!("daemon/{}",member.name),member.name,format!("$.fields.features.{feature}")],|row|row.get(0)).optional().map_err(internal)?.flatten();
+            Ok(supported == Some(true))
+        };
+        if (options.rollout.is_some() || manual_seats) && !advertised("seat_rollout")? {
+            blockers.push(format!(
+                "host/{} has not advertised seat-rollout support; upgrade before activation",
+                member.name
+            ));
         }
-        if manual_seats {
-            let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h4a66e5fad33d owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT json_extract(body,'$.fields.features.seat_rollout_manual')=1 FROM claims
-                 WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-            if supported != Some(true) {
-                blockers.push(format!("host/{} has not advertised manual seat-rollout support; upgrade before activation", member.name));
-            }
+        if source_enforcement && !advertised("source_enforcement")? {
+            blockers.push(format!(
+                "host/{} has not advertised source enforcement support; upgrade before activation",
+                member.name
+            ));
         }
-        if supported != Some(true) {
+        if manual_seats && !advertised("seat_rollout_manual")? {
+            blockers.push(format!("host/{} has not advertised manual seat-rollout support; upgrade before activation", member.name));
+        }
+        if tasks && !advertised("owned_set_tasks")? {
+            blockers.push(format!(
+                "host/{} has not advertised owned-set agent task support; upgrade before activation",
+                member.name
+            ));
+        }
+        if !advertised("owned_sets")? {
             blockers.push(format!(
                 "host/{} has not advertised owned-set support; upgrade before activation",
                 member.name
@@ -765,6 +1640,7 @@ pub fn plan_tx(
     let mut changes = BTreeMap::<String, String>::new();
     let mut effects = BTreeMap::<String, String>::new();
     let mut heads = BTreeMap::new();
+    let mut gate_check = BTreeSet::new();
     let mut adoptions = BTreeMap::new();
     let mut retired = old
         .as_ref()
@@ -782,11 +1658,35 @@ pub fn plan_tx(
             intent_leaves_tx(transaction, s).map_err(internal)?
         };
         if own.is_none() && !tokens.is_empty() {
-            if !options.adopt.contains(s) {
+            // An agent's tasks are adopted with the agent that declares them.
+            let adopted = options.adopt.contains(s)
+                || created.contains(s)
+                || input
+                    .subjects
+                    .get(s)
+                    .and_then(task_parent)
+                    .is_some_and(|parent| options.adopt.contains(parent) || created.contains(parent));
+            if !adopted {
                 blockers.push(format!("explicit adoption required: {s}"));
             } else {
                 adoptions.insert(s.clone(), tokens.clone());
             }
+        }
+        // Terminal retirement outranks the source: an agent retired ad hoc becomes a retired
+        // member through its stopped form, and every publication still declaring it reports that
+        // instead of failing. A member the set already keeps retired keeps its reference.
+        if s.starts_with("agent/")
+            && let Some(retirement) = retirements::record(transaction, s, None)?
+        {
+            if old.as_ref().is_some_and(|v| v.receipt.retired.contains_key(s)) {
+                intent.subjects.remove(s);
+            } else {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+            }
+            changes.insert(s.clone(), "retired".into());
+            effects.insert(s.clone(), kept_retired(&retirement, true));
+            heads.insert(s.clone(), tokens);
+            continue;
         }
         let existing = old.as_ref().and_then(|v| v.receipt.members.get(s));
         changes.insert(
@@ -800,11 +1700,20 @@ pub fn plan_tx(
             }
             .into(),
         );
+        if let Some(mission) = s.strip_prefix("mission/")
+            && existing.is_none_or(|m| m.revision != *revision)
+            && crate::store::missions::mission_revision_spec_tx(transaction, mission, revision)?
+                .is_none()
+        {
+            gate_check.insert(s.clone());
+        }
         if existing.is_none_or(|m| m.revision != *revision) {
             let effect = if s.starts_with("mission/") {
                 "publish definition; retain active runs".to_owned()
             } else if s.starts_with("schedule/") {
                 "update future occurrences; retain created runs".to_owned()
+            } else if s.starts_with("subscription/") {
+                "update deliveries; retain delivered messages".to_owned()
             } else if let Some(prior) = existing {
                 let old_subject = claim(transaction, &prior.claim, None)?
                     .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok());
@@ -816,7 +1725,9 @@ pub fn plan_tx(
                     (Some(new), Some(old)) => {
                         let changed = new.launch_changes(&old);
                         let manual = input.subjects.get(s).is_some_and(crate::rollout::manual);
-                        if (options.rollout.is_some() || manual) && !changed.is_empty() {
+                        // Tasks have no native session to drain: a launch change restarts them.
+                        let rollout = options.rollout.is_some() && s.starts_with("agent/");
+                        if (rollout || manual) && !changed.is_empty() {
                             if old_subject
                                 .as_ref()
                                 .and_then(|d| crate::accounts::harness_binding(&d.desired))
@@ -853,7 +1764,7 @@ pub fn plan_tx(
                                 "{}: {}",
                                 if manual {
                                     "publish declaration; rollout pending (manual)"
-                                } else if options.rollout.is_some() {
+                                } else if rollout {
                                     "drain and resume native session"
                                 } else {
                                     "restart runtime"
@@ -901,6 +1812,16 @@ pub fn plan_tx(
             if live.contains_key(s) {
                 continue;
             }
+            // An agent already retired ad hoc is not retired by this publication.
+            if m.kind == "agent"
+                && let Some(retirement) = retirements::record(transaction, s, None)?
+            {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+                heads.insert(s.clone(), intent_leaves_tx(transaction, s).map_err(internal)?);
+                changes.insert(s.clone(), "retired".into());
+                effects.insert(s.clone(), kept_retired(&retirement, false));
+                continue;
+            }
             let manual = manual_member(transaction, m)?;
             if (options.rollout.is_some() || manual) && m.kind == "agent" {
                 let old_member = claim(transaction, &m.claim, None)?
@@ -918,7 +1839,7 @@ pub fn plan_tx(
             changes.insert(s.clone(), "retiring".into());
             if m.kind == "mission" {
                 let c = claim(transaction, &m.claim, None)?.ok_or_else(|| {
-                    St3Error::new("owned-set-pending", "missing mission reference")
+                    FractalError::new("owned-set-pending", "missing mission reference")
                 })?;
                 let spec: MissionSpec = serde_json::from_value(c.body).map_err(internal)?;
                 let spec = crate::mission::retired_mission(spec)?;
@@ -939,10 +1860,12 @@ pub fn plan_tx(
                     s.clone(),
                     if m.kind == "schedule" {
                         "stop future occurrences; retain runs"
+                    } else if m.kind == "subscription" {
+                        "stop deliveries; retain delivered messages"
                     } else {
                         if manual {
                             "publish retirement; rollout pending (manual)"
-                        } else if options.rollout.is_some() {
+                        } else if options.rollout.is_some() && m.kind == "agent" {
                             "drain and retire runtime; retain conversation and history"
                         } else {
                             "stop runtime; retain conversation and history"
@@ -956,9 +1879,45 @@ pub fn plan_tx(
             retired.insert(s.clone(), retiring_member);
         }
     }
+    // A forced creation the source still does not declare is taken over and retired by the set:
+    // a mission through its retired definition, any other subject through its stopped form.
+    if !noop {
+        let orphaned: Vec<String> = created
+            .iter()
+            .filter(|s| !live.contains_key(*s) && !changes.contains_key(*s))
+            .cloned()
+            .collect();
+        for s in &orphaned {
+            if let Some(mission_id) = s.strip_prefix("mission/") {
+                let claim_id: String = transaction
+                    .query_row(
+                        "SELECT claim_id FROM mission_definitions WHERE mission_id=?1",
+                        [mission_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(internal)?;
+                let c = claim(transaction, &claim_id, None)?.ok_or_else(|| {
+                    FractalError::new("owned-set-pending", "missing mission reference")
+                })?;
+                let spec: MissionSpec = serde_json::from_value(c.body).map_err(internal)?;
+                let spec = crate::mission::retired_mission(spec)?;
+                intent.missions.insert(spec.id.clone(), spec);
+                heads.insert(
+                    s.clone(),
+                    mission_definition_token_tx(transaction, mission_id).map_err(internal)?,
+                );
+            } else {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+                heads.insert(s.clone(), intent_leaves_tx(transaction, s).map_err(internal)?);
+            }
+            changes.insert(s.clone(), "retiring".into());
+            effects.insert(s.clone(), "stop ad hoc creation the source does not declare".into());
+        }
+    }
+    // Stopping a forced ad hoc creation is not a retirement of source-declared membership.
     let retiring = changes
-        .values()
-        .filter(|v| v.as_str() == "retiring")
+        .iter()
+        .filter(|(s, v)| v.as_str() == "retiring" && !created.contains(*s))
         .count();
     let old_count = old.as_ref().map_or(0, |v| v.receipt.members.len());
     let mass = retiring > 0 && (retiring >= 10 || retiring.saturating_mul(2) >= old_count);
@@ -979,10 +1938,43 @@ pub fn plan_tx(
         &intent,
         changes
             .iter()
-            .filter(|(_, change)| change.as_str() != "unchanged")
+            .filter(|(_, change)| !matches!(change.as_str(), "unchanged" | "retired"))
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
+    // Publication converges every member to this bundle, so it closes all of the set's open
+    // debt and reports what each forced change becomes. An ad hoc retirement cannot be reverted:
+    // its debt stays open while the source declares the member and is adopted once it does not.
+    let mut reverted_debts = Vec::new();
+    if !noop {
+        for record in &open_debts {
+            let Some(mut debt) = debt_view(record) else { continue };
+            if debt.verb == Verb::Retire.as_str() {
+                if !live.contains_key(&debt.subject) {
+                    debt.outcome = Some("adopted".into());
+                    reverted_debts.push(debt);
+                }
+                continue;
+            }
+            let forced = record.body["fields"]["revision"].as_str();
+            let adopted = forced.is_some() && live.get(&debt.subject).map(String::as_str) == forced;
+            debt.outcome = Some(match (forced.is_some(), adopted) {
+                (true, true) => "adopted",
+                (true, false) => "reverted",
+                // A forced hold or suspension still in place is released or resumed.
+                (false, _) if forced_request_in_place(transaction, record)? => "reverted",
+                (false, _) => "closed",
+            }.into());
+            if debt.outcome.as_deref() == Some("reverted") {
+                effects.entry(debt.subject.clone()).or_insert_with(|| format!(
+                    "revert ad hoc change by {}: {}",
+                    debt.actor.as_deref().unwrap_or("unknown"),
+                    debt.reason
+                ));
+            }
+            reverted_debts.push(debt);
+        }
+    }
     let rollouts = input.subjects.values().filter(|desired| crate::rollout::manual(desired))
         .filter_map(|desired| {
             let refusal = desired.member.as_ref()
@@ -1005,6 +1997,9 @@ pub fn plan_tx(
         empty: live.is_empty(),
         blockers,
         noop,
+        policy,
+        reverted_debts,
+        gate_check: Some(gate_check),
     };
     Ok(Plan {
         intent,
@@ -1012,14 +2007,36 @@ pub fn plan_tx(
         retired,
         adoptions,
         bundle_digest,
+        prior_policy,
         materialize,
     })
 }
 
-pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
+/// The selected and the requested policy each name who may publish the set; an empty list
+/// allows anyone. Replicated admission does not re-check this (writers are not signed yet).
+pub fn check_publisher(plan: &Plan, actor: Option<&str>) -> Result<(), FractalError> {
+    for policy in [&plan.prior_policy, &plan.preview.policy].into_iter().flatten() {
+        if !policy.publisher.is_empty() && !actor.is_some_and(|a| policy.publisher.iter().any(|p| p == a)) {
+            return Err(FractalError::new(
+                "source-publisher-refused",
+                format!(
+                    "{} may be published only by {}, not {}",
+                    plan.preview.set,
+                    policy.publisher.join(", "),
+                    actor.unwrap_or("an anonymous actor"),
+                ),
+            )
+            .with_detail("set", plan.preview.set.clone())
+            .with_detail("publisher", json!(policy.publisher)));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), FractalError> {
     if !plan.preview.blockers.is_empty() {
         return Err(
-            St3Error::new("owned-set-refused", plan.preview.blockers.join("; "))
+            FractalError::new("owned-set-refused", plan.preview.blockers.join("; "))
                 .with_detail("preview", json!(plan.preview)),
         );
     }
@@ -1027,13 +2044,13 @@ pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
         return Ok(());
     }
     if options.expected_subjects != plan.preview.expected_subjects {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-subject",
             "owned-set member heads changed; preview again",
         ));
     }
     if plan.preview.empty && !options.allow_empty {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-owned-set",
             "intentional empty membership needs --allow-empty",
         )
@@ -1042,7 +2059,7 @@ pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
     if plan.preview.mass_retirement
         && options.confirm_retire.as_deref() != Some(&plan.preview.digest)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mass-retirement-refused",
             "retirement requires confirmation of this exact preview",
         )
@@ -1057,10 +2074,14 @@ pub fn commit_tx(
     plan: &Plan,
     actor: Option<&str>,
     batch: &str,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let mut members = BTreeMap::new();
     let mut retired = plan.retired.clone();
     for (s, change) in &plan.preview.changes {
+        // A member the set already keeps retired publishes nothing and keeps its reference.
+        if change == "retired" && !plan.intent.subjects.contains_key(s) {
+            continue;
+        }
         let member = if s.starts_with("mission/") {
             transaction
                 .query_row(
@@ -1080,7 +2101,7 @@ pub fn commit_tx(
         } else {
             let row = current_desired_row_tx(transaction, s)
                 .map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-set-member", s.clone()))?;
+                .ok_or_else(|| FractalError::new("missing-set-member", s.clone()))?;
             Member {
                 one_shot: plan
                     .intent
@@ -1088,7 +2109,7 @@ pub fn commit_tx(
                     .get(s)
                     .and_then(|d| d.member.as_ref())
                     .is_some_and(|m| m.one_shot),
-                manual_rollout: if change == "retiring" {
+                manual_rollout: if change == "retiring" || change == "retired" {
                     plan.retired.get(s).is_some_and(|m| m.manual_rollout)
                 } else {
                     plan.intent
@@ -1096,17 +2117,12 @@ pub fn commit_tx(
                         .get(s)
                         .is_some_and(crate::rollout::manual)
                 },
-                kind: if s.starts_with("agent/") {
-                    "agent"
-                } else {
-                    "schedule"
-                }
-                .into(),
+                kind: s.split_once('/').map_or("schedule", |(kind, _)| kind).into(),
                 claim: row.claim_id,
                 revision: row.revision,
             }
         };
-        if change == "retiring" {
+        if change == "retiring" || change == "retired" {
             retired.insert(s.clone(), member);
         } else {
             members.insert(s.clone(), member);
@@ -1120,6 +2136,7 @@ pub fn commit_tx(
         members,
         retired,
         adoptions: plan.adoptions.clone(),
+        policy: plan.preview.policy.clone(),
     };
     let hash = canonical_hash(&revision).map_err(internal)?;
     let predecessors = rows(transaction, None)?
@@ -1127,7 +2144,7 @@ pub fn commit_tx(
         .filter(|v| Some(reference(v)) == revision.previous)
         .map(|v| v.claim)
         .collect::<Vec<_>>();
-    append_claim_tx(
+    let receipt = append_claim_tx(
         transaction,
         origin,
         &plan.preview.set,
@@ -1137,11 +2154,13 @@ pub fn commit_tx(
         &predecessors,
         Some(batch),
     )
-    .map_err(internal)
+    .map_err(internal)?;
+    close_debts_tx(transaction, origin, plan, &format!("{}@{hash}", plan.preview.set), actor, batch)?;
+    Ok(receipt)
 }
 
 /// Rebuild the existing desired and mission projections through exact set member references.
-pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     for view in selected(transaction, None)? {
         if !view.blockers.is_empty() {
             continue;
@@ -1214,14 +2233,14 @@ pub fn desired_at(connection: &Connection, s: &str, at: u64) -> Result<Option<De
     }))
 }
 
-pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error> {
+pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), FractalError> {
     let revision: Revision = serde_json::from_value(body["fields"]["body"].clone())
-        .map_err(|e| St3Error::new("invalid-owned-set", e.to_string()))?;
+        .map_err(|e| FractalError::new("invalid-owned-set", e.to_string()))?;
     if subject(subject_name)? != subject_name
         || body["fields"]["revision"].as_str()
             != Some(&canonical_hash(&revision).map_err(internal)?)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "set revision has invalid identity/hash",
         ));
@@ -1231,18 +2250,18 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error
         .keys()
         .any(|s| revision.retired.contains_key(s))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "a member cannot be live and retired",
         ));
     }
     for (s, m) in revision.members.iter().chain(&revision.retired) {
-        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule")
+        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule" | "subscription" | "exec" | "pty")
             || !s.starts_with(&format!("{}/", m.kind))
             || m.claim.is_empty()
             || m.revision.is_empty()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-owned-set",
                 "invalid member reference",
             ));
@@ -1253,7 +2272,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error
         || !matches!(revision.source.sha.len(), 40 | 64)
         || !revision.source.sha.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return Err(St3Error::new("invalid-owned-set", "invalid source"));
+        return Err(FractalError::new("invalid-owned-set", "invalid source"));
     }
     Ok(())
 }
@@ -1269,7 +2288,7 @@ impl Store {
     /// Fence an external effect prepared from a declaration against the selected set.
     /// Effect callers must enter outside an enclosing read snapshot and wait for this
     /// method to return before writing or performing the effect.
-    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), St3Error> {
+    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), FractalError> {
         smallclaims::sqlite::debug_assert_no_pinned_read();
         smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
         smallclaims::touched::note_read(|| desired.subject.clone());
@@ -1286,7 +2305,7 @@ impl Store {
         }
         if let Some(current) = retirements::terminal_selection(&self.readers.get(), desired)? {
             return if current { Ok(()) } else {
-                Err(St3Error::new("stale-set-member", "terminal retirement replaced this declaration"))
+                Err(FractalError::new("stale-set-member", "terminal retirement replaced this declaration"))
             };
         }
         // A negative probe is not authorization. Start another current snapshot for the full
@@ -1298,14 +2317,14 @@ impl Store {
                     let view = selected(&connection, None)?
                         .into_iter()
                         .find(|v| v.id == set)
-                        .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+                        .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
                     if !view.blockers.is_empty() {
-                        return Err(St3Error::new("owned-set-pending", view.blockers.join("; ")));
+                        return Err(FractalError::new("owned-set-pending", view.blockers.join("; ")));
                     }
                     let members = effective_members(&connection, &view, None)?;
                     let member = members.get(&desired.subject);
                     if member.is_none_or(|(m, _, _)| m.revision != desired_revision(desired)) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-set-member",
                             "declaration changed since this effect was prepared",
                         ));
@@ -1316,11 +2335,76 @@ impl Store {
                         [&desired.subject], |row| row.get(0),
                     ).map_err(internal)?;
                     if staged {
-                        return Err(St3Error::new("owned-set-pending", "staged member awaits its owning set revision"));
+                        return Err(FractalError::new("owned-set-pending", "staged member awaits its owning set revision"));
                     }
                 }
                 Ok(())
             }))
         }).map_err(internal)?
+    }
+
+    /// `fractal source status`: every set's policy, open and closed source debt and, with
+    /// `audit`, the newest audit records.
+    pub fn source_status(&self, audit: bool) -> Result<Value, FractalError> {
+        source_status(&self.readers.get(), audit)
+    }
+
+    /// Refuse a runtime desired-state write (`hold`, `suspend`, `resume`, `retire`) that the
+    /// subject's owning set refuses, before the caller's other checks. The write itself goes
+    /// through [`Store::append_source_gated`] or carries [`Store::source_follow_up`].
+    pub fn source_gate(
+        &self,
+        subject: &str,
+        verb: Verb,
+        force_reason: Option<&str>,
+    ) -> Result<(), FractalError> {
+        gate(&self.readers.get(), subject, verb, force_reason).map(drop)
+    }
+
+    /// The follow-up of a gated runtime write to `subject`, run in that write's transaction: the
+    /// gate is decided again there and records debt for a forced write (naming the write as its
+    /// request) or an audit record for a write an `enforce` set would refuse. An audited terminal
+    /// retirement also records debt: no publication can revert it, so it stays open until the
+    /// source stops declaring the retired member.
+    pub fn source_follow_up<'a>(
+        &'a self,
+        subject: &'a str,
+        verb: Verb,
+        actor: Option<&'a str>,
+        force_reason: Option<&'a str>,
+    ) -> impl Fn(&Transaction<'_>, &ClaimRecord) -> Result<(), FractalError> + Sync + 'a {
+        move |transaction, record| match gate(transaction, subject, verb, force_reason)? {
+            Gate::Allow => Ok(()),
+            Gate::Force(view) => record_debt_tx(transaction, &self.origin, &view, subject, verb,
+                Forced::Request(&record.id), None, actor, force_reason.unwrap_or_default(), None)
+                .map(drop),
+            Gate::Audit(view, refused) => {
+                record_audit_tx(transaction, &self.origin, &view, subject, verb, actor, &refused, None)?;
+                if verb == Verb::Retire {
+                    let reason = record.body["fields"]["reason"].as_str().unwrap_or_default();
+                    record_debt_tx(transaction, &self.origin, &view, subject, verb,
+                        Forced::Request(&record.id), None, actor, reason, None)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Append a gated runtime write to `subject` with its [`Store::source_follow_up`] in one
+    /// transaction. A replay records nothing.
+    pub fn append_source_gated(
+        &self,
+        subject: &str,
+        input: &ClaimInput,
+        verb: Verb,
+        force_reason: Option<&str>,
+    ) -> Result<(ClaimRecord, bool), FractalError> {
+        if let Some(actor) = &input.actor {
+            self.graph.ensure_principal_key(actor)?;
+        }
+        self.fractal.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
+        let then = self.source_follow_up(subject, verb, input.actor.as_deref(), force_reason);
+        append_claim_with_commit_context(&self.graph, input, None, None, None, None,
+            ClaimCommitContext { then: Some(&then), ..Default::default() })
     }
 }

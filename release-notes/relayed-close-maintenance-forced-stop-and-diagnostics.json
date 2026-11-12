@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Preserve forced shutdown during remote-close draining and report maintenance deadline failures once.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or replication behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No persistent schema or data representation changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or coordinated upgrade changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Normal shutdown still drains admitted close writes. A second termination or interrupt signal now bypasses that drain immediately, including when another operation holds the writer. Maintenance owns its budget diagnostic; unrelated failures remain reported."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or interruption required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Forced shutdown may leave a remote close for a later maintenance sweep, as any forced process termination can."
+  }
+}

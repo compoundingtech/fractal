@@ -80,9 +80,17 @@ pub struct World {
     /// another. Not part of the shared contract.
     #[serde(skip)]
     pub settled: bool,
+    /// The agents whose conversation has prose newer than where the person last read it on this
+    /// device (`read_store`). Kept by the UI from its read positions, never by st. Not part of
+    /// the shared contract.
+    #[serde(skip)]
+    pub unread: std::collections::BTreeSet<String>,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
+    /// Server alert total only when the attention rows are an incomplete window.
+    #[serde(skip)]
+    pub inbox_alerts: Option<usize>,
     pub attention: Load<Vec<Attention>>,
     pub agents: Load<Vec<Agent>>,
     pub missions: Load<Vec<Mission>>,
@@ -117,6 +125,9 @@ pub struct World {
     /// from an earlier read.
     #[serde(skip)]
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, when the member is configured with one.
+    #[serde(skip)]
+    pub slo_otel_url: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -128,7 +139,7 @@ pub struct World {
 /// A client connected to this member, as it describes itself.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Connected {
-    /// Its reported name and build, "stui 0.1.0+ab12cd3"; empty when it sent none.
+    /// Its reported name and build, "fractal-tui 0.1.0+ab12cd3"; empty when it sent none.
     pub client: String,
     /// The person or agent it acts for, and the paired device when one is acting.
     pub who: String,
@@ -179,6 +190,9 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// Exact opening time for chronological navigation, absent on an invalid server timestamp.
+    #[serde(skip)]
+    pub requested_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
     /// applies`. None on an item with no deadline.
     pub deadline: Option<String>,
@@ -457,6 +471,10 @@ pub struct Agent {
     /// The client shows it as reported and derives nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reported: Option<String>,
+    /// When it last said something (st's `last_prose_at`), in ms since the epoch: what unread
+    /// compares with the read position. Absent from an older st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_prose_ms: Option<i64>,
 }
 
 /// A subagent an agent's harness runs inside its own session. It belongs to the agent and is not

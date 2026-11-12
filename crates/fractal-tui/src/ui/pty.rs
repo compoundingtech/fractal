@@ -3,7 +3,7 @@
 //! emulator here. The PTY takes the pane's size, keys go to it as bytes, and the history that
 //! scrolls off the top stays here to scroll back through.
 
-use super::theme;
+use super::{attach_trace::Trace, theme};
 #[path = "pty_graphics.rs"]
 mod graphics;
 #[path = "pty_connection.rs"]
@@ -186,6 +186,9 @@ pub(crate) struct NativeTerminal {
     presented: AtomicBool,
     cell: Mutex<pty_terminal::CellSize>,
     painter: Mutex<graphics::Painter>,
+    trace: Option<Trace>,
+    /// A decoded screen was drawn in this frame, awaiting a successful outer flush.
+    pending_render: AtomicBool,
 }
 
 impl NativeTerminal {
@@ -198,13 +201,14 @@ impl NativeTerminal {
         incarnation: String,
         rows: u16,
         columns: u16,
+        trace: Option<Trace>,
     ) -> Self {
         let size = Size {
             rows: rows.max(1),
             columns: columns.max(1),
         };
         let screen = Arc::new(Mutex::new(Screen::new(size, Requests::default())));
-        let input = start(stream, name, size, &screen);
+        let input = start(stream, name, size, &screen, trace.clone());
         Self {
             screen,
             input: Mutex::new(input),
@@ -213,6 +217,8 @@ impl NativeTerminal {
             presented: AtomicBool::new(false),
             cell: Mutex::new(pty_terminal::CellSize::default()),
             painter: Mutex::new(graphics::Painter::default()),
+            trace,
+            pending_render: AtomicBool::new(false),
         }
     }
 
@@ -227,7 +233,7 @@ impl NativeTerminal {
             screen.retry_at = None;
             screen.attached = false;
         }
-        let input = start(stream, name, size, &self.screen);
+        let input = start(stream, name, size, &self.screen, None);
         *self.input.lock().unwrap_or_else(|error| error.into_inner()) = input;
     }
 
@@ -531,6 +537,20 @@ impl NativeTerminal {
         self.presented.load(Ordering::Relaxed)
     }
 
+    /// Clear the draw acknowledgment before each outer frame, including hidden panes.
+    pub(crate) fn frame_started(&self) {
+        self.pending_render.store(false, Ordering::Relaxed);
+    }
+
+    /// Acknowledge only a screen drawn during the successfully flushed outer frame.
+    pub(crate) fn frame_rendered(&self) {
+        if self.pending_render.swap(false, Ordering::Relaxed)
+            && let Some(trace) = &self.trace
+        {
+            trace.complete();
+        }
+    }
+
     pub(crate) fn attached(&self) -> bool {
         self.lock().attached
     }
@@ -597,6 +617,14 @@ impl NativeTerminal {
             }
             buf.set_line(area.x, area.y + row as u16, &Line::from(spans), area.width);
         }
+        if screen.attached
+            && screen.ended.is_none()
+            && screen.lost.is_none()
+            && rows > 0
+            && columns > 0
+        {
+            self.pending_render.store(true, Ordering::Relaxed);
+        }
         // The cursor, when the bottom is shown and the program shows it: the person's own
         // terminal cursor where it has the keys, so it keeps the shape the program asked for
         // (vim's bar while inserting), blinks, and places an input method's text; otherwise
@@ -627,6 +655,15 @@ impl NativeTerminal {
     }
 }
 
+impl Drop for NativeTerminal {
+    fn drop(&mut self) {
+        if let Some(trace) = &self.trace {
+            trace.finish("native-dropped");
+        }
+        // The thread sees the input channel close and detaches.
+    }
+}
+
 /// The cursor style until a program asks for one: the person's own shape is kept then.
 const UNASKED: CursorStyle = CursorStyle {
     shape: CursorShape::HollowBlock,
@@ -654,11 +691,6 @@ fn cursor_style(shape: CursorShape, blinking: bool) -> SetCursorStyle {
     }
 }
 
-impl Drop for NativeTerminal {
-    fn drop(&mut self) {
-        // The thread sees the channel close and detaches.
-    }
-}
 
 /// Start the attach thread for `stream`; the sender takes what is typed and resizes.
 fn start(
@@ -666,13 +698,14 @@ fn start(
     name: &str,
     size: Size,
     screen: &Arc<Mutex<Screen>>,
+    trace: Option<Trace>,
 ) -> mpsc::Sender<Input> {
     let (input, inputs) = mpsc::channel();
     let shared = screen.clone();
     let name = name.to_owned();
     std::thread::Builder::new()
         .name(format!("pty {name}"))
-        .spawn(move || run(stream, size, &shared, &inputs))
+        .spawn(move || run(stream, size, &shared, &inputs, trace))
         .ok();
     input
 }
@@ -709,23 +742,42 @@ fn run(
     size: Size,
     screen: &Mutex<Screen>,
     inputs: &mpsc::Receiver<Input>,
+    trace: Option<Trace>,
 ) {
     let lock = || screen.lock().unwrap_or_else(|error| error.into_inner());
     if let Err(error) = stream.set_nonblocking(false) {
         lock().ended = Some(error.to_string());
+        if let Some(trace) = &trace {
+            trace.finish("native-attach-failed");
+        }
         return;
     }
     let mut control = stream.try_clone();
     let mut requested = size;
+    let screen_phase = trace.as_ref().map(|trace| trace.start_phase("native-first-screen"));
     let mut connection = match connection::Connection::attach_over(
         stream,
         size.rows,
         size.columns,
         ATTACH_TIMEOUT,
+        trace.clone(),
     ) {
-        Ok(connection) => connection,
+        Ok(connection) => {
+            if let Some(phase) = screen_phase { phase.end("success"); }
+            connection
+        }
         Err(error) => {
+            if let Some(phase) = screen_phase {
+                phase.end(if error.kind() == std::io::ErrorKind::TimedOut { "timeout" } else { "failure" });
+            }
             dropped(&mut lock(), error.to_string());
+            if let Some(trace) = &trace {
+                trace.finish(if error.kind() == std::io::ErrorKind::TimedOut {
+                    "native-attach-timeout"
+                } else {
+                    "native-attach-failed"
+                });
+            }
             return;
         }
     };
@@ -830,15 +882,24 @@ fn run(
             Ok(Some(SessionEvent::Exit(code))) => {
                 super::slo::METRICS.add("dead_terminal_tabs", 1);
                 lock().ended = Some(format!("the program exited ({code})"));
+                if let Some(trace) = &trace {
+                    trace.finish("native-exited");
+                }
                 return;
             }
             Ok(Some(SessionEvent::Closed)) => {
                 dropped(&mut lock(), "the connection closed".into());
+                if let Some(trace) = &trace {
+                    trace.finish("native-stream-lost");
+                }
                 return;
             }
             Ok(None) => {}
             Err(error) => {
                 dropped(&mut lock(), error.to_string());
+                if let Some(trace) = &trace {
+                    trace.finish("native-stream-lost");
+                }
                 return;
             }
         }
@@ -1179,6 +1240,102 @@ mod tests {
     }
 
     #[test]
+    fn screen_milestones_require_decoding_drawing_and_successful_flush_per_attempt() {
+        use pty_core::protocol::{MessageType, encode_packet};
+        use std::io::Write as _;
+
+        let (first_trace, first_events) = Trace::captured("agent/first");
+        let (second_trace, second_events) = Trace::captured("agent/second");
+        let (first_socket, mut first_peer) = UnixStream::pair().unwrap();
+        let (second_socket, mut second_peer) = UnixStream::pair().unwrap();
+        let first = NativeTerminal::spawn(first_socket, "first", "one".into(), 4, 20, Some(first_trace));
+        let second = NativeTerminal::spawn(second_socket, "second", "two".into(), 4, 20, Some(second_trace));
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buffer = Buffer::empty(area);
+        let rendered = |events: &Arc<Mutex<Vec<serde_json::Value>>>| {
+            events.lock().unwrap().iter().filter(|event| event["phase"] == "first-screen-rendered").count()
+        };
+
+        // Drawing the pending emulator and acknowledging an empty frame are not a screen.
+        first.frame_started();
+        first.draw(&mut buffer, area, false);
+        first.frame_rendered();
+        assert_eq!(rendered(&first_events), 0);
+        first_peer.write_all(&pty_core::protocol::encode_geometry(4, 20)).unwrap();
+        let geometry_deadline = Instant::now() + Duration::from_secs(5);
+        while !first_events.lock().unwrap().iter().any(|event| event["phase"] == "first-frame-decoded") {
+            assert!(Instant::now() < geometry_deadline, "local geometry was not decoded");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        first.frame_started();
+        first.draw(&mut buffer, area, false);
+        first.frame_rendered();
+        assert_eq!(rendered(&first_events), 0, "geometry alone is not a screen");
+        first_peer.write_all(&encode_packet(MessageType::Screen, b"first screen")).unwrap();
+        second_peer.write_all(&encode_packet(MessageType::Screen, b"second screen")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !first.attached() || !second.attached() {
+            assert!(Instant::now() < deadline, "local snapshot was not decoded");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(rendered(&first_events), 0);
+        assert_eq!(rendered(&second_events), 0);
+        first.frame_started();
+        first.draw(&mut buffer, Rect::new(0, 0, 0, 4), false);
+        first.frame_rendered();
+        assert_eq!(rendered(&first_events), 0);
+
+        // A failed outer flush has no acknowledgment. A later hidden frame must not
+        // accidentally acknowledge the stale buffer draw from that failed frame.
+        first.frame_started();
+        first.draw(&mut buffer, area, false);
+        first.frame_started();
+        first.frame_rendered();
+        assert_eq!(rendered(&first_events), 0);
+
+        second.frame_started();
+        second.draw(&mut buffer, area, false);
+        assert_eq!(rendered(&second_events), 0, "buffer draw is not an outer flush");
+        second.frame_rendered();
+        assert_eq!(rendered(&second_events), 1);
+        assert_eq!(rendered(&first_events), 0, "another attempt must not complete this one");
+        first.frame_started();
+        first.draw(&mut buffer, area, true);
+        first.frame_rendered();
+        first.frame_rendered();
+        assert_eq!(rendered(&first_events), 1);
+        drop(first);
+        drop(second);
+
+        let first_events = first_events.lock().unwrap();
+        let second_events = second_events.lock().unwrap();
+        assert_ne!(first_events[0]["attempt_id"], second_events[0]["attempt_id"]);
+        for (events, agent) in [(&*first_events, "agent/first"), (&*second_events, "agent/second")] {
+            assert!(events.iter().all(|event| event["agent"] == agent && event["attempt_id"] == events[0]["attempt_id"]));
+            let decoded = events.iter().position(|event| event["phase"] == "first-frame-decoded").unwrap();
+            let rendered = events.iter().position(|event| event["phase"] == "first-screen-rendered").unwrap();
+            assert!(decoded < rendered);
+            assert_eq!(events.iter().filter(|event| event["phase"] == "first-frame-decoded").count(), 1);
+            let terminal: Vec<_> = events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").collect();
+            assert_eq!(terminal.len(), 1);
+            assert_eq!(terminal[0]["outcome"], "success");
+        }
+    }
+
+    #[test]
+    fn dropping_native_during_setup_finishes_without_waiting_for_worker() {
+        let (trace, events) = Trace::captured("agent/dropped");
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let terminal = NativeTerminal::spawn(socket, "test", "one".into(), 4, 20, Some(trace));
+        drop(terminal);
+        let events = events.lock().unwrap();
+        let terminal: Vec<_> = events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").collect();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["outcome"], "native-dropped");
+        assert!(!events.iter().any(|event| event["phase"] == "first-screen-rendered"));
+    }
+
+    #[test]
     fn tries_to_attach_again_wait_longer_each_time_and_never_more_than_the_most() {
         let waits: Vec<u64> = (0..8).map(|tries| retry_delay(tries).as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
@@ -1223,7 +1380,7 @@ mod tests {
 
         let (tui, mut daemon) = UnixStream::pair().unwrap();
         daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30, None);
         let mut reader = PacketReader::new();
         let mut pending = std::collections::VecDeque::new();
         let mut next = |daemon: &mut UnixStream| loop {
@@ -1307,7 +1464,7 @@ mod tests {
                 .collect::<String>()
         };
         let (tui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 6, 30);
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 6, 30, None);
         let mut bytes = [0_u8; 64];
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
@@ -1380,7 +1537,7 @@ mod tests {
             buf
         };
         let (tui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 4, 10);
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 4, 10, None);
         let mut bytes = [0_u8; 64];
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
@@ -1453,7 +1610,7 @@ mod tests {
         use pty_core::protocol::{MessageType, PacketReader, encode_packet};
         use std::io::{Read as _, Write as _};
         let (tui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(tui, "test", "incarnation".into(), 4, 20);
+        let terminal = NativeTerminal::spawn(tui, "test", "incarnation".into(), 4, 20, None);
         let mut reader = PacketReader::new();
         let mut packets = Vec::new();
         let mut next = |daemon: &mut UnixStream, packets: &mut Vec<_>| {

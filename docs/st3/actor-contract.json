@@ -22,10 +22,10 @@
         "ignores_actor": false
       },
       "st actor-contract": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -66,6 +66,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents burst": {
+        "actor": "required",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents handoff ready": {
         "actor": "optional",
         "accepts_person": true,
@@ -94,6 +103,15 @@
         "ignores_actor": false
       },
       "st agents hold": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st agents lane": {
         "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
@@ -149,6 +167,24 @@
       },
       "st agents rename-id": {
         "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st agents rename-id proof export": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st agents rename-id proof verify": {
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
@@ -337,7 +373,7 @@
         "ignores_actor": false
       },
       "st apply": {
-        "actor": "required",
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
@@ -381,29 +417,38 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st budgets attention": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st changes list": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st changes show": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st changes sync": {
-        "actor": "none",
-        "accepts_person": false,
+        "actor": "optional",
+        "accepts_person": true,
         "can_carry_person": true,
-        "as_role": "none",
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -414,6 +459,15 @@
         "can_carry_person": true,
         "as_role": "none",
         "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st claims ls": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
@@ -499,10 +553,10 @@
         "ignores_actor": false
       },
       "st conversations export": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -750,6 +804,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st devices renew-stage": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st devices revoke": {
         "actor": "optional",
         "accepts_person": true,
@@ -849,6 +912,24 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st fleet admit-without": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st fleet anchor show": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st fleet create": {
         "actor": "none",
         "accepts_person": false,
@@ -940,28 +1021,28 @@
         "ignores_actor": false
       },
       "st fleet transports add": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st fleet transports prefer": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st fleet transports remove": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -976,30 +1057,39 @@
         "ignores_actor": false
       },
       "st gate cargo-test": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st gate ci-passed": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st gate merged": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st gh checks": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
       "st gh comment": {
@@ -1022,6 +1112,24 @@
       },
       "st gh own": {
         "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st gh pr": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st gh prs": {
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
@@ -1308,11 +1416,20 @@
         "actor_environment": null,
         "ignores_actor": false
       },
-      "st missions blocked": {
+      "st migrate launchd-domain": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,
         "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions blocked": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1336,10 +1453,19 @@
         "ignores_actor": false
       },
       "st missions check": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions dismiss-fault": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1391,6 +1517,24 @@
       },
       "st missions rename-id": {
         "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id proof export": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id proof verify": {
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
@@ -1453,10 +1597,10 @@
         "ignores_actor": false
       },
       "st missions waiting-on": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1507,10 +1651,10 @@
         "ignores_actor": false
       },
       "st recorder report": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1601,6 +1745,15 @@
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st replication replay": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -2073,6 +2226,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st source status": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st store prepare-indexes": {
         "actor": "none",
         "accepts_person": false,
@@ -2091,11 +2253,29 @@
         "actor_environment": null,
         "ignores_actor": false
       },
-      "st subject history": {
+      "st subject decisions": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,
         "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st subject desired": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st subject history": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -2191,10 +2371,10 @@
         "ignores_actor": false
       },
       "st terminals peek": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -2290,10 +2470,10 @@
         "ignores_actor": false
       },
       "st trace show": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -2353,10 +2533,10 @@
         "ignores_actor": false
       },
       "st validate": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false

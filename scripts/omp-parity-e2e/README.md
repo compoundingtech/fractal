@@ -9,7 +9,7 @@ an original transcript, or simulates a live OMP process.
 From the repository root, with previously built binaries:
 
 ```bash
-scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --out "$PWD/tmp/omp-parity-e2e"
+scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/fractal" --out "$PWD/tmp/omp-parity-e2e"
 ```
 
 Optional: add `--corpus /absolute/path/to/session.jsonl` for private first-page
@@ -30,8 +30,8 @@ only to the isolated daemon's Unix socket and `person/tester`.
 Every check writes `PASS` or `FAIL` to `<out>/report.txt`. Independent checks
 continue after failure; failed setup dependencies stop immediately. The final
 exit is nonzero if any check failed.
-Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`stui.txt`) and
-child capture (`stui-child.txt`) are retained as evidence. Cleanup stops the
+Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`fractal-tui.txt`) and
+child capture (`fractal-tui-child.txt`) are retained as evidence. Cleanup stops the
 terminal and daemon and removes isolation unless `--keep` was supplied.
 
 ## Assertions

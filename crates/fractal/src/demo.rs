@@ -818,8 +818,12 @@ pub fn play(
     // Where a demo keeps what outlives its daemon: the daemon's pid and the presenter's log.
     let dir = instance.state_home().join("st3-demo");
     // The last play's daemon, if it is still running.
-    stop_daemon(&dir)?;
-    let work = config.work_root.clone().unwrap_or_else(|| instance.work_dir());
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    stop_daemon(&dir, &config.state_dir, stop_deadline)?;
+    let work = config
+        .work_root
+        .clone()
+        .unwrap_or_else(|| instance.work_dir());
     // A daemon this player did not start (the instance's service) owns the graph: leave it be.
     ensure!(
         std::os::unix::net::UnixStream::connect(&config.socket).is_err(),
@@ -829,14 +833,14 @@ pub fn play(
     );
     claim_instance(instance, &config_path, &config.state_dir, &cache, reset)?;
     let instance = instance.name();
-    reset_state(&config, &cache)?;
+    reset_state(&config, &cache, stop_deadline)?;
     fs::create_dir_all(&dir)?;
     write_config(&demo, &config_path)?;
     println!("Resetting the {instance} instance and starting its daemon…");
-    let daemon = Daemon::start(&exe, &dir)?;
+    let daemon = Daemon::start(&exe, &dir, &config.state_dir)?;
     let runner = Runner::new(exe.clone(), &demo, &dir, &work)?;
     let outcome = (|| {
-        runner.wait_for_daemon(&config.client_socket())?;
+        runner.wait_for_daemon(fractal_daemon::client::Endpoint::DiscoveredUnix(config.client_discovery()))?;
         println!("Seeding {}…", demo.title.as_deref().unwrap_or(&demo.name));
         runner.seed(&demo)?;
         println!(
@@ -854,7 +858,7 @@ pub fn play(
         shown?;
         Ok::<_, anyhow::Error>(played)
     })();
-    drop(daemon);
+    daemon.finish()?;
     let failures = outcome?;
     if failures.is_empty() {
         println!("The demo ended. Run the same command to play it again from the start.");
@@ -907,7 +911,12 @@ fn claim_instance(
 }
 
 /// Remove the instance's graph and sockets, so the demo starts from nothing.
-fn reset_state(config: &fractal_daemon::config::Config, cache: &Path) -> Result<()> {
+fn reset_state(
+    config: &fractal_daemon::config::Config,
+    cache: &Path,
+    deadline: Instant,
+) -> Result<()> {
+    fractal_daemon::node_identity::wait_for_release(&config.state_dir, deadline)?;
     if config.state_dir.exists() {
         fs::remove_dir_all(&config.state_dir)
             .with_context(|| format!("cannot reset {}", config.state_dir.display()))?;
@@ -942,10 +951,12 @@ fn toml_string(value: &str) -> String {
 struct Daemon {
     child: Child,
     pid_file: PathBuf,
+    state_dir: PathBuf,
+    stop_attempted: bool,
 }
 
 impl Daemon {
-    fn start(exe: &Path, dir: &Path) -> Result<Self> {
+    fn start(exe: &Path, dir: &Path, state_dir: &Path) -> Result<Self> {
         let log = fs::File::create(dir.join("daemon.log"))?;
         let mut command = Command::new(exe);
         command.arg("up");
@@ -960,7 +971,26 @@ impl Daemon {
         let child = command.spawn().context("cannot start the demo's daemon")?;
         let pid_file = dir.join("daemon.pid");
         fs::write(&pid_file, child.id().to_string())?;
-        Ok(Self { child, pid_file })
+        Ok(Self {
+            child,
+            pid_file,
+            state_dir: state_dir.into(),
+            stop_attempted: false,
+        })
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.stop_attempted = true;
+        let result = terminate(self.child.id(), &self.state_dir);
+        // Reap only if it has exited; a failed stop must not introduce an unbounded wait.
+        let _ = self.child.try_wait();
+        result?;
+        let _ = fs::remove_file(&self.pid_file);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.stop()
     }
 }
 
@@ -978,58 +1008,50 @@ fn pty_beside(exe: &Path) -> Option<PathBuf> {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        terminate(self.child.id());
-        let _ = self.child.wait();
-        let _ = fs::remove_file(&self.pid_file);
+        if !self.stop_attempted
+            && let Err(error) = self.stop()
+        {
+            eprintln!("could not stop the demo's daemon: {error:#}");
+        }
     }
 }
 
 /// Stop the daemon an earlier play left running (a crashed or still open demo).
-fn stop_daemon(dir: &Path) -> Result<()> {
+fn stop_daemon(dir: &Path, state_dir: &Path, deadline: Instant) -> Result<()> {
     let pid_file = dir.join("daemon.pid");
-    let Ok(pid) = fs::read_to_string(&pid_file) else {
-        return Ok(());
-    };
-    if let Ok(pid) = pid.trim().parse::<u32>()
-        && is_demo_daemon(pid)
+    if let Ok(pid) = fs::read_to_string(&pid_file)
+        && let Ok(pid) = pid.trim().parse::<u32>()
+        && fractal_daemon::service::is_daemon_process(pid)
     {
-        terminate(pid);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let kill_wait = remaining.min(Duration::from_secs(1));
+        anyhow::ensure!(
+            fractal_daemon::service::stop_daemon_process(
+                pid,
+                state_dir,
+                remaining - kill_wait,
+                kill_wait
+            )?,
+            "the demo's daemon (pid {pid}) did not stop"
+        );
     }
+    fractal_daemon::node_identity::wait_for_release(state_dir, deadline)?;
     let _ = fs::remove_file(pid_file);
     Ok(())
 }
 
-/// Whether `pid` is still an `st up` of this user: a reused pid is left alone.
-fn is_demo_daemon(pid: u32) -> bool {
-    let Ok(output) = Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
-        .output()
-    else {
-        return false;
-    };
-    let args = String::from_utf8_lossy(&output.stdout);
-    args.split_whitespace().any(|word| word == "up")
-        && args.split_whitespace().next().is_some_and(|program| program.contains("st"))
-}
-
-/// SIGTERM, and SIGKILL if it is still there after ten seconds.
-fn terminate(pid: u32) {
-    let pid = pid as libc::pid_t;
-    // SAFETY: kill has no memory preconditions; the pid is ours or gone.
-    unsafe { libc::kill(pid, libc::SIGTERM) };
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
-        // SAFETY: as above; signal 0 only asks whether the process exists.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return;
-        }
-        let mut status = 0;
-        // SAFETY: a non-blocking wait for our own child, or ECHILD for another's.
-        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // SAFETY: as above.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+/// Allow escalation and lock closure within the existing ten-second stop bound.
+fn terminate(pid: u32, state_dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        fractal_daemon::service::stop_daemon_process(
+            pid,
+            state_dir,
+            Duration::from_secs(9),
+            Duration::from_secs(1)
+        )?,
+        "the demo's daemon (pid {pid}) did not stop"
+    );
+    Ok(())
 }
 
 /// The st environment a seat leaves in its process: a demo command acts only as the agent or
@@ -1122,10 +1144,8 @@ impl Runner {
     /// Wait up to a minute for the daemon at `socket` to answer its health check. The agents
     /// roster and the other lists are published after the daemon starts listening, and a read
     /// of one says "not ready" until then, so only the health answer says the daemon is up.
-    fn wait_for_daemon(&self, socket: &Path) -> Result<()> {
-        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(
-            socket.to_owned(),
-        ))
+    fn wait_for_daemon(&self, endpoint: fractal_daemon::client::Endpoint) -> Result<()> {
+        let client = fractal_daemon::client::Client::new(endpoint)
         .with_outage_wait(Duration::from_secs(60), false);
         let health = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1166,10 +1186,15 @@ impl Runner {
     /// The seed's agents with the process each runs in place of a harness: one that waits for
     /// the demo to end and does nothing else.
     fn with_stand_ins(&self, demo: &Demo) -> Result<String> {
-        let mut document: KdlDocument = demo.graph.parse().map_err(|error: kdl::KdlError| {
-            anyhow::anyhow!("{}", kdl_error(&error))
-        })?;
-        let exe = self.exe.to_str().context("the st path is not UTF-8")?.to_owned();
+        let mut document: KdlDocument = demo
+            .graph
+            .parse()
+            .map_err(|error: kdl::KdlError| anyhow::anyhow!("{}", kdl_error(&error)))?;
+        let exe = self
+            .exe
+            .to_str()
+            .context("the st path is not UTF-8")?
+            .to_owned();
         let player = std::process::id().to_string();
         for node in document.nodes_mut() {
             if node.name().value() != "agent" {
@@ -1748,6 +1773,92 @@ fn wait_for_exit(pid: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stale_demo_receipt_leaves_a_live_unrelated_process_alone() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let dir = root.path().join("demo");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&state)?;
+        let receipt = dir.join("daemon.pid");
+        // This test process pins its own PID and does not run the daemon verb.
+        std::fs::write(&receipt, std::process::id().to_string())?;
+        super::stop_daemon(&dir, &state, std::time::Instant::now())?;
+        assert!(!receipt.exists(), "an unrelated live PID must not strand demo cleanup");
+        Ok(())
+    }
+
+    #[test]
+    fn stop_waits_for_inherited_state_lock() -> anyhow::Result<()> {
+        use fractal_daemon::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let dir = root.path().join("demo");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&dir)?;
+        let mut fixture = RetainedLock::spawn(
+            "demo::tests::stop_waits_for_inherited_state_lock",
+            &state,
+            false,
+        )?;
+        let pid_file = dir.join("daemon.pid");
+        std::fs::write(&pid_file, fixture.leader.id().to_string())?;
+        let error = super::stop_daemon(
+            &dir,
+            &state,
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+        )
+        .expect_err("demo stop must not report a clean stop while a child holds the lock");
+        fixture.assert_held_error(&error)?;
+        assert!(pid_file.exists(), "failed cleanup must keep its receipt");
+        fixture.release()?;
+        super::stop_daemon(&dir, &state, std::time::Instant::now())?;
+        assert!(!pid_file.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reset_preserves_state_while_inherited_lock_is_held() -> anyhow::Result<()> {
+        use fractal_daemon::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let state = root.path().join("state");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache)?;
+        let mut fixture = RetainedLock::spawn(
+            "demo::tests::reset_preserves_state_while_inherited_lock_is_held",
+            &state,
+            false,
+        )?;
+        fixture.leader.kill()?;
+        fixture.leader.wait()?;
+        let config = fractal_daemon::config::Config {
+            state_dir: state.clone(),
+            socket: root.path().join("api.sock"),
+            client_gateway_socket: root.path().join("client.sock"),
+            ..Default::default()
+        };
+        std::fs::write(state.join("precious"), "keep")?;
+        let error = super::reset_state(
+            &config,
+            &cache,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        )
+        .expect_err("reset must preserve a directory whose lock outlives its leader");
+        fixture.assert_held_error(&error)?;
+        assert_eq!(std::fs::read_to_string(state.join("precious"))?, "keep");
+        assert!(cache.exists());
+        fixture.release()?;
+        super::reset_state(&config, &cache, std::time::Instant::now())?;
+        assert!(!state.exists());
+        assert!(!cache.exists());
+        Ok(())
+    }
+
     use super::*;
 
     const SMALL: &str = r#"
@@ -2041,7 +2152,9 @@ beats {
                                 assert!(file.is_file(), "{}", file.display());
                             }
                         }
-                        Action::Document { file, .. } => assert!(file.is_file(), "{}", file.display()),
+                        Action::Document { file, .. } => {
+                            assert!(file.is_file(), "{}", file.display())
+                        }
                         _ => {}
                     }
                 }

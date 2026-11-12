@@ -9,20 +9,21 @@ let
   inherit (lib) mkEnableOption mkIf mkOption types;
   cfg = config.services.smalltalk;
   externallyManaged = cfg.binary.path != null;
-  # Copy st3 itself: a symlinkJoin-only executable resolves current_exe() back to the
+  # Copy fractal itself: a symlinkJoin-only executable resolves current_exe() back to the
   # original package, whose bin/pty would still win when seats prepend that directory.
   effectivePackage =
     if cfg.ptyPackage == null then
       cfg.package
     else
       pkgs.symlinkJoin {
-        name = "st3-with-pty";
+        name = "fractal-with-pty";
         paths = [ cfg.package ];
         postBuild = ''
-          rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
-          cp ${cfg.package}/bin/st3 "$out/bin/st3"
+          rm "$out/bin/fractal" "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
+          cp ${cfg.package}/bin/fractal "$out/bin/fractal"
           # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-          ln -s st3 "$out/bin/st"
+          ln -s fractal "$out/bin/st"
+          ln -s fractal "$out/bin/st3"
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
         '';
@@ -30,7 +31,7 @@ let
   # Keep the real executable with the daemon's per-user state: current_exe()
   # resolves store symlinks, but seats must watch one replaceable path across deploys.
   binDir = if externallyManaged then builtins.dirOf cfg.binary.path else "${cfg.stateDir}/bin";
-  executable = if externallyManaged then cfg.binary.path else "${binDir}/st3";
+  executable = if externallyManaged then cfg.binary.path else "${binDir}/fractal";
   environment = cfg.environment // {
     # The Linux daemon asks the user manager to move PTY servers into their own scopes via busctl.
     PATH = binDir + ":" + lib.makeBinPath (
@@ -40,6 +41,9 @@ let
     ) + ":/usr/local/bin:/usr/bin:/bin";
     XDG_CONFIG_HOME = config.xdg.configHome;
     XDG_STATE_HOME = config.xdg.stateHome;
+    # Services use the replaceable st3 image path, including externally managed builds.
+    # Keep internal daemon/seat launches out of the human alias-deprecation channel.
+    FRACTAL_SUPPRESS_DEPRECATION = "1";
   };
   upArgs =
     [ "up" "--state-dir" cfg.stateDir ]
@@ -48,9 +52,9 @@ let
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
     ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
-    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
+    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${cfg.package}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
-      [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
+      [ "--client-gateway-socket" "${cfg.stateDir}/run/fractal-client.sock" ]
     ++ (if externallyManaged then
       [ "--pty-binary" "${binDir}/pty" ]
     else
@@ -104,9 +108,12 @@ let
     while IFS= read -r line; do marker=$line; done < "$fence"
     [ "$marker" = ${lib.escapeShellArg configFenceMarker} ] || exit 1
   '';
-  targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/st3";
+  targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/fractal";
   targetArgs = lib.replaceStrings [ legacyState ] [ targetState ];
-  targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
+  isConfigArg = arg: arg == "--config" || lib.hasPrefix "--config=" arg;
+  targetUpArgs = map targetArgs upArgs
+    ++ lib.optionals (!(builtins.any isConfigArg upArgs))
+      [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
   targetEnvironment = lib.mapAttrs (_: targetArgs) environment;
   migrationReady = ''
     for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
@@ -116,6 +123,23 @@ let
       if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then exit 1; fi
     done
   '';
+  hmDomain = config.launchd.agents.${if completed then "fractal" else "smalltalk"}.domain or "gui";
+  domainQuery = lib.escapeShellArgs [ (if externallyManaged then cfg.binary.path else "${effectivePackage}/bin/fractal") "migrate" "launchd-domain" ];
+  resolveDomain = ''
+    domain=$(${domainQuery}) || exit 1
+    [ "$domain" = "${hmDomain}/$(id -u)" ] || {
+      echo "Refusing launchd domain change: loaded/journal domain $domain, Home Manager domain ${hmDomain}" >&2
+      exit 1
+    }
+    ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) ''
+      [ "$domain" = "${config.launchd.agents.${if completed then "fractal-apply" else "smalltalk-apply"}.domain or "gui"}/$(id -u)" ] || exit 1
+    ''}
+  '';
+  stageSession = agent:
+    let session = config.launchd.agents.${agent}.config.LimitLoadToSessionType or null;
+    in lib.optionalAttrs (!completed && (session != null || hmDomain == "user")) {
+      LimitLoadToSessionType = if session != null then session else "Background";
+    };
   targetGuard = pkgs.writeShellScript "fractal-migration-ready" (''
     set -eu
   '' + migrationReady + (if pkgs.stdenv.hostPlatform.isLinux then ''
@@ -126,8 +150,26 @@ let
       printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
+    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ]; then
+      ${resolveDomain}
+    else
+      for marker in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" configFence ]}; do
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          echo "Refusing launchd ownership: migration marker/fence $marker exists but .fractal-host-cutover.json is missing" >&2
+          exit 1
+        fi
+      done
+      if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ]; then
+        ${resolveDomain}
+      elif [ "${hmDomain}" != gui ]; then
+        echo "Fresh user-domain launchd installation without a migration journal is unsupported" >&2
+        exit 1
+      else
+        domain="gui/$(id -u)"
+      fi
+    fi
     for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do
-      if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then exit 1
+      if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then exit 1
       elif [ "$?" -ne 113 ]; then exit 1
       fi
     done
@@ -150,24 +192,22 @@ let
     ProgramArguments = [ (toString targetLaunchScript) ];
     RunAtLoad = true;
     KeepAlive.SuccessfulExit = false;
+    # The stop path waits for receipts and the replication inventory save.
+    ExitTimeOut = 30;
     EnvironmentVariables = targetEnvironment;
     ProcessType = "Interactive";
     SoftResourceLimits.NumberOfFiles = 8192;
     StandardOutPath = "${targetDaemonState}/logs/st3.stdout.log";
     StandardErrorPath = "${targetDaemonState}/logs/st3.stderr.log";
-  };
+  } // stageSession "smalltalk";
   targetApplyPlist = {
     Label = "com.compoundingtech.fractal-apply";
     ProgramArguments = [ (toString targetApplyScript) ];
     EnvironmentVariables = targetEnvironment;
-  };
+  } // stageSession "smalltalk-apply";
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
 in
 {
-  options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
-    the opt-in fractal alias in the Home Manager-owned Fractal stable bin directory.
-    Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
-  '';
 
 
   options.services.smalltalk = {
@@ -185,19 +225,19 @@ in
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
     package = mkOption {
       type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.st3;
-      description = "The st3 package.";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.fractal;
+      description = "The complete Fractal package.";
     };
     binary.path = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "/opt/fractal/bin/st3";
+      example = "/opt/fractal/bin/fractal";
       description = ''
         Stable absolute executable path owned by an external deployer. When set,
-        Home Manager neither installs the st3 package nor copies its executable,
+        Home Manager neither installs the Fractal package nor copies its executable,
         uses pty from the same directory instead of ptyPackage, and does not
         restart the daemon on package changes. Null keeps Home Manager
-        responsible for installing and restarting st3.
+        responsible for installing and restarting Fractal.
       '';
     };
     person = mkOption {
@@ -222,7 +262,7 @@ in
     };
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
-    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
+    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/fractal-client.sock on Linux, stateDir/run/fractal-client.sock on Darwin)."; };
     webListen = mkOption {
       type = types.nullOr types.str;
       default = "127.0.0.1:7410";
@@ -242,7 +282,7 @@ in
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      description = "Additional arguments passed to st3 up.";
+      description = "Additional arguments passed to fractal up.";
     };
     memoryHigh = mkOption {
       type = types.nullOr types.str;
@@ -297,6 +337,9 @@ in
         ) config.xdg.configFile)
       ));
       message = "Fractal migration requires unforced legacy config and state ownership (including raw forced-path prefixes); remove forced old generations before cutover.";
+    } ++ lib.optional completed {
+      assertion = builtins.length (builtins.filter isConfigArg targetUpArgs) <= 1;
+      message = "services.smalltalk completed daemon arguments require at most one --config (including --config=PATH).";
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =
@@ -305,6 +348,10 @@ in
         mkIf (cfg.declarationsApply.enable && hasDeclarations) {
           text = lib.generators.toPlist { escape = true; } targetApplyPlist;
         };
+    };
+    xdg.configFile."st3/launchd-staged" = {
+      enable = staging && !completed && pkgs.stdenv.hostPlatform.isDarwin;
+      text = "Home Manager launchd staging\n"; force = lib.mkForce false;
     };
     home.activation.fractalMigrationPreflight = lib.hm.dag.entryBetween
       [ "writeBoundary" ] [ ] ''
@@ -320,20 +367,24 @@ in
               exit 1
             fi
           done
+          ${lib.optionalString (staging && pkgs.stdenv.hostPlatform.isDarwin) resolveDomain}
         ''}
       '';
     home.activation.fractalStageDisabled = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin)
       (lib.hm.dag.entryBetween [ "linkGeneration" ] [ "writeBoundary" ] ''
         if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
+          ${resolveDomain}
           for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
-            if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+            if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then
               echo "Refusing to stage an already loaded Fractal launchd job: $label" >&2
               exit 1
             elif [ "$?" -ne 113 ]; then
               echo "Cannot establish launchd staging state for $label" >&2
               exit 1
             fi
-            /bin/launchctl disable "gui/$(id -u)/$label"
+          done
+          for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
+            /bin/launchctl disable "$domain/$label"
           done
         fi
       '');
@@ -348,33 +399,226 @@ in
           (
             set -eu
             binDir=${lib.escapeShellArg binDir}
-            source=${lib.escapeShellArg "${effectivePackage}/bin/st3"}
+            source=${lib.escapeShellArg "${effectivePackage}/bin/fractal"}
             target=${lib.escapeShellArg executable}
+            installReceipt="$binDir/.fractal-install.json"
+            pendingReceipt="$installReceipt.pending"
+            receiptOwned=false
+            # Boundary for rollback through a pre-receipt HM generation: that
+            # generation replaces the payload but leaves the newer HM receipt.
+            # Trust only the previous active generation's immutable package and
+            # intact reverse aliases, never an arbitrary digest mismatch.
+            previousHmPayload() {
+              local previous name hash
+              [[ -f "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && -x "$target" ]] || return 1
+              for name in st st3; do
+                [[ -L "$binDir/$name" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                  fractal|"$target") ;;
+                  *) return 1 ;;
+                esac
+              done
+              [[ -n "''${oldGenPath:-}" ]] || return 1
+              previous=$(${pkgs.coreutils}/bin/readlink -e "$oldGenPath/home-path/bin/fractal") || return 1
+              [[ "$previous" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/ ]] || return 1
+              [[ -f "$previous" && -x "$previous" ]] || return 1
+              ${pkgs.diffutils}/bin/cmp -s "$previous" "$target" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$target") || return 1
+              hash=''${hash%% *}
+              ${pkgs.jq}/bin/jq -e -s --arg hash "$hash" '
+                length == 1 and (.[0] |
+                  type == "object" and .schema == 1 and .name == "fractal"
+                  and .installer == "hm"
+                  and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+                  and .sha256 != $hash)
+              ' "$installReceipt" >/dev/null 2>&1
+            }
+            if [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+              # The incoming executable owns the receipt parser and checks it
+              # against the prior installed payload before any replacement.
+              if receiptError=$("$source" setup --receipt-verify "$binDir" 2>&1); then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+              elif ! previousHmPayload; then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+                printf 'Home Manager: invalid install receipt %s; reinstall Fractal to restore ownership.\n' "$installReceipt" >&2
+                exit 1
+              fi
+              receiptOwned=true
+            fi
+            # A pre-Fractal rollback restores physical st3 but can leave an
+            # unrelated candidate at fractal. Require installer provenance for
+            # st3; the leftover's bytes are deliberately not evidence.
+            rollbackSnapshot() {
+              local candidate=$1 legacy="$binDir/st3" hash
+              [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+              [[ -f "$legacy" && ! -L "$legacy" ]] || return 1
+              ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$candidate" "$legacy" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$legacy") || return 1
+              printf '%s\n' "''${hash%% *}"
+              if [[ -e "$binDir/st" || -L "$binDir/st" ]]; then
+                [[ -L "$binDir/st" ]] || return 1
+                ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$binDir/st" || return 1
+                ${pkgs.coreutils}/bin/readlink "$binDir/st" || return 1
+              else
+                printf 'absent\n'
+              fi
+            }
+            rollbackLayout() {
+              local package recorded legacy hash expected
+              rollbackProof=$(rollbackSnapshot "$target") || return 1
+              [[ ! -e "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && ! -L "$target" ]] || return 1
+              legacy="$binDir/st3"
+              [[ -f "$legacy" && ! -L "$legacy" ]] || return 1
+              if [[ -e "$binDir/st" || -L "$binDir/st" ]]; then
+                [[ -L "$binDir/st" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/st")" in
+                  st3|"$legacy") ;;
+                  *) return 1 ;;
+                esac
+              fi
+              recorded="$binDir/../binary-installer/current.json"
+              [[ -f "$recorded" && ! -L "$recorded" ]] || return 1
+              package=$(${pkgs.jq}/bin/jq -er -s '
+                select(length == 1) | .[0] |
+                select(type == "object" and (.installer | type == "string")
+                  and (.narHash | type == "string")) | .package |
+                select(type == "string" and
+                  test("^/nix/store/[0-9a-z]{32}-(st3-with-pty|fractal-with-pty|fractal(-[0-9][^/]*)?)$"))
+              ' "$recorded") || return 1
+              expected="$package/bin/st3"
+              [[ -f "$expected" ]] || return 1
+              if [[ "$(${pkgs.coreutils}/bin/readlink -e "$legacy")" != "$(${pkgs.coreutils}/bin/readlink -e "$expected")" ]]; then
+                hash=$(${pkgs.coreutils}/bin/sha256sum "$legacy") || return 1
+                expected=$(${pkgs.coreutils}/bin/sha256sum "$expected") || return 1
+                [[ "''${hash%% *}" == "''${expected%% *}" ]] || return 1
+              fi
+              [[ "$(rollbackSnapshot "$target")" == "$rollbackProof" ]] || return 1
+            }
+            preserveRollback=false
+            # Matching payload bytes alone are not ownership: require the receipt
+            # or the historical forward/reverse alias layout.
+            if [[ -e "$target" || -L "$target" ]]; then
+              owned=$receiptOwned
+              if [[ -L "$target" ]]; then
+                case "$(${pkgs.coreutils}/bin/readlink "$target")" in
+                  st3|"$binDir/st3") owned=true ;;
+                esac
+              elif [[ -f "$target" ]]; then
+                aliasOwned=false
+                if [[ -x "$target" ]]; then aliasOwned=true; fi
+                for name in st st3; do
+                  if [[ ! -L "$binDir/$name" ]]; then aliasOwned=false; break; fi
+                  case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                    fractal|"$target") ;;
+                    *) aliasOwned=false; break ;;
+                  esac
+                done
+                if "$aliasOwned"; then owned=true; fi
+                if ! "$owned" && rollbackLayout; then
+                  owned=true
+                  preserveRollback=true
+                fi
+              fi
+              if ! "$owned"; then
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+            fi
             ${pkgs.coreutils}/bin/mkdir -p "$binDir"
+            temporary=
+            backup=$(${pkgs.coreutils}/bin/mktemp -d "$binDir/.fractal-backup.XXXXXX")
+            binaryPublished=false
+            receiptPublished=false
+            pendingPublished=false
+            rollback() {
+              status=$?
+              trap - EXIT
+              if [[ "$status" -ne 0 ]]; then
+                if "$receiptPublished"; then
+                  if [[ -e "$backup/receipt" || -L "$backup/receipt" ]]; then
+                    if [[ ! "$backup/receipt" -ef "$installReceipt" ]]; then
+                      ${pkgs.coreutils}/bin/mv -f "$backup/receipt" "$installReceipt"
+                    fi
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$installReceipt"
+                  fi
+                fi
+                if "$pendingPublished"; then
+                  if [[ -e "$backup/pending" || -L "$backup/pending" ]]; then
+                    ${pkgs.coreutils}/bin/mv -f "$backup/pending" "$pendingReceipt"
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$pendingReceipt"
+                  fi
+                fi
+                if "$binaryPublished"; then
+                  if [[ -e "$backup/binary" || -L "$backup/binary" ]]; then
+                    ${pkgs.coreutils}/bin/mv -f "$backup/binary" "$target"
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$target"
+                  fi
+                fi
+              fi
+              ${pkgs.coreutils}/bin/rm -f -- "$temporary"
+              ${pkgs.coreutils}/bin/rm -rf "$backup"
+              exit "$status"
+            }
+            trap rollback EXIT
+            if [[ -e "$target" || -L "$target" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$target" "$backup/binary"
+            fi
+            if "$preserveRollback"; then
+              # mktemp reserves a unique timestamped sibling, including when
+              # several rollback/roll-forward cycles occur within one second.
+              replaced=$(${pkgs.coreutils}/bin/mktemp "$binDir/fractal.replaced-$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%S).XXXXXX")
+              if ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"; then
+                binaryPublished=true
+              else
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+              if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]] ||
+                [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+                # Do not let the EXIT trap restore the earlier backup over a
+                # concurrently published target, even if this restore fails.
+                binaryPublished=false
+                if ! ${pkgs.coreutils}/bin/mv -Tn "$replaced" "$target" ||
+                  [[ -e "$replaced" || -L "$replaced" ]]; then
+                  printf 'Home Manager: preserved candidate at %s; leaving concurrent command at %s untouched.\n' "$replaced" "$target" >&2
+                fi
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+            fi
+            if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$installReceipt" "$backup/receipt"
+            fi
+            if [[ -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$pendingReceipt" "$backup/pending"
+            fi
+            # Prepare ownership for the incoming bytes before publishing them.
+            # A crash after replacement can then be recognized on the next activation.
+            pendingPublished=true
+            "$source" setup --receipt-prepare "$binDir" --receipt-installer hm
             # Preserve the inode on no-op activation; replace symlinks even if bytes match.
             if [[ -L "$target" ]] || ! ${pkgs.diffutils}/bin/cmp -s "$source" "$target"; then
-              temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.st3.XXXXXX")
-              trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
+              temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.fractal.XXXXXX")
               ${pkgs.coreutils}/bin/cp "$source" "$temporary"
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
+              binaryPublished=true
             fi
+            ${pkgs.coreutils}/bin/chmod 755 "$target"
+            # Finalization validates pending against the installed executable.
+            # Mark first so a failure after publication still restores the old receipt.
+            receiptPublished=true
+            "$source" setup --receipt-write "$binDir"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-            ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
-            ${if config.programs.smalltalk.fractalBinary.enable then ''
-              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
-                : # Already points at the stable executable.
-              elif [[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]; then
-                ${pkgs.coreutils}/bin/ln -s st3 "$binDir/fractal" ||
-                  echo "Could not create $binDir/fractal; kept the existing path. Fractal remains available as st." >&2
-              else
-                echo "Not replacing $binDir/fractal: it is not a Fractal alias. Move it yourself to opt in; use st meanwhile." >&2
-              fi
-            '' else ''
-              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
-                ${pkgs.coreutils}/bin/rm "$binDir/fractal"
-              fi
-            ''}
+            ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st"
+            ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st3"
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           )
         fi
@@ -421,7 +665,7 @@ in
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs))
             # Preserve systemd's runtime-directory specifier; systemdArg escapes literal percent signs.
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (environment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -465,7 +709,7 @@ in
           ExecCondition = toString targetGuard;
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ targetExecutable ] ++ targetUpArgs))
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (targetEnvironment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -509,6 +753,8 @@ in
           ProgramArguments = [ executable ] ++ upArgs;
           RunAtLoad = true;
           KeepAlive.SuccessfulExit = false;
+          # The stop path waits for receipts and the replication inventory save.
+          ExitTimeOut = 30;
           ProcessType = "Interactive";
           SoftResourceLimits.NumberOfFiles = 8192;
           StandardOutPath = "${cfg.stateDir}/logs/st3.stdout.log";

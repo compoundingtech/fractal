@@ -14,7 +14,7 @@ pub(super) struct ClientDocumentQuery {
 }
 
 fn invalid_reference() -> ApiError {
-    ApiError::bad(St3Error::new(
+    ApiError::bad(FractalError::new(
         "invalid-document-reference",
         "a document is named `doc/NAME@HASH`, or `doc/NAME` for its latest version",
     ))
@@ -28,6 +28,9 @@ pub(super) async fn document_get(
     Extension(session): Extension<ClientSession>,
     Query(query): Query<ClientDocumentQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    if client_v0::external_grants::is_service(&session) {
+        return Err(client_v0::external_grants::service_documents_forbidden());
+    }
     require_scope(&session, "read.projections")?;
     let (name, hash) = match query.name.rsplit_once('@') {
         Some((name, hash)) if !name.is_empty() && !hash.is_empty() => {
@@ -86,6 +89,9 @@ pub(super) async fn documents_list(
     Extension(session): Extension<ClientSession>,
     query: Query<DocumentQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    if client_v0::external_grants::is_service(&session) {
+        return Err(client_v0::external_grants::service_documents_forbidden());
+    }
     require_scope(&session, "read.projections")?;
     let Json(page) = list_documents(State(state), query).await?;
     Ok(Json(json!({
@@ -216,7 +222,7 @@ pub(super) async fn document_references(
             found.ok_or_else(|| ApiError::not_found(format!("`{subject}` does not exist")))?;
         step_references(&mission, step.as_deref(), &mut references);
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "document references are read for a message/, mission/, mission-run/ or step-run/ subject",
         )));

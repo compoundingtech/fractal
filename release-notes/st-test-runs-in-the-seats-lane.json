@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st-test started by a seat outside its lane builds in the seat's lane, which the daemon names (st agents lane)",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No stored data changes."},
+  "rules": {"status": "none", "detail": "A check st-test runs outside every build cap, for a caller that names a seat (ST_AGENT) whose capped lane is on this host, runs in a scope in that lane instead of builds.slice. Checks that ran in place still do."},
+  "compatibility": {"status": "none", "detail": "New local daemon route GET /v1/agents/lane and CLI command st agents lane; nothing replicates. An older daemon or CLI cannot name the lane, so st-test takes builds.slice as before and says why. Signed notes are unchanged: the recorded command does not include the scope."},
+  "downtime": {"status": "none", "detail": "The CLI command needs the new daemon; st-test changes on its next run."},
+  "manual": {"status": "none", "detail": "Nothing to configure. A seat may still start its job units with --slice=\"$FRACTAL_LANE_SLICE\" (docs/st3/seat-lanes.md); st-test no longer depends on it."},
+  "recovery": {"status": "none", "detail": "Reverting puts a seat's unit started outside its lane back in builds.slice for its checks."}
+}

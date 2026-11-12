@@ -1,9 +1,10 @@
 import type * as Fractal from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { hiddenByDefault, presentMission, sortMissions } from './presentation.ts'
+import { foldedInSidebar, hiddenByDefault, missionReaderTitle, presentMission, type MissionPresentation } from './presentation.ts'
+import { sortMissions } from './missionWords.ts'
 
 const at = DateTime.makeUnsafe('2026-10-14T10:00:00Z')
 
@@ -105,5 +106,22 @@ describe('presentMission', () => {
     expect(hiddenByDefault(presentMission({ mission: mission([step('build', 'claimed')]), agents: [], attention: [] }), today)).toBe(false)
     const rows = ['done', 'working', 'decision', 'stalled'].map((each) => ({ id: each, presentation: { word: each } as never }))
     expect(sortMissions(rows).map((row) => row.id)).toEqual(['decision', 'stalled', 'working', 'done'])
+  })
+})
+
+describe('sidebar folding and titles', () => {
+  const base = { id: 'mission/spontaneous-work/0123456789abcdef', kind: 'mission', title: 'spontaneous-work/0123456789abcdef', state: 'running', runs: [], updated_at: DateTime.makeUnsafe('2026-10-14T11:00:00Z') } as never as Fractal.Mission
+  const quiet = { word: 'working', system: false, settled_at: null } as MissionPresentation
+  it('folds quiet ad hoc work but keeps it while someone must act or it faulted', () => {
+    expect(foldedInSidebar({ mission: base, presentation: quiet, startOfToday: 0 })).toBe(true)
+    expect(foldedInSidebar({ mission: { ...base, must_act: 'you' } as Fractal.Mission, presentation: quiet, startOfToday: 0 })).toBe(false)
+    expect(foldedInSidebar({ mission: base, presentation: { ...quiet, word: 'stalled' }, startOfToday: 0 })).toBe(false)
+    expect(foldedInSidebar({ mission: { ...base, id: 'mission/example/build' } as Fractal.Mission, presentation: quiet, startOfToday: 0 })).toBe(false)
+  })
+  it('titles a hash-named mission by its open step, never the hash', () => {
+    expect(missionReaderTitle(base)).toBe('Untitled mission')
+    const step = { id: 's', path: 'ask', state: 'ready', title: Option.none(), goals: ['Ask about the release'] }
+    expect(missionReaderTitle({ ...base, run_details: [{ status: 'running', steps: Option.some([step]) }] } as never)).toBe('Ask about the release')
+    expect(missionReaderTitle({ ...base, title: 'example/build' } as Fractal.Mission)).toBe('example/build')
   })
 })

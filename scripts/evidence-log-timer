@@ -15,9 +15,23 @@ if [ ! -d "$repo" ]; then
   git -C "$repo" config gc.auto 0
   git -C "$repo" remote add origin "$remote"
 fi
-git -C "$repo" -c core.hooksPath=/dev/null fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main
+# Apply to existing repositories too. The default fsync method persists objects before their references.
+git -C "$repo" config core.fsync objects,reference
 tools=$(mktemp -d)
 trap 'rm -rf "$tools"' EXIT
+# Fetch the tools using only main's refs. Git's fetch connectivity check otherwise reads even an unrelated damaged log ref,
+# failing before the tool can repair it. Share the object directory and seed main so this remains an incremental fetch.
+repo=$(cd "$repo" && pwd)
+git init -q --bare "$tools/main.git"
+bootstrap_git() {
+  GIT_OBJECT_DIRECTORY="$repo/objects" git -C "$repo" --git-dir="$tools/main.git" -c core.hooksPath=/dev/null -c core.fsync=objects,reference \
+    -c maintenance.auto=false -c gc.auto=0 "$@"
+}
+if main=$(git -C "$repo" rev-parse --verify refs/remotes/origin/main 2>/dev/null); then
+  bootstrap_git update-ref refs/remotes/origin/main "$main"
+fi
+bootstrap_git fetch -q --no-tags "$(git -C "$repo" remote get-url origin)" +refs/heads/main:refs/remotes/origin/main
+git -C "$repo" update-ref refs/remotes/origin/main "$(bootstrap_git rev-parse refs/remotes/origin/main)"
 for tool in evidence-log evidence-verify; do
   git -C "$repo" show "origin/main:scripts/$tool" > "$tools/$tool"
 done
@@ -34,5 +48,5 @@ if [ -n "$entry" ]; then
   keys=$tools/log-keys
 fi
 # shellcheck disable=SC2086
-exec python3 -I "$tools/evidence-log" "${1:-pull}" --repo "$repo" --remote origin --main origin/main \
+python3 -I "$tools/evidence-log" "${1:-pull}" --repo "$repo" --remote origin --main origin/main \
   --signer "$(cat "$config/signer.json")" --log-keys "$keys" ${EVIDENCE_LOG_FLAGS:-} "${@:2}"

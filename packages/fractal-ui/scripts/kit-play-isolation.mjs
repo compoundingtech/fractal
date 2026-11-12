@@ -17,22 +17,55 @@ export function testRunnerUserAgent(browser) {
   return testRunnerUserAgents.get(browser)
 }
 
+// The inert probe's localStorage keys, read once more after a residue. A failed read is
+// reported in its place: the residue error, not the probe's, is what fails the case.
+export async function reauditStorage(probe) {
+  try {
+    return { localStorage: await probe.evaluate(() => Object.keys(localStorage)) }
+  } catch (error) {
+    return { error: String(error?.message ?? error) }
+  }
+}
+
+// Storage.clearDataForOrigin acknowledges the browser-side deletion before Blink
+// necessarily applies the observer event to a retained page's localStorage cache.
+function observeLocalStorageClear(client, origin) {
+  const { promise, resolve } = Promise.withResolvers()
+  const onClear = ({ storageId }) => {
+    if (storageId.securityOrigin === origin && storageId.isLocalStorage) resolve(true)
+  }
+  client.on('DOMStorage.domStorageItemsCleared', onClear)
+  return {
+    async wait() {
+      let deadline
+      try {
+        return await Promise.race([promise, new Promise(resolve => { deadline = setTimeout(() => resolve(false), 1_000) })])
+      } finally {
+        clearTimeout(deadline)
+      }
+    },
+    close() { client.off('DOMStorage.domStorageItemsCleared', onClear) },
+  }
+}
+
 // Chromium's HTTP resource cache is intentionally retained: the job's server and
 // bundle are immutable. Cache Storage and every other origin storage type are not.
 export async function createIsolatedKitWorker(browser, base, { workerId = null } = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, userAgent: await testRunnerUserAgent(browser) })
   const origins = new Set()
   let previousCase = null
+  const residualError = isolation => {
+    const error = new Error(`Kit isolation ${isolation.boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
+    error.isolation = isolation
+    return error
+  }
   const residualStorage = (boundary, snapshot) => {
     const storage = [
       { kind: 'localStorage', keys: snapshot.local },
       { kind: 'sessionStorage', keys: snapshot.session },
     ].filter(({ keys }) => keys.length)
     if (!storage.length) return
-    const isolation = { boundary, origin: snapshot.origin, storage, workerId, previousCase }
-    const error = new Error(`Kit isolation ${boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
-    error.isolation = isolation
-    throw error
+    throw residualError({ boundary, origin: snapshot.origin, storage, workerId, previousCase })
   }
   const trackOrigin = url => {
     const parsed = new URL(url)
@@ -47,13 +80,14 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
     // another Chromium page for every case. They never execute story code or
     // share a case's sessionStorage; fresh case documents audit that separately.
     const auditPages = new Map()
+    const probeStorage = new WeakMap()
     const inertAudit = (origin, page) => !page.isClosed() && page.url() === new URL(origin).href && page.frames().length === 1 && page.workers().length === 0
     const assertControl = () => {
       if (control.isClosed() || control.url() !== 'about:blank') {
         throw new Error('Kit isolation control page must remain open and blank')
       }
     }
-    const audit = async () => {
+    const audit = async (clears = new Map()) => {
       assertControl()
       const cookies = await context.cookies()
       if (cookies.length) throw new Error(`Kit isolation audit: ${cookies.length} residual cookies`)
@@ -72,14 +106,19 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
           await probeClient.send('Emulation.setScriptExecutionDisabled', { value: true })
           await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
           await probe.goto(origin)
+          await probeClient.send('DOMStorage.enable')
+          probeStorage.set(probe, probeClient)
           auditPages.set(origin, probe)
         }
         if (!inertAudit(origin, probe)) {
           throw new Error(`Kit isolation audit page changed at ${origin}`)
         }
-        residualStorage('reset', await probe.evaluate(() => ({
+        const read = () => probe.evaluate(() => ({
           origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
-        })))
+        }))
+        let snapshot = await read()
+        if (snapshot.local.length && !snapshot.session.length && await clears.get(origin)?.wait()) snapshot = await read()
+        residualStorage('reset', snapshot)
       }
       // Public audits also cover sessionStorage in still-live case pages;
       // reset has already destroyed those browsing sessions.
@@ -88,6 +127,19 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         residualStorage('reset', await page.evaluate(() => ({
           origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
         })))
+      }
+    }
+    // On a residue, read the origin's inert probe once more with nothing cleared or written in between. Its key names
+    // say whether the residue is held in storage or was already gone, as an in-flight write's would not be (#3896).
+    // Diagnostic only: the case fails either way. Null when no probe has been opened for that origin yet.
+    const withReaudit = async check => {
+      try {
+        return await check()
+      } catch (error) {
+        if (!error.isolation) throw error
+        const probe = auditPages.get(error.isolation.origin)
+        const reaudit = probe && inertAudit(error.isolation.origin, probe) ? await reauditStorage(probe) : null
+        throw residualError({ ...error.isolation, reaudit })
       }
     }
     return {
@@ -117,10 +169,17 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         }
         await context.clearCookies()
         await context.clearPermissions()
-        for (const origin of origins) {
-          await client.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' })
+        const clears = new Map()
+        try {
+          for (const origin of origins) {
+            const probe = auditPages.get(origin)
+            if (probe) clears.set(origin, observeLocalStorageClear(probeStorage.get(probe), origin))
+            await client.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' })
+          }
+          await withReaudit(() => audit(clears))
+        } finally {
+          for (const clear of clears.values()) clear.close()
         }
-        await audit()
         return { resetMilliseconds: performance.now() - started }
       },
       // Audit only the FIRST HTTP(S) top-level document of each fresh page.
@@ -157,7 +216,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
             if (captured || ['http:', 'https:'].includes(new URL(page.url()).protocol)) {
               const snapshot = await firstSnapshot
               if (snapshot.error) throw new Error(`Kit isolation document-start audit failed at ${snapshot.origin}: ${snapshot.error}`)
-              residualStorage('document-start', snapshot)
+              await withReaudit(() => residualStorage('document-start', snapshot))
             }
             return response
           }

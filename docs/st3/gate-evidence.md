@@ -1,6 +1,6 @@
 # Gate evidence
 
-`st evidence put`, `show`, and `verify` run offline. They require Git with SSH
+`fractal evidence put`, `show`, and `verify` run offline. They require Git with SSH
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
 signers file. They do not load daemon configuration or contact a Fractal instance.
 
@@ -26,18 +26,21 @@ same bridge; a selected list that cannot be read or decoded refuses hosted
 execution. GC likewise resolves and prefetches main's selected `rust-test-inputs.json`
 before computing the per-crate keys it must retain.
 
-For keyed Clippy, the workflow source/generated `linux-clippy` environment and
-`scripts/ci-clippy-keyed` use `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`:
-the keyed caller supplies the policy path, and the stage resolves its checkout
-layout at execution time under this migration ARN. The linux-gate/rust-tests
+For keyed Clippy, the workflow source/generated `linux-clippy` environment
+uses `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`: the keyed
+caller supplies the policy path, and the stage resolves its checkout layout at
+execution time under this migration ARN. Locally, `scripts/ci-clippy-result`
+(linux-clippy's recorded command) resolves the same path the same way after
+the stage. The linux-gate/rust-tests
 static script closures contain no policy-file literal. This does not imply
 hosted dependency isolation: as on main, the hosted linux-clippy job still
 supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explicit
 policy path remains explicit; malformed or unreadable preferred configuration
 never selects the legacy file. The generated workflow environment is a bridge
 site documented here because its comments come from generator output.
-The newly keyed `linux-fleet-compat` workflow and `scripts/ci-fleet-compat-keyed`
-use the same `auto:` bridge through `CI_KEYED_FLEET_COMPAT_POLICY`. Both keyed
+The newly keyed `linux-fleet-compat` workflow uses the same `auto:` bridge
+through `CI_KEYED_FLEET_COMPAT_POLICY`, and `scripts/ci-fleet-compat-result`,
+its local note's command, the same missing-only choice as `scripts/ci-clippy-result`. Both keyed
 stages share the argument-based missing-only resolver; their existing hosted
 policy dependencies are retained, not introduced by the directory migration.
 
@@ -149,7 +152,7 @@ verifier still reads it, with a pattern that matches only names exactly one obje
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
 Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
-`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `fractal evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
 the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
 removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
@@ -188,7 +191,7 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
   unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (45,000), and an
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (150,000), and an
   optional `reason` that says why (JSON has no comments).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
@@ -226,6 +229,10 @@ about 2.5 times that live set. The plan leaves 15,541 refs.
 records. The live set was 21,518 records (7,399 crate keys of 532 live trees among them), over the cap of 20,000, so the
 run exited 3. `cap_records` is 45,000, about twice that live set.
 
+**Measured 2026-11-05**, a dry run after GC had been paused since 2026-11-01: 265,030 refs, 139,285 records. The live set
+was 73,782 records (4,216 more in grace), over the cap of 45,000, so the run exited 3; the plan deletes 1,514 dead trees and
+2,375 dead input keys (113,366 refs), leaving 151,664 refs. `cap_records` is 150,000, about twice that live set.
+
 **On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
 own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
 changes whatever fails next. Then each group's remaining names go in one `git push --atomic`, several whole groups to a
@@ -242,11 +249,38 @@ failure to let an older pass decide; the signed evidence log reports a record th
 user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
 `scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
 `~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
-cannot change what deletes). It reads the open pull requests' heads from the GitHub API without a login (if that
+cannot change what deletes). For a new plan it reads the open pull requests' heads from the GitHub API without a login (if that
 fails, nothing runs), runs GC with `--fetch --apply --open-heads-from`, keeps 30 days of summaries and plans, and
 stores each summary as a new version of the Fractal document `doc/fleet/factory/evidence-gc/runs`. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
 and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
 writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
+
+The wrapper passes `--resume-state` with `pending-plan.json` in its state directory. The complete original plan is fsynced before
+its hook runs and held under a file lock. A killed or failed deletion leaves that journal in place. The next run finishes it
+before reading another open-head list, fetching the evidence namespace, or recomputing record and input-key protection. Remote
+progress is authoritative: refs already gone need no push, and every remaining deletion is leased to its original object id.
+Migration replay keeps an already-created matching destination; a changed ref, remote, repository or hook is refused. Whole-group
+atomic pushes and remote protection remain in force. For live migrations and redundant-name cleanup, each deletion batch first
+re-reads the replacement from the remote and requires its original object id; these records remain live and need no GC line.
+Local cleanup is idempotent too, including a kill after its transaction
+committed but before the journal was removed. Protection-kept groups are a completed outcome: their remaining names stay
+remote, the journal closes, and the next run reads fresh open heads and plans again. Other failures retain the journal.
+The journal is not part of the 30-day summary cleanup.
+The saved plan has a unique `operation_id`; in journal mode `plan_sha256` includes that id with `delete` and `migrate`. The same
+operation keeps its hash on resume, while a later operation over identical refs gets a distinct GC marker. The pure plan's choices
+and `inputs_sha256` remain deterministic; commands without journal mode keep their existing plan hashes.
+A newly created tree-prefixed alias still incurs the existing per-name verification on its first log pull, even if that object
+was verified under another name. Checkpointed pulls retain that progress across interruptions; GC resume itself does not replan
+or re-verify the records. Reusing verification across aliases is a separate optimization.
+
+Every resumed attempt runs the original hook again before any deletion, so the signed GC lines must still publish through the
+existing fast-forward guard. A resumed plan is marked in its plan file: its hook reuses existing GC lines without duplicating them
+or dropping copies of newer records. If an old target was logged again after this operation's GC line, resume refuses its
+deletion even if a later GC line followed. Pending-name expiration is bounded as described below. A failed publication leaves the previous pending set and copies intact and deletes no
+remote refs. Its signed local GC commit can remain and be published by an intervening pull while copies are retained; finishing
+the journal converges that state. Commands without a journal require a later successful GC run to converge after this failure.
+The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; a collision can defer deletion until the
+next daily invocation. The hook's 600-second limit and the service's one-hour limit are unchanged. The durable journal allows the next scheduled invocation to continue.
 
 **Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
 file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
@@ -300,17 +334,31 @@ shallow copy sends every shallow root on every fetch (13 s to fetch 20 records i
 record back. It accepts a record that is well formed and
 signed by a key main's `.st/evidence-keys` trusts for the signer the record names, keeps it under `refs/evidence-copy/`
 (never pruned), and appends one line per record and check to the log. An input-index ref is logged under its key only
-when the record carries that key. It then commits the log, every time, even with nothing new: the commit is signed by
-the log key and its message carries its time, so a verifier can refuse a head that is not fresh. `--publish` pushes the
-head to `refs/evidence-log/main`; a logged record the remote no longer has is reported (`missing`, exit 4), and
+when the record carries that key. It checkpoints after 500 verified refs or 120 seconds of verification, and commits
+every pull even with nothing new. Each commit is signed by the log key and stamped when made, so a verifier can refuse
+a head that is not fresh. The log head is written before the copy markers: an interrupted checkpoint may verify a ref
+again, but cannot skip its missing log line. `--publish` pushes each checkpoint to `refs/evidence-log/main`;
+a logged record the remote no longer has is reported (`missing`, exit 4), and
 `--restore` pushes it back. `evidence-log gc --plan FILE` appends a GC line for each tree and input key of an
 evidence-gc plan and drops their copies; it runs before the plan's deletions (`evidence-gc --before-delete`), so a pull
 does not restore them. It also keeps the plan's ref names as pending deletions in the copy
 (`evidence-log.gc-pending.json`): a pull that runs between the GC lines and the deletions does not log those records
 again after the GC line, which would turn their deletion into `missing` and let `--restore` push them back. A name stops
-being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
-any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
-next pull.
+being pending once the remote no longer has it. After 24 hours (`TOMBSTONE_HOURS`), a pull rechecks at most 500 pending
+names (`TOMBSTONE_RELEASE_REFS`), oldest timestamp first, with ref name breaking ties. New records are verified and
+checkpointed before this expiry work starts. Every expired record still needs the usual signature check unless an exact
+verified copy is already active after the log path's last GC line. A copy left by GC before it dropped copies is rechecked
+and logged after that line. Selected names remain pending until the signed checkpoint and, with `--publish`, its guarded
+publication succeed. A kill before then selects the same oldest names next time; a verified copy written before pending
+cleanup completes that cleanup without another check. Rejected names remain held and their timestamps advance, making them
+eligible again after 24 hours while older names proceed. The pending file keeps its name-to-unix-time format.
+
+For 20,000 expired valid names, 500 per pull means 40 successful pulls, about 80 minutes at the two-minute cadence after
+expiry, without another GC run re-holding them. With GC paused, pending state cannot grow: absent names are pruned, accepted
+names drain, and rejected names remain bounded by that existing set and are periodically rechecked. This bounds expiry work;
+new refs retain their existing checkpointed processing. Pending state identifies names, not object IDs: a changed object under
+a held name remains hidden until its expiry attempt, as before. GC's exact-OID leases and record verification are unchanged.
+`gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the next pull.
 
 A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
 fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but
@@ -322,17 +370,43 @@ stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although th
 written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
 GC now keeps the crate keys of live trees.
 
+The watcher rebuilds its disposable fetch repository once when a fetch fails with demonstrated local object damage,
+or its fetched head cannot be read. It retains the newest `head.git.broken-*` copy for inspection and preserves
+`watch.json`, synced before replacement, so recovery sends the usual single notification. A healthy copy with an
+unreachable remote reports the fetch failure without rebuilding; a fetch timeout also leaves the copy in place.
+
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
-through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
+through `fractal sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
 log key list is main's `.st/evidence-log-key` (`~/.config/evidence-log/log-keys` on a host whose main has none), and a
 pull never extends a head that list does not sign. The signer starts without the caller's loader variables.
 
 **The log key's custody (interim).** The pinned key (principal `log/evidence`) is a plain file on the log host, readable by
-any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
+any process running as the account that runs the timer, until a `fractal sekrets` profile holds it. The log is shadow only
 until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
 replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
+
+**One publisher at a time.** A publish (pull or gc) is a fast-forward of the head that run fetched, leased on it
+(`--force-with-lease`), so a host whose chain does not continue the published one (a second publisher, or a copy that was
+not seeded) publishes nothing and exits 1 with `publish_refused`. It never overwrites the other host's heads. A copy that
+was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
+so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
+cannot publish.
+
+A failed checkpoint publication stops further checkpoints, then still packs refs and restores missing records when
+`--restore` was requested. Missing records retain alarm exit 4; a publication failure without missing records exits 1.
+
+Before other fetches, the publisher checks chain connectivity and streams the current tree's contents to detect
+unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
+local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once
+to identify damaged loose files, including blobs whose headers still read. The published head must verify against the
+existing `--log-keys`, using the publisher's working directory and effective signature verification settings, including
+revocations, and contain the exact damaged local head in its ancestry. Broken loose objects are retained under
+`evidence-log.broken-objects`; no published head,
+an untrusted head, or a chain that cannot prove it continues the damaged local head is an alarm (exit 1).
+An unpublished damaged head requires operator recovery. Empty copies are not automatically seeded. The timer sets
+`core.fsync=objects,reference` on existing and new log repositories with Git's default fsync method.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
@@ -370,9 +444,9 @@ already-constructed observation: full/test must be signed; degraded must be
 explicitly unsigned with a null signer. Fetch its objects before importing:
 
 ```sh
-st evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
-st evidence show --repo . --record RECORD_ID
-st evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+fractal evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+fractal evidence show --repo . --record RECORD_ID
+fractal evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
 ```
 
 `show` prints data and asserts no trust. `verify --record` checks the format,
@@ -413,7 +487,7 @@ version. The file affects this verifier only; it does not activate
 curator enforcement or alter the merge queue.
 
 ```sh
-st evidence verify --repo . --revision HEAD --base BASE_COMMIT \
+fractal evidence verify --repo . --revision HEAD --base BASE_COMMIT \
   --change-id CHANGE_ID --trusted-signers /tmp/allowed-signers
 ```
 
@@ -518,7 +592,7 @@ Test mode requires a throwaway key and `expires_at`, no more than 15 minutes
 ahead. Use a separate scratch repository for the test service. Production key
 files and configuration are never stored in a change checkout or this repository.
 
-The protected PATH supplies operator-installed st3, Git, OpenSSH, gh, Python and
+The protected PATH supplies operator-installed Fractal, Git, OpenSSH, gh, Python and
 GNU timeout. gh receives only the profile's read-only GitHub credential. The
 observer fetches attempt-specific run metadata and every page of jobs; it checks
 the configured repository, Workspace CI workflow, completed state and required
@@ -562,7 +636,7 @@ Test services emit test tier; production policy rejects those records even when
 their signatures verify. An expired test service refuses to produce records.
 
 The response contains record IDs, explicit tiers, and an object-only base64 pack
-with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `st evidence put` with its external allowed-signers file.
+with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `fractal evidence put` with its external allowed-signers file.
 No key, configuration, ref or executable is exported. The caller retains/fetches
 source parent history before pushing evidence refs to peers.
 
@@ -639,6 +713,17 @@ the commit, tree and `flake.lock` from the caller's checkout, never from the req
 clock and its own digest as producer, accepts exactly the documented request keys, and signs a
 `tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
 the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
+
+Before invoking the signer, `scripts/st-test` hydrates missing reachable objects
+(including historical blobs) in the source checkout, using the caller's normal Git context.
+Local `upload-pack` disables lazy fetching, so a `blob:none` checkout cannot otherwise
+serve the private scratch fetch even when its working tree is complete. The caller fetches
+missing IDs from its configured promisor remote in batches of at most 200, without updating
+refs, recursing into submodules, or running maintenance. A failed fetch or one that makes
+no progress stops preparation. The signer itself never contacts a promisor remote: it disables
+lazy fetching and refuses with the missing-object count and an instruction to hydrate in the
+caller. Other callers must perform that preparation themselves. The signed observation and
+verifier requirements are unchanged.
 
 `scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
 (`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests
@@ -879,11 +964,11 @@ a policy input, until deadlines and the production controller are decided.
 
 ## Standalone verifier
 
-`scripts/evidence-verify` answers one question without a built st: does a trusted,
+`scripts/evidence-verify` answers one question without a built Fractal binary: does a trusted,
 signed note exist for this exact tree and this check? It needs only `git`,
 `ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
-repository with hundreds of records. `st evidence verify` stays the reference
+repository with hundreds of records. `fractal evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH
 signatures.
 
@@ -903,7 +988,7 @@ its principal before the first slash (`machine/ci1` is level `machine`); it is n
 read from the record. Removing a line revokes every note that key signed.
 
 `kind` comes from the record's `runner`: `nix`, `wrapper` (a command run once and signed by the wrapper) and `sekrets` name themselves, and a runner that starts with `github:` is kind
-`observed`, the central observer's record of a finished GitHub job (`st evidence observe-ci`).
+`observed`, the central observer's record of a finished GitHub job (`fractal evidence observe-ci`).
 Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is never evidence
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest
@@ -1137,14 +1222,41 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
+**A merge-group failure in a signed check: file it with an owner, fix its cause, and only then lift the refusal
+with one rerun of all jobs of that run.** A merge group never reuses a pass of its own tree, so its jobs run for
+real, and the observer records a failure like any other record. Only merge-group runs are observed: the Evidence
+observe workflow and its poll take `merge_group` runs, and the observer refuses a push. For a check with inputs,
+that failure is the newest record for the group's key. It shadows every earlier pass on the same key, so every
+pull request whose signed pass of those inputs predates it is refused with `check_failed`, until a newer pass
+exists. That refusal is the rule working: a failure on the same inputs is evidence about those inputs, and a vote
+of passes would hide exactly such a race (#5235 was one, a perf-slot ticket lost in about one join in a few
+hundred under load).
+
+So the failure is a defect first. File it, name its owner, and fix its cause, or record the owner's explicit
+disposition of why it is unrelated to the inputs. A passing rerun proves nothing about the defect. Once that is
+done, the pull requests still refused on the old key can be lifted in either of two ways:
+- **Re-sign.** Each affected pull request signs the check again (`scripts/st-test --check C --push origin`).
+- **Rerun.** One rerun of the whole merge-group run (`gh run rerun RUN`, all jobs) lifts them all at once. The
+  rerun is a new attempt of the same run. The Evidence observe workflow fires on its completion with that attempt,
+  and the poll keys its state on run and attempt (`scripts/ci-evidence-observe`), so the attempt is recorded as new
+  records. It is the same commit, so it has the same key. A job takes longer than the two-minute margin, so a
+  pass is dated after the failure and decides (`test_a_newer_failure_with_the_same_key_stops_the_skip_by_itself`,
+  and, past a preferred level,
+  `test_preferred_levels_take_the_hosts_own_pass_over_a_newer_ci_pass_but_not_over_a_failure_after_it`).
+  Rerun every job, not only the failed one. The observer reads the attempt's own `ci-evidence-source-<attempt>`
+  artifact, which only that attempt's evidence-source job uploads, so a rerun of the failed job alone (`--job`,
+  `--failed`) is never observed and the failure stands. A full rerun is a whole Workspace CI run, so once the fix
+  has merged and moved the key, re-signing the few pull requests left is usually cheaper. A failing rerun stands
+  like any failure.
+
 `linux-gate` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is the Rust test stage's
 (`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
-`docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
-on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
-`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
-`docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
+`docs/st3` and the retained `docs/vrs` migration reference, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
+on which the whole gate passed. `slo` (`include_str!` of `slo/objectives.kdl` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st3` (`crates/fractal/tests/invariants.rs` includes
+`docs/st3/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
 artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
 (`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/fractal-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
@@ -1165,8 +1277,7 @@ the detector matches lies outside the declared list.
 (`scripts/check-public-repo`, formerly called from `tests/public_repo.rs`) and the retired-name check (`scripts/check-native-names`, formerly
 `tests/native_only.rs::tracked_product_surface_contains_only_native_names`). Run inside the Linux gate they would see a page under `apps`, `packages` or
 `release-notes` that the declared inputs leave out, so a skip by input key could hide their failure. `scripts/ci-genie-freshness` runs both; that check's
-key is the whole tree, so it runs for every tree the Linux gate skips. `tests/vrs_ledger.rs` reads only `docs/vrs`, `src`, `tests` and `crates`, all
-declared. A policy test (`test_no_rust_source_lints_the_whole_tree`) fails when a Rust source lists the whole tree with `git ls-files` or calls one of
+key is the whole tree, so it runs for every tree the Linux gate skips. The retired root package's VRS-ledger test was removed with that package. A policy test (`test_no_rust_source_lints_the_whole_tree`) fails when a Rust source lists the whole tree with `git ls-files` or calls one of
 those scripts. The aggregate `linux-gate` note signs its input key like a stage note (its job has no `PROJECT_BASE_SHA`, so
 `ci-evidence-signing` takes the same base from the event payload), which is what publishes `refs/notes/evidence-input/linux-gate/...`. The skip decision is taken once per stage group
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
@@ -1184,6 +1295,26 @@ is a reviewed change to the list (policy, `.st/required-lanes.json`, and the lis
 licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
 (`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/fractal-test` entry and the
 same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
+
+Daily iOS delivery's Python integration suite also runs in this sparse lane.
+`scripts/ios-release-delivery-test` executes
+`apps/ios/scripts/test_release_delivery.py` unchanged; its two declared app inputs
+are that suite and `apps/ios/scripts/release_delivery.py`. It uses real temporary
+Git repositories and executable tool fixtures, not Apple tools or a device.
+The entrypoint is first in the six-process parallel pool so its runtime overlaps
+the other self-tests instead of adding a serial tail. There is no per-suite
+timeout in `parallel_tests`; the hosted `ci-script-tests` job has a 20-minute
+budget including setup. Hosted Ubuntu runners use ordinary Git, not the local
+agent push wrapper, so this lane does not rename fixture branches or use an adapter.
+
+The devnet helper Python suites run via
+`TMPDIR=/tmp python3 -m unittest discover -s apps/fractal-web/scripts/devnet -p '*_test.py'`
+in the same hosted lane. The entire devnet script directory is declared in the
+sparse projection, evidence inputs and lane definition, covering helper imports
+and future discovered suites. The five pinned bubblewrap isolation smoke tests
+remain opt-in (`candidate_sandbox_test.py --real`); discovery runs their unit coverage.
+The short temporary root keeps Unix socket fixtures within the platform's path
+limit even when `nix develop` provides a longer `TMPDIR`.
 
 `isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
 run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
@@ -1323,7 +1454,9 @@ requests skip CI entirely; the merge queue's full run is the comparison). Each f
 ### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
 
 `scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
-window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+window (started by the given accounts), each check as `skipped`, as `not_relevant` (no note covered the tree, but the check's own job
+passed with its `<check>-execution` job skipped, because nothing it reads changed: fractal-web, which st-test does not sign then), or as
+run, and why it ran: `lane_edit` (the pull request changes a file
 of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
 protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
 unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),
@@ -1684,20 +1817,31 @@ and this bridge marker. Do not prefer or copy the shim while copy-only bases rem
 
 `scripts/fractal-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
+records the exit code and output digest.
+
+If the local `typescript-client` check exits 127, the runner prints its caller's `PATH` and `BASH_ENV`, plus
+the web shell hook's start/end snapshots: `PATH`, `command -v pnpm`, `BASH_ENV`, and the publisher's exit status.
+A missing report or end marker means that hook entry or completion was not observed. These snapshots describe
+the hook before the child Bash starts; inherited startup code can still change the child's environment afterward.
+The check keeps its failed status and is not rerun. The report lives in the run's private scratch directory;
+the shell hook writes it only when the runner supplies `CI_WEB_SHELL_DIAGNOSTICS`, and ordinary developer
+shells print no additional output. This gathers evidence for the unresolved environment incident in
+[#4659](https://github.com/compoundingtech/fractal/issues/4659), rather than claiming a later pass fixed it.
+
+The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
 `linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
 linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
 worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
-of persistent ones per ORIGIN (`~/.cache/st-test/pools/<hash of the normalised origin URL>/tree-N`; a clone without an origin has a pool of its own, keyed by its git common dir), each held by an flock while a run uses it
+of persistent ones per canonical ORIGIN (`~/.cache/st-test/pools/<hash of the canonical origin identity>/tree-N`; a clone without an origin has a pool of its own, keyed by its git common dir), each held by an flock while a run uses it
 (a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
 untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots plus one, counted as the cargo shim counts them: `CARGO_HEAVY_SLOTS`, else `~/.config/cargo-heavy-slots`, else 1; `off`
-runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
+runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. `ST_TEST_POOL_RANK=last` puts a run last in the pool: its ticket (rank 999, `POOL_LAST_RANK`) never ages and is never overdue, and its waiter never tries a tree that another ticket waits for, so it takes a tree only while no other run waits. It also takes a tree only while another tree is free, which it leaves to a seat that comes during its run (in a pool of one tree it never runs). The queue signer's seed runs this way (2026-11-01: on one build host it had held 18% of the pool's tree-hours in a day). The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Every waiter follows main's current rules for the queue. A ticket holds the version of the rules its copy of `st-test` follows (`rules N`, `QUEUE_RULES`), and a waiter defers only to tickets of its own rules or newer: an older copy's ticket, or one with no version, gets no deference, and the tree's flock decides between them, so a waiter left on old rules cannot stall the new ones. While a run waits for a tree, it fetches the base every ten minutes (`QUEUE_FOLLOW_SECONDS`), and when the base's own `scripts/st-test` (never a branch's) is no longer the copy it runs, it unwinds and executes that copy in the same process: the same pid, so the newer copy takes the ticket over (`ST_TEST_HANDOVER_TICKET`) and with it the run's place, its start and its name in the host's admission order. It never does so once it holds a tree, so one copy runs every check of a run and signs it; what a note names (the base's evidence-wrap, evidence-sign and evidence-verify, the tree, the lane) is unchanged. On 2026-10-30 a run that started before the two-hour rule merged kept the older copy it started with and waited 13.2 h: the new waiters deferred to its overdue ticket while it deferred to their rank-3 ones. Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
 takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Slot first:** a tree held while its run waits for a build slot is a tree nobody can use (2026-10-28: on one build host the slowest run waited
 42,265 s for a tree while linux-gate in the held trees waited 1,000-2,400 s at a time for a build slot), and a tree cannot be given back while a
 check is at work in it. So the best ticket takes a free tree only when a build started now would get a heavy slot at once: more of the shim's
@@ -1708,14 +1852,31 @@ starves no run. A host without the shim's slots, or a gate that cannot be read, 
 `tree_wait_s` (the wait for its tree), `tree_slot_wait_s` (the part of it with a tree free, waiting for a slot), `tree_held_s` and
 `tree_blocked_s`: the time the build lane held the tree and built nothing, `tree_pre_start_s` before `ci-local` started (admission and the dev
 shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
-counted). **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+counted). A run that builds asks for its seat's lane burst at its tree, and takes the tree only once the burst is granted (docs/st3/seat-lanes.md,
+"Bursts"), so the burst wait is part of `tree_wait_s`; its record has `burst` (the size held, or null with `burst_none` saying why) and
+`burst_wait_s`, the wait for it; a handover keeps the burst or its waiting ask, which the newer copy carries on. **Every clone of one origin shares the pool**. Origins normalize HTTPS, SSH and scp transport spellings, default ports and
+the remote `.git` suffix. Only GitHub host and owner/repository names fold case; local and `file://` paths keep their case and `.git`
+suffix, and nondefault ports stay distinct. Relative local paths resolve from the caller's checkout. Pinned renames in
+`.st/repo-aliases.json` (or the preferred `.fractal/repo-aliases.json`, when present) map exact normalized identities to the canonical
+pool identity. The data is read from the pinned accepted base, including when the runner is extracted alone; an absent file on an
+older base means no aliases. A malformed alias file refuses the run. Canonical identities keep existing pools warm and need not be
+the current repository name. No redirect or other network lookup discovers aliases. Selecting a pool never moves or deletes another
+pool. Duplicate pools under former keys, including keys changed by stricter normalization, remain eligible for ordinary global
+least-recently-used eviction when the pool cap is enabled and exceeded. With the cap off or not exceeded, an idle duplicate can persist
+indefinitely: there is no idle-age timer. No manual migration is needed; operators may independently reclaim unlocked duplicate build
+output after rollout under their existing cleanup policy. Unknown schemes (for example `fabric://`) keep their whole URL and may also
+change pool key once.
+Thus a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
 its own exact tree: the tree is reset to the commit and cleaned every run, whoever used the slot before. A slot has one writer: its lease (an
 `flock` on `tree-N.lock`) ends with the run that held it, but not always with what that run started. On 2026-10-28 a seat restart killed a run
 during its checkout of `tree-2`, and the next five runs given the tree failed on the `index.lock` git left. So a free slot whose tree still has
-a process at work in it (read from `/proc`) is busy: it is skipped, named once per waiter, until those processes end. A leftover `index.lock`
+a process at work in it (read from `/proc`) is busy: it is skipped, named once per waiter, until those processes end. **Never name a pool path in
+a command's arguments** (`du`, `find` or `ls` under `~/.cache/st-test/pools/`) on a host where runs may be waiting: a process whose argv names a
+tree counts as a reference to it, and the run given that tree fails rather than signal a process it did not start (2026-11-01: a `du` over the
+pool directories failed a run). Read pool use from `df`, a slot's `tree-N.size`, or the runs' own summaries. A leftover `index.lock`
 is removed before the checkout, and logged, only when no process is left in the tree. With one still there, the run fails rather than
 sharing the tree. The pool cap (`ST_TEST_POOL_MAX_GB`)
 evicts whole slots, least recently used first, the old per-clone layout included. When that tree has a
@@ -1797,10 +1958,23 @@ Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/cu
 the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
 PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
 All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
-tree already held, `fractal-test` removes the least recently used trees and their targets whose lock is free, oldest first, until the pool directory
+tree already held, `fractal-test` removes the least recently used trees and both their workspace and fleet-compat targets whose lock is free, oldest first, until the pool directory
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
-compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
-`build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. A build host's
+cargo config may point `build-dir` elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`). Every check that builds runs with
+`CARGO_BUILD_BUILD_DIR` set to its own target, so the intermediates stay in the pool, under the tree's lock and the cap. That includes each
+unit's dep-info, which the keyed checks read after the build. The fleet-compat stage moves its build-dir with its own target. Left on the
+build disk, nothing held them for the run: one host's were removed between a run's clippy build and its dep-info check, so the check found no
+dep-info and linux-clippy was refused (2026-11-06).
+A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
+`/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
+a kept one). A host's `/tmp` can be a small tmpfs that swaps, and `nix develop -c` never removes the `nix-shell.*` directory it makes its
+command's `TMPDIR`, so every check left one there, with whatever its tests wrote (about 370 a day on one build host, 2026-10-30), as did
+evidence-wrap's key file. The run holds an flock on its directory while it lives: a killed run's directory is removed by the next run, once
+it is ten minutes old and nobody holds its lock (only `st-test.*` directories this account owns are judged). It is not under `~/.cache`
+because tests bind Unix sockets a few levels below a `nix-shell.XXXXXX` in it, and a socket path is limited to 108 bytes: under
+`~/.cache/st-test/tmp/XXXXXXXX` the Watchman socket of `scripts/ci-local-web-test` took 114. `scripts/ci-local` and `scripts/ci-local-web`
+still give their stages a `TMPDIR` of their own (below).
 `scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
 end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
@@ -1824,12 +1998,19 @@ with the branch as it was (`git merge --abort`); so does a checkout that gained 
 before it pushes: it fetches the base, merges it in when the gate would now judge the merge (as above, with your git identity, never a rebase), and
 asks the base's verifier about EVERY check of the suite for the head, as `--status` does. What is covered is not run again; what is not (a check whose
 tree the merge changed, a crate whose key main's `.st/rust-test-inputs.json` moved, the whole-tree checks a narrowed `--check rust-tests --crate X`
-run did not select once it merged) is signed in the same pool tree, and the branch is pushed at once when nothing is missing, so main has no time
-to move a protected file between a green run and its push (2026-10-29: a run's three checks were green and its push was refused, main having moved a
+run did not select once it merged) is signed in the same pool tree, and the branch is pushed as soon as coverage is complete
+(2026-10-29: a run's three checks were green and its push was refused, main having moved a
 protected file during the run). It does this at most `TOP_UP_ROUNDS` (3) times after the run itself, each against the base as it is then (`fractal-test:
 top-up round 1 of 3: origin/main is at <sha>, merged into the branch as <sha>; signing what <sha> lacks: linux-gate, rust-tests (2 crates: ...)`), and
 then fails, exit 2, with `main is moving too fast; run again`: the notes it signed are pushed, the branch is not. A conflict in a top-up merge stops the
-run the same way (`git merge --abort`, the branch as it was, not pushed). When the base did not move and a check the round signed is still not covered
+run the same way (`git merge --abort`, the branch as it was, not pushed). If the fetched base changed `scripts/st-test`, the green run finishes its lanes,
+confirms its notes on the remote and releases its tree before continuing in that base's runner to plan the top-up. The continuation acquires a pool
+lock before preparing its tree. Another run can take or evict the old tree meanwhile; valid notes remain reusable on a different tree. The new runner asks about its own whole suite, including newly added local checks
+such as `linux-fleet-compat`, rather than carrying the old runner's check list into the push. It keeps the process, original start time, admission order
+and consumed top-up rounds; changing runners does not reset the three-round bound. It keeps the run's lane burst too: the new runner takes a free
+tree at once with it, or gives it back if none is free (docs/st3/seat-lanes.md, "Bursts"). Notes that still cover the new base are reused, including after
+an original `--rerun` or narrowed selection; a newly required check that fails leaves the branch unpublished.
+When the base did not move and a check the round signed is still not covered
 (a note the verifier finds too old, say), signing again would change nothing: the run ends as before, pushing a merge it made and not a head that is not
 covered. A narrowed run that merged nothing pushes only its notes, as before. The branch goes to the branch of the same name on REMOTE (never forced,
 through the pre-push hook as any push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a
@@ -1839,7 +2020,7 @@ and every run that starts nix checks it can find it (on PATH, else `/run/current
 `/nix/var/nix/profiles/default/bin/nix`): a `systemd-run --user` unit starts with the user manager's PATH, so pass it `--setenv=PATH="$PATH"`. Either
 missing fails the run at once, not after hours in the queue. A `--base` given as a commit ID (no `remote/` prefix) reads its repository through `origin`. `--status` changes nothing: it asks about the tree CI would judge now, the merge tree (`git merge-tree`, nothing
 checked out), so the pre-push hook refuses a push when that tree is not covered even if the head tree is. A run that waits for a pool tree fetches
-the base again once it has one and decides at the base's tip then (a branch that does not merge with the base is still refused before the wait).
+the base again once it has one and decides at the base's tip then (a branch that does not merge with the base is still refused before the wait, and before any wait for a lane burst, with a pool tree or without).
 A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
 judges it: `fractal-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
 from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
@@ -1867,6 +2048,11 @@ The check that builds the Rust workspace (`linux-gate`) builds in one cargo targ
 trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
 trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
+Fleet compatibility uses the kept sibling `target-N-fleet-compat`, about 20 GB extra per pool tree. Its Cargo target is separate because
+its feature selection can relink binaries that the tests are executing (#4128). Both targets count toward the pool cap, are evicted
+together under the tree's lock, and are emptied together before a run when their combined size exceeds the existing 80 GB target limit. A shared
+`ST_EVIDENCE_TARGET=PATH` uses `PATH-fleet-compat` under the same exclusive lock. With `off`, fleet compatibility builds in the tree's
+`target/fleet-compat` (under the usual ignored `target/`, also excluded by the dependency-input checker); an explicit `CARGO_TARGET_DIR=PATH` uses the separate `PATH-fleet-compat` without st-test trimming either directory.
 Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
@@ -1955,6 +2141,27 @@ host's Watchman service, named by its socket. The note records `kit_shard_count=
 as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). fractal-test asks the base's own
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
+The check's declared inputs and lane tree inputs include `nix/fractal-web-publisher.nix`; the existing `apps/fractal-web` input
+covers its server sources. Publisher packaging changes therefore invalidate web evidence just as the web detector requires.
+
+Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
+counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
+place. Rust checks keep their per-command admission because their detached test guardian cannot inherit a held stage slot. Web and
+light output is buffered and printed after the build lane, and a background lane that exits without a result fails its checks.
+On timeout or interruption the web process group is killed together with its slot supervisor before the lane is joined; HUP and
+TERM unwind through the same cleanup. A cancelled run also stops a web process that starts during cancellation. Hosts with a cargo
+admission shim must support `--stage-slot`; an unsupported shim fails the check. The web changelog registry writer's generated
+`registry.generated.ts` and its atomic `.tmp` siblings are ignored so they cannot transiently dirty the shared tree for another lane.
+Web and `typescript-client` hold the same per-worktree file lock for their entire check, including every install and dependency
+reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
+runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
+remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+The runner's self-test fixtures select their own scheduling mode and do not inherit the enclosing run's serial setting.
+
+An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
+deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
+head as `candidate`. `scripts/fractal-test-report` lists those runs separately and excludes them from every SLO figure. Normal signing
+continues to execute the accepted base's runner.
 
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
 is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
@@ -1979,9 +2186,13 @@ ratchet compared with the base (as CI compares with the event's base): fractal-t
 fetched (`CLIPPY_BASE_SHA`) and records it in the note as the input `clippy_base_sha`, which a host or agent `linux-gate` note must
 carry; run by hand, `ci-local` fetches main itself and never trusts a local ref, and refuses when it cannot. Every other input
 `evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
-installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
-and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
-since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
+installing the rendered hooks as the job's test-archive setup does, in a home of its own.
+Clippy and fleet compatibility each run in a buffered lane beside tests. Clippy shares the workspace target and Cargo's build lock;
+fleet compatibility uses its own target, so its compiles can overlap the tests build; every Cargo command still takes host build admission. Their logs are printed after foreground stages, in the requested stage order, and the first
+failure in that order is returned, including a lane that leaves no result. `CI_LOCAL_SERIAL=1` restores sequential stages while keeping
+the separate targets. HOME and the XDG state, config, data
+and cache directories are a scratch directory that is removed afterwards, and no Fractal variable (`ST_*`, `ST2_*`, `ST3_*` and,
+since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
@@ -2060,7 +2271,8 @@ runs `fractal-test --seed COMMIT` on each new tip of main, which signs and pushe
 whose key has none yet, so a pull request branched from main reuses them; most merges move a handful of crates, one that moves the lane
 all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
 It starts on the same terms as `sign`, and not while another `fractal-test --seed` runs on the host (that tick is skipped; the next tries
-again); its nextest takes the build slots through the admission shim like any `fractal-test` build. A tip is seeded once whatever the outcome
+again); its nextest takes the build slots through the admission shim like any `fractal-test` build, and it waits for a pool tree last
+(`ST_TEST_POOL_RANK=last`, above): a seat's run waiting for a tree always goes first. A tip is seeded once whatever the outcome
 (the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
 slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
 a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether

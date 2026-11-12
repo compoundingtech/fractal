@@ -26,11 +26,21 @@ use crate::model::{
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    DiscoveredUnix(fractal_client::UnixSocketDiscovery),
     Http(String),
     Fabric(FabricEndpoint),
 }
 
 impl Endpoint {
+    /// Resolve discovery at use time; explicit Unix endpoints remain exact.
+    pub fn unix_socket(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        match self {
+            Self::Unix(path) | Self::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Explicit(path)) =>
+                Some(std::borrow::Cow::Borrowed(path)),
+            Self::DiscoveredUnix(discovery) => Some(std::borrow::Cow::Owned(discovery.resolve())),
+            Self::Http(_) | Self::Fabric(_) => None,
+        }
+    }
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
         if value.starts_with("fabric:") {
@@ -258,6 +268,8 @@ pub struct DaemonUnreachable {
     starting: bool,
     full_replay: bool,
     socket_os_error: Option<i32>,
+    /// Refused, and no daemon holds this socket's readiness lock.
+    abandoned: bool,
 }
 
 impl DaemonUnreachable {
@@ -270,6 +282,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -282,6 +295,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -312,9 +326,21 @@ impl DaemonUnreachable {
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
+        let abandoned = error.kind() == std::io::ErrorKind::ConnectionRefused
+            && crate::startup::abandoned(Path::new(&endpoint));
         let mut outage = Self::connect(endpoint, reason);
         outage.socket_os_error = error.raw_os_error();
+        outage.abandoned = abandoned;
         outage
+    }
+
+    /// Where an abandoned socket may have gone: a daemon started with `--socket` elsewhere.
+    fn elsewhere(&self) -> &'static str {
+        if self.abandoned {
+            "; no daemon holds this socket now, so the daemon may also be listening on another socket (name it with `socket` in config.toml or ST3_ENDPOINT)"
+        } else {
+            ""
+        }
     }
 
     fn after(mut self, waited: Duration) -> Self {
@@ -357,8 +383,8 @@ impl DaemonUnreachable {
         }
         match self.phase {
             OutagePhase::Connect => format!(
-                "the st daemon at {} is not reachable ({}); it may be restarting",
-                self.endpoint, self.reason
+                "the st daemon at {} is not reachable ({}); it may be restarting{}",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => format!(
                 "the st daemon at {} closed the connection before it answered ({}); it may be restarting, and the request may or may not have been applied",
@@ -377,8 +403,8 @@ impl fmt::Display for DaemonUnreachable {
         match self.phase {
             OutagePhase::Connect => write!(
                 formatter,
-                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped. Nothing was sent; run the command again once the daemon is back",
-                self.endpoint, self.reason
+                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped{}. Nothing was sent; run the command again once the daemon is back",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => write!(
                 formatter,
@@ -397,6 +423,27 @@ pub fn daemon_unreachable(error: &anyhow::Error) -> Option<&DaemonUnreachable> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<DaemonUnreachable>())
 }
+/// One logical mutation, including refused projection-drain attempts. No body, key or
+/// identity is exposed; `route` omits the query string.
+#[derive(Clone, Copy, Debug)]
+pub struct MutationObservation<'a> {
+    pub method: &'a str,
+    pub route: &'a str,
+    pub attempts: u32,
+    pub took: Duration,
+    pub retry_wait: Duration,
+}
+
+type MutationObserver = Box<dyn Fn(&MutationObservation<'_>) + Send + Sync>;
+static MUTATION_OBSERVER: std::sync::OnceLock<MutationObserver> = std::sync::OnceLock::new();
+
+/// Install optional per-call diagnostics once, before starting calls. Observing sends nothing.
+pub fn set_mutation_observer(
+    observer: impl Fn(&MutationObservation<'_>) + Send + Sync + 'static,
+) {
+    let _ = MUTATION_OBSERVER.set(Box::new(observer));
+}
+
 
 #[derive(Clone, Copy)]
 pub struct ClientDeadlines {
@@ -436,6 +483,12 @@ impl Client {
             #[cfg(any(test, feature = "test-support"))]
             follow_test: None,
         }
+    }
+
+    /// Preserve an endpoint's discovery identity when adding local authority.
+    pub fn with_endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     /// Keep retrying for up to `wait` while the daemon is unreachable. Only requests that are
@@ -495,12 +548,9 @@ impl Client {
         Self::new(Endpoint::Unix(path.into()))
     }
 
-    /// The daemon's Unix socket, when this client talks to one.
-    pub fn socket_path(&self) -> Option<&std::path::Path> {
-        match &self.endpoint {
-            Endpoint::Unix(path) => Some(path),
-            Endpoint::Http(_) | Endpoint::Fabric(_) => None,
-        }
+    /// A current Unix socket snapshot. Request clients retain the endpoint's discovery identity.
+    pub fn socket_path(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        self.endpoint.unix_socket()
     }
 
     /// Name the concrete human authority carried over the trusted Unix boundary.
@@ -533,6 +583,21 @@ impl Client {
         Ok(client)
     }
 
+    /// Name the mission run a program effect acts as over the trusted Unix boundary. The daemon
+    /// accepts it only when the caller's run credential binds that run.
+    pub fn unix_run(path: impl Into<PathBuf>, run: impl Into<String>) -> Result<Self> {
+        let run = run.into();
+        anyhow::ensure!(
+            run.strip_prefix("mission-run/").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+            "Unix run authority must be one concrete `mission-run/<id>` subject"
+        );
+        let mut client = Self::unix(path);
+        client.person = Some(run);
+        Ok(client)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let first_page = path.starts_with("/v1/client/") && !request_has_page_cursor(path);
         for attempt in 0..3 {
@@ -562,8 +627,8 @@ impl Client {
         &self,
         request: &fractal_schema::deploy::VerifyGoRequest,
     ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
-            return Err(crate::model::St3Error::new(
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
+            return Err(crate::model::FractalError::new(
                 "deploy-local-only",
                 "deploy verification requires the local Unix endpoint",
             ).into());
@@ -638,21 +703,51 @@ impl Client {
             .transpose()?
             .unwrap_or_default();
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
+        let result = loop {
+            attempts += 1;
             let attempt_started = tokio::time::Instant::now();
             let error = match self.request_once(method, path, &bytes).await {
                 Ok(response) => {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
                     }
-                    return decode_api_response(&response);
+                    break decode_api_response(&response);
                 }
                 Err(error) => error,
             };
+            if mutation && api_error_parts(&error).is_some_and(|(status, code, _, details)| {
+                status == 503 && code == "database-busy"
+                    && details.get("reason").and_then(serde_json::Value::as_str)
+                        == Some("run-projection-drain")
+            }) {
+                // The completed refusal guarantees the action never ran. Reserve the entire
+                // next request deadline; never cancel a sent mutation and return this refusal.
+                let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let delay = jittered(pause);
+                if remaining < request_deadline(path, self.deadlines) + delay {
+                    break Err(error);
+                }
+                draining = true;
+                let slept = tokio::time::Instant::now();
+                tokio::time::sleep(delay).await;
+                retry_wait += slept.elapsed();
+                if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    < request_deadline(path, self.deadlines)
+                {
+                    break Err(error);
+                }
+                pause = (pause * 2).min(Duration::from_secs(1));
+                continue;
+            }
             if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
-                return Err(error);
+                break Err(error);
             }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
@@ -667,18 +762,18 @@ impl Client {
                 continue;
             }
             let Some(outage) = daemon_unreachable(&error) else {
-                return Err(error);
+                break Err(error);
             };
             if outage.full_replay && self.announce_outage_wait {
-                return Err(error);
+                break Err(error);
             }
             let repeatable = outage.phase() == OutagePhase::Connect || method == "GET";
             let waited = started.elapsed();
             if !repeatable || self.outage_wait.is_zero() {
-                return Err(error);
+                break Err(error);
             }
             if waited >= self.outage_wait {
-                return Err(outage.clone().after(waited).into());
+                break Err(outage.clone().after(waited).into());
             }
             if self.announce_outage_wait && !announced {
                 eprintln!(
@@ -688,9 +783,31 @@ impl Client {
                 );
                 announced = true;
             }
-            tokio::time::sleep(jittered(pause).min(self.outage_wait - waited)).await;
+            let remaining = if draining {
+                (self.outage_wait - waited).min(drain_deadline.saturating_duration_since(tokio::time::Instant::now()))
+            } else {
+                self.outage_wait - waited
+            };
+            let slept = tokio::time::Instant::now();
+            tokio::time::sleep(jittered(pause).min(remaining)).await;
+            retry_wait += slept.elapsed();
+            if draining && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                < request_deadline(path, self.deadlines)
+            {
+                break Err(error);
+            }
             pause = (pause * 2).min(Duration::from_secs(1));
+        };
+        if mutation && let Some(observer) = MUTATION_OBSERVER.get() {
+            observer(&MutationObservation {
+                method,
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
 
     async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
@@ -725,9 +842,10 @@ impl Client {
         }
         let deadline = request_deadline(path, self.deadlines);
         let response = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 unix_request(
-                    socket,
+                    &socket,
                     method,
                     path,
                     bytes,
@@ -798,7 +916,7 @@ impl Client {
     /// read without any graph write. `None` leaves the attach to the WebSocket: an HTTP endpoint
     /// can be another host, and a daemon from before direct attachment has no such route.
     pub async fn local_terminal(&self, subject: &str) -> Result<Option<LocalTerminal>> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Ok(None);
         }
         match self
@@ -882,10 +1000,9 @@ impl Client {
         &self,
         fence: &Fence,
     ) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>> {
-        let Endpoint::Unix(path) = &self.endpoint else {
-            anyhow::bail!("native mailbox subscriptions require a local Unix socket");
-        };
-        let stream = tokio::net::UnixStream::connect(path).await?;
+        let path = self.endpoint.unix_socket()
+            .context("native mailbox subscriptions require a local Unix socket")?;
+        let stream = tokio::net::UnixStream::connect(path.as_ref()).await?;
         let url = format!(
             "ws://localhost/v1/mailbox?subject={}&incarnation={}&component={}&epoch={}&token={}",
             urlencoding::encode(&fence.subject),
@@ -914,11 +1031,12 @@ impl Client {
             Endpoint::Fabric(_) => {
                 anyhow::bail!("native Fabric endpoints do not support WebSocket requests");
             }
-            Endpoint::Unix(socket) => {
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 let endpoint = socket.display().to_string();
                 let stream = tokio::time::timeout(
                     self.deadlines.connect,
-                    tokio::net::UnixStream::connect(socket),
+                    tokio::net::UnixStream::connect(socket.as_ref()),
                 )
                 .await
                 .map_err(|_| connect_deadline_error(&endpoint, self.deadlines.connect))?
@@ -1056,6 +1174,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.empty)
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -1135,6 +1261,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1527,11 +1655,11 @@ impl MailboxRetry {
 }
 
 /// The window over which drivers re-executed by one deploy spread what their seats' delivery does
-/// not need. At hetz2's 07:30:58Z restart, about 60 drivers sent their harness events, presence
+/// not need. At one host's 07:30:58Z restart, about 60 drivers sent their harness events, presence
 /// diagnostics and native sessions in the new daemon's first eight seconds. Those requests added
 /// about seven seconds of writer time to those eight, and write-acks queued behind them. Over 30
-/// seconds the same work takes under a quarter of the writer. Harness evidence stays fresh for 90
-/// seconds, so nothing ages out while a driver waits.
+/// seconds the same work takes under a quarter of the writer. The shared harness observation
+/// freshness window exceeds this settling interval, so nothing ages out while a driver waits.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(30);
 
 /// How long a driver re-executed into a new binary waits before it sends what its seat's delivery
@@ -1715,6 +1843,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -1744,6 +1873,15 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unix_run_client_names_exactly_one_mission_run() {
+        let client = Client::unix_run("/tmp/socket", "mission-run/0123abcd").unwrap();
+        assert_eq!(client.person.as_deref(), Some("mission-run/0123abcd"));
+        for run in ["mission-run/", "mission-run/a/b", "person/operator", "mission-run/a b"] {
+            assert!(Client::unix_run("/tmp/socket", run).is_err(), "{run}");
+        }
+    }
 
     #[tokio::test]
     async fn bind_422_warns_and_keeps_retrying() {
@@ -2068,6 +2206,30 @@ mod tests {
         assert!(outage.local_connect_defect());
         assert!(!outage.starting);
         assert!(outage.summary().contains("inspect the socket path"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_socket_no_daemon_holds_says_the_daemon_may_listen_elsewhere() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let refused = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        let outage = || DaemonUnreachable::connect_io(socket.display().to_string(), &refused);
+        // No daemon ever observed startup here: refused, as before.
+        assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        {
+            let startup = crate::startup::Startup::begin(&socket).unwrap();
+            startup.serving();
+            // A daemon holds it: a restart or a slow accept, not a socket left behind.
+            assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        }
+        // That daemon has exited and nothing holds the socket.
+        let summary = outage().summary();
+        assert!(summary.contains("it may be restarting; no daemon holds this socket now"), "{summary}");
+        assert!(summary.contains("`socket` in config.toml or ST3_ENDPOINT"), "{summary}");
+        let waited = outage().after(Duration::from_secs(30)).to_string();
+        assert!(waited.contains("restarting or stopped; no daemon holds this socket now"), "{waited}");
     }
 
     #[cfg(target_os = "linux")]
@@ -2508,6 +2670,44 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("was not reachable for 0s"), "{message}");
         assert!(message.contains("Nothing was sent"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn default_discovery_retries_a_legacy_daemon_restored_during_the_wait() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("fractal.sock");
+        let legacy = directory.path().join("st3.sock");
+        let discovery = fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: primary.clone(),
+            published: primary.clone(),
+        };
+        assert_eq!(discovery.resolve(), primary);
+        let client = Client::new(Endpoint::DiscoveredUnix(discovery))
+            .with_outage_wait(Duration::from_secs(2), false);
+        let request = tokio::spawn(async move { client.get::<usize>("/v1/test").await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listener = UnixListener::bind(&legacy).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                if stream.read(&mut bytes).await.unwrap() == 0 {
+                    continue; // Discovery probes do not issue an HTTP request.
+                }
+                let body = r#"{"api_version":"st3.v1","value":42}"#;
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+                break;
+            }
+        });
+        assert_eq!(request.await.unwrap().unwrap(), 42);
+        server.await.unwrap();
+        assert!(!primary.exists());
+        assert!(Client::unix(primary).with_outage_wait(Duration::from_millis(50), false)
+            .get::<usize>("/v1/test").await.is_err());
     }
 
     #[tokio::test]
@@ -3012,4 +3212,23 @@ mod tests {
             "a session the registry did not name must receive nothing"
         );
     }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
+    }
+
 }

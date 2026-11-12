@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Decode the st3.v1 envelope in Fabric adapter membership and pairing reads",
+  "replay": { "status": "none", "detail": "No startup or projection replay changes." },
+  "schema": { "status": "none", "detail": "No persisted formats or database schema changes." },
+  "rules": { "status": "none", "detail": "Membership verification and Fabric grant ownership are unchanged. Failed snapshot reads still cannot withdraw grants." },
+  "compatibility": { "status": "none", "detail": "The adapter now reads the existing st3.v1 response envelope for leave-state and pairing admission instead of expecting an unwrapped payload. No daemon wire contract changes." },
+  "downtime": { "status": "none", "detail": "Restart the adapter to use the corrected reads; no daemon restart is required." },
+  "manual": { "status": "none", "detail": "No store repair or coordinated fleet upgrade is required." },
+  "recovery": { "status": "none", "detail": "Rollback does not change stored state; older adapters retain the response decoding defect." }
+}

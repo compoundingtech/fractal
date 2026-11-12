@@ -17,6 +17,81 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
+    let cases: serde_json::Value = decode("message-sender-outcomes.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/Page"
+    })).unwrap();
+    assert!(validator.is_valid(&cases));
+    for raw in cases["items"].as_array().unwrap() {
+        let message: Message = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(message.state, raw["state"].as_str().unwrap());
+        let encoded = serde_json::to_value(message).unwrap();
+        assert_eq!(encoded["state"], raw["state"]);
+    }
+}
+
+#[test]
+fn person_option_notes_round_trip_and_empty_omission() {
+    let legacy = serde_json::json!({"id": "land", "text": "Ship it."});
+    let input: PersonAnswerInput = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(input.option_notes.is_empty());
+    assert_eq!(serde_json::to_value(&input).unwrap(), legacy);
+    let notes = serde_json::json!([{"id": "hold", "text": "Keep as a fallback."}]);
+    let wire = serde_json::json!({"id": "land", "text": "Ship it.", "option_notes": notes});
+    let input: PersonAnswerInput = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(input.option_notes[0].id, "hold");
+    assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    let stored = serde_json::json!({"type": "decision", "outcome": "accept",
+        "id": "land", "text": "Ship it.", "option_notes": notes});
+    let answer: PersonAnswer = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(serde_json::to_value(answer).unwrap(), stored);
+    let mut empty = stored;
+    empty["option_notes"] = serde_json::json!([]);
+    let answer: PersonAnswer = serde_json::from_value(empty.clone()).unwrap();
+    empty.as_object_mut().unwrap().remove("option_notes");
+    assert_eq!(serde_json::to_value(answer).unwrap(), empty);
+}
+
+#[test]
+fn person_option_notes_schema_is_nested_and_strict() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/PersonAnswerInput"
+    })).unwrap();
+    assert!(validator.is_valid(&serde_json::json!({"id": "land",
+        "option_notes": [{"id": "hold", "text": "Fallback."}]})));
+    for note in [
+        serde_json::json!({"id": "hold"}),
+        serde_json::json!({"id": "hold", "text": ""}),
+        serde_json::json!({"id": "hold", "text": "x".repeat(8001)}),
+        serde_json::json!({"id": "hold", "text": "Fallback.", "label": "extra"}),
+    ] {
+        assert!(!validator.is_valid(&serde_json::json!({"id": "land", "option_notes": [note]})));
+    }
+}
+
+#[test]
+fn related_run_rows_decode_and_validate_server_semantics() {
+    let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
+    let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
+    assert!(decoded.rows[0].waiting_on_you);
+    assert!(decoded.rows[0].eta.is_none());
+    assert_eq!(decoded.rows[0].current_step.as_ref().unwrap().who.as_deref(), Some("person/reviewer"));
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let schema = serde_json::json!({"$defs":schema["$defs"],"$ref":"#/$defs/AgentRelatedRuns"});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&value));
+    let mut invalid = value;
+    invalid["rows"][0]["urgency_rank"] = serde_json::json!(5);
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
 fn revisioned_agents_frames_keep_typed_publication_and_snapshot_provenance() {
     let CollectionEvent::AgentsSnapshotChunk {
         id, collection, snapshot, publication, chunk_index, chunk_count, items, order, has_more,
@@ -443,6 +518,33 @@ fn generated_models_decode_every_stream_fixture() {
 }
 
 #[test]
+fn mcp_pairing_and_read_proofs_preserve_their_principal() {
+    let paired: Envelope<PairedSession> = decode("assistant-mcp-pairing.json");
+    let PairedSession::Assistant(session) = paired.value else {
+        panic!("MCP session decoded as person");
+    };
+    assert_eq!(session.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.issuer, "person/robin");
+    assert_eq!(
+        session.session_actor,
+        format!("assistant/mcp/session/{}", session.grant.id)
+    );
+    assert_eq!(session.session_actor, session.grant.session_actor);
+    assert!(serde_json::from_slice::<Envelope<PersonPairedSession>>(
+        &fixture("assistant-mcp-pairing.json")
+    ).is_err());
+
+    let mut proof: serde_json::Value = decode("assistant-read-authorization.json");
+    proof["payload"]["issuer"] = serde_json::json!("person/robin");
+    proof["payload"]["identity"] = serde_json::json!("mcp");
+    proof["payload"]["assistant_id"] = serde_json::json!("assistant/mcp");
+    let proof: ScgReadAuthorization = serde_json::from_value(proof).unwrap();
+    assert_eq!(proof.payload.identity, ScgReadIdentity::Mcp);
+    assert_eq!(proof.payload.assistant_id, AssistantPrincipal::Mcp);
+}
+
+#[test]
 fn assistant_pairing_is_disjoint_from_person_delegation() {
     let begin: PairingBegin = decode("assistant-pairing-begin.json");
     let PairingBegin::Assistant(request) = begin else { panic!("assistant request decoded as person"); };
@@ -783,6 +885,26 @@ fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
         legacy.body,
         TimelineBody::ToolResult(body) if body.blocks.is_empty()
     ));
+}
+
+#[test]
+fn a_mailbox_content_entry_names_its_message_and_older_content_decodes_without() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/mailbox-content", "sequence": 3, "revision": 1,
+        "timestamp": "2026-09-20T12:00:00Z", "role": "user", "type": "content", "final": true,
+        "body": {"media_type": "text/plain", "text": "hello", "message_id": "message/first"}
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::Content(body) = &entry.body else {
+        panic!("content discriminator was not preserved");
+    };
+    assert_eq!(body.message_id.as_deref(), Some("message/first"));
+    assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+
+    wire["body"].as_object_mut().unwrap().remove("message_id");
+    let older: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(&older.body, TimelineBody::Content(body) if body.message_id.is_none()));
+    assert_eq!(serde_json::to_value(&older).unwrap(), wire);
 }
 
 #[test]
@@ -1244,4 +1366,23 @@ fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() 
         "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
 }
