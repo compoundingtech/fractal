@@ -588,11 +588,22 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "from_stale_handoff": args.from_stale_handoff,
                         "ignore_fit": args.ignore_fit,
                         "reason": args.reason,
                     }),
                 )
                 .await?;
+            if request.body["fields"]["fresh_session"] == true
+                && request.body["fields"]["operation"] != fractal_daemon::handoff::RESTART_NOW_OPERATION
+            {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Fresh-session restart pending for {subject}: waiting for the agent to write or mark its handoff ready; no deadline forces the restart");
+                    Ok(())
+                };
+            }
             if request.body["fields"]["action"] == "restart-when-idle" {
                 return if json_output {
                     print_value(&request, true)

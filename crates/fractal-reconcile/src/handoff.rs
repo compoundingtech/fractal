@@ -191,12 +191,17 @@ pub fn ready_since_last_turn(store: &Store, agent: &str) -> Result<bool> {
 }
 
 /// The "prepare for restart" message: why, by when, and what to do.
-pub fn render_prepare(reason: &str, deadline_unix_ms: u128, now_unix_ms: u128) -> String {
-    let seconds = deadline_unix_ms.saturating_sub(now_unix_ms).div_ceil(1000);
+pub fn render_prepare(reason: &str, deadline_unix_ms: Option<u128>, now_unix_ms: u128) -> String {
+    let timing = deadline_unix_ms.map_or_else(
+        || "It restarts into a fresh session only once you acknowledge; it never restarts without your acknowledgement".to_owned(),
+        |deadline| format!(
+            "It restarts as soon as you acknowledge, or in {} s, whichever comes first",
+            deadline.saturating_sub(now_unix_ms).div_ceil(1000),
+        ),
+    );
     format!(
-        "st is about to restart this seat: {reason}. It restarts as soon as you acknowledge, or in \
-         {seconds} s, whichever comes first, and the session after this one will not remember \
-         this conversation.\n\n\
+        "st is about to restart this seat: {reason}. {timing}, and the session after this one \
+         will not remember this conversation.\n\n\
          Write your handoff now with `st agents handoff write --as \"$ST_AGENT\"` (stdin or a \
          file): what you were doing, open pull requests and branches, what you wait on, the next \
          steps, and anything running that you started. Writing it is the acknowledgement. If the \
@@ -461,11 +466,20 @@ mod tests {
 
     #[test]
     fn the_prepare_message_says_why_when_and_how_to_acknowledge() {
-        let text = render_prepare("the declared model changed", 130_000, 10_000);
+        let text = render_prepare("the declared model changed", Some(130_000), 10_000);
         assert!(text.contains("the declared model changed"), "{text}");
         assert!(text.contains("in 120 s"));
         assert!(text.contains("st agents handoff write"));
         assert!(text.contains("st agents handoff ready"));
+    }
+
+    #[test]
+    fn a_fresh_restart_prepare_message_has_no_restart_anyway_deadline() {
+        let text = render_prepare("a fresh session was requested", None, 10_000);
+        assert!(text.contains("only once you acknowledge"), "{text}");
+        assert!(text.contains("never restarts without your acknowledgement"), "{text}");
+        assert!(!text.contains("whichever comes first"), "{text}");
+        assert!(text.contains("st agents handoff write"), "{text}");
     }
 
     #[test]

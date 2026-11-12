@@ -3943,16 +3943,20 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
-    /// Restart at once. By default an agent that is up and ready is first asked for its handoff and
-    /// restarted at its acknowledgement or after two minutes; use this for an agent that cannot answer.
-    /// Also interrupts immediately when restarting yourself during a turn.
+    /// Restart at once, skipping the usual handoff acknowledgement or two-minute wait.
+    /// Also interrupts immediately when restarting yourself during a turn. With --fresh-session,
+    /// still waits for a current handoff unless --from-stale-handoff is given by a person.
     #[arg(long)]
     now: bool,
-    /// Start a new native session instead of continuing the last one. The agent must have a
-    /// handoff written or marked ready (`fractal agents handoff ready`) since its last turn; the new
-    /// session is given it first. Without this the restart continues the last session.
+    /// Start a new native session instead of continuing the last one. If the handoff has not been
+    /// written or marked ready since the last turn, return pending until the agent acknowledges
+    /// preparation; no deadline forces the restart. The new session is given the handoff first.
     #[arg(long)]
     fresh_session: bool,
+    /// Accept the existing handoff without waiting for the agent to acknowledge preparation.
+    /// Only a person may use this override; the request records who accepted the stale handoff.
+    #[arg(long, requires = "fresh_session")]
+    from_stale_handoff: bool,
     /// Start the agent now even if its lane does not fit the host's free room, for when a stale
     /// measurement holds an agent that must run. Needs --reason; who asked and why are recorded.
     #[arg(long, requires = "reason")]
