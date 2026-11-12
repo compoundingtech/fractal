@@ -4293,7 +4293,7 @@ fn now_page_names_availability_before_alerts() {
         deadline_clock_since: None,
         deadline_clock_until: None,
     };
-    let output = render_now_page(&fixture_product_page(&["attention"], false), &[away.clone()], "fractal now");
+    let output = render_now_page(&fixture_product_page(&["attention"], false), std::slice::from_ref(&away), "fractal now");
     assert!(
         output.starts_with(
             "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\n1 alert\n"
@@ -4301,9 +4301,10 @@ fn now_page_names_availability_before_alerts() {
         "{output}"
     );
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), &[away.clone()], "fractal now"),
+        render_now_page(&fixture_product_page(&[], false), std::slice::from_ref(&away), "fractal now"),
         "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\nWork: fractal work ls · Health: fractal doctor\n"
-    );    let unknown = fractal_client::PersonAvailability {
+    );
+    let unknown = fractal_client::PersonAvailability {
         status_source: "presence".into(),
         status_until: None,
         presence: Some("unknown".into()),
