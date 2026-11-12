@@ -3987,6 +3987,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("signal", string()),
             ("reason", string()),
             ("fresh_session", boolean()),
+            ("from_stale_handoff", boolean()),
             ("ignore_fit", boolean()),
         ],
         "runtime.action.succeeded"
