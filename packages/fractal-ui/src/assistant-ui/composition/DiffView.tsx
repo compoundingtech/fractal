@@ -41,6 +41,12 @@ let pierreFailed = false
 const pierreChunk = createLazyChunk({
   // fractal-ui targets ES2022, before Promise.withResolvers. Defer past the plain first paint.
   load: () => new Promise<PierreModule>((resolve, reject) => {
+    // Pierre's custom element adopts a constructed stylesheet (`new CSSStyleSheet().replaceSync`) in its
+    // constructor; where that API is missing (jsdom, pre-16.4 Safari) creating the element throws.
+    if (typeof CSSStyleSheet === 'undefined' || typeof CSSStyleSheet.prototype.replaceSync !== 'function') {
+      reject(new Error('Constructable stylesheets are unavailable; the diff stays plain'))
+      return
+    }
     requestAnimationFrame(() => setTimeout(() => { import('./DiffView.pierre').then(resolve, reject) }, 0))
   }),
 })
