@@ -231,7 +231,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let mission_id = mission_storage_id(&self.readers.get(), &run.mission)?;
+        let mission_id = missions::mission_storage_id(&self.readers.get(), &run.mission)?;
         let revision: Option<String> = self.readers.get().query_row(
             "SELECT revision FROM mission_definitions WHERE mission_id=?1",
             [&mission_id], |row| row.get(0),
