@@ -270,7 +270,14 @@ function literalEvents(source: string): readonly Event[] {
       byte = byteEnd
     }
   }
-  const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, '\\$&')
+  const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, (character, index: number) => {
+    if (character !== '|') return `\\${character}`
+    // Preserve block parsing too: escaping an originally structural pipe in a paragraph could turn a malformed
+    // table header into a valid one on the second pass. In cells, retain the original odd escaped-pipe parity.
+    let slash = index
+    while (slash > 0 && value[slash - 1] === '\\') slash--
+    return (index - slash) % 2 === 0 ? '|' : '\\|'
+  })
   const parts: string[] = []
   let at = 0
   // Text ranges arrive in source order. Consume each run's candidate cursor here rather than sorting overlapping

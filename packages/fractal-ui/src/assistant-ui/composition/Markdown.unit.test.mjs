@@ -527,7 +527,8 @@ test('literal URLs stay inside original inline containers on both parser paths',
     await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
     const parse = (source, plugins) => {
       let tree
-      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' || key === 'implicit' ? undefined : field)) }
+      // Compare semantic nodes; list looseness bookkeeping is also covered by exact rendered-HTML equality.
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => ['position', 'implicit', 'spread'].includes(key) ? undefined : field)) }
       const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
       return { tree, html }
     }
@@ -549,7 +550,9 @@ test('literal URLs stay inside original inline containers on both parser paths',
           for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
             const actual = parse(source, plugins)
             compare(actual, expected, source)
-            compare(actual.tree.children[0].children.map(row => row.children.length), expected.tree.children[0].children.map(row => row.children.length), source)
+            if (actual.tree.children[0].type === 'table' && expected.tree.children[0].type === 'table') {
+              compare(actual.tree.children[0].children.map(row => row.children.length), expected.tree.children[0].children.map(row => row.children.length), source)
+            }
           }
         }
       }
