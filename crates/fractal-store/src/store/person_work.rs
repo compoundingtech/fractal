@@ -949,6 +949,22 @@ pub fn project_minimal_run(
     Ok(())
 }
 
+/// Whether the origin's immutable revision gives it a typed program handler.
+pub fn runs_program(tx: &Transaction<'_>, step: &StepRunView) -> Result<bool> {
+    let body: Option<String> = tx.query_row(
+        "SELECT r.body FROM run_generations g
+         JOIN mission_runs m ON m.id=?2
+         JOIN mission_revisions r ON r.mission_id=m.mission_id AND r.revision=g.revision
+         WHERE g.id=?1",
+        params![generation_id_from_subject(&step.generation), step.run.strip_prefix("mission-run/").unwrap_or(&step.run)],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(body) = body else { return Ok(false) };
+    let mission: MissionSpec = serde_json::from_str(&body)?;
+    Ok(flatten_mission_step_specs(&mission).into_iter()
+        .any(|spec| spec.path == step.step && spec.program.is_some()))
+}
+
 pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, FractalError> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
@@ -1047,9 +1063,30 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
         }
         if let Some(origin) = ask.body["fields"]["origin_step"].as_str() {
             if !step_owner_is_terminal_tx(tx, origin)? {
-                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4a39c8232ed5 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready',blocked_reason=NULL,readiness_epoch=readiness_epoch+1,
-                    activated_at_unix_ms=?3,updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4").map_err(internal)?.execute(
-                    /* sqlite-large-value: allow-for-now lv-hfe5b780e197e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject]).map_err(internal)?;
+                let cancelled = claim.kind == "work.person-cancelled";
+                // The response's asking claim is the episode fence, not merely the origin
+                // subject. A stale replica may cancel after another member resumed or retried.
+                if cancelled {
+                    let exact_episode = match fields.get("episode") {
+                        Some(Value::String(episode)) => episode == &ask.id,
+                        // Older automatic cancellations bind the asking claim causally
+                        // instead of recording its ID in the response fields.
+                        None => claim.predecessors.contains(&ask.id),
+                        _ => false,
+                    };
+                    if !exact_episode {
+                        return Ok(true);
+                    }
+                }
+                let failed = cancelled && step(tx, origin).map_err(internal)?
+                    .map(|view| runs_program(tx, &view)).transpose().map_err(internal)? == Some(false);
+                let reason = failed.then(|| format!("ask cancelled by {}", claim.actor.as_deref().unwrap_or_default()));
+                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c515cfc602a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?5,blocked_reason=?6,
+                    readiness_epoch=readiness_epoch+CASE WHEN ?5='ready' THEN 1 ELSE 0 END,
+                    activated_at_unix_ms=CASE WHEN ?5='ready' THEN ?3 ELSE activated_at_unix_ms END,
+                    updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4").map_err(internal)?.execute(
+                    /* sqlite-large-value: allow-for-now lv-h109f5388a001 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject,
+                        if failed { "failed" } else { "ready" }, reason]).map_err(internal)?;
             }
         }
     }
