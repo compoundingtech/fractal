@@ -148,7 +148,7 @@ function SourceTab({ state, node, onNodeChange }: { readonly state: SourceTabSta
         {entries.map(entry => <li key={entry.path}>
           <Button aria-current={entry.path === selected ? 'true' : undefined} data-node={entry.path} onPress={() => onNodeChange(entry.path)} onHoverChange={isHovering => setHovered(isHovering ? entry.path : undefined)} {...stylex.props(styles.outlineRow, entry.path === selected && styles.outlineSelected, entry.path === hovered && styles.outlineHovered)}>
             <span style={{ paddingInlineStart: `${Math.max(0, entry.depth - 1) * 10}px` }} {...stylex.props(styles.outlineLabel)}>{entry.label}</span>
-            <span {...stylex.props(styles.outlineLocation)}>{entry.location}</span>
+            <span {...stylex.props(styles.outlineLocation, entry.path === selected && styles.mutedOnActive)}>{entry.location}</span>
           </Button>
         </li>)}
       </ul>
@@ -202,7 +202,7 @@ function FrameStrip({ map, strip, active, permalink, onSelect }: { readonly map:
     {strip.map((frame, index) => <React.Fragment key={index}>
       {index === 0 ? null : <span aria-hidden="true" {...stylex.props(styles.stripSeparator)}>›</span>}
       <Button aria-pressed={index === active} data-role={frame.role} data-precision={frame.precision} onPress={() => onSelect(index)} {...stylex.props(styles.frame, index === active && styles.frameActive)}>
-        <span {...stylex.props(styles.frameRole)}>{roleWord(frame.role)}</span> <span {...stylex.props(styles.mono, frame.precision === 'enclosing' && styles.enclosingLabel)}>{frameLocation(map, frame)}</span>
+        <span {...stylex.props(styles.frameRole, index === active && styles.mutedOnActive)}>{roleWord(frame.role)}</span> <span {...stylex.props(styles.mono, frame.precision === 'enclosing' && styles.enclosingLabel)}>{frameLocation(map, frame)}</span>
       </Button>
     </React.Fragment>)}
     {permalink === undefined ? null : <Link href={permalink} target="_blank" rel="noreferrer" {...stylex.props(styles.stripLink)}>GitHub ↗</Link>}
@@ -413,14 +413,17 @@ const styles = stylex.create({
   frame: { display: 'inline-flex', alignItems: 'baseline', gap: s.xs, paddingInline: s.sm, paddingBlock: s.xs2, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: ink.fgMuted, fontSize: t.denseSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   frameActive: { backgroundColor: surface.rowActive, color: ink.fg },
   frameRole: { color: ink.fgMuted },
+  // Muted labels on the rowActive fill drop below AA; the active row raises them to fgSoft.
+  mutedOnActive: { color: ink.fgSoft },
   enclosingLabel: { textDecorationLine: 'underline', textDecorationStyle: 'dashed', textUnderlineOffset: '3px' },
   stripLink: { marginInlineStart: 'auto', color: ink.fgMuted, fontSize: t.denseSize, textDecoration: 'none', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   scroller: { flexGrow: 1, minHeight: 0, overflow: 'auto', backgroundColor: surface.codeBg, fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.codeLeading, color: ink.fgSoft, scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   code: { display: 'flex', flexDirection: 'column', width: 'max-content', minWidth: '100%', paddingBlock: s.sm },
   row: { display: 'flex', alignItems: 'stretch', minWidth: '100%', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent', cursor: 'default' },
-  rowFrame: { backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
-  rowEnclosing: { backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
-  rowLinked: { backgroundColor: interaction.wash },
+  // Tinted rows raise muted syntax ink (strings, comments) to fgSoft so it keeps AA contrast on the tint.
+  rowFrame: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
+  rowEnclosing: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
+  rowLinked: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: interaction.wash },
   lineNumber: { position: 'sticky', left: 0, flexShrink: 0, minWidth: g.gutter40, boxSizing: 'border-box', paddingInlineEnd: s.md, textAlign: 'right', color: ink.fgMuted, backgroundColor: surface.codeBg, fontVariantNumeric: 'tabular-nums', userSelect: 'none' },
   lineText: { flexGrow: 1, paddingInlineEnd: s.lg, fontFamily: 'inherit', whiteSpace: 'pre' },
   footer: { margin: 0, minHeight: t.metaLeading, paddingInline: s.lg, paddingBlock: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, color: ink.fgMuted, fontSize: t.denseSize, overflowWrap: 'anywhere' },
@@ -441,8 +444,8 @@ const styles = stylex.create({
   diffScroller: { flexGrow: 0, overflowY: 'hidden' },
   gap: { color: ink.fgMuted, backgroundColor: surface.washSubtle },
   diffGutter: { display: 'flex', justifyContent: 'space-between', gap: s.xs2 },
-  addRow: { backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
-  delRow: { backgroundColor: status.diffRemovedWash },
+  addRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
+  delRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: status.diffRemovedWash },
   addGutter: { color: diffColor.added },
   delGutter: { color: diffColor.removed },
 })
