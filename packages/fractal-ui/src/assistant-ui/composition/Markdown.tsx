@@ -546,6 +546,8 @@ const styles = stylex.create({
   details: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   summary: { cursor: 'pointer', color: textColor.fg, fontWeight: t.weightMedium, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
-  link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  // Blue on light prose is about 2:1 against the words around it, so colour alone cannot mark a link (WCAG 1.4.1):
+  // a quiet underline does, and turns full strength on hover.
+  link: { color: status.runningFg, textDecorationLine: 'underline', textDecorationThickness: '1px', textUnderlineOffset: '0.2em', textDecorationColor: { default: 'color-mix(in srgb, currentColor 45%, transparent)', ':hover': 'currentColor' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
 })
