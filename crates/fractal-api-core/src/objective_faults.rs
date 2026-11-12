@@ -77,7 +77,7 @@ fn rows_here<'a>(store: &Store, rows: &'a [Value], objectives: &BTreeSet<String>
     if reading.is_some_and(|reading| reading.member == store.origin()) {
         return Ok(Cow::Borrowed(rows));
     }
-    Ok(Cow::Owned(rows.iter().filter(|row| !missed(*row)).cloned().collect()))
+    Ok(Cow::Owned(rows.iter().filter(|row| !missed(row)).cloned().collect()))
 }
 
 /// Open a fault for each objective in `objectives` that `rows` shows missed and that has no open
