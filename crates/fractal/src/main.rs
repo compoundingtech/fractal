@@ -1499,8 +1499,10 @@ struct MissionRunStartArgs {
     /// are used as given. Defaults to MISSION/UUIDv7.
     #[arg(long)]
     id: Option<String>,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members. Required for remote execution; must be absolute there.
+    /// Local execution defaults to the current directory.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     /// Start no work until this mission run completes; fail if it fails or is cancelled.
@@ -1726,8 +1728,9 @@ struct LaunchApproveAndStartArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Launch)))]
     session: String,
     preview_hash: String,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members; required and absolute for remote execution.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -1739,8 +1742,9 @@ struct LaunchApproveAndStartArgs {
 struct LaunchRunArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Launch)))]
     session: String,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members; required and absolute for remote execution.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -8477,6 +8481,129 @@ fn whole_duration(ms: u64) -> String {
     }
 }
 
+/// A run has no single placement: its declarations and executable gates may span members.
+/// Never turn the caller's cwd into a default path for those other members.
+fn resolve_mission_workspace(
+    mission: &MissionSpec,
+    workspace: Option<&Path>,
+    local: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<PathBuf> {
+    let mut hosts = BTreeSet::new();
+    let unknown_placement = mission_workspace_hosts(mission, inputs, &mut hosts)?;
+    if unknown_placement || hosts.iter().any(|host| host != local && host != "local") {
+        let workspace = workspace.context(
+            "this mission is not provably local; pass --workspace with an absolute path on the execution members",
+        )?;
+        anyhow::ensure!(
+            workspace.is_absolute(),
+            "a workspace for execution that is not provably local must be an absolute path on the execution members"
+        );
+        return Ok(workspace.to_path_buf());
+    }
+    let workspace = workspace.unwrap_or_else(|| Path::new("."));
+    workspace
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", workspace.display()))
+}
+
+fn mission_workspace_hosts(
+    mission: &MissionSpec,
+    inputs: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> Result<bool> {
+    // A referenced mission can be selected by a prior step's output, so its placement is
+    // not necessarily knowable before the run. Do not publish a local default for it.
+    let mut unknown_placement = mission.steps.values().any(|step| step.uses_mission.is_some());
+    // Only values already known for actual execution belong here. Proof variables are not
+    // execution context: substituting one could make a remote placement look local.
+    let mut variables = BTreeMap::new();
+    variables.extend(inputs.iter().map(|(name, value)| (format!("input.{name}"), value.clone())));
+    if let Some(source) = &mission.declarations_kdl {
+        unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
+    }
+    for gate in &mission.gates {
+        unknown_placement |= gate_workspace_host(gate, &variables, hosts);
+    }
+    for step in mission.steps.values() {
+        variables.insert("ST_STEP".into(), step.path.clone());
+        if let Some(source) = &step.declarations_kdl {
+            unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
+        }
+        for gate in &step.gates {
+            unknown_placement |= gate_workspace_host(gate, &variables, hosts);
+        }
+    }
+    for step in mission.steps.values() {
+        if let Some(nested) = &step.nested_mission {
+            unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
+        }
+        if let Some(loop_spec) = &step.loop_spec {
+            for nested in [
+                Some(&loop_spec.round),
+                loop_spec.on_keep.as_ref(),
+                loop_spec.on_discard.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
+            }
+        }
+    }
+    Ok(unknown_placement)
+}
+
+/// Collect an over-approximation of placement expressions without interpolating unrelated
+/// runtime fields (workspace, IDs, commands). Unknown placement requires an explicit path.
+fn declaration_workspace_hosts(
+    source: &str,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> Result<bool> {
+    fn visit(document: &KdlDocument, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+        let mut unknown = false;
+        for node in document.nodes() {
+            unknown |= node.name().value().contains("${");
+            if node.name().value() == "host" {
+                unknown |= node.entries().first()
+                    .and_then(|entry| entry.value().as_string())
+                    .is_none_or(|host| record_workspace_host(host, variables, hosts));
+            }
+            for entry in node.entries() {
+                if entry.name().is_some_and(|name| name.value() == "host") {
+                    unknown |= entry.value().as_string()
+                        .is_none_or(|host| record_workspace_host(host, variables, hosts));
+                }
+            }
+            if let Some(children) = node.children() {
+                unknown |= visit(children, variables, hosts);
+            }
+        }
+        unknown
+    }
+    Ok(visit(&source.parse::<KdlDocument>()?, variables, hosts))
+}
+
+fn gate_workspace_host(
+    gate: &fractal_daemon::model::GateSpec,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> bool {
+    match gate {
+        fractal_daemon::model::GateSpec::Mechanical { host, .. }
+        | fractal_daemon::model::GateSpec::Llm { host, .. } => record_workspace_host(host, variables, hosts),
+        _ => false,
+    }
+}
+
+fn record_workspace_host(host: &str, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+    match fractal_daemon::mission::interpolate(host, variables) {
+        Ok(host) => { hosts.insert(host); false }
+        Err(_) => true,
+    }
+}
+
 async fn start_mission_run(
     client: &Client,
     args: MissionRunStartArgs,
@@ -8502,11 +8629,12 @@ async fn start_mission_run(
         "mission `mission/{mission_id}` is not ready"
     );
     let run_id = mission_start_run_id(mission_id, args.id.as_deref());
-    let workspace = args
-        .workspace
-        .canonicalize()
-        .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
     let inputs = unique_pairs(args.inputs, "input")?;
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let workspace = resolve_mission_workspace(&mission, args.workspace.as_deref(), local, &inputs)?;
     let actor = args.actor;
     let requester = normalize_requester_subject(&actor);
     let after = args
