@@ -8,18 +8,35 @@ public enum ConnectionState: Sendable, Equatable {
   case stale(lastSuccess: Date?, reason: String)
 }
 
-/// Every open attention card (all pages).
+/// Every open attention card (all pages), and whether this device may answer.
 public struct AttentionPage: Sendable, Equatable {
   public let records: [AttentionRecord]
+  /// The device's session is granted `work.done` (scope `control.attention`).
+  public let canAnswer: Bool
 
-  public init(records: [AttentionRecord]) {
+  public init(records: [AttentionRecord], canAnswer: Bool) {
     self.records = records
+    self.canAnswer = canAnswer
   }
+}
+
+/// A refusal to show the person verbatim: Fractal's reason, or why nothing was sent.
+public struct AnswerRefused: Error, Sendable, Equatable, CustomStringConvertible {
+  public let description: String
+  public init(_ description: String) { self.description = description }
 }
 
 public protocol AttentionAdapter: Sendable {
   func readAttention() async throws -> AttentionPage
   func readSlo() async throws -> SloSnapshot
+  /// Returns only once Fractal committed the answer; throws `AnswerRefused` otherwise.
+  func submit(_ submission: WorkDoneSubmission) async throws
+}
+
+/// Where snoozes live. Fractal serves no attention snooze, so they are this Mac's only.
+public protocol SnoozeStore: Sendable {
+  func load() -> [String: Date]
+  func save(_ snoozes: [String: Date])
 }
 
 /// One independently refreshed section: a failure keeps its last value and never blanks another.
@@ -28,16 +45,31 @@ public struct LiveSection<Value: Sendable & Equatable>: Sendable, Equatable {
   public internal(set) var state: ConnectionState = .loading
 }
 
+public enum AnswerState: Sendable, Equatable {
+  case sending(String)
+  /// Fractal committed it; the card leaves on the next read.
+  case committed(String)
+  case refused(String)
+}
+
 @MainActor @Observable public final class AttentionModel {
   public private(set) var attention = LiveSection<AttentionPage>()
   public private(set) var slo = LiveSection<SloSnapshot>()
+  public private(set) var answers: [String: AnswerState] = [:]
   public private(set) var isRefreshing = false
   public let configurationError: String?
+  private var snoozes: [String: Date]
   private let adapter: (any AttentionAdapter)?
+  private let snoozeStore: (any SnoozeStore)?
   private var refreshAgain = false
 
-  public init(adapter: (any AttentionAdapter)?, configurationError: String? = nil) {
+  public init(
+    adapter: (any AttentionAdapter)?, snoozeStore: (any SnoozeStore)? = nil,
+    configurationError: String? = nil
+  ) {
     self.adapter = adapter
+    self.snoozeStore = snoozeStore
+    snoozes = snoozeStore?.load() ?? [:]
     self.configurationError =
       adapter == nil
       ? configurationError
@@ -58,14 +90,24 @@ public struct LiveSection<Value: Sendable & Equatable>: Sendable, Equatable {
     }
   }
 
-  public var asks: [AttentionRecord] { records { $0.role == .ask } }
+  public func asks(now: Date = .now) -> [AttentionRecord] {
+    records { if case .ask = $0.role { true } else { false } }.filter { !isSnoozed($0, now: now) }
+  }
+
+  public func snoozedAsks(now: Date = .now) -> [AttentionRecord] {
+    records { if case .ask = $0.role { true } else { false } }.filter { isSnoozed($0, now: now) }
+  }
 
   public var updates: [AttentionRecord] { records { $0.role == .update } }
 
-  /// The menu bar count: asks waiting on the person. Updates ask nothing.
-  public var openAskCount: Int { asks.count }
+  /// The menu bar count: asks waiting on the person, not snoozed. Updates ask nothing.
+  public func openAskCount(now: Date = .now) -> Int { asks(now: now).count }
 
   public var sloBoard: SloBoard? { slo.value.map { SloBoard($0.rows) } }
+
+  public var canAnswer: Bool { attention.value?.canAnswer ?? false }
+
+  public func snoozedUntil(_ record: AttentionRecord) -> Date? { snoozes[Self.snoozeKey(record)] }
 
   private func records(where keep: (AttentionRecord) -> Bool) -> [AttentionRecord] {
     (attention.value?.records ?? []).filter(keep)
@@ -95,7 +137,9 @@ public struct LiveSection<Value: Sendable & Equatable>: Sendable, Equatable {
 
   private func readAttention(from adapter: any AttentionAdapter, now: Date?) async {
     let result = await Self.capture { try await adapter.readAttention() }
-    Self.apply(result, to: &attention, now: now ?? .now)
+    let stamp = now ?? .now
+    Self.apply(result, to: &attention, now: stamp)
+    if case .success(let page) = result { prune(page, now: stamp) }
   }
 
   private func readSlo(from adapter: any AttentionAdapter, now: Date?) async {
@@ -121,5 +165,71 @@ public struct LiveSection<Value: Sendable & Equatable>: Sendable, Equatable {
         }
       section.state = .stale(lastSuccess: last, reason: String(describing: error))
     }
+  }
+
+  /// Drop answer states and snoozes of cards Fractal no longer holds open at that revision.
+  private func prune(_ page: AttentionPage, now: Date) {
+    let open = Set(page.records.map(\.id))
+    answers = answers.filter { id, state in
+      if case .sending = state { return true }
+      return open.contains(id)
+    }
+    let keys = Set(page.records.map(Self.snoozeKey))
+    let kept = snoozes.filter { keys.contains($0.key) && $0.value > now }
+    if kept != snoozes {
+      snoozes = kept
+      snoozeStore?.save(kept)
+    }
+  }
+
+  // MARK: Actions
+
+  /// Sends one answer. Nothing is shown as answered until Fractal commits it.
+  public func answer(_ record: AttentionRecord, with answer: WorkDoneAnswer, label: String) async {
+    guard let adapter else { return }
+    if case .sending = answers[record.id] { return }
+    answers[record.id] = .sending(label)
+    do {
+      try await adapter.submit(WorkDoneSubmission(record: record, answer: answer))
+      answers[record.id] = .committed(label)
+      await refresh()
+    } catch {
+      answers[record.id] = .refused(String(describing: error))
+    }
+  }
+
+  public func snooze(_ record: AttentionRecord, until: Date) {
+    snoozes[Self.snoozeKey(record)] = until
+    snoozeStore?.save(snoozes)
+  }
+
+  public func unsnooze(_ record: AttentionRecord) {
+    snoozes[Self.snoozeKey(record)] = nil
+    snoozeStore?.save(snoozes)
+  }
+
+  private func isSnoozed(_ record: AttentionRecord, now: Date) -> Bool {
+    snoozes[Self.snoozeKey(record)].map { $0 > now } ?? false
+  }
+
+  /// A changed card (new revision) is new to the person and is never hidden by an old snooze.
+  static func snoozeKey(_ record: AttentionRecord) -> String { "\(record.id)#\(record.revision)" }
+}
+
+/// Snoozes persisted in the app's defaults domain.
+public struct DefaultsSnoozeStore: SnoozeStore, @unchecked Sendable {
+  private let defaults: UserDefaults
+  private let key = "snoozedAttention"
+
+  public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+  public func load() -> [String: Date] {
+    (defaults.dictionary(forKey: key) as? [String: Double] ?? [:]).mapValues {
+      Date(timeIntervalSince1970: $0)
+    }
+  }
+
+  public func save(_ snoozes: [String: Date]) {
+    defaults.set(snoozes.mapValues(\.timeIntervalSince1970), forKey: key)
   }
 }

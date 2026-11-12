@@ -37,7 +37,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
         environment: ProcessInfo.processInfo.environment)
       model = AttentionModel(
         adapter: FractalAttentionAdapter(
-          configuration: configuration, clientName: "attention-tray \(build.machineVersion)"))
+          configuration: configuration, clientName: "attention-tray \(build.machineVersion)"),
+        snoozeStore: DefaultsSnoozeStore())
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
@@ -84,7 +85,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       }
     }
     let line =
-      "attention \(describe(model.attention.state)) (\(model.openAskCount) asks, \(model.updates.count) updates); "
+      "attention \(describe(model.attention.state)) (\(model.openAskCount()) asks, \(model.updates.count) updates); "
       + "slo \(describe(model.slo.state)) (\(model.slo.value?.rows.count ?? 0) rows, \(model.sloBoard?.needsAttention ?? 0) need attention)"
     guard line != lastLogged else { return }
     lastLogged = line
@@ -96,13 +97,15 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   /// Verification: refresh once against the configured endpoint, render the open panel to a
-  /// PNG and exit.
+  /// PNG and exit. `ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's answer controls.
   private func snapshot(to path: String) async {
     await model.refresh()
     logOutcome()
+    let reveal = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT_REVEAL"] == "1"
     // NSHostingView (not ImageRenderer) so AppKit-backed controls draw.
     let host = NSHostingView(
       rootView: TrayPanel(model: model, build: build)
+        .environment(\.revealControls, reveal)
         .environment(\.panelMaxHeight, .infinity)
         // cacheDisplay draws the view only, not the window: paint the panel background.
         .background(Color(nsColor: .windowBackgroundColor)))
@@ -132,7 +135,7 @@ private struct TrayLabel: View {
       Image(systemName: "exclamationmark.bubble")
         .accessibilityLabel("Attention: configuration needed")
     } else {
-      let count = model.openAskCount
+      let count = model.openAskCount()
       let slo = model.sloBoard?.needsAttention ?? 0
       HStack(spacing: 3) {
         Image(

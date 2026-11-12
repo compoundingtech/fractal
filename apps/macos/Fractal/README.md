@@ -5,9 +5,22 @@ attention inbox and the objectives every Fractal client reads. It reads only
 Fractal, through `FractalClient`, at launch and every 30 seconds.
 
 - **Asks** (all attention pages, classified as Fractal web's
-  `data/attention.ts` does) link to Fractal's `/w/<agent>` route, where they are
-  answered.
-- **Updates** are listed apart and not counted.
+  `data/attention.ts` does) are answered in the panel: a decision's or choice's
+  named answers (recommended first; request-changes takes words), a choice's
+  custom words or feedback text, Yes/No for an untyped question, Dismiss (named
+  answers) or Nothing to do. Custom forms and harness prompts link to Fractal.
+  Controls appear on hover or focus.
+- Answers mirror Fractal web `alert-action-port.ts`: re-read the card, require it
+  open, offering `work.done` and at the revision the person read, then submit
+  one `work.done` fenced on that read. The action ID and idempotency key are
+  derived from the card revision and the whole answer, so a repeated send of the
+  same answer replays Fractal's first receipt. A card shows "Sending…", then
+  "committed" only after Fractal's result, or Fractal's refusal verbatim; it is
+  never removed optimistically.
+- **Updates** are listed apart and not counted; Mark read sends the server's
+  prefilled `work.done` (`Read`, answer `read`).
+- **Snooze** hides an ask on this Mac only (defaults domain), keyed by its
+  revision, because Fractal serves no attention snooze; a changed ask resurfaces.
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   The menu bar adds a gauge when any objective is missed or budget nearly spent.
@@ -41,7 +54,7 @@ Standalone launches require three explicit environment variables:
 There are no endpoint, localhost, or Boss fallbacks. The application itself
 loads no keychain, 1Password item or device-profile file.
 `ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
-file and exits.
+file and exits (`ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's controls).
 
 On mbp2025, `services.attentionTray.enable = true` imports the Home Manager
 module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
@@ -75,6 +88,8 @@ owner-only `0400` or `0600`; parent `0700`). It accepts exactly one
 Missing scopes, extra scopes and a broader person grant fail closed. The profile
 stores that session at pinned `device.rs:166-177`; `generated.rs:4523` supplies
 the scopes field and CLI `main.rs:2023` defines the read-only set.
+The tray also reads `v1/client/capabilities` and shows a read-only note
+instead of answer controls unless `work.done` is granted.
 Its endpoint and bearer are exported only to the app process. Never put the
 bearer into Nix options, launchd configuration, shell arguments or logs.
 
@@ -249,6 +264,15 @@ not `attention-migrated`. `api/client_v0.rs:789-801` admits these GETs with
 `read.projections`, included in the read-only set above. The migration error
 belongs to the legacy mutation `attention.resolve`
 (`crates/fractal-api-client-v0/src/api/client_v0.rs:7735-7738`), not these reads.
+At the pinned Fractal `3b8e57cb`, `attention.resolve` is always refused as
+`attention-migrated` (`crates/fractal-api-client-v0/src/api/client_v0.rs:9479`):
+answers, dismissals and reading an update all complete the source person step
+with `work.done`, whose update parameters the server prefills
+(`crates/fractal-api-core/src/api.rs:5078`). `work.done` needs
+`control.attention` (`crates/fractal-api-core/src/api/client_v0.rs:4573`
+`action_scope`). Action admission requires an `action/` ID and a 16-256 byte
+idempotency key (`client_v0.rs:9461`) and replays a key's receipt only for the
+same request digest (`:9375-9400`).
 
 On **every success or failure**, send this cleanup to the **dev5 person PTY**:
 
@@ -330,7 +354,10 @@ match `fractal slo` run on the paired member (dev5): member-measured objectives
 such as `person-read` or `cpu` describe that member. Compare with Fractal's authenticated
 attention view, respecting the tray's supported-answer filter and full
 pagination rather than comparing to an unfiltered first page. Wait at least one
-30-second interval and observe refresh. Answer in Fractal must open `/w/<agent>` for its
+30-second interval and observe refresh. Answering is proven on an ask raised for
+the purpose (for example `fractal work ask` from an agent seat), never on a real
+one: the card shows Sending, then committed, and leaves on the next read; the
+asking agent sees the answer. Open in Fractal must open `/w/<agent>` for its
 conversation/requester, not a Boss URL, and the authenticated page must load.
 
 Run a second unchanged sanctioned activation only if rollout verification
