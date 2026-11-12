@@ -45,6 +45,30 @@ reconciler is not running, or never writes the row, the card keeps `running`/`wo
 `silent_since` is the only signal; `down` covers only seats whose row never reached `running`.
 A `down` card also reports `harness_state: indeterminate`, so the two fields never disagree.
 
+## A seat running on a fallback model
+
+The card carries `live_model`: the model the seat's own session last reported for the card's
+incarnation (`harness.usage` `context_occupancy` or `session_cumulative`: Claude's status line,
+the omp/pi channel, OpenCode), or null when it reported none. Response spend never counts: it
+includes subagents' responses under their own models. A driver whose session reports no model
+(Codex) has a null `live_model` and no drift fault. The declaration still names the wanted model; the two
+differ while the harness silently fell back (omp down its ladder on a 429). The reconciler
+raises a non-blocking per-seat fault (`Seat runs on a fallback model`, condition
+`harness-model-drift`) naming declared vs live model and since when: it never stops, parks,
+or crash-loops the seat, and recovers when usage returns to the declared model or the
+declaration adopts the live model. If the live model moves to another undeclared model while
+drifted, the fault is recovered and raised again naming the new model, keeping its first
+`since`. The fault is owned by the seat's declaring agent and is never a person's item. A
+person instead sees one `model-drift` attention item over every drifting agent they own
+(`fractal alerts ls`, under updates, and Now's today group): "3 agents declared X run Y since
+09:14Z (oldest agent/...)". It is derived from the current faults, so it follows them and is
+gone once no agent drifts. `fractal agents show`
+prints `LIVE MODEL`, and a step script reads `.live_model` from `agents show --json` to flag
+what a one-shot reviewer actually ran on. Model names compare after the pricing table's
+canonicalization (provider prefix, bracketed variant, date snapshot stripped). A Claude alias
+(`opus`, `sonnet`, `haiku`) matches any API ID of its family, and a declaration that is neither
+an alias nor a priced API ID is not compared, so it never raises the fault.
+
 ## Example
 
 At audit time a seat `example/builder` showed `desired` with a `working` step and fresh-looking
