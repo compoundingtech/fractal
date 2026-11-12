@@ -14,7 +14,9 @@ import { surfaceVars as surface, textVars as textColor, borderVars as border, in
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
-import { codeFenceLabel, diffStats, isDiffLanguage } from './markdown-code'
+import { codeFenceLabel, isDiffLanguage } from './markdown-code'
+import { DiffView } from './DiffView'
+import { diffStats } from './diff-patch'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
 import { remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
@@ -264,14 +266,10 @@ export function HighlightedSource({ code, language }: { code: string; language: 
   })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
-/** A diff's body. The kit DiffView (@pierre/diffs) takes over here once it lands; until then the highlighter draws it. */
-function DiffBody({ code }: { readonly code: string }) {
-  return <HighlightedSource code={code} language="diff" />
-}
-
 /**
  * A fenced block: a header naming the file (with Copy path) and the language, a diff's +added −removed counts, a Copy
- * button shown on hover or focus, and one ⋯ menu holding Wrap, Copy and, when a host opens files, Open.
+ * button shown on hover or focus, and one ⋯ menu holding Wrap, Copy and, when a host opens files, Open. A diff renders
+ * through the kit DiffView and is counted by its hunks.
  */
 const CodeBlock = React.memo(function CodeBlock({ code, language: info, meta }: { code: string; language: string; meta?: string | null }) {
   const { language, path } = codeFenceLabel(info, meta)
@@ -304,7 +302,9 @@ const CodeBlock = React.memo(function CodeBlock({ code, language: info, meta }: 
         </Popover>
       </MenuTrigger>
     </div>
-    <pre data-testid="markdown-code" role="group" aria-label={`Code, ${path ?? language}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}>{diff ? <DiffBody code={code} /> : <HighlightedSource code={code} language={info === '' && path === undefined ? '' : language} />}</code></pre>
+    {/* A diff is the kit DiffView, a region of its own, in place of the code block's <pre>; this header stays. */}
+    {diff ? <DiffView patch={code} wrap={wrap} {...(path === undefined ? {} : { path })} label={`Diff, ${path ?? language}`} />
+      : <pre data-testid="markdown-code" role="group" aria-label={`Code, ${path ?? language}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}><HighlightedSource code={code} language={info === '' && path === undefined ? '' : language} /></code></pre>}
     <span role="status" aria-live="polite" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden>{copy.tag === 'copied' && !copiedCurrentCode ? 'Code has changed since the last copy.' : announcement}</VisuallyHidden>}</span>
   </div>
 })

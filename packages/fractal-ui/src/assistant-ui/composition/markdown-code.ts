@@ -1,6 +1,6 @@
 /**
  * What a code fence's header shows, read from its info string: the file it names (```ts title=src/x.ts, or a path as
- * the info itself, ```src/x.ts) and its language, and for a diff the lines it adds and removes.
+ * the info itself, ```src/x.ts) and its language. A diff's counts come from `diffStats` in diff-patch.ts.
  */
 
 const TITLE = /(?:^|\s)(?:title|file|path)=(?:"([^"]+)"|'([^']+)'|(\S+))/
@@ -16,17 +16,5 @@ export function codeFenceLabel(language: string, meta: string | null | undefined
 }
 
 const extension = (path: string): string | undefined => /\.(\w{1,8})$/.exec(path)?.[1]?.toLowerCase()
-
-/** Lines a unified diff adds and removes, as GitHub counts them: file headers and hunk markers excluded. */
-export function diffStats(patch: string): { readonly added: number; readonly removed: number } {
-  let added = 0
-  let removed = 0
-  for (const line of patch.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) continue
-    if (line.startsWith('+')) added++
-    else if (line.startsWith('-')) removed++
-  }
-  return { added, removed }
-}
 
 export const isDiffLanguage = (language: string): boolean => language === 'diff' || language === 'patch'
