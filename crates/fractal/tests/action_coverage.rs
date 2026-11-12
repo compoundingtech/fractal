@@ -1909,17 +1909,24 @@ async fn revision_decisions_survive_stale_previews_and_restarts() {
                 "cancelled"
             }
         );
+        let store = daemon.store();
+        let source = store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(source.generation, run.generation, "review never rewrites the source generation");
+        assert_eq!(source.revision, run.revision, "review preserves the source definition");
         if kind == "mission.approve-revision" {
             assert_eq!(decided.approvals, [PERSON]);
-            assert_ne!(
-                daemon
-                    .store()
-                    .mission_run(&run.id)
-                    .unwrap()
-                    .unwrap()
-                    .generation,
-                run.generation
-            );
+            let generation = store.run_generation(
+                decided.successor_generation.as_deref().expect("approved successor generation"),
+            ).unwrap().unwrap();
+            let successor = store.mission_run(&generation.run).unwrap().unwrap();
+            assert_ne!(successor.subject, source.subject);
+            assert_ne!(successor.generation, run.generation);
+            assert_eq!(successor.generation, generation.id);
+            assert_eq!(successor.revision, intent.missions["example/revision"].revision);
+            assert_eq!(source.superseded_by.as_deref(), Some(successor.subject.as_str()));
+            assert_eq!(successor.supersedes.as_deref(), Some(source.subject.as_str()));
+        } else {
+            assert!(source.superseded_by.is_none(), "cancelling review creates no replacement");
         }
     }
 }
