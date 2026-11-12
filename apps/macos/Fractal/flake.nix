@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/4ba99f3209788ed04f01af38f77ddb803ad6ec63";
     fractal = {
-      url = "git+https://github.com/compoundingtech/fractal?rev=943445316e3738a1fc1ee58f676334b7ec684bf4&shallow=1";
+      url = "git+https://github.com/compoundingtech/fractal?rev=3b8e57cbfdda1caedfa14871aa80ef624a0bda4b&shallow=1";
       flake = false;
     };
   };
@@ -14,7 +14,22 @@
     let
       system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
+      version = "0.2.0";
       clientPath = "${fractal}/clients/swift/FractalClient";
+      fractalRev = fractal.rev or null;
+      # The build-identity rev names this tray's own source closure (its sources plus the
+      # FractalClient revision), not the enclosing repository commit: unrelated commits must
+      # neither rebuild nor restart the tray. A relative path input has no rev of its own.
+      sourceRev = builtins.substring 0 7 (
+        builtins.hashString "sha256" "${./.}:${if fractalRev == null then "unknown" else fractalRev}"
+      );
+      buildStamp = builtins.toJSON {
+        type = "nix";
+        inherit version;
+        rev = "src.${sourceRev}";
+        dirty = false;
+        fractalClientRev = fractalRev;
+      };
       infoPlist = pkgs.writeText "attention-tray-Info.plist" (
         pkgs.lib.generators.toPlist { escape = true; } {
           CFBundleDisplayName = "Attention";
@@ -22,15 +37,15 @@
           CFBundleIdentifier = "com.schickling.attention.tray";
           CFBundleName = "AttentionTray";
           CFBundlePackageType = "APPL";
-          CFBundleShortVersionString = "0.1.0";
-          CFBundleVersion = "1";
+          CFBundleShortVersionString = version;
+          CFBundleVersion = version;
           LSMinimumSystemVersion = "14.0";
           LSUIElement = true;
           NSHighResolutionCapable = true;
         }
       );
       tray =
-        pkgs.runCommand "attention-tray-0.1.0"
+        pkgs.runCommand "attention-tray-${version}"
           {
             # Same host Apple SDK boundary as Boss's unsigned Swift app bundle.
             __noChroot = true;
@@ -50,9 +65,11 @@
             export PATH=/usr/bin:/bin:/usr/sbin:/sbin
             /usr/bin/swift build --configuration release --jobs 2 --disable-sandbox
             app="$out/Applications/AttentionTray.app"
-            mkdir -p "$app/Contents/MacOS"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
             install -m 0755 .build/release/AttentionTray "$app/Contents/MacOS/AttentionTray"
             install -m 0644 ${infoPlist} "$app/Contents/Info.plist"
+            install -m 0644 ${pkgs.writeText "nix-build-stamp.json" buildStamp} \
+              "$app/Contents/Resources/nix-build-stamp.json"
           '';
     in
     {
