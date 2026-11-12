@@ -170,9 +170,11 @@ const FLAKY_ARTIFACT_PREFIX: &str = "nextest-flaky-";
 const FLAKY_READS_PER_POLL: usize = 20;
 /// The repository fact that records the runs CI's objectives read.
 pub const WORKSPACE_CI_FIELD: &str = "workspace_ci";
-/// How old a `workspace_ci` reading may be before its rows read no-data: three of the repository
-/// observer's five-minute polls, so one slow or failed poll does not blank the rows, and a member
-/// that stopped reading cannot keep them met.
+/// How long a `workspace_ci` reading may go without following GitHub before its rows read no-data:
+/// three of the repository observer's five-minute polls, so one failed poll does not blank the
+/// rows, while an observer whose replicated state is not healthy, or whose Workspace CI reads
+/// keep failing, cannot keep them met. The reading carries no read time: an unchanged poll records
+/// the same fact, so it appends nothing and the standing observer backs off.
 pub const WORKSPACE_CI_FRESH_MS: u64 = 15 * 60_000;
 
 /// One completed Workspace CI run, a pull request's or a merge group's, as the `workspace_ci` fact
@@ -194,7 +196,8 @@ pub struct WorkspaceRun {
     /// for the last job's completion, which would need a jobs read per run.
     pub until_unix_ms: u64,
     /// The tests nextest passed only on a retry in the run's test lanes, from its artifacts'
-    /// names; absent until they are listed (only for a run that finished in the last hour).
+    /// names; absent until they are listed (only for a run that finished in the last hour), and
+    /// then kept with the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flaky: Option<u64>,
 }
@@ -288,14 +291,18 @@ impl WorkspaceRun {
 }
 
 /// The recent completed Workspace CI runs one repository observation read, the `workspace_ci`
-/// fact of its `vcs.repository`: the runs a row of this reading reads, and no others.
+/// fact of its `vcs.repository`: the runs a row of this reading reads. It changes only when a run
+/// is new or changed, a flaky count is listed, or its reads start or stop failing, never with the
+/// clock alone: runs that age out of the windows stay until the next change, and the rows read
+/// their windows when they are read.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCi {
     pub repository: String,
-    /// When the runs were read. A failed read records the previous reading unchanged, so this
-    /// says how old the runs are.
-    pub observed_at_unix_ms: u64,
     pub runs: Vec<WorkspaceRun>,
+    /// When this reading's Workspace CI reads began to fail, each failed read recording the
+    /// reading as it was; absent while they succeed. It is set once per failure episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_since_unix_ms: Option<u64>,
 }
 
 impl WorkspaceCi {
@@ -399,8 +406,9 @@ fn flaky_reads(runs: &[WorkspaceRun], listed: &BTreeMap<u64, u64>, now_unix_ms: 
 }
 
 /// List the artifacts of `ci`'s runs that finished in the last hour, each at most once: `listed`
-/// holds each run's flaky test count from the previous reading, pruned to the runs still in the
-/// hour. Each run's `flaky` is then set from it. A failed listing is tried again on a later poll.
+/// holds each run's flaky test count from the previous reading, pruned to the runs still in this
+/// one, so a count stays with its run after the hour. Each run's `flaky` is then set from it. A
+/// failed listing is tried again on a later poll.
 pub(crate) async fn read_flaky(
     client: &reqwest::Client,
     base: &str,
@@ -410,8 +418,7 @@ pub(crate) async fn read_flaky(
     listed: &mut BTreeMap<u64, u64>,
     now_unix_ms: u64,
 ) {
-    let since = now_unix_ms.saturating_sub(HOUR_MS);
-    listed.retain(|run_id, _| ci.runs.iter().any(|run| run.id == *run_id && run.until_unix_ms > since));
+    listed.retain(|run_id, _| ci.runs.iter().any(|run| run.id == *run_id));
     for run_id in flaky_reads(&ci.runs, listed, now_unix_ms) {
         // At most 100 artifacts: a longer listing fails rather than truncates.
         let url = format!("{base}/actions/runs/{run_id}/artifacts?per_page=100");
@@ -485,12 +492,12 @@ pub async fn workspace_ci_runs(
     runs.sort_by_key(|run| run.id);
     runs.dedup_by_key(|run| run.id);
     runs.retain(|run| run.read_at(now_unix_ms));
-    Ok(WorkspaceCi { repository: repository.to_owned(), observed_at_unix_ms: now_unix_ms, runs })
+    Ok(WorkspaceCi { repository: repository.to_owned(), runs, unread_since_unix_ms: None })
 }
 
 /// The Workspace CI runs among `listed`. Runs listed but none of them Workspace CI's means the
-/// workflow's name or path changed: that fails, so the previous reading ages out to no-data with
-/// a warning instead of reading as an idle day.
+/// workflow's name or path changed: that fails, so the previous reading turns no-data with a
+/// warning instead of reading as an idle day.
 fn workspace_runs(repository: &str, listed: &[Value]) -> Result<Vec<WorkspaceRun>> {
     let runs = listed.iter().filter_map(|run| WorkspaceRun::from_run(repository, run)).collect::<Vec<_>>();
     anyhow::ensure!(
@@ -503,8 +510,10 @@ fn workspace_runs(repository: &str, listed: &[Value]) -> Result<Vec<WorkspaceRun
 
 /// The `workspace_ci` fact this observation records: the recent runs read now, with the flaky
 /// test counts `previous` (the repository's facts before this observation) already holds, so a
-/// run's artifacts are listed once whichever member polls. A failed read records the previous
-/// reading unchanged, its age showing, and never fails the observation. None when neither read.
+/// run's artifacts are listed once whichever member polls. A read that finds no run new or
+/// changed records `previous` as it was, so an unchanged poll records the same fact. A failed
+/// read records `previous` with the time its reads began to fail, and never fails the
+/// observation. None when neither read.
 pub async fn observe_workspace_ci(
     client: &reqwest::Client,
     base: &str,
@@ -525,13 +534,29 @@ pub async fn observe_workspace_ci(
                 .filter_map(|run| Some((run.id, run.flaky?)))
                 .collect();
             read_flaky(client, base, auth, cache_for, &mut ci, &mut listed, now_unix_ms).await;
-            Some(ci)
+            match previous {
+                Some(mut previous) if unchanged(&previous, &ci) => {
+                    previous.unread_since_unix_ms = None;
+                    Some(previous)
+                }
+                _ => Some(ci),
+            }
         }
         Err(error) => {
             tracing::warn!(repository, error = %error, "could not read Workspace CI runs for CI's objectives");
-            previous
+            previous.map(|mut previous| {
+                previous.unread_since_unix_ms.get_or_insert(now_unix_ms);
+                previous
+            })
         }
     }
+}
+
+/// Whether `read` holds no run that `previous` does not hold as it is: only runs that aged out of
+/// the windows, or out of the listing, are gone.
+fn unchanged(previous: &WorkspaceCi, read: &WorkspaceCi) -> bool {
+    let held = previous.runs.iter().map(|run| (run.id, run)).collect::<BTreeMap<_, _>>();
+    read.runs.iter().all(|run| held.get(&run.id) == Some(&run))
 }
 
 pub async fn main_performance_failures(
@@ -691,11 +716,15 @@ mod tests {
         runs.retain(|run| run.read_at(now));
         assert_eq!(runs.iter().map(|run| run.id).collect::<Vec<_>>(), [1, 2, 4]);
         runs[1].flaky = Some(2);
-        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: now, runs };
+        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), runs, unread_since_unix_ms: None };
         let fact = serde_json::to_value(&ci).unwrap();
+        // No read time: the fact is the repository and its runs, so an unchanged poll records it again.
+        assert_eq!(fact.as_object().unwrap().keys().collect::<Vec<_>>(), ["repository", "runs"]);
         assert_eq!(fact["runs"][0], json!({"id": 1, "event": "pull_request", "conclusion": "success",
             "from_unix_ms": unix_ms("2026-10-20T12:00:30Z"), "until_unix_ms": unix_ms("2026-10-20T12:09:30Z")}));
         assert_eq!((&fact["runs"][1]["flaky"], &fact["runs"][2]["attempt"]), (&json!(2), &json!(2)));
+        let unread = WorkspaceCi { unread_since_unix_ms: Some(now), ..ci.clone() };
+        assert_eq!(serde_json::to_value(&unread).unwrap()["unread_since_unix_ms"], json!(now));
         // A green first attempt with GitHub's 11-digit ids is 123 bytes, the widest run at most 160:
         // two full listings, 2,000 runs, stay under 320 KB.
         let green = WorkspaceRun { id: 19_234_567_890, attempt: 1, event: "pull_request".into(), conclusion: "success".into(),
@@ -731,8 +760,8 @@ mod tests {
         ];
         let mut ci = WorkspaceCi {
             repository: "acme/garden".to_owned(),
-            observed_at_unix_ms: unix_ms("2026-10-21T09:30:00Z"),
             runs: runs.iter().filter_map(|run| WorkspaceRun::from_run("acme/garden", run)).collect(),
+            unread_since_unix_ms: None,
         };
         let now = unix_ms("2026-10-21T09:30:00Z");
         // Run 1 finished at 09:09:30 the day before, just outside the day.

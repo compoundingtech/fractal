@@ -7,7 +7,7 @@
 //! member's `daemon/NODE` subject, addressed to the fleet fault agent and never to a person; it
 //! stays one episode until the row is met again, when an `operational.recovered` ends it, on any
 //! member that has one open. A row with no data, as before any member has recorded runs or once
-//! the reading is too old, neither opens nor ends one. With no fleet fault agent, nothing opens.
+//! the reading is stale, neither opens nor ends one. With no fleet fault agent, nothing opens.
 //!
 //! It stays cheap: a check whose rows hold no met or missed CI objective reads nothing, and one
 //! that does reads this member's objective faults once through the claims' subject and kind

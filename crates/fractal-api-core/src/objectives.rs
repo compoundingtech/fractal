@@ -361,29 +361,36 @@ fn ci_measure(path: &str) -> &'static str {
     }
 }
 
-/// The newest Workspace CI reading a repository observation holds, and the member whose
-/// observer recorded it.
+/// The newest Workspace CI reading a repository observation holds, the member whose observer
+/// recorded it, and whether that observer still keeps it current.
 pub struct CiReading {
     pub ci: WorkspaceCi,
     pub member: String,
+    /// Since when, and why, the reading has not followed GitHub: the observer's replicated
+    /// `observer.state` is not healthy, or the reading's own Workspace CI reads fail. None while
+    /// both are well. The reading itself carries no read time, so an unchanged poll writes nothing.
+    pub lapse: Option<(u64, String)>,
 }
 
 /// Repository observations read a page at a time while looking for Workspace CI readings.
 const REPOSITORY_PAGE: usize = 200;
 
 /// The newest `workspace_ci` reading among the `vcs.repository` observations, which replicate,
-/// so every member finds the same one; None when none holds one.
+/// so every member finds the same one, with its observer's replicated state; None when none
+/// holds one.
 pub fn ci_reading(store: &Store) -> anyhow::Result<Option<CiReading>> {
-    let mut newest: Option<(u64, String)> = None;
+    let mut newest: Option<crate::model::ClaimRecord> = None;
     let mut after: Option<String> = None;
     loop {
         let page = store.resource_collection_page(None, Some("vcs.repository"), None, after.as_deref(), REPOSITORY_PAGE)?;
         for resource in &page {
-            let (Some(subject), Some(ci)) = (resource["id"].as_str(), WorkspaceCi::from_facts(&resource["facts"])) else {
+            let Some(subject) = resource["id"].as_str().filter(|_| WorkspaceCi::from_facts(&resource["facts"]).is_some()) else {
                 continue;
             };
-            if newest.as_ref().is_none_or(|(at, _)| ci.observed_at_unix_ms > *at) {
-                newest = Some((ci.observed_at_unix_ms, subject.to_owned()));
+            // The reading and its member from one claim; the newest recorded wins.
+            let Some(claim) = store.latest_observation(subject, "resource.observed")? else { continue };
+            if newest.as_ref().is_none_or(|newest| claim.accepted_at_unix_ms > newest.accepted_at_unix_ms) {
+                newest = Some(claim);
             }
         }
         if page.len() < REPOSITORY_PAGE {
@@ -391,12 +398,24 @@ pub fn ci_reading(store: &Store) -> anyhow::Result<Option<CiReading>> {
         }
         after = page.last().and_then(|resource| resource["id"].as_str()).map(str::to_owned);
     }
-    let Some((_, subject)) = newest else { return Ok(None) };
-    // The reading and its member from one claim.
-    Ok(store.latest_observation(&subject, "resource.observed")?.and_then(|claim| {
-        let ci = WorkspaceCi::from_facts(&claim.body["fields"]["facts"])?;
-        Some(CiReading { ci, member: claim.origin })
-    }))
+    let Some(claim) = newest else { return Ok(None) };
+    let Some(ci) = WorkspaceCi::from_facts(&claim.body["fields"]["facts"]) else { return Ok(None) };
+    // The observer's own liveness, as every member holds it: a failed poll records its state.
+    let observer = match claim.body["fields"]["observer"].as_str() {
+        Some(observer) => store.latest_claim(observer, Some("observer.state"))?,
+        None => None,
+    };
+    let failing = observer.and_then(|state| {
+        let word = state.body["fields"]["state"].as_str().unwrap_or("unknown").to_owned();
+        (word != "healthy").then(|| (millis(state.accepted_at_unix_ms), format!("its observer has been {word}")))
+    });
+    let unread = ci.unread_since_unix_ms.map(|since| (since, "its Workspace CI reads have failed".to_owned()));
+    let lapse = failing.into_iter().chain(unread).min_by_key(|(since, _)| *since);
+    Ok(Some(CiReading { ci, member: claim.origin, lapse }))
+}
+
+fn millis(at: u128) -> u64 {
+    u64::try_from(at).unwrap_or(u64::MAX)
 }
 
 /// CI's objectives on this member, from the newest replicated Workspace CI reading.
@@ -406,28 +425,30 @@ pub fn ci_rows(store: &Store, now_unix_ms: u64) -> anyhow::Result<Vec<Value>> {
 
 /// CI's objectives: each percentile of a duration over the last day and each count over the last
 /// hour, from the runs of `reading` (None when no member has recorded any). A series nothing
-/// feeds, one with no sample in its window, and a reading older than `WORKSPACE_CI_FRESH_MS` are
-/// no-data.
+/// feeds, one with no sample in its window, and a reading that has not followed GitHub for longer
+/// than `WORKSPACE_CI_FRESH_MS` are no-data.
 fn ci(targets: &crate::slo::Targets, reading: Option<&CiReading>, now_unix_ms: u64) -> Vec<Value> {
     const DAY_MS: u64 = 86_400_000;
     const HOUR_MS: u64 = 3_600_000;
-    // How old the reading is, in whole seconds.
-    let age = reading.map(|reading| (now_unix_ms.saturating_sub(reading.ci.observed_at_unix_ms) / 1_000).max(1) * 1_000);
-    let stale = age.is_some_and(|age| age > WORKSPACE_CI_FRESH_MS);
+    // How long, in whole seconds, the reading has not followed GitHub, and why.
+    let lapse = reading.and_then(|reading| reading.lapse.as_ref())
+        .map(|(since, why)| ((now_unix_ms.saturating_sub(*since) / 1_000).max(1) * 1_000, why));
+    let stale = lapse.is_some_and(|(age, _)| age > WORKSPACE_CI_FRESH_MS);
     let source = reading.filter(|_| !stale).map(|reading| &reading.ci);
-    let unobserved = |path: &str| match reading {
-        Some(reading) if stale => format!(
-            "The newest Workspace CI reading for {path}, by host/{}, is {} old, older than the {} three of its observer's polls allow",
-            reading.member, duration(age.unwrap_or_default()), duration(WORKSPACE_CI_FRESH_MS),
+    let unobserved = |path: &str| match (reading, lapse) {
+        (Some(reading), Some((age, why))) if stale => format!(
+            "The newest Workspace CI reading for {path}, by host/{}, is not current: {why} for {}, longer than the {} three of its observer's polls allow",
+            reading.member, duration(age), duration(WORKSPACE_CI_FRESH_MS),
         ),
-        Some(_) => format!("Nothing feeds {path} yet"),
-        None => format!("No member has recorded Workspace CI runs for {path}: the repository observer that reads main_performance_failures records them"),
+        (Some(_), _) => format!("Nothing feeds {path} yet"),
+        (None, _) => format!("No member has recorded Workspace CI runs for {path}: the repository observer that reads main_performance_failures records them"),
     };
-    let not_read = if stale { "reading too old" } else { "not observed" };
-    // Which member read the runs, and when, for a row a fresh reading feeds.
+    let not_read = if stale { "reading stale" } else { "not observed" };
+    // Which member read the runs for a row a current reading feeds, and any failure it rides out.
     let fresh = reading.filter(|_| !stale).map_or_else(String::new, |reading| format!(
-        " Read by host/{} from {}'s Workspace CI runs {} ago.",
-        reading.member, reading.ci.repository, duration(age.unwrap_or_default()),
+        " Read by host/{} from {}'s Workspace CI runs{}.",
+        reading.member, reading.ci.repository,
+        lapse.map_or_else(String::new, |(age, why)| format!("; {why} for {}", duration(age))),
     ));
     let durations = targets.duration.iter().map(|target| {
         let (p, within) = (target.percentile, duration(target.target_ms));
@@ -1136,8 +1157,8 @@ mod tests {
         ci_rows_flaky(runs, &[])
     }
 
-    /// The reading of `runs`, taken at `NOW` by `alder`, of which those named in `flaky` had their
-    /// artifacts listed.
+    /// The reading of `runs` by `alder`, whose observer is healthy, of which those named in
+    /// `flaky` had their artifacts listed.
     fn reading(runs: &[Value], flaky: &[(u64, u64)]) -> CiReading {
         let runs = runs
             .iter()
@@ -1147,8 +1168,8 @@ mod tests {
                 run
             })
             .collect();
-        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
-        CiReading { ci, member: "alder".to_owned() }
+        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), runs, unread_since_unix_ms: None };
+        CiReading { ci, member: "alder".to_owned(), lapse: None }
     }
 
     /// The rows from `runs`, of which those named in `flaky` had their artifacts listed.
@@ -1311,24 +1332,92 @@ mod tests {
         assert_eq!(ci_reading(&member).unwrap().unwrap().member, "alder");
         for row in &there {
             assert_ne!(row["status"], "no-data", "{row}");
-            assert!(row["explain"].as_str().unwrap().ends_with(" Read by host/alder from acme/garden's Workspace CI runs 1 s ago."), "{row}");
+            assert!(row["explain"].as_str().unwrap().ends_with(" Read by host/alder from acme/garden's Workspace CI runs."), "{row}");
         }
         assert_eq!(by_id(&there, "flakes")["current"], "2 in the last hour");
     }
 
     #[test]
-    fn a_reading_older_than_three_polls_is_no_data_never_met() {
+    fn a_reading_that_lapses_for_three_polls_is_no_data_never_met() {
         let runs = [ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 9.0, 30.0)];
-        let at = |now: u64| ci(crate::slo::targets(), Some(&reading(&runs, &[])), now);
-        for row in at(unix_ms(NOW) + WORKSPACE_CI_FRESH_MS) {
+        let now = unix_ms(NOW);
+        let lapsed = |since: u64| CiReading { lapse: Some((since, "its observer has been unreachable".to_owned())), ..reading(&runs, &[]) };
+        // One failed poll does not blank the rows; they say what they ride out.
+        for row in ci(crate::slo::targets(), Some(&lapsed(now - WORKSPACE_CI_FRESH_MS)), now) {
             assert_eq!(row["status"], "met", "{row}");
-            assert!(row["explain"].as_str().unwrap().ends_with("Workspace CI runs 15 min ago."), "{row}");
+            assert!(row["explain"].as_str().unwrap().ends_with("Workspace CI runs; its observer has been unreachable for 15 min."), "{row}");
         }
-        for row in at(unix_ms(NOW) + WORKSPACE_CI_FRESH_MS + 1_000) {
-            assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some("reading too old")), "{row}");
+        for row in ci(crate::slo::targets(), Some(&lapsed(now - WORKSPACE_CI_FRESH_MS - 1_000)), now) {
+            assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some("reading stale")), "{row}");
             assert!(row["remaining_percent"].is_null(), "{row}");
-            assert!(row["explain"].as_str().unwrap().contains("by host/alder, is 15.0 min old, older than the 15 min three of its observer's polls allow"), "{row}");
+            assert!(row["explain"].as_str().unwrap().contains("by host/alder, is not current: its observer has been unreachable for 15.0 min, longer than the 15 min three of its observer's polls allow"), "{row}");
         }
+        // A reading whose observer stays healthy carries no read time and stays current while
+        // nothing changes; its runs leave the rows through the windows.
+        let later = ci(crate::slo::targets(), Some(&reading(&runs, &[])), now + 2 * 3_600_000);
+        assert_eq!((by_id(&later, "flakes")["status"].as_str(), by_id(&later, "flakes")["current"].as_str()), (Some("no-data"), Some("no samples")));
+        assert_eq!(by_id(&later, "merge-latency/p50")["status"], "met");
+    }
+
+    #[test]
+    fn an_unchanged_reading_appends_nothing_and_its_observer_says_whether_it_is_current() {
+        use crate::model::ClaimInput;
+        use crate::resource::github_workflows::WORKSPACE_CI_FIELD;
+        use crate::{SeatsStore as _, SeatsStoreCore as _};
+        let poller = Store::open_memory("alder").unwrap();
+        let source = r#"version 2
+resource "garden" { kind "vcs.repository" }
+observer "garden" { resource "resource/garden"; provider "github.repository"; locator "acme/garden"; field "issues" }
+"#;
+        let intent = crate::graph::parse_execution_intent(source, "alder", "ci-reading").unwrap();
+        let subject = |kind: &str| intent.subjects.values().find(|subject| subject.kind == kind).unwrap().subject.clone();
+        let (observer, resource) = (subject("observer"), subject("resource"));
+        poller.apply_internal(&intent, "ci-reading-observer").unwrap();
+        let revision = poller.selected_desired_revision(&observer).unwrap().unwrap();
+        let runs = [ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 9.0, 30.0)];
+        let facts = json!({"repository_id": 7, WORKSPACE_CI_FIELD: reading(&runs, &[]).ci});
+        let observe = |facts: &Value, next_check: u128| poller
+            .record_resource_observation_outcome(&observer, &revision, None, &resource, None, facts, next_check, &[], None)
+            .unwrap();
+        let (first, wrote) = observe(&facts, 1);
+        assert!(wrote && first.observation_claim.is_some());
+        // The next poll read nothing new, so it records the same fact: nothing is appended and no
+        // field changed, and the standing observer steps back to its quiet cadence.
+        let before = poller.index().unwrap();
+        let (unchanged, wrote) = observe(&facts, 2);
+        assert!(!wrote && unchanged.observation_claim.is_none() && unchanged.changed_fields.is_empty());
+        assert_eq!(poller.index().unwrap(), before);
+        // Every member finds the reading current while its observer is healthy.
+        let member = Store::open_memory("birch").unwrap();
+        replicate(&poller, &member);
+        let there = ci_reading(&member).unwrap().unwrap();
+        assert_eq!((there.member.as_str(), there.lapse.as_ref(), there.ci), ("alder", None, reading(&runs, &[]).ci));
+        // A failed poll records the observer's state, which replicates: the reading lapses from then.
+        let unreachable = || poller.append_claim(&ClaimInput {
+            subject: observer.clone(), kind: "observer.state".into(), actor: None,
+            fields: std::collections::BTreeMap::from([("state".into(), json!("unreachable")),
+                ("reason".into(), json!("GitHub answered 502")), ("revision".into(), json!(revision))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let failed = unreachable();
+        replicate(&poller, &member);
+        let lapse = |store: &Store| ci_reading(store).unwrap().unwrap().lapse;
+        assert_eq!(lapse(&member), Some((millis(failed.accepted_at_unix_ms), "its observer has been unreachable".to_owned())));
+        // The next good poll records the observer healthy again, and the reading is current.
+        observe(&facts, 3);
+        replicate(&poller, &member);
+        assert_eq!(lapse(&member), None);
+        // A poll whose Workspace CI reads failed records since when; with its observer failing
+        // later as well, the reading lapses from the earlier of the two.
+        let mut unread = facts.clone();
+        unread[WORKSPACE_CI_FIELD]["unread_since_unix_ms"] = json!(7);
+        observe(&unread, 4);
+        replicate(&poller, &member);
+        let reads_failed = Some((7, "its Workspace CI reads have failed".to_owned()));
+        assert_eq!(lapse(&member), reads_failed);
+        unreachable();
+        replicate(&poller, &member);
+        assert_eq!(lapse(&member), reads_failed);
     }
 
     #[test]

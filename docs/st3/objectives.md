@@ -77,7 +77,8 @@ named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `c
 These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
 1% of its samples are over, a max when any one is. CI rows read the same on every member, from
 the newest replicated Workspace CI reading, and are no-data while no member has recorded one or
-once it is older than 15 minutes ([profiling](profiling.md)).
+once it has not followed GitHub for 15 minutes, its observer or its reads failing
+([profiling](profiling.md)).
 
 ### Interval over claims
 

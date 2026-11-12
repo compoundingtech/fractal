@@ -91,7 +91,7 @@ fn without_a_fault_agent_a_missed_objective_opens_nothing() {
 fn only_the_member_that_recorded_the_reading_opens_a_ci_fault() {
     let poller = Store::open_memory("alder").unwrap();
     crate::objectives::record_ci_reading(&poller, json!({"repository_id": 7,
-        "workspace_ci": {"repository": "acme/garden", "observed_at_unix_ms": 1, "runs": []}}));
+        "workspace_ci": {"repository": "acme/garden", "runs": []}}));
     let member = Store::open_memory("birch").unwrap();
     crate::objectives::replicate(&poller, &member);
     let rows = [row("merge-latency/p95", "missed"), row("flakes", "met"), row("transaction/write", "missed")];

@@ -456,19 +456,29 @@ completed `merge_group` runs, each created since the start of the previous UTC d
 runs a row reads as the repository's `workspace_ci` fact: those that finished in the last hour,
 and the successful first attempts that finished in the last day, each as its id, event,
 conclusion, attempt (when not the first), the two timestamps its row measures between and its
-flaky test count once listed, with the time of the read (`observed_at_unix_ms`). The observation
-replicates, so every member computes the same rows from the newest reading and says which member
-read it and how long ago. A green run is about 125 bytes, so a busy day of about 200 runs is about
-25 KB an observation; the two listings' 1,000-run bounds cap it at 2,000 runs, under 320 KB. Each
-successful read is a new observation (the read time changes), about 288 a day at the five-minute
-cadence; replaced observations are trimmed like every other `resource.observed`. A reading older
-than 15 minutes, three polls, lists the rows as `no-data`, never as met: a failed read records
-the previous reading unchanged, never fails the observation, and so ages out, as does a reading
-whose observer stopped. If the listings return runs but none named `Workspace CI` at
-`.github/workflows/fleet.yml` (the workflow was renamed), the read fails with a warning, so the
-rows age out to `no-data` instead of reading as an idle day. With several repositories recording
-a reading, the rows read the newest. Only run-level timestamps and, for `flakes`, artifact names
-are read, no jobs and no logs:
+flaky test count once listed. The observation replicates, so every member computes the same rows
+from the newest reading and says which member read it. A green run is about 125 bytes, so a busy
+day of about 200 runs is about 25 KB an observation; the two listings' 1,000-run bounds cap it at
+2,000 runs, under 320 KB. The fact holds no read time, so it changes only when a run is new or
+changed, a run's flaky count is listed, or the reads start or stop failing: a poll that finds
+nothing new records the previous reading as it was, runs that aged out of the windows included,
+so the store appends nothing and the standing observer backs off to its quiet cadence as for any
+unchanged observation. Runs that aged out leave with the next change; the rows read their windows
+when they are read. Replaced observations are trimmed like every other `resource.observed`.
+
+A reading's freshness comes from its observer's liveness, not from a read time. The rows are
+`no-data` (`current` `reading stale`), never met, once the reading has not followed GitHub for
+more than 15 minutes, three polls: since the replicated `observer.state` of the observer that
+recorded it went other than `healthy` (a failed poll records it), or since its own Workspace CI
+reads began to fail. A failed read never fails the observation: it records the previous reading
+with `unread_since_unix_ms`, once per failure episode, and the next good read clears it. Within
+the 15 minutes the rows stay as they were and their explain says what they ride out. A member
+that stops without recording a failure leaves its observer `healthy`; its reading's samples then
+leave the rows through the windows, after an hour for `flakes` and a day for the durations. If the
+listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the workflow
+was renamed), the read fails with a warning, so the rows turn `no-data` instead of reading as an
+idle day. With several repositories recording a reading, the rows read the most recently recorded
+one. Only run-level timestamps and, for `flakes`, artifact names are read, no jobs and no logs:
 
 - `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
   `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
@@ -504,7 +514,7 @@ members compute the same missed row and open none. Its reviewer is the fleet fau
 agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
 fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
 that shows the row `met` ends it with `operational.recovered`, on whichever member has it open. A
-`no-data` row, as before any member has recorded runs or once the reading is too old, neither
+`no-data` row, as before any member has recorded runs or once the reading is stale, neither
 opens nor ends one. The other objectives open no fault.
 
 ### Operator-selected API readiness
