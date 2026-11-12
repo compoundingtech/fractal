@@ -49,14 +49,23 @@ public enum AnswerState: Sendable, Equatable {
 @MainActor @Observable public final class AttentionModel {
   public private(set) var attention = LiveSection<AttentionPage>()
   public private(set) var slo = LiveSection<SloSnapshot>()
+  /// The person's availability and directive note.
+  public internal(set) var availability = LiveSection<AvailabilitySnapshot>()
+  /// The panel's latest availability or note change: sending, committed or Fractal's refusal.
+  public internal(set) var availabilityWrite: AnswerState?
   public private(set) var answers: [String: AnswerState] = [:]
   public private(set) var isRefreshing = false
   public let configurationError: String?
   private let adapter: (any AttentionAdapter)?
+  let availabilityAdapter: (any AvailabilityAdapter)?
   private var refreshAgain = false
 
-  public init(adapter: (any AttentionAdapter)?, configurationError: String? = nil) {
+  public init(
+    adapter: (any AttentionAdapter)?, availabilityAdapter: (any AvailabilityAdapter)? = nil,
+    configurationError: String? = nil
+  ) {
     self.adapter = adapter
+    self.availabilityAdapter = availabilityAdapter
     self.configurationError =
       adapter == nil
       ? configurationError
@@ -110,6 +119,9 @@ public enum AnswerState: Sendable, Equatable {
       await withTaskGroup(of: Void.self) { group in
         group.addTask { await self.readAttention(from: adapter, now: now) }
         group.addTask { await self.readSlo(from: adapter, now: now) }
+        if let availabilityAdapter {
+          group.addTask { await self.readAvailability(from: availabilityAdapter, now: now) }
+        }
       }
     } while refreshAgain
   }
@@ -125,11 +137,11 @@ public enum AnswerState: Sendable, Equatable {
     Self.apply(result, to: &slo, now: now ?? .now)
   }
 
-  private nonisolated static func capture<T: Sendable>(_ read: @Sendable () async throws -> T) async -> Result<T, Error> {
+  nonisolated static func capture<T: Sendable>(_ read: @Sendable () async throws -> T) async -> Result<T, Error> {
     do { return .success(try await read()) } catch { return .failure(error) }
   }
 
-  private static func apply<T: Sendable & Equatable>(_ result: Result<T, Error>, to section: inout LiveSection<T>, now: Date) {
+  static func apply<T: Sendable & Equatable>(_ result: Result<T, Error>, to section: inout LiveSection<T>, now: Date) {
     switch result {
     case .success(let value):
       section.value = value

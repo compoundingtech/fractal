@@ -21,6 +21,9 @@ let package = Package(
       dependencies: [
         "AttentionCore", .product(name: "FractalClient", package: "FractalClient"),
       ]),
-    .testTarget(name: "AttentionCoreTests", dependencies: ["AttentionCore"]),
+    // AttentionTray: the adapter's mapping onto FractalClient's request types.
+    .testTarget(
+      name: "AttentionCoreTests",
+      dependencies: ["AttentionCore", "AttentionTray", .product(name: "FractalClient", package: "FractalClient")]),
   ]
 )

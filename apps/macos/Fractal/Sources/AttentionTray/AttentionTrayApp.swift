@@ -35,9 +35,9 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     do {
       let configuration = try TrayConfiguration.load(
         environment: ProcessInfo.processInfo.environment)
-      model = AttentionModel(
-        adapter: FractalAttentionAdapter(
-          configuration: configuration, clientName: "attention-tray \(build.machineVersion)"))
+      let adapter = FractalAttentionAdapter(
+        configuration: configuration, clientName: "attention-tray \(build.machineVersion)")
+      model = AttentionModel(adapter: adapter, availabilityAdapter: adapter)
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
@@ -85,7 +85,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     }
     let line =
       "attention \(describe(model.attention.state)) (\(model.openAskCount) asks, \(model.updates.count) updates); "
-      + "slo \(describe(model.slo.state)) (\(model.slo.value?.rows.count ?? 0) rows, \(model.sloBoard?.needsAttention ?? 0) need attention)"
+      + "slo \(describe(model.slo.state)) (\(model.slo.value?.rows.count ?? 0) rows, \(model.sloBoard?.needsAttention ?? 0) need attention); "
+      + "availability \(describe(model.availability.state))"
     guard line != lastLogged else { return }
     lastLogged = line
     log(line)
