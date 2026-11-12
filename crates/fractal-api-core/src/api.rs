@@ -4223,6 +4223,14 @@ fn client_agent_cards_presented(
                 .cloned()
                 .unwrap_or_default();
             let usage = usage_summaries.get(&subject.subject);
+            // The model the seat actually runs on: the latest `harness.usage` model for the
+            // card's incarnation, or null when it reported none. Hoisted out of the card
+            // literal: the literal already nests at the macro recursion limit. A step script
+            // reads what a one-shot reviewer actually ran on even after it exits.
+            let live_model: Option<String> = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+                None => None,
+            };
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4285,6 +4293,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }

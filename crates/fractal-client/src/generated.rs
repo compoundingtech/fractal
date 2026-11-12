@@ -2022,6 +2022,10 @@ pub struct Agent {
     pub next_work: Option<WorkLabel>,
     #[serde(default)]
     pub upcoming_work: Vec<WorkLabel>,
+    /// The model the seat actually runs on: the latest harness usage model for the card's
+    /// incarnation. `None` when it reported none; differs from the declaration while drifted.
+    #[serde(default)]
+    pub live_model: Option<String>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
     #[serde(default)]
