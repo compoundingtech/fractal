@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Markdown applies a GitHub-like HTML policy on parsed and plain fallback paths: hidden content stays hidden even when HTML attributes contain code delimiters, genuine code stays literal in fallback text, raw pre/code retains its words, allowed elements render, details disclose, links allow http(s) and document references, images wait for consent, and nesting is capped at 32",
+  "summary": "Markdown applies a GitHub-like HTML policy on parsed and plain fallback paths: hidden content stays hidden even when HTML attributes contain code delimiters or list/quote continuations use tabs, genuine code stays literal with indentation measured past its container using CommonMark tab stops, raw pre/code retains its words, allowed elements render, details disclose, links allow http(s) and document references, images wait for consent, and nesting is capped at 32",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."

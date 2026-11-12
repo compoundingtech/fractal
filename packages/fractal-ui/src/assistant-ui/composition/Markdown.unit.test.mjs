@@ -150,6 +150,16 @@ const FALLBACK_HTML_PAYLOADS = [
   '<span data-x="`unfinished',
   '<!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <details>Visible</details>',
   ...['&#106;avascript:', '&#x6A;avascript:', 'java&Tab;script:'].map(scheme => `<a data-x="\`" href="${scheme}alert(1)">safe</a>\``),
+  ...[
+    '- item\n\t',
+    '1. item\n\t',
+    '- outer\n  - inner\n\t',
+    '> item\n> \t',
+    '>\t',
+    '- item\n \t',
+    '- item\nlazy continuation\n\t',
+    '- item\n\n\t',
+  ].flatMap(prefix => [`${prefix}<script>SECRET</script>`, `${prefix}<!-- HIDDEN -->`]),
 ]
 const FALLBACK_LITERAL_CODE = [
   '`<!-- literal -->`',
@@ -158,6 +168,12 @@ const FALLBACK_LITERAL_CODE = [
   '~~~\n<script data-x="~~~">literal</script>\n~~~',
   '    <script data-x="`">literal</script>',
   '\t<!-- literal -->',
+  '- item\n\n      <script>literal</script>',
+  '- item\n\n \t  <!-- literal -->',
+  '1. item\n\n       <script>literal</script>',
+  '> item\n>\n>     <!-- literal -->',
+  '- item\n  ~~~html\n  <script>literal</script>\n  ~~~',
+  '>\t~~~html\n> <!-- literal -->\n> ~~~',
 ]
 
 test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
@@ -171,12 +187,15 @@ test('delimiter and error fallback text applies HTML policy without stripping co
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
   assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
   assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
-  for (const source of FALLBACK_HTML_PAYLOADS) assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
+  for (const source of FALLBACK_HTML_PAYLOADS) {
+    assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
+    assert.doesNotMatch(block(source), /HIDDEN|SECRET/, `normal parser must hide the same payload: ${source}`)
+  }
   assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible <span data-x="unfinished')
   assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible <span data-x="`')
 })
 
-test('delimiter guard and caught renderer failure keep attribute code markers out of the real fallback DOM', async () => {
+test('delimiter guard and caught renderer failure keep attribute markers and container HTML out of the real fallback DOM', async () => {
   const { JSDOM } = await import('jsdom')
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')

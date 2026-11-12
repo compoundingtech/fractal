@@ -218,6 +218,92 @@ export function remarkHtmlPolicy() {
   return (tree: Node) => { capDepth(tree, 0); rebuild(tree); capDepth(tree, 0) }
 }
 
+type MarkdownContainer = 'quote' | number
+type MarkdownCursor = { at: number; column: number; pending: number }
+
+/** Like the excerpt scanner: a tab can straddle a container boundary without changing source offsets. */
+function containerLine(line: string, state: { containers: MarkdownContainer[]; quotes: number }, fenced: boolean) {
+  const cursor: MarkdownCursor = { at: 0, column: 0, pending: 0 }
+  const byte = () => cursor.pending > 0 ? ' ' : line[cursor.at]
+  const space = () => {
+    if (cursor.pending > 0) cursor.pending--
+    else {
+      if (line[cursor.at] === '\t') cursor.pending = 3 - cursor.column % 4
+      else if (line[cursor.at] !== ' ') return false
+      cursor.at++
+    }
+    cursor.column++
+    return true
+  }
+  const indent = (limit: number) => {
+    const start = cursor.column
+    while (cursor.column - start < limit && space()) {}
+  }
+  const advance = (width: number) => { cursor.at += width; cursor.column += width }
+  let matched = 0
+  let quotes = 0
+  for (; matched < state.containers.length; matched++) {
+    const start = { ...cursor }
+    const container = state.containers[matched]!
+    if (container === 'quote') {
+      indent(3)
+      if (byte() !== '>') { Object.assign(cursor, start); break }
+      advance(1)
+      space()
+      quotes++
+    } else {
+      indent(container)
+      if (cursor.column - start.column < container) {
+        if (/^\s*$/.test(line.slice(cursor.at))) {
+          if (quotes === state.quotes) matched = state.containers.length
+          else while (state.containers[matched] !== 'quote') matched++
+          cursor.at = line.length
+          cursor.pending = 0
+        } else Object.assign(cursor, start)
+        break
+      }
+    }
+  }
+  const ended = matched < state.containers.length
+  // A paragraph may lazily continue a container without repeating its prefix. Keep that context for the next
+  // indented line, but never extend a fence or classify the lazy line's own indentation relative to it.
+  const tail = line.slice(cursor.at)
+  const lazy = ended && !fenced && /^\S/.test(tail) && !/^(?:[<>`~#]|[-+*](?:\s|$)|\d{1,9}[.)](?:\s|$))/.test(tail)
+  if (ended && !lazy) {
+    for (let index = matched; index < state.containers.length; index++) if (state.containers[index] === 'quote') state.quotes--
+    state.containers.length = matched
+  }
+  if ((!fenced || ended) && !lazy) {
+    while (true) {
+      const start = { ...cursor }
+      indent(3)
+      if (byte() === '>') {
+        advance(1)
+        space()
+        state.containers.push('quote')
+        state.quotes++
+        continue
+      }
+      const marker = cursor.at
+      if (byte() === '-' || byte() === '+' || byte() === '*') advance(1)
+      else {
+        while (byte() !== undefined && /[0-9]/.test(byte()!) && cursor.at - marker < 9) advance(1)
+        if (cursor.at === marker || (byte() !== '.' && byte() !== ')')) { Object.assign(cursor, start); break }
+        advance(1)
+      }
+      const padding = { ...cursor }
+      indent(5)
+      const width = cursor.column - padding.column
+      if (width === 0) { Object.assign(cursor, start); break }
+      if (width > 4) { Object.assign(cursor, padding); space() }
+      state.containers.push(cursor.column - start.column)
+    }
+  }
+  const contentColumn = cursor.column
+  indent(Infinity)
+  return { ended, indent: cursor.column - contentColumn, body: line.slice(cursor.at) }
+}
+
 /**
  * The parser's plain-text rendering path still applies the HTML policy. Code islands remain literal, while prose
  * passes through the same tree policy as parsed Markdown (including hidden comments and dropped element content).
@@ -236,12 +322,19 @@ export function filteredMarkdownText(source: string): string {
   let at = 0
   let plainStart = 0
   let fence: { marker: string; start: number } | undefined
+  const containers = { containers: [] as MarkdownContainer[], quotes: 0 }
   while (at < source.length) {
     if (at === 0 || source[at - 1] === '\n') {
       const newline = source.indexOf('\n', at)
       const end = newline === -1 ? source.length : newline + 1
       const line = source.slice(at, end)
-      const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line)
+      const context = containerLine(line, containers, fence !== undefined)
+      if (context.ended && fence !== undefined) {
+        children.push({ type: 'code', value: source.slice(fence.start, at) })
+        fence = undefined
+        plainStart = at
+      }
+      const marker = context.indent <= 3 ? /^(`{3,}|~{3,})(.*)/.exec(context.body) : null
       if (fence !== undefined) {
         if (marker !== null && marker[1]![0] === fence.marker[0] && marker[1]!.length >= fence.marker.length && marker[2]!.trim() === '') {
           children.push({ type: 'code', value: source.slice(fence.start, end) })
@@ -257,7 +350,7 @@ export function filteredMarkdownText(source: string): string {
         at = end
         continue
       }
-      if (/^(?: {4}|\t)/.test(line)) {
+      if (context.indent >= 4) {
         children.push({ type: 'html', value: source.slice(plainStart, at) }, { type: 'code', value: line })
         at = plainStart = end
         continue
