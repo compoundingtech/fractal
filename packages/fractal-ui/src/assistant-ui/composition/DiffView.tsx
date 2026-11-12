@@ -30,7 +30,7 @@ export interface DiffViewProps {
   readonly hideWhitespace?: boolean
   readonly collapsed?: boolean
   readonly tone?: 'default' | 'muted'
-  /** `compact`: hover-card scale (dense type, meta leading, no line numbers by default). */
+  /** `compact`: hover-card scale (dense type, meta leading, no line numbers by default); static, so it adds no tab stop or landmark inside a tooltip. */
   readonly density?: 'default' | 'compact'
   /** Accessible name of the scrollable region. */
   readonly label?: string
@@ -148,7 +148,7 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   const added = prepared.files.reduce((sum, file) => sum + file.added, 0)
   const removed = prepared.files.reduce((sum, file) => sum + file.removed, 0)
   const Pierre = pierre === 'failed' || pierre === undefined ? undefined : pierre.default
-  return <div ref={host} role="region" aria-label={label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} tabIndex={0} data-testid={testId} data-diff-state={Pierre ? 'rendered' : pierre === 'failed' ? 'plain-failed' : 'plain'} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
+  return <div ref={host} role={density === 'compact' ? undefined : 'region'} aria-label={density === 'compact' ? undefined : label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} tabIndex={density === 'compact' ? undefined : 0} data-testid={testId} data-diff-state={Pierre ? 'rendered' : pierre === 'failed' ? 'plain-failed' : 'plain'} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
       const plain = <PlainDiff file={file} wrap={wrap} />
       return <div key={`${file.path}:${index}`} data-diff-file={file.path} {...stylex.props(styles.file)}>
