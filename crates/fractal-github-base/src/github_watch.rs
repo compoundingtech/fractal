@@ -817,6 +817,8 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
         // A comment owns its entire span, even if it contains code-looking delimiters.
         if bytes[at..].starts_with(b"<!--") {
             at = text[at + 4..].find("-->").map_or(bytes.len(), |end| at + 4 + end + 3);
+        } else if bytes[at] == b'\\' && bytes.get(at + 1).is_some_and(|next| matches!(*next, b'`' | b'\\')) {
+            at += 2;
         } else if bytes[at] == b'`' {
             if let Some(end) = closing.get(&at) {
                 ranges.push((at, *end));
@@ -1609,6 +1611,7 @@ mod tests {
             assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
         }
         assert_eq!(quote("<!-- hidden `code` -->After").as_deref(), Some("> After"));
+        assert_eq!(quote("\\`<!-- hidden -->` after").as_deref(), Some("> \\`` after"));
     }
 
     #[test]
