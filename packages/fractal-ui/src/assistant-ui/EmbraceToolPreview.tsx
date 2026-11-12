@@ -3,7 +3,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Markdown, type MarkdownProps, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
 import { tokens } from './embrace-tokens.stylex'
-import { syntaxVars as syntax } from './composition-tokens.stylex'
+import { syntaxVars as syntax, surfaceVars as surface, textVars as ink } from './composition-tokens.stylex'
 import type { ToolDiff } from './embrace-tool-preview'
 import { DiffView } from './composition/DiffView'
 import { patchFromRows } from './composition/diff-patch'
@@ -23,7 +23,8 @@ const EmbraceFileDiff = ({ diff }: { readonly diff: ToolDiff }) => {
         <span {...stylex.props(styles.path)}>{diff.path || 'Edited excerpt'}{diff.excerpt ? ' · excerpt' : ''}</span>
         <span {...stylex.props(styles.counts)}><span {...stylex.props(styles.countAdded)}>+{diff.added}</span> <span {...stylex.props(styles.countRemoved)}>−{diff.removed}</span></span>
       </figcaption>
-      <DiffView files={files} label={`Changes to ${diff.path || 'excerpt'}`} />
+      {/* The region's name follows the caption, so an excerpt and the whole file's diff are two different landmarks. */}
+      <DiffView files={files} label={`Changes to ${diff.path || 'excerpt'}${diff.path && diff.excerpt ? ', excerpt' : ''}`} />
     </figure>
   )
 }
@@ -37,7 +38,9 @@ export const EmbraceMarkdownPreview = ({ markdown, tone, resolveImage, onLoadIma
 const styles = stylex.create({
   diffList: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
   diff: { margin: 0, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 6, overflow: 'hidden', minWidth: 0 },
-  caption: { display: 'flex', alignItems: 'baseline', gap: 10, padding: 8, fontSize: 11, color: tokens.ink, backgroundColor: tokens.recess },
+  // The +N −M inks are the composition syntax palette, held to AA on composition surfaces; the caption sits on one.
+  // On the embrace recess the dark deletion ink read 3.96:1, and with no embrace theme the dark addition ink 2.05:1.
+  caption: { display: 'flex', alignItems: 'baseline', gap: 10, padding: 8, fontSize: 11, color: ink.fg, backgroundColor: surface.raised },
   path: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere' },
   counts: { flexShrink: 0, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums' },
   countAdded: { color: syntax.additionInk },
