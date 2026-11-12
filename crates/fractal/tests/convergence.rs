@@ -1969,9 +1969,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 }
 
 /// Corpus v23 adds the four person-availability kinds to kind selection, shifting the shared RNG
-/// schedule. The never-trim set is characterized by hosted CI; a lightly loaded runner diverges
+/// schedule: burst nextest run 43215860112 at the corpus change trims seed 34 and leaves seed 21
+/// untrimmed. The never-trim set is characterized by hosted CI; a lightly loaded runner diverges
 /// from it (#6210).
-const NEVER_TRIMS: &[u64] = &[34];
+const NEVER_TRIMS: &[u64] = &[21];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
