@@ -48,9 +48,10 @@ async fn launch_run_workspace(
     let bytes = document_bytes(client, name, hash).await?;
     let source = std::str::from_utf8(&bytes).context("the launch candidate KDL is not UTF-8")?;
     let intent = fractal_daemon::parse_intent(source, local)?;
-    let mission = intent.missions.values()
-        .find(|mission| mission.id == session.mission.trim_start_matches("mission/"))
-        .context("the launch candidate does not declare its mission")?;
+    // Candidate admission requires exactly one top-level mission. Its immutable document
+    // keeps the authored name even when the session now presents a renamed public label.
+    anyhow::ensure!(intent.missions.len() == 1, "the launch candidate must declare exactly one mission");
+    let mission = intent.missions.values().next().context("the launch candidate declares no mission")?;
     resolve_mission_workspace(
         mission,
         workspace,

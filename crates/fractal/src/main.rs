@@ -8490,14 +8490,14 @@ fn resolve_mission_workspace(
     inputs: &BTreeMap<String, String>,
 ) -> Result<PathBuf> {
     let mut hosts = BTreeSet::new();
-    let referenced_execution = mission_workspace_hosts(mission, local, inputs, &mut hosts)?;
-    if referenced_execution || hosts.iter().any(|host| host != local && host != "local") {
+    let unknown_placement = mission_workspace_hosts(mission, inputs, &mut hosts)?;
+    if unknown_placement || hosts.iter().any(|host| host != local && host != "local") {
         let workspace = workspace.context(
-            "this mission has remote or referenced execution; pass --workspace with an absolute path on the execution members",
+            "this mission is not provably local; pass --workspace with an absolute path on the execution members",
         )?;
         anyhow::ensure!(
             workspace.is_absolute(),
-            "a workspace for remote or referenced execution must be an absolute path on the execution members"
+            "a workspace for execution that is not provably local must be an absolute path on the execution members"
         );
         return Ok(workspace.to_path_buf());
     }
@@ -8509,51 +8509,34 @@ fn resolve_mission_workspace(
 
 fn mission_workspace_hosts(
     mission: &MissionSpec,
-    local: &str,
     inputs: &BTreeMap<String, String>,
     hosts: &mut BTreeSet<String>,
 ) -> Result<bool> {
     // A referenced mission can be selected by a prior step's output, so its placement is
     // not necessarily knowable before the run. Do not publish a local default for it.
-    let mut referenced_execution = mission.steps.values().any(|step| step.uses_mission.is_some());
-    let mut variables = fractal_daemon::graph::runtime_proof_variables(mission);
-    variables.extend(
-        inputs
-            .iter()
-            .map(|(name, value)| (format!("input.{name}"), value.clone())),
-    );
-    for source in mission.declarations_kdl.iter().chain(
-        mission
-            .steps
-            .values()
-            .filter_map(|step| step.declarations_kdl.as_ref()),
-    ) {
-        let source = fractal_daemon::mission::interpolate_kdl(source, &variables)?;
-        let intent =
-            fractal_daemon::graph::parse_execution_intent(&source, local, "workspace-resolution")?;
-        hosts.extend(
-            intent
-                .subjects
-                .values()
-                .filter_map(|subject| subject.member.as_ref().map(|member| member.host.clone())),
-        );
+    let mut unknown_placement = mission.steps.values().any(|step| step.uses_mission.is_some());
+    // Only values already known for actual execution belong here. Proof variables are not
+    // execution context: substituting one could make a remote placement look local.
+    let mut variables = BTreeMap::new();
+    variables.extend(inputs.iter().map(|(name, value)| (format!("input.{name}"), value.clone())));
+    if let Some(source) = &mission.declarations_kdl {
+        unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
     }
-    for gate in mission
-        .gates
-        .iter()
-        .chain(mission.steps.values().flat_map(|step| &step.gates))
-    {
-        match gate {
-            fractal_daemon::model::GateSpec::Mechanical { host, .. }
-            | fractal_daemon::model::GateSpec::Llm { host, .. } => {
-                hosts.insert(fractal_daemon::mission::interpolate(host, &variables)?);
-            }
-            _ => {}
+    for gate in &mission.gates {
+        unknown_placement |= gate_workspace_host(gate, &variables, hosts);
+    }
+    for step in mission.steps.values() {
+        variables.insert("ST_STEP".into(), step.path.clone());
+        if let Some(source) = &step.declarations_kdl {
+            unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
+        }
+        for gate in &step.gates {
+            unknown_placement |= gate_workspace_host(gate, &variables, hosts);
         }
     }
     for step in mission.steps.values() {
         if let Some(nested) = &step.nested_mission {
-            referenced_execution |= mission_workspace_hosts(nested, local, inputs, hosts)?;
+            unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
         }
         if let Some(loop_spec) = &step.loop_spec {
             for nested in [
@@ -8564,11 +8547,61 @@ fn mission_workspace_hosts(
             .into_iter()
             .flatten()
             {
-                referenced_execution |= mission_workspace_hosts(nested, local, inputs, hosts)?;
+                unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
             }
         }
     }
-    Ok(referenced_execution)
+    Ok(unknown_placement)
+}
+
+/// Collect an over-approximation of placement expressions without interpolating unrelated
+/// runtime fields (workspace, IDs, commands). Unknown placement requires an explicit path.
+fn declaration_workspace_hosts(
+    source: &str,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> Result<bool> {
+    fn visit(document: &KdlDocument, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+        let mut unknown = false;
+        for node in document.nodes() {
+            unknown |= node.name().value().contains("${");
+            if node.name().value() == "host" {
+                unknown |= node.entries().first()
+                    .and_then(|entry| entry.value().as_string())
+                    .is_none_or(|host| record_workspace_host(host, variables, hosts));
+            }
+            for entry in node.entries() {
+                if entry.name().is_some_and(|name| name.value() == "host") {
+                    unknown |= entry.value().as_string()
+                        .is_none_or(|host| record_workspace_host(host, variables, hosts));
+                }
+            }
+            if let Some(children) = node.children() {
+                unknown |= visit(children, variables, hosts);
+            }
+        }
+        unknown
+    }
+    Ok(visit(&source.parse::<KdlDocument>()?, variables, hosts))
+}
+
+fn gate_workspace_host(
+    gate: &fractal_daemon::model::GateSpec,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> bool {
+    match gate {
+        fractal_daemon::model::GateSpec::Mechanical { host, .. }
+        | fractal_daemon::model::GateSpec::Llm { host, .. } => record_workspace_host(host, variables, hosts),
+        _ => false,
+    }
+}
+
+fn record_workspace_host(host: &str, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+    match fractal_daemon::mission::interpolate(host, variables) {
+        Ok(host) => { hosts.insert(host); false }
+        Err(_) => true,
+    }
 }
 
 async fn start_mission_run(

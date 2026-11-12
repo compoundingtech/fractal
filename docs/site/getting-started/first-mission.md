@@ -95,13 +95,16 @@ Publication stores an immutable definition; starting creates one execution pinne
 
 The run workspace is a path on its execution members, not necessarily the computer
 where you type the command. For missions whose declared runtimes or executable
-gates run on another member, or which invoke referenced missions whose placement
-is not known before starting, pass an absolute `--workspace` on those members;
+gates run on another member, or whose placement cannot be determined before
+starting (including referenced missions), pass an absolute `--workspace` on those members;
 the CLI publishes it as written without checking the caller's filesystem.
 Omitting it or passing a relative path is refused rather than publishing the
-caller's current directory. Local-only execution still defaults to the current
-directory and canonicalizes local paths. The same rule applies to `launch run`
+caller's current directory. Provably local execution still defaults to the current
+directory and canonicalizes local paths. Placement uses actual step paths and
+supplied inputs, never fabricated interpolation values; unresolved host expressions
+require an explicit workspace. The same rule applies to `launch run`
 and `launch approve-and-launch`; `launch start` creates a local planning agent.
+Approved launches keep using their pinned candidate even if the mission is renamed.
 
 ## Check the result
 

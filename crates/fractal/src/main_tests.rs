@@ -5180,6 +5180,27 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 }
 
 #[test]
+fn mission_workspace_uses_actual_step_hosts_and_refuses_unknown_placement() {
+    let source = "version 2\nmission \"placement\" state=\"ready\" {\n goal \"Resolve actual placement\"\n step \"executor\" {\n agentless\n host \"${ST_STEP}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n }\n }\n}\n";
+    let intent = fractal_daemon::parse_intent(source, "publisher").unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    let cwd = Path::new(".").canonicalize().unwrap();
+    for workspace in [None, Some(Path::new("."))] {
+        assert_eq!(resolve_mission_workspace(&mission, workspace, "executor", &inputs).unwrap(), cwd);
+        let error = resolve_mission_workspace(&mission, workspace, "migration-step", &inputs).unwrap_err();
+        assert!(error.to_string().contains(if workspace.is_none() { "pass --workspace" } else { "absolute path" }), "{error:#}");
+    }
+    let remote = Path::new("/srv/only-on-executor/../workspace");
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-step", &inputs).unwrap(), remote);
+    mission.steps.get_mut("executor").unwrap().declarations_kdl = Some(
+        "version 2\nhost \"${ST_REQUESTER}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n}\n".into()
+    );
+    assert!(resolve_mission_workspace(&mission, None, "migration-reviewer", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-reviewer", &inputs).unwrap(), remote);
+}
+
+#[test]
 fn mission_workspace_respects_execution_members() {
     let intent = fractal_daemon::parse_intent(
         "version 2\nmission \"workspace\" state=\"ready\" {\n goal \"Check workspace placement\"\n step \"wait\" { agentless }\n}\n",
@@ -8986,6 +9007,13 @@ async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
             let _: PlanningSessionView = client.post(&format!("{path}/approve"), &PlanningApprovalRequest {
                 actor: "person/test".into(), preview_hash: hash.clone(), idempotency_key: "remote-launch-approve".into(),
             }).await.unwrap();
+            let _: Value = client.post("/v1/missions/rename-id", &json!({
+                "from": "mission/remote-launch", "to": "mission/renamed-launch",
+                "actor": "person/test", "reason": "Clarify mission name",
+                "idempotency_key": "remote-launch-rename"
+            })).await.unwrap();
+            let renamed: PlanningSessionView = client.get(&path).await.unwrap();
+            assert_eq!(renamed.mission, "renamed-launch");
         }
         let command = |workspace| if combined {
             LaunchCommand::ApproveAndLaunch(LaunchApproveAndStartArgs {
@@ -9005,6 +9033,7 @@ async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
         let runs: Vec<MissionRunView> = client.get("/v1/mission-runs?mission=remote-launch").await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].workspace, remote);
+        assert_eq!(runs[0].mission, if combined { "mission/remote-launch" } else { "mission/renamed-launch" });
         server.abort();
     }
 }
