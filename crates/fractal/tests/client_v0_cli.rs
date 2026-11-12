@@ -5306,6 +5306,21 @@ async fn availability_surfaces_to_an_asking_agent_in_ask_and_now() {
     assert_eq!(people.len(), 1, "{seat}");
     assert_eq!(people[0]["status"], "away");
     assert!(people[0]["presence"].is_null());
+
+    // With no override, a locked device makes the person away; the agent never sees the raw
+    // presence but its Now must still name the presence-derived away so it parks.
+    let cleared = run_lane_cli(&socket, &config_home, None, true, &["availability", "clear"]).await;
+    assert!(cleared.status.success(), "{}", String::from_utf8_lossy(&cleared.stderr));
+    let locked = run_lane_cli(&socket, &config_home, None, true, &["availability", "presence", "locked"]).await;
+    assert!(locked.status.success(), "{}", String::from_utf8_lossy(&locked.stderr));
+    let seat = run_lane_cli(&socket, &config_home, Some(&agent), false, &["now"]).await;
+    assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+    let seat = String::from_utf8_lossy(&seat.stdout);
+    assert!(seat.starts_with("person/ada is away\n"), "{seat}");
+    let seat = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["now"]).await);
+    let people = seat["availability"]["people"].as_array().unwrap();
+    assert_eq!((people[0]["status"].as_str(), people[0]["status_source"].as_str()), (Some("away"), Some("presence")), "{seat}");
+    assert!(people[0]["presence"].is_null(), "{seat}");
     server.abort();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
