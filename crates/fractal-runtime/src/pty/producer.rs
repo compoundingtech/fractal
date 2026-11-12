@@ -265,8 +265,8 @@ impl PtyRuntime {
         Ok(true)
     }
 
-    /// Runs once at runtime startup, including already-applied starts that no
-    /// longer enter the pending-start cleanup path.
+    /// Reconcile durable producers at startup and on runtime inventory, including
+    /// applied starts that no longer enter pending-start cleanup.
     pub(super) fn reconcile_producers(&self) -> Result<()> {
         let roots = match std::fs::read_dir(self.spawn_state_directory()) {
             Ok(roots) => roots,
@@ -341,6 +341,39 @@ mod tests {
         let owner: ProducerOwnership =
             serde_json::from_reader(File::open(directory.join("owner.json")).unwrap()).unwrap();
         assert!(!owner.publication_pending);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inventory_finalizes_a_vanished_producer_idempotently_without_restart() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("requires real systemd user scope support");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("registry"));
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let token = crate::process_start_token(pid).unwrap();
+        let directory = startup_fixture(&runtime, "inventory-vanished-start", pid, token);
+        runtime.snapshot().unwrap();
+        assert!(!directory.join("closure.json").exists(), "live producer remains pending");
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        // No registry row or pending start remains to drive cleanup, and this
+        // same runtime was constructed before the producer existed.
+        runtime.snapshot().unwrap();
+        let owner = std::fs::read(directory.join("owner.json")).unwrap();
+        let closure = std::fs::read(directory.join("closure.json")).unwrap();
+        let owner_record: ProducerOwnership = serde_json::from_slice(&owner).unwrap();
+        assert!(!owner_record.publication_pending);
+        let closure_record: serde_json::Value = serde_json::from_slice(&closure).unwrap();
+        assert_eq!(closure_record["publication_pending"], false);
+        assert_eq!(closure_record["reason"], "runtime-vanished");
+        runtime.snapshot().unwrap();
+        assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), owner);
+        assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), closure);
     }
 
     #[cfg(target_os = "linux")]

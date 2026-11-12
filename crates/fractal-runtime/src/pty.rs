@@ -332,6 +332,9 @@ impl PtyRuntime {
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
         crate::procfs::require_matching_procfs()?;
+        // Applied starts no longer enter pending-start cleanup. Inventory must
+        // still retire their durable producers after the server generation ends.
+        self.reconcile_producers()?;
         self.registry_snapshot.lock().map_err(|_| anyhow::anyhow!("PTY snapshot lock poisoned"))?
             .sessions(&self.root)?.into_iter().map(observation).collect()
     }
@@ -514,28 +517,22 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
-        // Only API-created default terminals opt into home resolution. A seat or mission
-        // workspace of "." retains its ordinary working-directory semantics.
+        // Resolve on the launching host, before any producer can persist or
+        // forward a relative directory. Untagged relative workspaces retain
+        // their daemon-relative meaning, but not their relative representation.
         let home = if cwd == Path::new(".")
             && tags.get("st3.cwd").is_some_and(|value| value == "home")
         {
-            if let Some(home) = std::env::home_dir() {
-                anyhow::ensure!(
-                    home.is_absolute(),
-                    "default terminal home directory must be absolute"
-                );
-                Some(home)
-            } else {
-                tracing::warn!(
-                    runtime_id = id,
-                    "default terminal home is unavailable; retaining '.' for shell-side home resolution"
-                );
-                None
-            }
+            let home = std::env::home_dir().context("default terminal home directory unavailable")?;
+            anyhow::ensure!(home.is_absolute(), "default terminal home directory must be absolute");
+            Some(home)
         } else {
             None
         };
         let cwd = home.as_deref().unwrap_or(cwd);
+        let cwd = cwd.canonicalize()
+            .with_context(|| format!("resolve PTY working directory {}", cwd.display()))?;
+        anyhow::ensure!(cwd.is_dir(), "PTY working directory is not a directory");
         // The lane is the scope's, never the harness's environment.
         let mut env = env.clone();
         let capacity = crate::lane::Capacity::take(&mut env);
@@ -2257,7 +2254,7 @@ exit 0
             .nth(1)
             .unwrap();
         assert!(Path::new(cwd).is_absolute(), "{arguments}");
-        assert_eq!(Path::new(cwd), std::env::home_dir().unwrap());
+        assert_eq!(Path::new(cwd), std::env::home_dir().unwrap().canonicalize().unwrap());
     }
 
     #[test]
@@ -2279,7 +2276,7 @@ exit 0
     }
 
     #[test]
-    fn untagged_dot_workspace_is_forwarded_unchanged() {
+    fn relative_workspace_is_forwarded_as_a_canonical_directory() {
         let root = tempfile::tempdir().unwrap();
         let binary = fake_pty(root.path(), "fake-pty-dot-cwd", "  publish new");
         let runtime =
@@ -2293,7 +2290,32 @@ exit 0
             .skip_while(|arg| *arg != "--cwd")
             .nth(1)
             .unwrap();
-        assert_eq!(cwd, ".");
+        assert_eq!(Path::new(cwd), std::env::current_dir().unwrap().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn symlink_workspace_is_forwarded_as_a_canonical_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join("workspace-link");
+        std::os::unix::fs::symlink(root.path(), &link).unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-symlink-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+        spawn_work(&runtime, &link, &BTreeMap::new()).unwrap();
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments.lines().skip_while(|arg| *arg != "--cwd").nth(1).unwrap();
+        assert_eq!(Path::new(cwd), root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn non_directory_workspace_is_rejected_before_producer_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("not-a-directory");
+        fs::write(&file, "").unwrap();
+        let runtime = PtyRuntime::new(root.path().join("registry"));
+        let error = spawn_work(&runtime, &file, &BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("PTY working directory is not a directory"));
+        assert!(!runtime.spawn_state_directory().exists());
     }
 
     #[test]

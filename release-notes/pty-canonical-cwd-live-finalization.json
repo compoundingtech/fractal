@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "PTY launches resolve every working directory to a canonical absolute directory on the launching host before publication. Runtime inventory also finalizes ended producers after applied starts leave pending-start cleanup, without requiring a daemon restart.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim or projection changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or durable sidecar format changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A working directory must resolve to an existing directory before producer creation. Default personal terminals require an available host home directory; no relative fallback is forwarded."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Wire parameters and home-intent tags remain unchanged. Relative runtime workspaces retain daemon-relative semantics but are forwarded canonically. Existing conservative generation, boot, scope and launcher acknowledgement checks still govern closure."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Updated runtime behavior takes effect after daemon restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual producer-record repair is performed or required for new launches."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Ambiguous or live producers remain pending. Closure uses the existing durable idempotent closure record and publication_pending=false owner transition."
+  }
+}
