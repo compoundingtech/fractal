@@ -1,10 +1,11 @@
+import { markdownInline, type MarkdownInline } from '@fractal/client/markdown'
 import type { Resource as ResourceWire } from '@fractal/client'
 import { Agent, Resource, decodeUnknownSync } from '@fractal/client/schema'
 import { Option, SchemaAST } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import oldLiteral from './agentSnapshot.oldLiteral.json'
-import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent } from './resourceDecode.ts'
+import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open } from './resourceDecode.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { frame } from './windowIngest.fixture.ts'
 
@@ -358,3 +359,12 @@ describe('mission served projections', () => {
   })
 })
 
+
+describe('Open leaves', () => {
+  it('keep a Markdown field assignable to its Markdown type', () => {
+    type Goal = NonNullable<Open<{ readonly goal: MarkdownInline }>['goal']>
+    const accepts = (goal: MarkdownInline): MarkdownInline => goal
+    const goal: Goal = markdownInline('Ship the *draft*')
+    expect(accepts(goal)).toBe('Ship the *draft*')
+  })
+})

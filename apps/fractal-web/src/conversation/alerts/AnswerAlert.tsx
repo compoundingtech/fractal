@@ -1,3 +1,4 @@
+import { markdownSource, optionalSource } from '@fractal/client/markdown'
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime, Option } from 'effect'
@@ -42,12 +43,12 @@ const Question = ({ text }: { readonly text: string }): React.ReactNode => {
 /** What a launch would start, as its planner previewed it: goal, steps, agents and gates. */
 const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
   if (Option.isNone(alert.preview)) {
-    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? <> <InlineMarkdown text={cleanMessageText(alert.detail)} /></> : ''}</div>
+    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? <> <InlineMarkdown text={cleanMessageText(markdownSource(alert.detail))} /></> : ''}</div>
   }
   const preview = alert.preview.value
   return (
     <>
-      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: <InlineMarkdown text={preview.request_excerpt} /></div> : null}
+      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: <InlineMarkdown text={markdownSource(preview.request_excerpt)} /></div> : null}
       {preview.steps.length > 0 ? (
         <ol {...stylex.props(styles.list)} aria-label="Steps">
           {preview.steps.map((step) => (
@@ -161,16 +162,16 @@ export const AnswerAlert = ({
     now,
   )
   const request = alert.request
-  const question = request?.question
+  const question = optionalSource(request?.question)
   const plain = question !== undefined && isPlainHeading(question)
-  const headingText = plain ? question : alert.attention_kind === 'launch-approval' && Option.isSome(alert.preview) ? alert.preview.value.goal : alert.title
-  const detail = cleanMessageText(alert.detail ?? '')
-  const contextSource = request?.summary ?? (request === undefined && alert.attention_kind !== 'launch-approval' && !(isRequest(alert.attention_kind) && report(detail) !== null) ? detail : '')
+  const headingText = plain ? question : alert.attention_kind === 'launch-approval' && Option.isSome(alert.preview) ? markdownSource(alert.preview.value.goal) : alert.title
+  const detail = cleanMessageText(optionalSource(alert.detail) ?? '')
+  const contextSource = optionalSource(request?.summary) ?? (request === undefined && alert.attention_kind !== 'launch-approval' && !(isRequest(alert.attention_kind) && report(detail) !== null) ? detail : '')
   const { line, overflows } = contextOf(contextSource)
   const title = plain && !repeatsHeading(alert.title, question) ? alert.title : undefined
-  const whyText = request?.why_person.replace(/^why (you|now):\s*/i, '').replace(/^why (you|now):\s*/i, '')
+  const whyText = optionalSource(request?.why_person)?.replace(/^why (you|now):\s*/i, '').replace(/^why (you|now):\s*/i, '')
   const why = whyText === undefined || whyText === '' || sameWords(whyText, contextSource, true) || sameWords(whyText, question ?? '', true) ? undefined : whyText
-  const evidence = [...(alert.because ? [`Because ${alert.because}`] : []), ...(request?.reasons ?? [])]
+  const evidence = [...(alert.because ? [`Because ${markdownSource(alert.because)}`] : []), ...(request?.reasons ?? []).map(markdownSource)]
   const related = subjectRows(alert, onOpenRef, opensRef)
   const full = density === 'full'
   const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> : undefined

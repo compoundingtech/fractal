@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { markdownBlock } from '@fractal/client/markdown'
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -144,7 +145,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
       path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z' }],
   }))
   const question: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-    actions: ['work.done'], conversation_id: seat.id, detail: 'Ship the reviewed change?', update: undefined }
+    actions: ['work.done'], conversation_id: seat.id, detail: markdownBlock('Ship the reviewed change?'), update: undefined }
   const missionValues = [hydrated]
   const attentionValues = [question]
   const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: missionValues })).pipe(Atom.keepAlive)

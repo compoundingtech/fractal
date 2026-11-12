@@ -1,3 +1,4 @@
+import { optionalSource } from '@fractal/client/markdown'
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime, Option } from 'effect'
@@ -71,7 +72,8 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
       ? prompt.call_id == null ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.' : 'The prompt details are incomplete or unsupported: answer it in the agent\'s terminal.'
       : undefined
   const failure = store.failure(alert)
-  const { line, overflows } = contextOf(alert.detail ?? '')
+  const detail = optionalSource(alert.detail) ?? ''
+  const { line, overflows } = contextOf(detail)
   const heading = question === undefined ? alert.title : `${question.header ? `${question.header} · ` : ''}${question.question}${question.multiSelect ? ' (choose any)' : ''}`
   const body = question === undefined && shown.length > 0
     ? shown.map((call) => <pre key={call.id} {...stylex.props(styles.call)}>{[call.tool, ...call.lines].join('\n')}</pre>)
@@ -86,7 +88,7 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
     heading={<InlineMarkdown text={heading} />}
     headingText={markdownLine(heading)}
     {...(line === '' || line === markdownLine(alert.title) ? {} : { context: line })}
-    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={alert.detail ?? ''} /></div> } : {})}
+    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={detail} /></div> } : {})}
     {...(body === undefined ? {} : { body })}
     options={options}
     mode={question?.multiSelect === true ? 'any' : 'one'}

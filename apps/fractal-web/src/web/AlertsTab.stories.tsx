@@ -1,4 +1,5 @@
 /** The sidebar's Alerts tab over the fleet-mid-refactor attention slice, in a fixed 256px sidebar at 440 and 1440 in both themes. */
+import { markdownSource } from '@fractal/client/markdown'
 import * as Native from '@fractal/client/schema'
 import { useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioArgTypes } from '@fractal/scenarios/storybook'
@@ -49,7 +50,7 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
         {!slice.loading && (state === 'served' || state === 'stale') && slice.state.messages.length > 0 && <section aria-label="Scenario fixture context" {...stylex.props(styles.fixtureContext)}>
           <h2>Scenario fixture context</h2>
           <p>The attention slice also serves these mailbox messages. They are fixture context, not Alerts rows or another inbox.</p>
-          <dl>{slice.state.messages.map((message) => <React.Fragment key={message.id}><dt>{message.title}</dt><dd>{message.content}</dd></React.Fragment>)}</dl>
+          <dl>{slice.state.messages.map((message) => <React.Fragment key={message.id}><dt>{message.title}</dt><dd>{markdownSource(message.content)}</dd></React.Fragment>)}</dl>
         </section>}
         <output data-testid="alerts-opened">{opened}</output>
       </main>
