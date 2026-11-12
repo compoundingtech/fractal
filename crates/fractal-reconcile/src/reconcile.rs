@@ -1321,6 +1321,9 @@ pub struct Reconciler<R = NativeRuntime> {
     pub wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
+    /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
+    /// `run_report`.
+    default_stall_reports_since: Mutex<Option<u128>>,
     #[cfg(any(test, feature = "test-support"))]
     background_dispatch_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1592,6 +1595,7 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
+            default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1813,6 +1817,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
+            default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -10666,10 +10671,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
                     // Telling a run's reporter never holds the run back or fails it.
-                    match self.run_report(&run.subject).and_then(|report| {
-                        report
-                            .map(|report| self.report_run(&run, &report, now_ms()))
-                            .transpose()
+                    match self.report_choice(&run.subject).and_then(|choice| match choice {
+                        run_report::ReportChoice::Named(report) => {
+                            self.report_run(&run, &report, now_ms()).map(Some)
+                        }
+                        run_report::ReportChoice::Unnamed => self
+                            .report_stall_by_default(&run, now_ms())
+                            .map(|due| due.map(Some)),
+                        run_report::ReportChoice::Cleared => Ok(None),
                     }) {
                         Ok(None) => {
                             // A run whose reporter was cleared has nobody left to fail.
