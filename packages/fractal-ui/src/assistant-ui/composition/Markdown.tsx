@@ -131,10 +131,11 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 }
 
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
-  if (href === undefined || href === '') return <>{children}</>
+  // Hooks first, every render; then an empty or unsafe href (the URL transform empties those) renders as its words.
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
-  const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
   const preview = React.useContext(MarkdownLinkPreviewContext)
+  if (href === undefined || href === '') return <>{children}</>
+  const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
   const linkWith = (linkTitle: string | undefined) => <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={linkTitle} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
   const previewed = !imageLink && href !== undefined && preview !== undefined ? preview(href, linkWith(undefined)) : undefined
   if (previewed !== undefined) return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{previewed}</ReferenceContext.Provider>
