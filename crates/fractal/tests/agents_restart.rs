@@ -791,6 +791,9 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
         (Shape::TopLevel, "exited", Some(0)),
         (Shape::TopLevel, "exited", Some(17)),
         (Shape::Mission, "exited", Some(0)),
+        (Shape::Mission, "vanished", None),
+        (Shape::Step, "exited", Some(0)),
+        (Shape::Step, "exited", Some(17)),
         (Shape::Step, "vanished", None),
     ] {
         let (fixture, subject) =
@@ -822,6 +825,16 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
             .unwrap();
         assert_eq!(ended.writer.as_deref(), Some("daemon/runtime"));
         assert_eq!(ended.declaration, original);
+        let retired = fixture
+            .store
+            .desired_subject_with_writer(&subject)
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(retired.kind, "stop");
+        assert_eq!(retired.owner_run, original.owner_run);
+        assert_eq!(retired.owner_generation, original.owner_generation);
+        assert_eq!(retired.owner_step, original.owner_step);
         assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
         assert!(succeeded(&st(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
         succeeded(&st(&socket, &["agents", "show", &subject, "--all"]).await);

@@ -22,6 +22,7 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod transcript;
 #[cfg(test)]
 mod test_executable;
 pub mod seat_admission;
@@ -62,6 +63,6 @@ pub use process::{
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable,
-    ProcfsHidesProcesses, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
+    ProcfsHidesProcesses, PtyExitEvidence, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
     PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };
