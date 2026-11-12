@@ -198,19 +198,19 @@ function emailLiterals(node: MdastNode): MdastNode[] {
  * Replace GFM's restarting literal-autolink tokenizer and postparse regex with the same bounded tree scan used by
  * pulldown. Keep the other GFM constructs and the CommonMark angle autolinks; email policy is applied afterward.
  */
-export function remarkLinearAutolinks(this: { data(): { micromarkExtensions?: unknown[]; fromMarkdownExtensions?: unknown[] } }) {
+export function remarkLinearAutolinks(this: { data(): object }) {
   const data = this.data()
-  const extensions = data.micromarkExtensions
+  const extensions = 'micromarkExtensions' in data ? data.micromarkExtensions : undefined
   const disabled = { disable: { null: ['emailAutolink', 'protocolAutolink', 'wwwAutolink'] } }
   if (Array.isArray(extensions)) extensions.push(disabled)
-  else data.micromarkExtensions = [disabled]
+  else Object.assign(data, { micromarkExtensions: [disabled] })
   const replaceTransform = (extension: unknown): void => {
     if (Array.isArray(extension)) { for (const item of extension) replaceTransform(item); return }
     if (typeof extension !== 'object' || extension === null || !('enter' in extension)) return
     const enter = extension.enter
     if (typeof enter === 'object' && enter !== null && 'literalAutolink' in enter && 'transforms' in extension) extension.transforms = []
   }
-  replaceTransform(data.fromMarkdownExtensions)
+  replaceTransform('fromMarkdownExtensions' in data ? data.fromMarkdownExtensions : undefined)
   return (tree: MdastNode) => linkLiterals(tree)
 }
 
