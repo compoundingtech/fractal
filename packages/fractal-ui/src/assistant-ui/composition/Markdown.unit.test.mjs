@@ -83,6 +83,30 @@ test('settled blocks are cut, so a long document is not parsed whole', () => {
   assert.equal(splitMarkdownBlocks('Some [ref][r].\n\nMore.\n\n[r]: https://example.test').length, 1)
 })
 
+test('multiline reference labels resolve across settled block boundaries', () => {
+  for (const source of [
+    '[two\\nlines]: https://example.test\\n\\nUse [two lines].'.replaceAll('\\n', '\n'),
+    'Use [two lines].\n\n[two\nlines]: https://example.test',
+    '[escaped\\] label\ncontinued]: https://example.test\n\nUse [escaped\\] label continued].',
+  ]) {
+    const blocks = splitMarkdownBlocks(source)
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks.map(parsed).join(''), parsed(source))
+    assert.match(parsed(source), /href="https:\/\/example.test"/)
+  }
+})
+
+test('both plain-text helper copies preserve literal entity-looking text', async () => {
+  const kit = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
+  const client = await server.ssrLoadModule(new URL('../../../../../../clients/typescript/fractal-client/markdown-text.ts', import.meta.url).pathname)
+  for (const helpers of [kit, client]) {
+    const source = '&copy; &#65; &#x41; &amp;'
+    for (const helper of [helpers.markdownFromPlain, helpers.inlineFromPlain]) {
+      assert.equal(parsed(helpers.markdownSource(helper(source))), '<p>&amp;copy; &amp;#65; &amp;#x41; &amp;amp;</p>')
+    }
+  }
+})
+
 test('splitting 200KB of Markdown stays within a streaming frame', () => {
   const source = Array.from({ length: 4000 }, (_, index) => `Paragraph ${index} with some \`code\` and words that fill the line.`).join('\n\n')
   const { milliseconds } = cpuMilliseconds(() => splitMarkdownBlocks(source))

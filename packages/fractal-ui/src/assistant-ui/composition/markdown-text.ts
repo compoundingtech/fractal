@@ -18,7 +18,7 @@ export const blockFromInline = (inline: MarkdownInline): MarkdownBlock => inline
 export const markdownBlock = (source: string): MarkdownBlock => source as unknown as MarkdownBlock;
 export const markdownInline = (source: string): MarkdownInline => source as unknown as MarkdownInline;
 
-const ESCAPED = /[\\`*_{}[\]()#+\-.!|<>~]/g;
+const ESCAPED = /[\\`*_{}[\]()#+\-.!|<>~&]/g;
 
 /** Literal text as Markdown that renders to exactly those characters, line breaks kept. */
 export const markdownFromPlain = (plain: string): MarkdownBlock =>

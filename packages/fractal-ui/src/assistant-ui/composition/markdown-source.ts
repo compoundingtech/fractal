@@ -6,7 +6,7 @@
 const LIST_LINE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]/
 const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})(.*)$/
 /** Definitions resolve across the whole document, also from inside quotes and list items. A task item may match: harmless, it only skips the cut. */
-const DEFINITION = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[[^\]\n]+\]:/m
+const DEFINITION = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[(?:\\[\s\S]|[^\[\]\\])+\]:/m
 const RAW_HTML_OPEN = /^ {0,3}<(script|style|pre|textarea)(?=[\s>]|$)/i
 const RAW_DECLARATION = /^ {0,3}<(?:\?|![A-Za-z]|!\[CDATA\[)/
 const CONTINUATION = /^(?: {2,}|\t)/
