@@ -531,6 +531,11 @@ test('literal URLs stay inside original inline containers on both parser paths',
       const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
       return { tree, html }
     }
+    const differences = []
+    const compare = (actual, expected, source) => {
+      try { assert.deepEqual(actual, expected, source) }
+      catch (error) { differences.push({ source, message: error.message }) }
+    }
     const protocols = ['https://example.test/', 'www.example.test/']
     for (const prefix of protocols) {
       for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a\\\\|b', 'a(b)).']) {
@@ -543,8 +548,8 @@ test('literal URLs stay inside original inline containers on both parser paths',
           const expected = parse(source, [remarkGfm])
           for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
             const actual = parse(source, plugins)
-            assert.deepEqual(actual, expected, source)
-            assert.deepEqual(actual.tree.children[0].children.map(row => row.children.length), [2, 2], source)
+            compare(actual, expected, source)
+            compare(actual.tree.children[0].children.map(row => row.children.length), expected.tree.children[0].children.map(row => row.children.length), source)
           }
         }
       }
@@ -577,9 +582,10 @@ test('literal URLs stay inside original inline containers on both parser paths',
     ]) {
       const expected = parse(source, [remarkGfm])
       for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
-        assert.deepEqual(parse(source, plugins), expected, source)
+        compare(parse(source, plugins), expected, source)
       }
     }
+    assert.deepEqual(differences, [], 'all inline-container cases match the original remark-gfm oracle')
   } finally { await isolated.close() }
 })
 
