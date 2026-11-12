@@ -25,7 +25,7 @@ function registerTheme() {
 }
 registerTheme()
 
-/** Inside the shadow root: the header reads the kit's sans stack; the host paints the shared focus ring. */
+/** Inside the shadow root: the header reads the kit's sans stack; focusable code columns draw the shared focus ring from the host's `--fractal-diff-focus-*` properties. */
 const unsafeCSS = `
 :host { background: transparent; }
 /* Change washes at 7% (light) and 9% (dark) of the change hue (Pierre: 12% and 20%), so syntax ink keeps 4.5:1. */
@@ -35,7 +35,7 @@ const unsafeCSS = `
 [data-deletions-count] { color: var(--fractal-diff-deletion-ink); }
 [data-line-type='change-addition'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-addition); text-underline-offset: 3px; }
 [data-line-type='change-deletion'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-deletion); text-underline-offset: 3px; }
-[data-code]:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+[data-code]:focus-visible { outline-width: var(--fractal-diff-focus-width); outline-style: solid; outline-color: var(--fractal-diff-focus-color); outline-offset: var(--fractal-diff-focus-inset); }
 `
 
 export interface PierrePatchProps {

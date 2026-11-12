@@ -78,6 +78,29 @@ export const Unified: Story = {
 export const UnifiedLight: Story = { args: { scheme: 'light' }, play: Unified.play }
 export const Split: Story = { args: { layout: 'split' }, play: Unified.play }
 export const SplitLight: Story = { args: { layout: 'split', scheme: 'light' }, play: Unified.play }
+/** A scrolling split column takes keyboard focus and draws the shared focus ring the host passes into the shadow root. */
+export const SplitFocusRing: Story = {
+  args: { layout: 'split' },
+  play: async ({ canvasElement }) => {
+    const view = await rendered(canvasElement)
+    const host = [...view.querySelectorAll<HTMLElement>('[data-diff-file] *')].find(node => node.shadowRoot !== null)!
+    const code = host.shadowRoot!.querySelector<HTMLElement>('[data-code]')!
+    await waitFor(() => expect(code.tabIndex).toBe(0))
+    code.focus()
+    await expect(code.matches(':focus-visible')).toBe(true)
+    // Resolve the shared ring tokens in the host's context, the values the shadow CSS must draw.
+    const probe = canvasElement.ownerDocument.createElement('div')
+    probe.style.cssText = 'outline-style: solid; outline-width: var(--fractal-diff-focus-width); outline-color: var(--fractal-diff-focus-color); outline-offset: var(--fractal-diff-focus-inset)'
+    view.append(probe)
+    try {
+      const ring = getComputedStyle(code), shared = getComputedStyle(probe)
+      await expect(ring.outlineStyle).toBe('solid')
+      await expect(ring.outlineWidth).toBe(shared.outlineWidth)
+      await expect(ring.outlineColor).toBe(shared.outlineColor)
+      await expect(ring.outlineOffset).toBe(shared.outlineOffset)
+    } finally { probe.remove() }
+  },
+}
 export const Narrow: Story = { args: { width: 440, wrap: true }, play: Unified.play }
 export const NarrowLight: Story = { args: { width: 440, wrap: true, scheme: 'light' }, play: Unified.play }
 

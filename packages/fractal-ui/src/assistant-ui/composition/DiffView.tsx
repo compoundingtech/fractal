@@ -224,6 +224,10 @@ const styles = stylex.create({
     '--fractal-diff-token-token-link': syntax.link,
     '--fractal-diff-token-token-inserted': syntax.inserted,
     '--fractal-diff-token-token-deleted': syntax.deleted,
+    // The shared focus ring for the keyboard-focusable code columns inside the shadow root.
+    '--fractal-diff-focus-width': g.focusRing,
+    '--fractal-diff-focus-color': interaction.focusRing,
+    '--fractal-diff-focus-inset': g.focusInset,
     display: 'flex', flexDirection: 'column', minWidth: 0,
     backgroundColor: surface.canvas,
     outlineStyle: 'none',
