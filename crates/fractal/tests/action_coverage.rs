@@ -1921,7 +1921,7 @@ async fn revision_decisions_survive_stale_previews_and_restarts() {
             let successor = store.mission_run(&generation.run).unwrap().unwrap();
             assert_ne!(successor.subject, source.subject);
             assert_ne!(successor.generation, run.generation);
-            assert_eq!(successor.generation, generation.id);
+            assert_eq!(successor.generation, generation.subject);
             assert_eq!(successor.revision, intent.missions["example/revision"].revision);
             assert_eq!(source.superseded_by.as_deref(), Some(successor.subject.as_str()));
             assert_eq!(successor.supersedes.as_deref(), Some(source.subject.as_str()));
