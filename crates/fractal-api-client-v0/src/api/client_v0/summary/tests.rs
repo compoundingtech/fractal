@@ -31,6 +31,7 @@ fn summary_home_working_machine_predicates_and_deadline() {
         assert!(!crate::model::attention_is_alert(kind, true));
     }
     assert!(!crate::model::attention_is_alert("unread-message", false));
+    assert!(!crate::model::attention_is_alert("model-drift", false));
     let agent = json!({"state":"running","harness_state":"working","fault":null,"delivery":{"state":"current"}});
     assert!(working(&agent));
     for changed in [
