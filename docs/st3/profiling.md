@@ -452,16 +452,23 @@ not in the request-latency read, its gauges or `fractal doctor`.
 Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
 `main_performance_failures` also reads, with the same token, conditional cache and five-minute
 cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
-completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
-the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
-the member that runs that observer has them; every other member, and that one until its first
-read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
-fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
-first observer that read them; another repository's observer does not read them and logs a warning.
-If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
-workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
-reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
-jobs and no logs:
+completed `merge_group` runs, each created since the start of the previous UTC day. It records the
+runs a row reads as the repository's `workspace_ci` fact: those that finished in the last hour,
+and the successful first attempts that finished in the last day, each as its id, event,
+conclusion, attempt (when not the first), the two timestamps its row measures between and its
+flaky test count once listed, with the time of the read (`observed_at_unix_ms`). The observation
+replicates, so every member computes the same rows from the newest reading and says which member
+read it and how long ago. A green run is about 125 bytes, so a busy day of about 200 runs is about
+25 KB an observation; the two listings' 1,000-run bounds cap it at 2,000 runs, under 320 KB. Each
+successful read is a new observation (the read time changes), about 288 a day at the five-minute
+cadence; replaced observations are trimmed like every other `resource.observed`. A reading older
+than 15 minutes, three polls, lists the rows as `no-data`, never as met: a failed read records
+the previous reading unchanged, never fails the observation, and so ages out, as does a reading
+whose observer stopped. If the listings return runs but none named `Workspace CI` at
+`.github/workflows/fleet.yml` (the workflow was renamed), the read fails with a warning, so the
+rows age out to `no-data` instead of reading as an idle day. With several repositories recording
+a reading, the rows read the newest. Only run-level timestamps and, for `flakes`, artifact names
+are read, no jobs and no logs:
 
 - `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
   `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
@@ -476,9 +483,10 @@ jobs and no logs:
   name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
   run that finished in the last hour, pull request or merge group, has its artifacts listed once
   (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
-  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
-  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
-  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
+  runs a poll, newest first, so a busy hour cannot burst the reads; the rest are listed on the next
+  polls. The counts travel in the fact and each poll starts from the previous observation's, so a
+  run is listed once whichever member polls; a failed listing is tried again on a later poll. Pull
+  request runs are listed only when they succeeded, so
   a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
   About one listing per Workspace CI run, a few hundred a day.
 
@@ -490,13 +498,14 @@ merge group run for the count, is `no-data`.
 
 A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
 objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
-`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
-subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
+`slo-objective-missed`, severity `warning`, so normal priority) on the `daemon/NODE` subject of the
+member whose observer recorded the reading, in the episode `slo-objective/NODE/ID`; the other
+members compute the same missed row and open none. Its reviewer is the fleet fault agent, the live
 agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
 fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
-that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
-before the observer has read any runs, neither opens nor ends one. The other objectives open no
-fault.
+that shows the row `met` ends it with `operational.recovered`, on whichever member has it open. A
+`no-data` row, as before any member has recorded runs or once the reading is too old, neither
+opens nor ends one. The other objectives open no fault.
 
 ### Operator-selected API readiness
 

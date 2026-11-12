@@ -1348,6 +1348,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
+                ("workspace_ci", object()),
                 ("github_http_requests_since_start", integer()),
             ],
         ),

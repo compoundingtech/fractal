@@ -67,7 +67,7 @@ the daemon was built with.
 | `cpu` | The daemon and its replication workers over closed UTC minutes; children `idle-min-minutes` and `load-max-cores` | `cores max=`, `idle-cores max=` | `NAME`, `NAME/idle` | the hour |
 | `database` | The store's pages in use and their daily growth | `live-gb max=`, `growth-mb-per-day max=` | `NAME` | the newest hourly measurement |
 | `divergence` | Open projection divergence faults | `open max=` | `NAME`, once a divergence check has run | now |
-| `ci-duration` | A CI `series` (`ci/merge-queue`) read by the repository observer | `pNN within=` | `NAME/pNN` | 1d |
+| `ci-duration` | A CI `series` (`ci/merge-queue`) from the Workspace CI runs the repository observer records on its replicated observation | `pNN within=` | `NAME/pNN` | 1d |
 | `ci-count` | Events in a CI `series` | `per-hour max=` | `NAME` | 1h |
 
 The statement, transaction, writer-hold, CPU, database and divergence objectives are one each,
@@ -75,8 +75,9 @@ named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `c
 `projection-divergence`): `fractal doctor` and the OTLP export read them by these names.
 
 These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
-1% of its samples are over, a max when any one is, and CI rows are no-data on a member that reads no
-Workspace CI runs.
+1% of its samples are over, a max when any one is. CI rows read the same on every member, from
+the newest replicated Workspace CI reading, and are no-data while no member has recorded one or
+once it is older than 15 minutes ([profiling](profiling.md)).
 
 ### Interval over claims
 
