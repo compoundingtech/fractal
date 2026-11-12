@@ -135,7 +135,9 @@ pub mod tests {
             answer: None,
         };
         assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
-        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "ready");
+        let failed = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.blocked_reason.as_deref(), Some(format!("ask cancelled by {}", response.actor).as_str()));
     }
 
     #[test]
@@ -1916,6 +1918,174 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     }
 
     #[test]
+    fn historical_automatic_cancellation_uses_asking_predecessor_and_replays() {
+        for wrong_episode in [false, true] {
+            let (source, origin, input) = fixture();
+            let ask = source.ask_person(&input).unwrap();
+            let asking = request(&source.readers.get(), &ask.subject).unwrap().unwrap();
+            let target = Store::open_memory("birch").unwrap();
+            target.project_replication_backlog().unwrap();
+            receive(&source, &target);
+            source.connection.batched(|tx| -> Result<()> {
+                let mut body = json!({"fields": {
+                    "attempt": ask.attempt, "status": "cancelled",
+                    "summary": "the requester, origin or owning run ended",
+                    "key": format!("person-owner-ended:{}", asking.id)
+                }});
+                if wrong_episode {
+                    body["fields"]["episode"] = json!("a-different-asking-claim");
+                }
+                let cancelled = append_claim_tx(
+                    tx, "alder", &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
+                    &body, std::slice::from_ref(&asking.id), None,
+                )?;
+                assert!(cancelled.predecessors.contains(&asking.id));
+                project(tx, &cancelled).unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+            receive(&source, &target);
+            for store in [&source, &target] {
+                let check = || {
+                    assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+                    let waiting = if wrong_episode {
+                        step(&store.readers.get(), &origin.subject).unwrap().unwrap()
+                    } else {
+                        store.step_run(&origin.subject).unwrap().unwrap()
+                    };
+                    assert_eq!(waiting.attempt, origin.attempt);
+                    assert_eq!(waiting.status, if wrong_episode { "waiting-person" } else { "failed" });
+                    assert_eq!(waiting.blocked_reason.as_deref(), Some(if wrong_episode {
+                        ask.subject.as_str()
+                    } else {
+                        "ask cancelled by daemon/runtime"
+                    }));
+                };
+                check();
+                store.replay_replication_graph().unwrap();
+                check();
+            }
+        }
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_new_attempt_and_live_lease() {
+        stale_replica_cancellation_preserves_origin("retry");
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_reclaimed_same_attempt() {
+        stale_replica_cancellation_preserves_origin("reclaimed");
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_different_ask_episode() {
+        stale_replica_cancellation_preserves_origin("another-ask");
+    }
+
+    fn stale_replica_cancellation_preserves_origin(advance: &str) {
+        for historical_effect in [false, true] {
+            let (owner, origin, mut input) = fixture();
+            let ask = owner.ask_person(&input).unwrap();
+            let episode = request(&owner.readers.get(), &ask.subject).unwrap().unwrap().id;
+            let stale = Store::open_memory("birch").unwrap();
+            stale.project_replication_backlog().unwrap();
+            receive(&owner, &stale);
+            owner.finish_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: ask.subject.clone(),
+                actor: input.person.clone(),
+                summary: "Friday".into(),
+                evidence: vec![],
+                episode: Some(episode.clone()),
+                idempotency_key: "answered-before-stale-cancel".into(),
+                answer: None,
+            }, false).unwrap();
+            if advance == "retry" {
+                owner.set_step_state(&origin.subject, "failed", Some("try again")).unwrap();
+                owner.retry_step(&origin.subject, "try again", 0).unwrap();
+                owner.set_step_state(&origin.subject, "ready", None).unwrap();
+            }
+            let attempt = owner.step_run(&origin.subject).unwrap().unwrap().attempt;
+            let expires = now_ms() + 600_000;
+            owner.connection.batched(|tx| -> Result<()> {
+                let claim = append_claim_tx(tx, "alder", &origin.subject, "work.claimed", Some(&input.actor),
+                    &json!({"fields": {"attempt": attempt, "status": "claimed", "claimant": input.actor,
+                        "claim_incarnation": "asker-new", "claim_expires_at_unix_ms": expires as u64}}), &[], None)?;
+                project_mission_run_update(tx, &claim).unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+            if advance == "another-ask" {
+                input.incarnation = Some("asker-new".into());
+                input.idempotency_key = "second-release-question".into();
+                owner.ask_person(&input).unwrap();
+            }
+            let before = owner.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(before.attempt, if advance == "retry" { 2 } else { 1 });
+            if advance == "another-ask" {
+                assert_eq!(before.status, "waiting-person");
+                assert_ne!(before.blocked_reason.as_deref(), Some(ask.subject.as_str()));
+            } else {
+                assert_eq!(before.status, "claimed");
+                assert_eq!(before.claim_incarnation.as_deref(), Some("asker-new"));
+                assert_eq!(before.claimant.as_deref(), Some(input.actor.as_str()));
+                assert_eq!(before.claim_expires_at_unix_ms, Some(expires));
+                assert!(expires > now_ms());
+            }
+            // Sort cancellation after the owner's new work, so replay consumes it against
+            // the newer attempt/episode rather than merely repairing an earlier failure.
+            stale.set_write_clock_at(now_ms() + 10_000).unwrap();
+            stale.finish_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: ask.subject.clone(),
+                actor: input.actor.clone(),
+                summary: "No longer needed".into(),
+                evidence: vec![],
+                episode: Some(episode),
+                idempotency_key: "stale-cancel".into(),
+                answer: None,
+            }, true).unwrap();
+            assert_eq!(stale.step_run(&origin.subject).unwrap().unwrap().status, "failed");
+            if historical_effect {
+                // Previous writers also emitted this redundant unfenced state effect.
+                stale.connection.batched(|tx| -> Result<()> {
+                    let response = tx.query_row(
+                        "SELECT id FROM claims WHERE subject=?1 AND kind='work.person-cancelled'",
+                        [&ask.subject], |row| row.get::<_, String>(0))?;
+                    let effect = append_claim_tx(tx, "birch", &origin.subject, "step-run.state", Some("daemon/runtime"),
+                        &json!({"fields": {"status": "failed", "attempt": 1,
+                            "reason": format!("ask cancelled by {}", input.actor)}}), &[response], None)?;
+                    project_mission_run_update(tx, &effect).unwrap();
+                    Ok(())
+                }).unwrap().unwrap();
+            }
+            let exchange = |source: &Store, target: &Store| {
+                let exchange = source.export_replication_exchange_answering(
+                    TEST_FLEET, &target.replication_inventory().unwrap(), &[]).unwrap();
+                target.receive_replication_exchange(&exchange.peer, TEST_FLEET, &exchange).unwrap();
+                target.validate_replication_backlog().unwrap();
+                target.project_replication_backlog().unwrap();
+            };
+            exchange(&stale, &owner);
+            exchange(&owner, &stale);
+            for store in [&owner, &stale] {
+                let check = || {
+                    let after = store.step_run(&origin.subject).unwrap().unwrap();
+                    assert_eq!(after.attempt, before.attempt);
+                    assert_eq!(after.status, before.status);
+                    assert_eq!(after.blocked_reason, before.blocked_reason);
+                    assert_eq!(after.claimant, before.claimant);
+                    assert_eq!(after.claim_incarnation, before.claim_incarnation);
+                    assert_eq!(after.claim_expires_at_unix_ms, before.claim_expires_at_unix_ms);
+                    assert_eq!(after.readiness_epoch, before.readiness_epoch);
+                };
+                check();
+                store.replay_replication_graph().unwrap();
+                check();
+            }
+        }
+    }
+
+    #[test]
     fn person_lifecycle_replication_rebuilds_only_its_tree() {
         for mode in ["step", "standalone", "owned"] {
             let standalone = mode != "step";
@@ -1982,7 +2152,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
                 if !standalone {
                     assert_eq!(
                         target.step_run(&origin.subject).unwrap().unwrap().status,
-                        "ready"
+                        if cancel { "failed" } else { "ready" }
                     );
                 }
                 target
