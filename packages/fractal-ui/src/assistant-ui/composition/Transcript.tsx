@@ -603,7 +603,8 @@ const styles = stylex.create({
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
-  userClamp: { maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
+  // Eight prose lines, as the disclosure contract promises; padding and its optional button are outside this box.
+  userClamp: { maxHeight: `calc(${t.bodyLeading} * 8)`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   // The outcome is what the reader came for: full contrast, never dimmer than the prompt.
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fg, flexShrink: 0 },
