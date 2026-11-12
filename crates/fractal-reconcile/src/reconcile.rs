@@ -15054,7 +15054,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         && crate::graph::declared_uri(&desired.desired).is_some())
             });
         }
-        self.keep_stops_by_hand(&mut intent, run)?;
+        self.keep_stopped_seats(&mut intent, run)?;
         if assigned_agents_only && intent.subjects.is_empty() {
             return Ok(false);
         }
@@ -15242,10 +15242,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
-    /// Leave out of `intent` each seat a person or an agent stopped while this generation of
-    /// `run` declared it. Declaring it again would undo that stop on the next daemon start,
-    /// or on the next pass for a step's seat; `st agents start` starts it again.
-    fn keep_stops_by_hand(
+    /// Preserve manual stops and automatic one-shot retirement for this generation. Re-declaring
+    /// either would revive a finished seat on the next pass or daemon start; an explicit
+    /// `st agents start` replaces the stop and allows materialization again.
+    fn keep_stopped_seats(
         &self,
         intent: &mut crate::model::NormalizedIntent,
         run: &MissionRunView,
@@ -15259,9 +15259,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         if agents.is_empty() {
             return Ok(());
         }
-        let stopped = self
+        let mut stopped = self
             .store
             .stopped_by_hand(&agents, &run.subject, &run.generation)?;
+        // Runtime retirement retains its run ownership for history and missing-agent evidence,
+        // so it is intentionally not one of the root stops returned by stopped_by_hand.
+        for desired in self.store.desired_subjects_named(&agents)? {
+            if desired.kind == "stop"
+                && desired.owner_run.as_deref() == Some(run.subject.as_str())
+                && desired.owner_generation.as_deref() == Some(run.generation.as_str())
+                && let Some(ended) = self.store.declaration_ended_by_stop(&desired.subject)?
+                && ended.writer.as_deref() == Some("daemon/runtime")
+                && ended.declaration.owner_run.as_deref() == Some(run.subject.as_str())
+                && ended.declaration.owner_generation.as_deref() == Some(run.generation.as_str())
+                && ended.declaration.member.as_ref().is_some_and(|member| member.one_shot)
+            {
+                stopped.insert(desired.subject);
+            }
+        }
         intent
             .subjects
             .retain(|subject, _| !stopped.contains(subject));
@@ -15383,7 +15398,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && current.owner_generation.as_deref() == Some(run.generation.as_str())
             })
         });
-        self.keep_stops_by_hand(&mut intent, run)?;
+        self.keep_stopped_seats(&mut intent, run)?;
         for subject in intent.subjects.values_mut() {
             if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
                 continue;
