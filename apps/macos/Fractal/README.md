@@ -11,8 +11,15 @@ not persist or send unsupported actions. Ask answering happens in Fractal.
 `nix build ./flakes/attention-tray#attention-tray` produces an unsigned
 `Applications/AttentionTray.app` for `aarch64-darwin`, using Apple's host Swift
 SDK. SwiftPM consumes the exact locked Fractal Swift client via
-`FRACTAL_CLIENT_PATH`; builds use two Swift jobs. The root tray input follows
-the root Fractal source; the standalone flake pins the same revision.
+`FRACTAL_CLIENT_PATH`; builds use two Swift jobs. The standalone flake pins
+Fractal `main`; the root tray input follows the root Fractal source, so the
+deployed tray uses the client of the daemon it talks to. The tray uses only
+client API present in both.
+
+The bundle carries `Contents/Resources/nix-build-stamp.json` (`type`, `version`,
+`rev`, `dirty`, `fractalClientRev`). Its `rev` is `src.<hash>` of the tray's own
+sources plus the FractalClient revision, so unrelated repository commits neither
+rebuild nor restart the tray.
 
 Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
 The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
