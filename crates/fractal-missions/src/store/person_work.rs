@@ -711,9 +711,11 @@ impl PersonWorkStore for Store {
             }
             // Past its deadline the ask's own member applies the default, which a later answer on
             // another member must not race; answers before it win (`standing_responses`). The
-            // stored time decides, so it is checked here, and refusing rolls this write back.
+            // stored time decides, against the deadline the person's held clock moved
+            // (`answer_cutoff`), so it is checked here, and refusing rolls this write back.
             if !cancel && deadlines
-                && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
+                && ask.as_ref().map(|a| answer_cutoff(tx, a)).transpose().map_err(internal)?.flatten()
+                    .is_some_and(|cutoff| claim.accepted_at_unix_ms >= cutoff) {
                 return Err(FractalError::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
             // Projection applies cancellation with the exact ask fence. Keep the derived
@@ -821,7 +823,10 @@ impl PersonWorkStore for Store {
                     if !deadlines || ask.origin != self.origin {
                         continue;
                     }
-                    let Some(deadline) = ask_deadline(&ask, since, default_ms) else { continue };
+                    // The person's held deadline clock moves the deadline; while it is held
+                    // nothing resolves the ask and no wake is armed: resuming writes a claim
+                    // that wakes the reconciler.
+                    let Some(deadline) = effective_ask_deadline(tx, &ask, since, default_ms)? else { continue };
                     if deadline > now {
                         pass.next_deadline = Some(pass.next_deadline.map_or(deadline, |next| next.min(deadline)));
                         continue;
@@ -867,33 +872,40 @@ impl PersonWorkStore for Store {
         /// How many new person answers one pass looks at.
         const ANSWERS_PER_PASS: i64 = 256;
         let after = self.person_answers_checked.load(std::sync::atomic::Ordering::Relaxed);
-        let (checked, overriding) = {
+        // Each new person answer to an ask of this member that a deadline resolved, with when
+        // the default was applied.
+        let (checked, resolved) = {
             let connection = self.readers.get();
-            let mut query = connection.prepare_cached("SELECT answer.store_index, answer.id, EXISTS(SELECT 1 FROM claims ask JOIN claims applied
+            let mut query = connection.prepare_cached("SELECT answer.store_index, answer.id, (SELECT MIN(CAST(applied.accepted_at_unix_ms AS INTEGER))
+                  FROM claims ask JOIN claims applied
                     ON applied.subject=ask.subject AND applied.kind='work.person-done' AND applied.origin=?2
                     AND json_extract(applied.body,'$.fields.resolved_by')='deadline'
-                  WHERE ask.subject=answer.subject AND ask.kind='work.person-asked' AND ask.origin=?2
-                    AND CAST(answer.accepted_at_unix_ms AS INTEGER) < COALESCE(json_extract(ask.body,'$.fields.deadline_unix_ms'),
-                      CAST(applied.accepted_at_unix_ms AS INTEGER)))
+                  WHERE ask.subject=answer.subject AND ask.kind='work.person-asked' AND ask.origin=?2)
                 FROM claims answer WHERE answer.kind='work.person-done' AND answer.store_index>?1
                   AND json_extract(answer.body,'$.fields.resolved_by') IS NOT 'deadline'
                 ORDER BY answer.store_index LIMIT ?3")?;
             let rows = query
                 .query_map(params![after as i64, self.origin, ANSWERS_PER_PASS], |row| {
-                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let checked = rows.last().map(|(index, _, _)| *index);
-            (checked, rows.into_iter().filter(|(_, _, overrides)| *overrides).map(|(_, id, _)| id).collect::<Vec<_>>())
+            (checked, rows.into_iter()
+                .filter_map(|(_, id, applied)| Some((id, u128::try_from(applied?).ok()?)))
+                .collect::<Vec<_>>())
         };
         let mut told = false;
-        if !overriding.is_empty() {
+        if !resolved.is_empty() {
             told = self.connection.batched(|tx| -> Result<bool> {
                 let mut told = false;
-                for id in &overriding {
+                for (id, applied) in &resolved {
                     let Some(response) = tx.query_row("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1",
                         [id], claim_from_row).optional()? else { continue };
                     let Some(ask) = request(tx, &response.subject)? else { continue };
+                    // The same cutoff `standing_responses` keeps the answer by.
+                    if response.accepted_at_unix_ms >= answer_cutoff(tx, &ask)?.unwrap_or(*applied) {
+                        continue;
+                    }
                     send_overridden_default_tx(tx, &self.origin, &ask, &response).map_err(anyhow::Error::new)?;
                     told = true;
                 }
