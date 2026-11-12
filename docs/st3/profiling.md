@@ -469,9 +469,11 @@ when they are read. Replaced observations are trimmed like every other `resource
 A reading's freshness comes from its observer's liveness, not from a read time. The rows are
 `no-data` (`current` `reading stale`), never met, once the reading has not followed GitHub for
 more than 15 minutes, three polls: since the replicated `observer.state` of the observer that
-recorded it went other than `healthy` (a failed poll records it), or since its own Workspace CI
-reads began to fail. A failed read never fails the observation: it records the previous reading
-with `unread_since_unix_ms`, once per failure episode, and the next good read clears it. Within
+recorded it went other than `healthy` (a failed poll records it; the lapse runs from the first
+such state after the newest `healthy` one, so a retry that records it again, as a rate limit's
+next check does, does not restart it), or since its own Workspace CI reads began to fail. A
+failed read never fails the observation: it records the previous reading with
+`unread_since_unix_ms`, once per failure episode, and the next good read clears it. Within
 the 15 minutes the rows stay as they were and their explain says what they ride out. A member
 that stops without recording a failure leaves its observer `healthy`; its reading's samples then
 leave the rows through the windows, after an hour for `flakes` and a day for the durations. If the

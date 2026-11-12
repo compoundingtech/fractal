@@ -367,8 +367,9 @@ pub struct CiReading {
     pub ci: WorkspaceCi,
     pub member: String,
     /// Since when, and why, the reading has not followed GitHub: the observer's replicated
-    /// `observer.state` is not healthy, or the reading's own Workspace CI reads fail. None while
-    /// both are well. The reading itself carries no read time, so an unchanged poll writes nothing.
+    /// `observer.state` is not healthy (since the first such state after the newest healthy one),
+    /// or the reading's own Workspace CI reads fail. None while both are well. The reading itself
+    /// carries no read time, so an unchanged poll writes nothing.
     pub lapse: Option<(u64, String)>,
 }
 
@@ -400,15 +401,25 @@ pub fn ci_reading(store: &Store) -> anyhow::Result<Option<CiReading>> {
     }
     let Some(claim) = newest else { return Ok(None) };
     let Some(ci) = WorkspaceCi::from_facts(&claim.body["fields"]["facts"]) else { return Ok(None) };
-    // The observer's own liveness, as every member holds it: a failed poll records its state.
-    let observer = match claim.body["fields"]["observer"].as_str() {
-        Some(observer) => store.latest_claim(observer, Some("observer.state"))?,
-        None => None,
-    };
-    let failing = observer.and_then(|state| {
-        let word = state.body["fields"]["state"].as_str().unwrap_or("unknown").to_owned();
-        (word != "healthy").then(|| (millis(state.accepted_at_unix_ms), format!("its observer has been {word}")))
-    });
+    // The observer's own liveness, as every member holds it: a failed poll records its state, and
+    // a retry records it again whenever its reason or next check changes, as a rate limit's does.
+    // So the lapse runs from the first state that was not healthy after the newest healthy one,
+    // read back from the newest only that far, and named by the newest state.
+    let mut failing: Option<(u64, String)> = None;
+    if let Some(observer) = claim.body["fields"]["observer"].as_str() {
+        store.claims_in_order(observer, "observer.state", true, |state| {
+            let word = state.body["fields"]["state"].as_str().unwrap_or("unknown");
+            if word == "healthy" {
+                return false;
+            }
+            let at = millis(state.accepted_at_unix_ms);
+            match &mut failing {
+                Some((since, _)) => *since = (*since).min(at),
+                None => failing = Some((at, format!("its observer has been {word}"))),
+            }
+            true
+        })?;
+    }
     let unread = ci.unread_since_unix_ms.map(|since| (since, "its Workspace CI reads have failed".to_owned()));
     let lapse = failing.into_iter().chain(unread).min_by_key(|(since, _)| *since);
     Ok(Some(CiReading { ci, member: claim.origin, lapse }))
@@ -1364,7 +1375,11 @@ mod tests {
         use crate::model::ClaimInput;
         use crate::resource::github_workflows::WORKSPACE_CI_FIELD;
         use crate::{SeatsStore as _, SeatsStoreCore as _};
+        let now = unix_ms(NOW);
+        let at = |minutes: i64| u128::from(now.saturating_add_signed(minutes * 60_000));
         let poller = Store::open_memory("alder").unwrap();
+        // Writes are dated on the rows' clock, so a lapse reads against the same `NOW`.
+        poller.set_write_clock_at(at(-60)).unwrap();
         let source = r#"version 2
 resource "garden" { kind "vcs.repository" }
 observer "garden" { resource "resource/garden"; provider "github.repository"; locator "acme/garden"; field "issues" }
@@ -1392,30 +1407,50 @@ observer "garden" { resource "resource/garden"; provider "github.repository"; lo
         replicate(&poller, &member);
         let there = ci_reading(&member).unwrap().unwrap();
         assert_eq!((there.member.as_str(), there.lapse.as_ref(), there.ci), ("alder", None, reading(&runs, &[]).ci));
-        // A failed poll records the observer's state, which replicates: the reading lapses from then.
-        let unreachable = || poller.append_claim(&ClaimInput {
-            subject: observer.clone(), kind: "observer.state".into(), actor: None,
-            fields: std::collections::BTreeMap::from([("state".into(), json!("unreachable")),
-                ("reason".into(), json!("GitHub answered 502")), ("revision".into(), json!(revision))]),
-            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        let failed = unreachable();
+        // A failed poll records the observer's state, which replicates, and every retry of a rate
+        // limit records it again with its next check. The lapse runs from the first of them, so
+        // fifteen minutes on the rows are no-data however recently the observer retried.
+        let state = |minutes: i64, word: &str, next_check: i64| {
+            poller.set_write_clock_at(at(minutes)).unwrap();
+            poller.append_claim(&ClaimInput {
+                subject: observer.clone(), kind: "observer.state".into(), actor: None,
+                fields: std::collections::BTreeMap::from([("state".into(), json!(word)),
+                    ("reason".into(), json!("GitHub's rate limit is exhausted")), ("error_code".into(), json!("rate-limited")),
+                    ("revision".into(), json!(revision)), ("next_check_unix_ms".into(), json!(at(next_check).to_string()))]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        let first_failure = state(-20, "degraded", -15);
+        assert_eq!(first_failure.accepted_at_unix_ms, at(-20));
+        state(-10, "degraded", -5);
+        state(-1, "degraded", 4);
         replicate(&poller, &member);
         let lapse = |store: &Store| ci_reading(store).unwrap().unwrap().lapse;
-        assert_eq!(lapse(&member), Some((millis(failed.accepted_at_unix_ms), "its observer has been unreachable".to_owned())));
+        assert_eq!(lapse(&member), Some((millis(at(-20)), "its observer has been degraded".to_owned())));
+        for row in super::ci_rows(&member, now).unwrap() {
+            assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some("reading stale")), "{row}");
+            assert!(row["explain"].as_str().unwrap().contains("is not current: its observer has been degraded for 20 min"), "{row}");
+        }
         // The next good poll records the observer healthy again, and the reading is current.
+        poller.set_write_clock_at(at(0)).unwrap();
         observe(&facts, 3);
         replicate(&poller, &member);
         assert_eq!(lapse(&member), None);
+        assert!(super::ci_rows(&member, now).unwrap().iter().all(|row| row["status"] == "met"));
+        // A later failure starts its own lapse; the earlier episode ended with the healthy state.
+        state(1, "unreachable", 6);
+        replicate(&poller, &member);
+        assert_eq!(lapse(&member), Some((millis(at(1)), "its observer has been unreachable".to_owned())));
         // A poll whose Workspace CI reads failed records since when; with its observer failing
         // later as well, the reading lapses from the earlier of the two.
+        poller.set_write_clock_at(at(2)).unwrap();
         let mut unread = facts.clone();
         unread[WORKSPACE_CI_FIELD]["unread_since_unix_ms"] = json!(7);
         observe(&unread, 4);
         replicate(&poller, &member);
         let reads_failed = Some((7, "its Workspace CI reads have failed".to_owned()));
         assert_eq!(lapse(&member), reads_failed);
-        unreachable();
+        state(3, "unreachable", 8);
         replicate(&poller, &member);
         assert_eq!(lapse(&member), reads_failed);
     }
