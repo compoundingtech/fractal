@@ -5109,6 +5109,12 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
         return;
     }
     for item in items {
+        // A model-drift item asks nothing; an older client shows it as a request it can read.
+        if item["kind"] == "attention" && item["attention_kind"] == "model-drift" {
+            item["attention_kind"] = json!("agent-request");
+            item["actions"] = json!([]);
+            continue;
+        }
         if item["kind"] == "attention" && item["source_kind"] == "custom" {
             item["custom_attention_kind"] = item["attention_kind"].clone();
             item["attention_kind"] = json!("agent-request");

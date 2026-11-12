@@ -12221,6 +12221,20 @@ mission "agent-human" state="ready" {
 }
 
 #[test]
+fn an_older_client_reads_a_model_drift_item_as_a_request_without_actions() {
+    let row = json!({"kind": "attention", "attention_kind": "model-drift", "source_kind": "model-drift",
+        "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
+    let mut current = vec![row.clone()];
+    client_attention_compatibility(&mut current, true);
+    assert_eq!(current, [row.clone()]);
+    let mut older = vec![row];
+    client_attention_compatibility(&mut older, false);
+    assert_eq!(older[0]["attention_kind"], "agent-request");
+    assert_eq!(older[0]["actions"], json!([]));
+    assert_eq!(older[0]["title"], "2 agents declared a run b since 09:14Z (oldest agent/example.a)");
+}
+
+#[test]
 fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

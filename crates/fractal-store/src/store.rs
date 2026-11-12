@@ -30,6 +30,7 @@ pub mod observer_refresh;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
+pub mod model_drift;
 mod notice_authority;
 mod transaction_work;
 pub mod assistant_write;
