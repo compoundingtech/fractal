@@ -244,6 +244,7 @@ pub struct PtyExitEvidence {
     pub incarnation: String,
     pub exit_code: Option<i64>,
     pub signal: Option<i32>,
+    /// Withheld unless the producer positively proves complete raw output context.
     pub output_tail: Option<String>,
 }
 
@@ -379,7 +380,8 @@ impl PtyRuntime {
             incarnation: incarnation.to_owned(),
             exit_code: receipt.exit_code.map(i64::from),
             signal: receipt.signal,
-            output_tail: crate::transcript::exit_output_tail(&receipt.output_tail),
+            output_tail: receipt.output_complete
+                .then(|| crate::transcript::exit_output_tail(&receipt.output_tail)).flatten(),
         }))
     }
 
@@ -1661,6 +1663,28 @@ mod tests {
         assert!(runtime.unlaned_seat.is_none());
         let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
         assert!(configured.unlaned_seat.is_some());
+    }
+
+    #[test]
+    fn legacy_or_incomplete_exit_receipts_keep_status_but_withhold_output() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().to_owned());
+        for complete in [None, Some(false), Some(true)] {
+            let mut receipt = serde_json::json!({
+                "name": "work", "generation": "g", "daemonPid": 42, "createdAt": "now",
+                "exitCode": 23, "signal": null, "outputTail": "fatal: fixture failure"
+            });
+            if let Some(complete) = complete { receipt["outputComplete"] = complete.into(); }
+            fs::write(
+                root.path().join(pty_core::registry::retained_exit::RETAINED_EXIT_FILE_NAME),
+                serde_json::to_vec(&vec![receipt]).unwrap(),
+            ).unwrap();
+            let evidence = runtime.exit_evidence("work", "42:now").unwrap().unwrap();
+            assert_eq!(evidence.exit_code, Some(23));
+            assert_eq!(evidence.signal, None);
+            assert_eq!(evidence.output_tail.as_deref(),
+                (complete == Some(true)).then_some("fatal: fixture failure"));
+        }
     }
     use crate::test_executable::fake_executable;
     use std::fs;
@@ -3212,9 +3236,14 @@ exit 0
             return;
         };
         for (print, expected) in [
-            ("printf 'fatal: fixture launch failed\\n' >&2", "fatal: fixture launch failed"),
-            ("printf '%78s' ''; printf 'sk-fixture-secret\\n'", "[REDACTED: sensitive terminal output]"),
-            ("printf 'sk-'; printf '%09000d' 0; printf '\\nfatal: safe footer\\n'", "fatal: safe footer"),
+            ("printf 'fatal: fixture launch failed\\n' >&2", Some("fatal: fixture launch failed")),
+            ("printf '%78s' ''; printf 'sk-fixture-secret\\n'", Some("[REDACTED: sensitive terminal output]")),
+            ("printf 'sk-'; printf '%09000d' 0; printf '\\nfatal: safe footer\\n'", None),
+            ("printf '%09000d Authorization:\\nfixture-secret\\n' 0", None),
+            ("printf 'Authorization:\\n'; i=0; while [ \"$i\" -lt 12000 ]; do printf '\\n'; i=$((i+1)); done; printf 'fixture-secret\\n'", None),
+            ("printf 'Authorization:\\033[2J\\033[Hfixture-secret\\n'", None),
+            ("printf 'fatal:\\b fixture failure\\n'", None),
+            ("printf '\\377fatal: fixture failure\\n'", None),
         ] {
             let root = tempfile::tempdir().unwrap();
             let gate = root.path().join("release");
@@ -3247,9 +3276,13 @@ exit 0
             assert_eq!(evidence.incarnation, incarnation);
             assert_eq!(evidence.exit_code, Some(23));
             assert_eq!(evidence.signal, None);
-            let tail = evidence.output_tail.unwrap();
-            assert!(tail.contains(expected), "{tail:?}");
-            assert!(!tail.contains("fixture-secret"), "terminal wrapping must not bypass redaction");
+            if let Some(expected) = expected {
+                let tail = evidence.output_tail.unwrap();
+                assert!(tail.contains(expected), "{tail:?}");
+                assert!(!tail.contains("fixture-secret"), "terminal wrapping must not bypass redaction");
+            } else {
+                assert_eq!(evidence.output_tail, None, "lost or unsafe output context must be withheld");
+            }
             assert!(recreated.exit_evidence(&session.id, "42:another-generation").unwrap().is_none());
         }
     }

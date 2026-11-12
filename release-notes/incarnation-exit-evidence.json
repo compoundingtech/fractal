@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Subject inspection includes exit code, signal and a bounded tail normalized by the shared transcript redaction policy. A waiting mission step and run include the retained failure explanation instead of only missing-agent admission text. Older registries retain unfamiliar exit_evidence observations as unknown-field waiting records until upgraded."
+    "detail": "Subject inspection includes exit code, signal and bounded output normalized by the shared transcript redaction policy. Output is published only when the producer proves a complete, valid UTF-8 stream from launch through EOF within the byte bound; older receipts, truncation, reader loss and unsafe terminal controls withhold output without losing exit status. A waiting mission step and run include the retained failure explanation instead of only missing-agent admission text. Older registries retain unfamiliar exit_evidence observations as unknown-field waiting records until upgraded."
   },
   "downtime": {
     "status": "none",
