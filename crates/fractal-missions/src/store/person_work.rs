@@ -834,7 +834,7 @@ impl PersonWorkStore for Store {
                 }
                 // The requester, origin or owning run ended.
                 let claim = append_claim_tx(tx, &self.origin, &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
-                    &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
+                    &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "episode": ask.id, "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
                 project(tx, &claim).map_err(anyhow::Error::new)?;
                 // Telling is best effort: a notice that cannot be written must never undo
                 // this cancellation or the others in this pass.

@@ -1023,8 +1023,17 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
                 let cancelled = claim.kind == "work.person-cancelled";
                 // The response's asking claim is the episode fence, not merely the origin
                 // subject. A stale replica may cancel after another member resumed or retried.
-                if cancelled && fields["episode"].as_str() != Some(ask.id.as_str()) {
-                    return Ok(true);
+                if cancelled {
+                    let exact_episode = match fields.get("episode") {
+                        Some(Value::String(episode)) => episode == &ask.id,
+                        // Older automatic cancellations bind the asking claim causally
+                        // instead of recording its ID in the response fields.
+                        None => claim.predecessors.contains(&ask.id),
+                        _ => false,
+                    };
+                    if !exact_episode {
+                        return Ok(true);
+                    }
                 }
                 let failed = cancelled && step(tx, origin).map_err(internal)?
                     .map(|view| runs_program(tx, &view)).transpose().map_err(internal)? == Some(false);

@@ -1916,6 +1916,56 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     }
 
     #[test]
+    fn historical_automatic_cancellation_uses_asking_predecessor_and_replays() {
+        for wrong_episode in [false, true] {
+            let (source, origin, input) = fixture();
+            let ask = source.ask_person(&input).unwrap();
+            let asking = request(&source.readers.get(), &ask.subject).unwrap().unwrap();
+            let target = Store::open_memory("birch").unwrap();
+            target.project_replication_backlog().unwrap();
+            receive(&source, &target);
+            source.connection.batched(|tx| -> Result<()> {
+                let mut body = json!({"fields": {
+                    "attempt": ask.attempt, "status": "cancelled",
+                    "summary": "the requester, origin or owning run ended",
+                    "key": format!("person-owner-ended:{}", asking.id)
+                }});
+                if wrong_episode {
+                    body["fields"]["episode"] = json!("a-different-asking-claim");
+                }
+                let cancelled = append_claim_tx(
+                    tx, "alder", &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
+                    &body, std::slice::from_ref(&asking.id), None,
+                )?;
+                assert!(cancelled.predecessors.contains(&asking.id));
+                project(tx, &cancelled).unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+            receive(&source, &target);
+            for store in [&source, &target] {
+                let check = || {
+                    assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+                    let waiting = if wrong_episode {
+                        step(&store.readers.get(), &origin.subject).unwrap().unwrap()
+                    } else {
+                        store.step_run(&origin.subject).unwrap().unwrap()
+                    };
+                    assert_eq!(waiting.attempt, origin.attempt);
+                    assert_eq!(waiting.status, if wrong_episode { "waiting-person" } else { "failed" });
+                    assert_eq!(waiting.blocked_reason.as_deref(), Some(if wrong_episode {
+                        ask.subject.as_str()
+                    } else {
+                        "ask cancelled by daemon/runtime"
+                    }));
+                };
+                check();
+                store.replay_replication_graph().unwrap();
+                check();
+            }
+        }
+    }
+
+    #[test]
     fn stale_replica_cancellation_preserves_new_attempt_and_live_lease() {
         stale_replica_cancellation_preserves_origin("retry");
     }

@@ -1104,6 +1104,10 @@ replace a later ask, or clear a resumed step's live lease, including during full
 Derived origin state claims remain notifications for reactive run invalidation, not a second
 authoritative cancellation effect. Upgraded readers also ignore those redundant effects from
 older writers; older daemons must be upgraded to gain this consumption fence.
+Automatic cancellation when the requester ends follows the same failure path and records the
+exact asking episode. Historical automatic cancellations without an explicit episode are
+accepted only when the asking claim is a direct causal predecessor; an explicit mismatching
+episode is never replaced by that historical form.
 It does not resume that step as ready. A program's `Fractal.ask` instead propagates typed
 `AskCancelled`, which the program may catch; uncaught, it fails the program step and
 uses the same ordinary failure cleanup (see [program engine §6](program-engine.md#6-linked-child-runs-worker-turns-and-asks)).

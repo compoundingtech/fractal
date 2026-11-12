@@ -1112,6 +1112,15 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
 
 #[test]
 fn cancelling_a_native_person_ask_fails_its_waiting_step_and_runs_finally() {
+    native_person_ask_failure_runs_finally(false);
+}
+
+#[test]
+fn removing_an_asking_worker_fails_its_native_wait_and_runs_finally() {
+    native_person_ask_failure_runs_finally(true);
+}
+
+fn native_person_ask_failure_runs_finally(remove_requester: bool) {
     let seat = Seat::new();
     apply_source(&seat.store, r#"version 2
 mission "garden/cancel-ask" state="ready" {
@@ -1164,12 +1173,27 @@ mission "garden/cancel-ask" state="ready" {
         answer: None,
         idempotency_key: "cancel-ask-response".into(),
     };
-    assert_eq!(seat.store.finish_person_step(&response, true).unwrap().status, "cancelled");
+    if remove_requester {
+        seat.publish(2, "first", None, true);
+        assert!(seat.store.reconcile_person_asks().unwrap());
+        assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+        let asked = seat.store.latest_claim(&ask.subject, Some("work.person-asked")).unwrap().unwrap();
+        let cancelled = seat.store.latest_claim(&ask.subject, Some("work.person-cancelled")).unwrap().unwrap();
+        assert_eq!(cancelled.body["fields"]["episode"], asked.id);
+    } else {
+        assert_eq!(seat.store.finish_person_step(&response, true).unwrap().status, "cancelled");
+    }
     let failed = seat.store.step_run(&origin).unwrap().unwrap();
     assert_eq!(failed.status, "failed");
-    assert_eq!(failed.blocked_reason.as_deref(), Some("ask cancelled by agent/garden/orchard"));
-    // A response replay does not resume or fail the step again.
-    seat.store.finish_person_step(&response, true).unwrap();
+    assert_eq!(failed.blocked_reason.as_deref(), Some(if remove_requester {
+        "ask cancelled by daemon/runtime"
+    } else {
+        "ask cancelled by agent/garden/orchard"
+    }));
+    if !remove_requester {
+        // A response replay does not resume or fail the step again.
+        seat.store.finish_person_step(&response, true).unwrap();
+    }
     let reconciler = Reconciler::new(
         seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
     );
