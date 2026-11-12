@@ -97,7 +97,9 @@ impl Store {
                 continue;
             };
             let subject = fault.item.subject;
-            let Some(owner) = self.agent_person(&subject)? else {
+            // Bounded: requester headers only, never a run's full view (its steps and wake
+            // history), which this read would otherwise rebuild per drifting seat.
+            let Some(owner) = agent_person_at(&connection, &subject)? else {
                 continue;
             };
             if person.is_some_and(|person| person != owner) {

@@ -658,7 +658,7 @@ async fn collection_items_with_windows(
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
-    let custom_forms = session.custom_forms;
+    let attention_compatibility = session.attention_compatibility();
     let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
@@ -1006,7 +1006,7 @@ async fn collection_items_with_windows(
                         )?,
                         _ => unreachable!(),
                     };
-                    client_attention_compatibility(&mut items, custom_forms);
+                    client_attention_compatibility(&mut items, attention_compatibility);
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
@@ -16504,6 +16504,28 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn model_drift_attention_is_its_own_feature_not_implied_by_custom_forms() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            // What clients before the kind send: custom forms alone never imply it.
+            (Some("custom-subjects.v1, conversation-blocks.v1"), false),
+            (Some("model-drift-attention.v2"), false),
+            (Some("custom-subjects.v1, model-drift-attention.v1 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/attention");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let session = authenticate(&state, &request, "unix").unwrap();
+            assert_eq!(session.model_drift_attention, expected, "{features:?}");
+            assert_eq!(session.attention_compatibility().model_drift, expected, "{features:?}");
+        }
+    }
+
+    #[test]
     fn messages_paging_requires_the_exact_request_feature_token() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -24662,6 +24684,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,

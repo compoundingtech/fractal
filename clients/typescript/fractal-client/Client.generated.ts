@@ -305,8 +305,8 @@ export class FractalClient {
     }
     private features(): string {
         return this.messagesPaging
-            ? 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2'
-            : 'custom-subjects.v1, conversation-blocks.v1';
+            ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1, messages-paging.v2'
+            : 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1';
     }
 
 

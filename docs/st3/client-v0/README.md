@@ -1254,8 +1254,9 @@ when they share one, since when, and the agent that drifted first, which is its 
 `conversation_id` and `episode` owner; `targets` and the detail list every drifting agent. It
 asks nothing and offers no action. It is derived from the agents' current drift faults, so it
 changes as agents start or stop drifting and is gone once none does; its id changes when the
-first-drifting agent recovers before the others. Older clients without custom forms read it as
-an `agent-request` with no actions.
+first-drifting agent recovers before the others. Only a client that sends the
+`model-drift-attention.v1` feature receives the kind as it is; any other client, including one
+with `custom-subjects.v1`, reads it as an `agent-request` with no actions.
 
 A `harness-prompt` alert is a native prompt a seat's harness shows in its terminal and waits on:
 a permission, a question or a review. Its `source_id` and `conversation_id` are the seat, its
