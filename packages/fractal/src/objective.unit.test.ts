@@ -394,6 +394,20 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
     }),
   )
 
+  it.effect('declare a count objective from objective.ts and objective.kdl', () =>
+    Effect.gen(function* () {
+      const root = fixture({
+        'factory/work-throughput/objective.ts': `${header}export default Fractal.objective({ about: 'Merged', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' } }), window: { span: '24h' }, targets: [{ stat: 'per-hour', min: 10 }] })`,
+        'factory/flakes/objective.kdl': 'version 2\nobjective "factory/flakes" {\n  about "Flakes"\n  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=1\n}\n',
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      expect(subjects.map(({ id, declaration }) => ({ id, tag: declaration._tag }))).toEqual([
+        { id: 'factory/flakes', tag: 'Kdl' },
+        { id: 'factory/work-throughput', tag: 'Module' },
+      ])
+    }),
+  )
+
   const rejections: ReadonlyArray<{
     readonly name: string
     readonly files: Readonly<Record<string, string>>
@@ -409,7 +423,7 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       files: {
         'ops/x/objective.ts': `${header}export default Fractal.objective({ about: 'a', indicator: Fractal.indicator.statement(), targets: [{ stat: 'p99', within: '10ms' }, { stat: 'max', within: '100ms' }] })`,
       },
-      message: 'A declared objective is an interval over claims named NAMESPACE/NAME; objective/ops/x is not',
+      message: 'A declared objective is an interval or count over claims named NAMESPACE/NAME; objective/ops/x is not',
     },
     {
       name: 'a one-segment name',
