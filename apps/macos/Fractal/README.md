@@ -1,10 +1,20 @@
 # Attention tray
 
-A native macOS 14+ SwiftUI menu-bar client. It reads all pages of open supported
-person asks at launch and every 30 seconds, retaining the last successful data
-with an explicit stale indicator on failure. Ask links open Fractal's
-`/w/<agent>` route. Notices are labelled synthetic previews; notice controls do
-not persist or send unsupported actions. Ask answering happens in Fractal.
+A native macOS 14+ SwiftUI menu-bar client for one person's Fractal: the
+attention inbox and the objectives every Fractal client reads. It reads only
+Fractal, through `FractalClient`, at launch and every 30 seconds.
+
+- **Asks** (all attention pages, classified as Fractal web's
+  `data/attention.ts` does) link to Fractal's `/w/<agent>` route, where they are
+  answered.
+- **Updates** are listed apart and not counted.
+- **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
+  first, then stale, then met; unmeasured objectives collapse; budgets follow.
+  The menu bar adds a gauge when any objective is missed or budget nearly spent.
+- Asks and objectives refresh independently: one failing keeps its last data
+  with its own stale note and never blanks the other.
+- Times are relative with the absolute time on hover. The footer shows the build
+  identity; launch and each change of refresh outcome are logged to stderr.
 
 ## Packaging and configuration
 
@@ -19,7 +29,8 @@ client API present in both.
 The bundle carries `Contents/Resources/nix-build-stamp.json` (`type`, `version`,
 `rev`, `dirty`, `fractalClientRev`). Its `rev` is `src.<hash>` of the tray's own
 sources plus the FractalClient revision, so unrelated repository commits neither
-rebuild nor restart the tray.
+rebuild nor restart the tray; the footer shows `machineVersion`
+(`0.2.0+src.<hash>`) with the FractalClient revision on hover.
 
 Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
 The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
@@ -29,6 +40,8 @@ Standalone launches require three explicit environment variables:
 `ATTENTION_FRACTAL_ENDPOINT`, `ATTENTION_FRACTAL_CREDENTIAL`, `ATTENTION_FRACTAL_URL`.
 There are no endpoint, localhost, or Boss fallbacks. The application itself
 loads no keychain, 1Password item or device-profile file.
+`ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
+file and exits.
 
 On review-host, `services.attentionTray.enable = true` imports the Home Manager
 module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
@@ -305,16 +318,20 @@ After pairing and browser startup, the separate readiness command validates
 private-file modes, exact read-only scopes, runtime configuration and a live
 launchd PID; expect no repeated nonzero exits.
 Logs are `~/.local/state/attention-tray/{stdout,stderr}.log`; do not dump
-credential files or process environments when diagnosing failures.
+credential files or process environments when diagnosing failures. The stderr
+log has one line per change of refresh outcome, for example
+`attention ok (3 asks, 1 updates); slo ok (28 rows, 7 need attention)`; a
+transport refusal such as `NSURLErrorDomain -1022` or `credential-rejected`
+appears there verbatim.
 
 Ada opens the menu-bar icon and checks that configuration is valid,
-freshness is current (not stale), and current pending asks appear. Compare with
-Fractal's authenticated attention view, respecting the tray's supported-answer
-filter and full pagination rather than comparing to an unfiltered first page.
-Wait at least one 30-second interval and observe refresh. Click an actual ask:
-the browser must open `/w/<agent>` for its conversation/requester, not a Boss
-URL, and the authenticated Fractal page must load. The synthetic notice section
-is not evidence of successful live ask retrieval.
+freshness is current (not stale), current pending asks appear and objectives
+match `fractal slo` run on the paired member (dev5): member-measured objectives
+such as `person-read` or `cpu` describe that member. Compare with Fractal's authenticated
+attention view, respecting the tray's supported-answer filter and full
+pagination rather than comparing to an unfiltered first page. Wait at least one
+30-second interval and observe refresh. Answer in Fractal must open `/w/<agent>` for its
+conversation/requester, not a Boss URL, and the authenticated page must load.
 
 Run a second unchanged sanctioned activation only if rollout verification
 requires it; compare the launchd PID and confirm there was no extra restart or

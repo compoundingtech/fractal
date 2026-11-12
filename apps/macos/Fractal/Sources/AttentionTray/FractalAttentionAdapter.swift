@@ -45,69 +45,122 @@ struct TrayConfiguration: Sendable {
   }
 }
 
+/// A read or transport failure in words: Fractal's own message, or the URL error.
+struct ReadFailure: Error, CustomStringConvertible {
+  let description: String
+
+  init(_ error: Error) {
+    switch error {
+    case let envelope as ErrorEnvelope: description = Self.describe(envelope)
+    case let url as URLError: description = "\(url.localizedDescription) (NSURLErrorDomain \(url.code.rawValue))"
+    case let failure as ReadFailure: description = failure.description
+    default: description = String(describing: error)
+    }
+  }
+
+  init(message: String) { description = message }
+
+  static func describe(_ envelope: ErrorEnvelope) -> String {
+    let reason: String? = if case .string(let reason) = envelope.details["reason"] { reason } else { nil }
+    return "\(envelope.message) (\([envelope.code.wire, reason].compactMap { $0 }.joined(separator: ": ")))"
+  }
+}
+
+extension ErrorCode {
+  /// The wire word (`stale-fence`), as Fractal's other clients show it.
+  var wire: String {
+    guard let data = try? JSONEncoder().encode(self), let word = try? JSONDecoder().decode(String.self, from: data)
+    else { return String(describing: self) }
+    return word
+  }
+}
+
 actor FractalAttentionAdapter: AttentionAdapter {
+  static let pageLimit = 100
   private let client: FractalClient
   private let fractalURL: URL
 
-  init(configuration: TrayConfiguration) {
+  init(configuration: TrayConfiguration, clientName: String) {
     client = FractalClient(
-      fabricLoopbackURL: configuration.endpoint, credential: configuration.credential)
+      fabricLoopbackURL: configuration.endpoint, credential: configuration.credential,
+      client: clientName)
     fractalURL = configuration.fractalURL
   }
 
-  func read() async throws -> AttentionSnapshot {
-    // Polling is intentional; no unavailable generic watch API is assumed.
-    // Publish only after all cursor pages succeed, never an incomplete zero/count.
-    var cursor: String?
-    var asks: [Ask] = []
-    repeat {
-      let page = try await client.attentionList(cursor: cursor, limit: 100).value
-      for resource in page.items {
-        guard case .attention(let item) = resource, Self.isWaitingForAnswer(item) else { continue }
-        // Same association rule as pinned st3-views/homeView.ts alertConversations.
-        let conversations = [item.conversationID].compactMap { $0 } + (item.conversationIDs ?? [])
-        let candidates =
-          conversations.isEmpty
-          ? [item.requesterID, item.sourceID].compactMap { $0 } : conversations
-        let agentRef = candidates.first { $0.hasPrefix("agent/") }
-        let url = try FractalAskURL.make(base: fractalURL, agentRef: agentRef)
-        asks.append(Ask(id: item.id, title: item.title, detail: item.detail, url: url))
-      }
-      if page.page.hasMore {
-        guard let next = page.page.nextCursor, next != cursor else {
-          throw ReadError.incompletePage
+  func readAttention() async throws -> AttentionPage {
+    do {
+      // Publish only after every cursor page succeeds, never an incomplete count.
+      var cursor: String?
+      var records: [AttentionRecord] = []
+      repeat {
+        let page = try await client.attentionList(cursor: cursor, limit: Self.pageLimit).value
+        for resource in page.items {
+          guard case .attention(let item) = resource else { continue }
+          let record = try record(item)
+          if record.role != .ignored { records.append(record) }
         }
-        cursor = next
-      } else {
-        cursor = nil
-      }
-    } while cursor != nil
-    return AttentionSnapshot(asks: asks, notices: [.fixture()])
-  }
-
-  private enum ReadError: Error { case incompletePage }
-
-  // Mirrors Fractal apps/fractal-web/src/data/attention.ts at the pinned revision.
-  // Open informational cards, approvals, faults and terminal-only prompts are not asks.
-  private static func isWaitingForAnswer(_ item: AttentionResource) -> Bool {
-    guard item.state == "open", item.update == nil else { return false }
-    if item.attentionKind == "person-step" || item.attentionKind == "agent-request" {
-      return item.actions.contains("work.done")
-    }
-    if item.attentionKind.hasPrefix("custom.") { return item.actions.contains("custom.reply") }
-    guard item.attentionKind == "harness-prompt", item.actions.contains("prompt.respond"),
-      case .object(let parameters) = item.actionParameters,
-      case .object(let prompt) = parameters["prompt.respond"],
-      case .array(let answers) = prompt["answers"]
-    else { return false }
-    return answers.contains {
-      if case .string(let answer) = $0 { return !answer.isEmpty }
-      return false
+        if page.page.hasMore {
+          guard let next = page.page.nextCursor, next != cursor else {
+            throw ReadFailure(message: "Fractal returned an attention page without a new cursor")
+          }
+          cursor = next
+        } else {
+          cursor = nil
+        }
+      } while cursor != nil
+      return AttentionPage(records: records)
+    } catch {
+      throw ReadFailure(error)
     }
   }
 
-  func control(_ action: NoticeControl, notice: AttentionCore.NoticeSnapshot) async throws {
-    // Intentionally no transport until fractal#3476 PR1 supplies typed fenced actions.
-    // AttentionModel presents an explicit preview-only result, never optimistic success.
+  func readSlo() async throws -> SloSnapshot {
+    do {
+      let list = try await client.sloList().value
+      return SloSnapshot(asOf: Self.date(ms: list.asOfUnixMS) ?? .now, rows: list.rows.map(Self.entry))
+    } catch {
+      throw ReadFailure(error)
+    }
+  }
+
+  // MARK: Mapping
+
+  private func record(_ item: AttentionResource) throws -> AttentionRecord {
+    // Same association rule as Fractal web `homeView.ts` alertConversations.
+    let conversations = [item.conversationID].compactMap { $0 } + (item.conversationIDs ?? [])
+    let candidates = conversations.isEmpty ? [item.requesterID, item.sourceID].compactMap { $0 } : conversations
+    let agentRef = candidates.first { $0.hasPrefix("agent/") }
+    let parameters: [String: JSONValue] = if case .object(let object) = item.actionParameters { object } else { [:] }
+    let promptAnswers: [String] =
+      if case .object(let prompt) = parameters["prompt.respond"], case .array(let answers) = prompt["answers"] {
+        answers.compactMap { if case .string(let answer) = $0, !answer.isEmpty { answer } else { nil } }
+      } else { [] }
+    return AttentionRecord(
+      id: item.id, kind: item.attentionKind, state: item.state, title: item.title, detail: item.detail,
+      // Web `alertFrom`: the agent that asked, else the subject it is about.
+      from: (item.requesterID ?? item.sourceID).replacingOccurrences(of: "agent/", with: "", options: .anchored),
+      requestedAt: Self.date(iso: item.requestedAt), deadlineAt: item.deadlineAt.flatMap(Self.date(iso:)),
+      defaultAnswerLabel: item.defaultAnswer?.label, actions: item.actions, promptAnswers: promptAnswers,
+      update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary) },
+      url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef))
+  }
+
+  private static func entry(_ row: SloRow) -> SloEntry {
+    SloEntry(
+      id: row.id, kind: row.kind == "budget" ? .budget : .objective, about: row.about,
+      target: row.target, current: row.current, window: row.window, status: row.status,
+      explain: row.explain, serverTone: row.tone, remainingPercent: row.remainingPercent,
+      measuredAt: row.measuredAtUnixMS.flatMap(date(ms:)), resetsAt: row.resetsAtUnixMS.flatMap(date(ms:)),
+      runsOutAt: row.runsOutAtUnixMS.flatMap(date(ms:)))
+  }
+
+  private static func date(ms: UInt64) -> Date? {
+    ms == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+  }
+
+  private static func date(iso value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
   }
 }
