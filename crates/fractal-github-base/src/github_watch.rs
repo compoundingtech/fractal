@@ -771,48 +771,74 @@ enum MarkdownContainer {
     List(usize),
 }
 
+/// A tab can straddle a container boundary. Keep its remaining virtual spaces without changing
+/// source offsets, and advance columns one at a time so every tab uses the next four-column stop.
+#[derive(Clone, Copy, Default)]
+struct MarkdownCursor {
+    at: usize,
+    column: usize,
+    pending: usize,
+}
+
+impl MarkdownCursor {
+    fn byte(self, bytes: &[u8]) -> Option<u8> {
+        if self.pending == 0 { bytes.get(self.at).copied() } else { Some(b' ') }
+    }
+
+    fn space(&mut self, bytes: &[u8]) -> bool {
+        if self.pending > 0 {
+            self.pending -= 1;
+        } else {
+            match bytes.get(self.at) {
+                Some(b' ') => {}
+                Some(b'\t') => self.pending = 3 - self.column % 4,
+                _ => return false,
+            }
+            self.at += 1;
+        }
+        self.column += 1;
+        true
+    }
+
+    fn indent(&mut self, bytes: &[u8], limit: usize) {
+        let start = self.column;
+        while self.column - start < limit && self.space(bytes) {}
+    }
+
+    fn advance(&mut self, width: usize) {
+        self.at += width;
+        self.column += width;
+    }
+}
+
 /// Consume only containers already open on the preceding line. In particular, a list sibling is not
 /// a continuation of an unclosed fence in the previous item.
 fn markdown_container_continuation(
     line: &str,
     containers: &[MarkdownContainer],
     quote_count: usize,
-) -> (usize, usize, usize) {
+) -> (MarkdownCursor, usize) {
     let bytes = line.as_bytes();
-    let (mut at, mut column) = (0, 0);
+    let mut cursor = MarkdownCursor::default();
     let mut matched_quotes = 0;
     for (matched, container) in containers.iter().enumerate() {
-        let (start, start_column) = (at, column);
+        let start = cursor;
         match container {
             MarkdownContainer::Quote => {
-                while bytes.get(at) == Some(&b' ') && column - start_column < 3 {
-                    at += 1;
-                    column += 1;
-                }
-                if bytes.get(at) != Some(&b'>') {
-                    return (start, start_column, matched);
+                cursor.indent(bytes, 3);
+                if cursor.byte(bytes) != Some(b'>') {
+                    return (start, matched);
                 }
                 matched_quotes += 1;
-                at += 1;
-                column += 1;
-                if bytes.get(at) == Some(&b' ') {
-                    at += 1;
-                    column += 1;
-                }
+                cursor.advance(1);
+                cursor.space(bytes);
             }
             MarkdownContainer::List(indent) => {
-                while column - start_column < *indent {
-                    match bytes.get(at) {
-                        Some(b' ') => column += 1,
-                        Some(b'\t') => column += 4 - column % 4,
-                        _ => break,
-                    }
-                    at += 1;
-                }
-                if column - start_column < *indent {
+                cursor.indent(bytes, *indent);
+                if cursor.column - start.column < *indent {
                     // Missing quotes still end their fence. Scanning to one removes that suffix,
                     // so repeated blank lines in deeply nested lists also stay linear.
-                    if bytes[at..].iter().all(u8::is_ascii_whitespace) {
+                    if bytes[cursor.at..].iter().all(u8::is_ascii_whitespace) {
                         let matched = if matched_quotes == quote_count {
                             containers.len()
                         } else {
@@ -820,14 +846,16 @@ fn markdown_container_continuation(
                                 .position(|container| matches!(container, MarkdownContainer::Quote))
                                 .unwrap()
                         };
-                        return (bytes.len(), column, matched);
+                        cursor.at = bytes.len();
+                        cursor.pending = 0;
+                        return (cursor, matched);
                     }
-                    return (start, start_column, matched);
+                    return (start, matched);
                 }
             }
         }
     }
-    (at, column, containers.len())
+    (cursor, containers.len())
 }
 
 /// Discover new quote/list prefixes only outside code. Offsets always refer to the original line.
@@ -835,55 +863,43 @@ fn markdown_container_openings(
     line: &str,
     containers: &mut Vec<MarkdownContainer>,
     quote_count: &mut usize,
-    mut at: usize,
-    mut column: usize,
-) -> usize {
+    mut cursor: MarkdownCursor,
+) -> MarkdownCursor {
     let bytes = line.as_bytes();
     loop {
-        let (start, start_column) = (at, column);
-        while bytes.get(at) == Some(&b' ') && column - start_column < 3 {
-            at += 1;
-            column += 1;
-        }
-        if bytes.get(at) == Some(&b'>') {
-            at += 1;
-            column += 1;
-            if bytes.get(at) == Some(&b' ') {
-                at += 1;
-                column += 1;
-            }
+        let start = cursor;
+        cursor.indent(bytes, 3);
+        if cursor.byte(bytes) == Some(b'>') {
+            cursor.advance(1);
+            cursor.space(bytes);
             containers.push(MarkdownContainer::Quote);
             *quote_count += 1;
             continue;
         }
-        let marker = at;
-        if matches!(bytes.get(at), Some(b'-' | b'+' | b'*')) {
-            at += 1;
+        let marker = cursor.at;
+        if matches!(cursor.byte(bytes), Some(b'-' | b'+' | b'*')) {
+            cursor.advance(1);
         } else {
-            while bytes.get(at).is_some_and(u8::is_ascii_digit) && at - marker < 9 {
-                at += 1;
+            while cursor.byte(bytes).is_some_and(|byte| byte.is_ascii_digit()) && cursor.at - marker < 9 {
+                cursor.advance(1);
             }
-            if at == marker || !matches!(bytes.get(at), Some(b'.' | b')')) {
+            if cursor.at == marker || !matches!(cursor.byte(bytes), Some(b'.' | b')')) {
                 return start;
             }
-            at += 1;
+            cursor.advance(1);
         }
-        if !matches!(bytes.get(at), Some(b' ' | b'\t')) {
+        let padding = cursor;
+        cursor.indent(bytes, 5);
+        let width = cursor.column - padding.column;
+        if width == 0 {
             return start;
         }
-        column += at - marker;
-        let padding_column = column;
-        let padding = at;
-        while matches!(bytes.get(at), Some(b' ' | b'\t')) {
-            column += if bytes[at] == b'\t' { 4 - column % 4 } else { 1 };
-            at += 1;
+        if width > 4 {
+            // Excess padding belongs to the item's content; a tab may be consumed only partly.
+            cursor = padding;
+            cursor.space(bytes);
         }
-        if column - padding_column > 4 {
-            // Excess padding belongs to the item's content, not its container.
-            at = padding + 1;
-            column = padding_column + if bytes[padding] == b'\t' { 4 - padding_column % 4 } else { 1 };
-        }
-        containers.push(MarkdownContainer::List(column - start_column));
+        containers.push(MarkdownContainer::List(cursor.column - start.column));
     }
 }
 
@@ -913,7 +929,7 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
         if at == 0 || bytes[at - 1] == b'\n' {
             let end = text[at..].find('\n').map_or(bytes.len(), |end| at + end + 1);
             let line = &text[at..end];
-            let (mut content, column, matched) = markdown_container_continuation(line, &containers, quote_count);
+            let (mut content, matched) = markdown_container_continuation(line, &containers, quote_count);
             if matched < containers.len() {
                 // A fence ends with its container, not at the next fence-shaped line in unrelated prose.
                 if let Some((_, _, start)) = fence.take() { ranges.push((start, at)); }
@@ -922,11 +938,12 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
                 }
             }
             if fence.is_none() {
-                content = markdown_container_openings(line, &mut containers, &mut quote_count, content, column);
+                content = markdown_container_openings(line, &mut containers, &mut quote_count, content);
             }
-            let body = &line[content..];
-            let trimmed = body.trim_start_matches(' ');
-            let indent = body.len() - trimmed.len();
+            let start_column = content.column;
+            content.indent(line.as_bytes(), usize::MAX);
+            let indent = content.column - start_column;
+            let trimmed = &line[content.at..];
             let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
             let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
             if let Some((character, width, start)) = fence {
@@ -944,7 +961,7 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
                 at = end;
                 continue;
             }
-            if indent >= 4 || body.starts_with('\t') {
+            if indent >= 4 {
                 ranges.push((at, end));
                 at = end;
                 continue;
@@ -1800,6 +1817,51 @@ mod tests {
              "- > ~~~\n  > <!-- literal -->\n\n  Visible"),
             ("> ```\n> <!-- literal -->\n<b>Visible</b>\n~~~\n<!-- literal again -->\n~~~\n<style>hidden</style>After",
              "> ```\n> <!-- literal -->\nVisible\n~~~\n<!-- literal again -->\n~~~\nAfter"),
+        ] {
+            assert_eq!(without_html_tags(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn container_fences_expand_tabs_and_preserve_partial_tab_indentation() {
+        for source in [
+            ">\t~~~html\n> <script>literal</script>\n> ~~~",
+            ">\t~~~html\n> <!-- literal -->\n> ~~~",
+            "> ~~~html\n>\t<script>literal</script>\n>\t~~~",
+            ">\t```html\n> <!-- literal -->",
+            ">\t~~~html\n> <script>literal</script>",
+            "- item\n\t~~~html\n  <script>literal</script>\n  ~~~",
+            "- item\n \t~~~html\n  <!-- literal -->\n \t~~~",
+            "-\t~~~html\n    <script>literal</script>\n\t~~~",
+            "> -\t~~~html\n>   <!-- literal -->\n> \t~~~",
+            "> \t> \t~~~html\n>   > <script>literal</script>\n>   > ~~~",
+            "- ~~~html\n\t  ~~~\n  <script>literal</script>\n  ~~~",
+            "> ~~~html\n>\t \t~~~\n> <!-- literal -->\n> ~~~",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+    }
+
+    #[test]
+    fn tabbed_container_indentation_does_not_create_or_extend_fences() {
+        for (source, expected) in [
+            (">\t~~~html\n> <!-- literal -->\n<script>hidden</script>Visible",
+             ">\t~~~html\n> <!-- literal -->\nVisible"),
+            ("- item\n\t~~~html\n  <!-- literal -->\n<script>hidden</script>Visible",
+             "- item\n\t~~~html\n  <!-- literal -->\nVisible"),
+            ("- item\n\t  ~~~html\n  <script>hidden</script>Visible",
+             "- item\n\t  ~~~html\n  Visible"),
+            ("- item\n \t  ~~~html\n  <!-- hidden -->Visible",
+             "- item\n \t  ~~~html\n  Visible"),
+            ("- item\n\t  <!-- literal -->\n  <script>hidden</script>Visible",
+             "- item\n\t  <!-- literal -->\n  Visible"),
+            ("- item\n \t<script>hidden</script>Visible",
+             "- item\n \tVisible"),
+            (">\t \t~~~html\n> <script>hidden</script>Visible",
+             ">\t \t~~~html\n> Visible"),
+            ("-\t  ~~~html\n  <script>hidden</script>Visible",
+             "-\t  ~~~html\n  Visible"),
         ] {
             assert_eq!(without_html_tags(source), expected, "{source}");
         }
