@@ -6675,10 +6675,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         if selected != *subject {
             return Ok(());
         }
-        let intent = crate::graph::parse_internal_intent(
+        let mut intent = crate::graph::parse_internal_intent(
             &format!("version 2\nstop {:?}\n", subject.subject),
             &self.host,
         )?;
+        let stopped = intent.subjects.get_mut(&subject.subject)
+            .context("one-shot stop lacks its subject")?;
+        stopped.owner_run.clone_from(&subject.owner_run);
+        stopped.owner_generation.clone_from(&subject.owner_generation);
+        stopped.owner_step.clone_from(&subject.owner_step);
         let result = self.store.apply_as(
             &intent,
             &BTreeMap::from([(subject.subject.clone(), vec![token.clone()])]),
@@ -22475,10 +22480,15 @@ mission "native-exit-evidence" state="ready" {{
         loop {
             reconciler.reconcile_once().unwrap();
             let view = store.mission_run(&run.id).unwrap().unwrap();
-            if view.steps[0].blocked_reason.as_deref().is_some_and(|reason| reason.contains("code 23")) {
+            if view.steps[0].blocked_reason.as_deref().is_some_and(|reason| reason.contains("code 23"))
+                && store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().is_some()
+                && store.latest_claim(&run.subject, Some("operational.failure")).unwrap().is_some()
+            {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "mission never reported the failed one-shot");
+            assert!(std::time::Instant::now() < deadline,
+                "mission never retained all failure surfaces: run={view:?}; faults={:?}",
+                store.observations_for(&run.subject, "reconcile.fault").unwrap());
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         reconciler.reconcile_once().unwrap();
@@ -22495,7 +22505,9 @@ mission "native-exit-evidence" state="ready" {{
         let reason = view.steps[0].blocked_reason.as_deref().unwrap();
         assert!(reason.contains(&incarnation) && reason.contains("fatal: fixture launch failed"), "{reason}");
         for kind in ["mission-run.state", "operational.failure"] {
-            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap().unwrap();
+            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
+                .unwrap_or_else(|| panic!("missing {kind}: run={view:?}; faults={:?}",
+                    store.observations_for(&run.subject, "reconcile.fault").unwrap()));
             let reason = claim.body["fields"]["reason"].as_str().unwrap();
             assert!(reason.contains("code 23") && reason.contains(&incarnation)
                 && reason.contains("fatal: fixture launch failed"), "{kind}: {reason}");
@@ -22559,7 +22571,9 @@ mission "exit-evidence" state="ready" {
         let reason = step.blocked_reason.as_deref().unwrap();
         assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
         for kind in ["operational.failure", "mission-run.state"] {
-            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap().unwrap();
+            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
+                .unwrap_or_else(|| panic!("missing {kind}: run={run:?}; faults={:?}",
+                    store.observations_for(&run.subject, "reconcile.fault").unwrap()));
             let reason = claim.body["fields"]["reason"].as_str().unwrap();
             assert!(reason.contains("code 23") && reason.contains("worker failed"), "{kind}: {reason}");
         }
@@ -22592,6 +22606,32 @@ mission "exit-evidence" state="ready" {
         let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
         assert!(actual_field(&replacement, "exit_code").is_none_or(Value::is_null));
+    }
+
+    #[test]
+    fn blocked_mission_reason_retains_new_exit_evidence_without_a_status_change() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, r#"version 2
+mission "retained-reason" state="ready" {
+  goal "Retain new evidence on a blocked run."
+  step "work" { assigned-to "agent/node.worker" }
+}
+"#, "retained-reason");
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "retained-reason".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "retained-reason-run".into(),
+        }).unwrap();
+        assert!(store.set_mission_run_state(
+            &run.id, "blocked", "normal", Some("no eligible agent is present"),
+        ).unwrap());
+        let reason = "no eligible agent is present; worker exited with code 23: worker failed";
+        assert!(store.set_mission_run_state(&run.id, "blocked", "normal", Some(reason)).unwrap());
+        let claim = store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["reason"], reason);
+        let index = store.index().unwrap();
+        assert!(!store.set_mission_run_state(&run.id, "blocked", "normal", Some(reason)).unwrap());
+        assert_eq!(store.index().unwrap(), index);
     }
 
     #[test]

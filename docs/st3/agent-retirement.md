@@ -25,6 +25,9 @@ The one-shot retirement decision records the exit summary. If the stopped seat l
 without an eligible agent, the waiting step, mission run reason and operational failure include
 the exit code/signal and safe output tail. Subject inspection retains the structured evidence
 after stop. Output that cannot be safely redacted is omitted by the runtime evidence boundary.
+Automatic one-shot stops retain run/generation/step ownership and do not suppress the missing-agent
+fault as a deliberate root stop would. A blocked run durably refreshes a changed failure reason
+even when its status and phase do not change; an identical reason remains deduplicated.
 The optional claim field changes the registry digest; peers must upgrade together to interpret it.
 
 

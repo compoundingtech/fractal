@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/c4348bb7a9fc2f56afb9e774fc00d998213b2262";
+    pty.url = "github:compoundingtech/pty/ab95a23173bd85a9ae92d6b8d5e9f1b62c78f1de";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
     fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
