@@ -270,8 +270,10 @@ function literalEvents(source: string): readonly Event[] {
       byte = byteEnd
     }
   }
-  const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, (character, index: number) => {
+  const escape = (value: string, destination = false) => value.replace(/[!-/:-@[-`{-~]/g, (character, index: number) => {
     if (character !== '|') return `\\${character}`
+    // The destination must not duplicate the label's structural pipes. Character references decode to the same URL.
+    if (destination) return '&#124;'
     // Preserve block parsing too: escaping an originally structural pipe in a paragraph could turn a malformed
     // table header into a valid one on the second pass. In cells, retain the original odd escaped-pipe parity.
     let slash = index
@@ -296,7 +298,7 @@ function literalEvents(source: string): readonly Event[] {
       const slashCount = before.length - (marker === '!' ? 1 : 0) - slash
       if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
       else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
-      parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
+      parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value, true)}>)`)
       at = candidate.end
     }
   }
@@ -305,12 +307,56 @@ function literalEvents(source: string): readonly Event[] {
   return events(parts.join(''))
 }
 
-/** Email is the only literal syntax absent from both parsers; protocol/www links are recognized before emphasis. */
+/**
+ * GFM also has a URL-only postparse fallback (for example `|www.…` in a paragraph). Preserve its distinct preceding
+ * character, ASCII-domain and punctuation rules, without its restarting regex or the quadratic email alternatives.
+ */
+function* fallbackUrls(source: string): Generator<LiteralUrl> {
+  const prefix = /https?:\/\/|www(?=\.)/gi
+  const domainPattern = /[\w-]*\.[\w.-]*/y
+  for (let match = prefix.exec(source); match !== null; match = prefix.exec(source)) {
+    const previous = source[match.index - 1]
+    if (previous !== undefined && (/[0-9a-z]/i.test(previous) || !/[\s\p{P}\p{S}]/u.test(previous))) continue
+    domainPattern.lastIndex = match.index + match[0].length
+    const domainMatch = domainPattern.exec(source)
+    if (domainMatch === null) continue
+    let end = domainPattern.lastIndex
+    while (end < source.length && !/[\t\n\r ]/.test(source[end]!)) end++
+    // A rejected replacement still consumes the original regex's whole match; never retry each prefix in its path.
+    prefix.lastIndex = end
+    const www = /^www/i.test(match[0])
+    const domainStart = www ? match.index : match.index + match[0].length
+    const domain = source.slice(domainStart, domainPattern.lastIndex)
+    if (/[\p{P}\p{S}]/u.test(domain[0]!) || domain.split('.').slice(-2).some(label => label !== '' && (label.includes('_') || !/[0-9a-z]/i.test(label)))) continue
+    const pathEnd = end
+    while (end > domainStart && /[!"&'),.:;<>?\]}]/.test(source[end - 1]!)) end--
+    let balance = 0
+    for (let index = domainStart; index < end; index++) {
+      if (source[index] === '(') balance++
+      else if (source[index] === ')') balance--
+    }
+    for (let index = end; index < pathEnd && balance > 0; index++) {
+      if (source[index] === ')') { balance--; end = index + 1 }
+    }
+    yield { index: match.index, value: source.slice(match.index, end) }
+  }
+}
+
+/** Tokenizer links are already nodes. Only the URL fallback and bounded email scan operate on remaining text. */
 function linkLiterals(parent: MdastNode): void {
   if (parent.children === undefined || parent.type === 'link' || parent.type === 'linkReference') return
   parent.children = parent.children.flatMap((child): MdastNode[] => {
     if (child.type !== 'text') { linkLiterals(child); return [child] }
-    return emailLiterals(child)
+    const parts: MdastNode[] = []
+    let at = 0
+    for (const candidate of fallbackUrls(child.value!)) {
+      if (candidate.index > at) parts.push(...emailLiterals({ type: 'text', value: child.value!.slice(at, candidate.index) }))
+      parts.push({ type: 'link', url: /^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value, title: null, children: [{ type: 'text', value: candidate.value }] })
+      at = candidate.index + candidate.value.length
+    }
+    if (at === 0) return emailLiterals(child)
+    if (at < child.value!.length) parts.push(...emailLiterals({ type: 'text', value: child.value!.slice(at) }))
+    return parts
   })
 }
 
@@ -334,8 +380,8 @@ function emailLiterals(node: MdastNode): MdastNode[] {
 }
 
 /**
- * Replace only GFM's restarting email tokenizer and postparse regex with a bounded tree scan. Retain GFM's protocol
- * and www tokenizers: their precedence over inline delimiters is part of the syntax, not a postparse link policy.
+ * Replace GFM's restarting email tokenizer and combined postparse regex with bounded scans. Retain its protocol/www
+ * tokenizers and the URL-only postparse fallback; only email's quadratic path changes implementation.
  */
 export function remarkLinearAutolinks(this: { data(): object }) {
   const data = this.data()

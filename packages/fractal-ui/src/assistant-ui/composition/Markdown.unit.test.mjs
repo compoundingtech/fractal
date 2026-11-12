@@ -539,7 +539,7 @@ test('literal URLs stay inside original inline containers on both parser paths',
     }
     const protocols = ['https://example.test/', 'www.example.test/']
     for (const prefix of protocols) {
-      for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a\\\\|b', 'a(b)).']) {
+      for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a(b)).']) {
         for (const source of [
           `|link|other|\n|---|---|\n|${prefix}${suffix}|b|`,
           `|${prefix}${suffix}|other|\n|---|---|\n|a|b|`,
@@ -582,6 +582,14 @@ test('literal URLs stay inside original inline containers on both parser paths',
       '[https://example.test/a*b*c](https://target.test/) www.example.test/after',
       '![https://example.test/a*b*c](https://image.test/) www.example.test/after',
       '|[https://example.test/a*b*c](https://target.test/)|www.example.test/after|\n|---|---|\n|![https://example.test/a*b*c](https://image.test/)|next|',
+      'https://example.test/a|b\n---|---|---',
+      'www.example.test/a|b\n---|---|---',
+      '|www.example.test/a|b\n---|---|---|---',
+      '`a\\\\|b` and `` a\\\\|b ``',
+      '```\na\\\\|b\n```\n\n    a\\\\|b',
+      '<span title="a\\\\|b">body</span>',
+      '<https://example.test/a\\\\|b>',
+      '[label](https://example.test/a\\\\|b) ![alt](https://example.test/a\\\\|b)',
     ]) {
       const expected = parse(source, [remarkGfm])
       for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
@@ -589,6 +597,48 @@ test('literal URLs stay inside original inline containers on both parser paths',
       }
     }
     assert.deepEqual(differences, [], 'all inline-container cases match the original remark-gfm oracle')
+  } finally { await isolated.close() }
+})
+
+test('known upstream divergence: even backslash runs before table pipes remain explicit beside GFM output', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const render = (source, plugins) => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source))
+    const anchor = (value, text = value) => h('a', { href: encodeURI(value.startsWith('www.') ? `http://${value}` : value) }, text)
+    const table = (head, row) => renderToStaticMarkup(h('table', null,
+      h('thead', null, h('tr', null, ...head.map(cell => h('th', null, cell)))),
+      h('tbody', null, h('tr', null, ...row.map(cell => h('td', null, cell)))),
+    ))
+    for (const prefix of ['https://example.test/', 'www.example.test/']) {
+      const raw = `${prefix}a\\\\|b`
+      const nativeLink = () => anchor(raw, `${prefix}a\\|b`)
+      const gfmLink = () => anchor(`${prefix}a\\\\`)
+      const gfmParagraphValue = suffix => `${prefix}a${prefix.startsWith('www.') ? '\\' : '\\\\'}|b|${suffix}`
+      const knownDivergences = [
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact data row', source: `|link|other|\n|---|---|\n|${raw}|b|`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact header', source: `|${raw}|other|\n|---|---|\n|a|b|`,
+          pulldown: table([nativeLink(), 'other'], ['a', 'b']),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue('other|')), '\n|---|---|\n|a|b|')) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact header and row', source: `|${raw}|${prefix}next|\n|---|---|\n|${raw}|${prefix}last|`,
+          pulldown: table([nativeLink(), anchor(`${prefix}next`)], [nativeLink(), anchor(`${prefix}last`)]),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue(`${prefix}next|`)), '\n|---|---|\n|', anchor(gfmParagraphValue(`${prefix}last|`)))) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'row without outer pipes', source: `link|other\n---|---\n${raw}|b`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+      ]
+      for (const known of knownDivergences) {
+        assert.notEqual(known.pulldown, known.gfm, known.name)
+        assert.equal(render(known.source, [remarkGfm]), known.gfm, `original GFM: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [remarkGfm, parity.remarkLinearAutolinks]), known.gfm, `bounded remark fallback: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [parity.remarkPulldown]), known.pulldown, `pinned upstream divergence: ${prefix} ${known.name}`)
+      }
+    }
   } finally { await isolated.close() }
 })
 
