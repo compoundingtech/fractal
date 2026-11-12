@@ -179,6 +179,13 @@ const styles = stylex.create({
     '--diffs-addition-color-override': 'var(--fractal-diff-addition)',
     '--diffs-deletion-color-override': 'var(--fractal-diff-deletion)',
     '--diffs-fg-number-override': text.fgMuted,
+    // Kit washes (9% line; word changes underlined in DiffView.pierre) keep muted ink at 4.5:1; Pierre's default 20% line wash does not.
+    '--diffs-bg-addition-override': 'color-mix(in srgb, var(--fractal-diff-addition) 9%, var(--fractal-diff-canvas))',
+    '--diffs-bg-deletion-override': 'color-mix(in srgb, var(--fractal-diff-deletion) 9%, var(--fractal-diff-canvas))',
+    '--diffs-bg-addition-number-override': 'color-mix(in srgb, var(--fractal-diff-addition) 6%, var(--fractal-diff-canvas))',
+    '--diffs-bg-deletion-number-override': 'color-mix(in srgb, var(--fractal-diff-deletion) 6%, var(--fractal-diff-canvas))',
+    '--diffs-bg-addition-emphasis-override': 'transparent',
+    '--diffs-bg-deletion-emphasis-override': 'transparent',
     '--fractal-diff-token-foreground': 'var(--fractal-diff-fg)',
     '--fractal-diff-token-background': surface.canvas,
     '--fractal-diff-token-token-comment': `var(--fractal-syntax-comment, ${text.fgMuted})`,
