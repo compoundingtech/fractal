@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "GitHub watch excerpts drop HTML comments, script and style content and real HTML tags before cutting at the 600-character bound, and close a code fence the cut leaves open",
+  "replay": {
+    "status": "none",
+    "detail": "No replay; new excerpts are computed when watches observe GitHub items."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The excerpt field keeps its type and 600-character bound; only its content is cleaner."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores excerpts cut before hidden HTML is removed."
+  }
+}
