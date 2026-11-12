@@ -12226,7 +12226,8 @@ fn an_older_client_reads_a_model_drift_item_as_a_request_without_actions() {
         "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
     let mut current = vec![row.clone()];
     client_attention_compatibility(&mut current, true);
-    assert_eq!(current, [row.clone()]);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0], row);
     let mut older = vec![row];
     client_attention_compatibility(&mut older, false);
     assert_eq!(older[0]["attention_kind"], "agent-request");
