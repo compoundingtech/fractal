@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "summary": "CI's objectives (merge-latency/p50 and /p95, ci-critical-path/p95, flakes) read the same real values on every member, from a Workspace CI reading the repository observation replicates",
+  "replay": {"status": "none", "detail": "No replay or rebuild. The rows are computed on read from the resource observation projection every member already keeps."},
+  "schema": {
+    "status": "changed",
+    "detail": "Adds an optional workspace_ci object to vcs.repository facts and regenerates the schema registry documentation; the registry digest changes. No tables, columns or migration. It holds the repository, the runs a row reads (each run's id, event, conclusion, attempt when not 1, from_unix_ms, until_unix_ms and flaky count once listed) and, while its Workspace CI reads fail, unread_since_unix_ms. It holds no read time, so an unchanged poll records the same fact. Only a github.repository observer that reads main_performance_failures writes it. Older readers quarantine a fact with an unknown resource field: upgrade every member before the field is written."
+  },
+  "rules": {"status": "none", "detail": "Claim kinds, rules, permissions and digests are unchanged. The fact rides the existing resource.observed claim of the repository, replicated and locally trimmed like every other observation."},
+  "compatibility": {
+    "status": "changed",
+    "detail": "st slo, GET /v1/slo and GET /v1/client/slo list the four CI rows with the same ids, targets, windows and SloRow fields on every member, computed from the newest replicated reading; each explain names the reading member (host/NAME). Freshness comes from the observer's liveness: once the observer that recorded the reading has had a replicated observer.state other than healthy, or the reading's own Workspace CI reads have failed, for more than 15 minutes (three five-minute polls), the rows are no-data with current 'reading stale', never met. The process-local copy of the runs and the one-repository-per-daemon rule are gone: a failed read records the previous reading with when its reads began to fail, and flaky test counts travel in the fact, so a run's artifacts are listed once whichever member polls. A missed row opens its fault only on the member whose observer recorded the reading; any member ends a fault it has open once the row is met. Size: a green run is about 125 bytes; a typical day keeps 100 to 200 runs, 13 to 25 KB an observation, at most 2,000 runs (under 320 KB) under the listings' bounds. A new observation is recorded only when a run is new or changed, a flaky count is listed, or the reads start or stop failing, about one per Workspace CI run; a poll with nothing new appends nothing, and the standing observer keeps its quiet backoff. No new GitHub reads or polling."
+  },
+  "downtime": {"status": "none", "detail": "None. The reads keep the observer's cadence and the rows are computed on read."},
+  "manual": {
+    "status": "changed",
+    "detail": "Deploy this build to every member first. Then activate, as before, by subscribing the owner agent to main_performance_failures on the shared observer (subscription on observer/github/compoundingtech/fractal, on \"main_performance_failures\", delivery \"message\", to the owner agent, applied with fractal apply FILE --as that agent); the observer reads and records Workspace CI only with that field."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Before downgrading, stop the main_performance_failures subscription so no older build is asked to observe the field. Recorded workspace_ci facts stay in replicated observations; an older build quarantines them during replay, so keep supporting readers until the observations carrying the field are trimmed. Binary rollback returns the four rows to the previous behavior."
+  }
+}

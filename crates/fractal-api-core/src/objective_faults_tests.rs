@@ -88,6 +88,24 @@ fn without_a_fault_agent_a_missed_objective_opens_nothing() {
 }
 
 #[test]
+fn only_the_member_that_recorded_the_reading_opens_a_ci_fault() {
+    let poller = Store::open_memory("alder").unwrap();
+    crate::objectives::record_ci_reading(&poller, json!({"repository_id": 7,
+        "workspace_ci": {"repository": "acme/garden", "runs": []}}));
+    let member = Store::open_memory("birch").unwrap();
+    crate::objectives::replicate(&poller, &member);
+    let rows = [row("merge-latency/p95", "missed"), row("flakes", "met"), row("transaction/write", "missed")];
+    let ids = |store: &Store| {
+        rows_here(store, &rows, &objectives()).unwrap().iter().map(|row| row["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&poller), ["merge-latency/p95", "flakes", "transaction/write"]);
+    // Another member computing the same rows opens none, and still ends a fault of its own once met.
+    assert_eq!(ids(&member), ["flakes", "transaction/write"]);
+    // With no reading anywhere, no member opens one.
+    assert_eq!(ids(&Store::open_memory("node").unwrap()), ["flakes", "transaction/write"]);
+}
+
+#[test]
 fn the_ci_objectives_are_the_declared_durations_and_counts() {
     let ids = ci_objectives(crate::slo::targets());
     assert_eq!(
