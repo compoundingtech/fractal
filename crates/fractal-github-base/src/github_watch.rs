@@ -785,7 +785,7 @@ fn without_html_tags(text: &str) -> String {
     while let Some(start) = rest.find('<') {
         visible.push_str(&rest[..start]);
         let tag = &rest[start..];
-        let Some(end) = tag[1..].find(|c| c == '<' || c == '>').map(|end| end + 1) else {
+        let Some(end) = tag[1..].find(['<', '>']).map(|end| end + 1) else {
             visible.push_str(tag);
             return visible;
         };
