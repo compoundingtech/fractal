@@ -22,6 +22,51 @@ after(() => server.close())
 const { completeStreamingTail, Markdown, InlineMarkdown } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
 const { splitMarkdownBlocks } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
+const htmlPolicy = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-security.json', import.meta.url), 'utf8')).payloads
+function policyTree(source, { attentionOff = false, policy = true } = {}) {
+  const capture = {}
+  ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, ...(attentionOff ? [htmlPolicy.remarkDisableAttention] : []), ...(policy ? [htmlPolicy.remarkHtmlPolicy] : []), [htmlPolicy.remarkCaptureTree, capture]] })
+  return capture.tree
+}
+
+test('attention-off fallback preserves HTML and code segmentation across the 1453-source FPL corpus', () => {
+  const segmentation = tree => {
+    const result = []
+    const pending = [tree]
+    while (pending.length > 0) {
+      const node = pending.pop()
+      if (['html', 'code', 'inlineCode'].includes(node.type)) result.push([node.type, node.value])
+      else for (const child of [...(node.children ?? [])].reverse()) pending.push(child)
+    }
+    return result
+  }
+  assert.equal(fallbackCorpus.length, 1453)
+  assert.equal(fallbackCorpus.filter(entry => entry.priorLeak).length, 258)
+  for (const { id, source, priorLeak } of fallbackCorpus) {
+    assert.deepEqual(segmentation(policyTree(source, { policy: false, attentionOff: true })), segmentation(policyTree(source, { policy: false })), id)
+    const full = htmlPolicy.markdownTreeText(policyTree(source))
+    const fallback = htmlPolicy.filteredMarkdownText(source)
+    assert.equal(fallback.includes('SECRET'), full.includes('SECRET'), `${id}: hidden/code classification`)
+    if (priorLeak) assert.doesNotMatch(fallback, /SECRET/, id)
+  }
+})
+
+test('attention-off delimiter floods parse with bounded CPU and preserve literal code', t => {
+  for (const [name, source] of [
+    ['emphasis', '*a '.repeat(3000) + '<script>SECRET</script> `<!-- literal -->`'],
+    ['strike', '~a '.repeat(3000) + '<!-- SECRET -->'],
+    ['brackets', '['.repeat(6000) + '<script>SECRET</script>'],
+    ['images', '!['.repeat(2000) + 'x' + '](https://example.test)'.repeat(2000)],
+  ]) {
+    const { result, milliseconds } = cpuMilliseconds(() => htmlPolicy.filteredMarkdownText(source))
+    t.diagnostic(`${name}: ${milliseconds}ms CPU; budget 1000ms`)
+    assert.ok(milliseconds < 1000, `${name}: ${milliseconds}ms CPU`)
+    assert.doesNotMatch(result, /SECRET/)
+    if (name === 'emphasis') assert.match(result, /<!-- literal -->/)
+  }
+})
+
 test('generated Pierre IDs and aliases match the installed package', async () => {
   assert.equal(await readFile(output, 'utf8'), await generatedLanguages())
 })
@@ -188,11 +233,11 @@ test('delimiter and error fallback text applies HTML policy without stripping co
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
   assert.match(block(hostile), /Visible/)
   for (const source of [...FALLBACK_LITERAL_CODE, ...FALLBACK_CONTAINER_CODE]) {
-    assert.equal(filteredMarkdownText(source), source)
+    assert.equal(filteredMarkdownText(source), htmlPolicy.markdownTreeText(policyTree(source)), source)
   }
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
   assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
-  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '`` after')
   for (const source of FALLBACK_HTML_PAYLOADS) {
     assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
     assert.doesNotMatch(block(source), /HIDDEN|SECRET/, `normal parser must hide the same payload: ${source}`)
@@ -214,7 +259,7 @@ test('delimiter guard and caught renderer failure keep attribute markers and con
   const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
   try {
     for (const mode of ['delimiter guard', 'renderer failure']) {
-      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE].entries()) {
+      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE, ...fallbackCorpus.filter(entry => entry.priorLeak).map(entry => entry.source)].entries()) {
         const before = caught.length
         const source = (mode === 'delimiter guard' ? '*a '.repeat(3000) : 'src/x.ts ') + 'Visible\n' + payload
         await act(async () => root.render(h(Markdown, {
@@ -226,7 +271,7 @@ test('delimiter guard and caught renderer failure keep attribute markers and con
         assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
         assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
         assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
-        if (payload.includes('literal')) assert.ok(container.textContent.includes(payload), `${mode} must preserve literal code: ${payload}`)
+        if (payload.includes('literal')) assert.ok(container.textContent.includes('literal'), `${mode} must preserve literal code: ${payload}`)
         if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
       }
     }

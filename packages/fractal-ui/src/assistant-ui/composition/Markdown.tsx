@@ -15,7 +15,7 @@ import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
-import { filteredMarkdownText, remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
+import { filteredMarkdownText, markdownTreeText, remarkCaptureTree, remarkHtmlPolicy, safeLinkHref, type MarkdownParsedTree } from './markdown-html-policy'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
@@ -69,13 +69,13 @@ function markStreamingTail() {
  * bracket counts twice (at most 1,024 per block); code (fences and inline spans) never counts.
  */
 const DELIMITER_LIMIT = 2048
-const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{filteredMarkdownText(source)}</p>
+const PlainBlock = ({ text }: { readonly text: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{text}</p>
 /** A block the parser cannot handle shows as its text, never as a broken transcript. */
-class BlockFallback extends React.Component<{ readonly source: string; readonly children: React.ReactNode }, { readonly failed: boolean }> {
+class BlockFallback extends React.Component<{ readonly source: string; readonly parsed: MarkdownParsedTree; readonly children: React.ReactNode }, { readonly failed: boolean }> {
   override state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   override componentDidUpdate(previous: { readonly source: string }) { if (previous.source !== this.props.source && this.state.failed) this.setState({ failed: false }) }
-  override render() { return this.state.failed ? <PlainBlock source={this.props.source} /> : this.props.children }
+  override render() { return this.state.failed ? <PlainBlock text={this.props.parsed.tree === undefined ? '' : markdownTreeText(this.props.parsed.tree)} /> : this.props.children }
 }
 function delimiters(source: string): number {
   let count = 0
@@ -92,8 +92,10 @@ function delimiters(source: string): number {
   return count
 }
 const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
-  if (delimiters(source) > DELIMITER_LIMIT) return <PlainBlock source={source} />
-  return <BlockFallback source={source}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
+  const parsed = React.useMemo<MarkdownParsedTree>(() => ({}), [source])
+  const plugins: NonNullable<React.ComponentProps<typeof ReactMarkdown>['remarkPlugins']> = [...(hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS), [remarkCaptureTree, parsed]]
+  if (delimiters(source) > DELIMITER_LIMIT) return <PlainBlock text={filteredMarkdownText(source)} />
+  return <BlockFallback source={source} parsed={parsed}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={plugins} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
 })
 /** Images keep their source for the consent-gated placeholder; a link opens only an http(s) URL. */
 const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : key === 'href' ? safeLinkHref(url) ?? '' : defaultUrlTransform(url)
