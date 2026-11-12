@@ -22,6 +22,24 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// Set or clear the session person's own note. A nil `text` clears it and is sent as `null`.
+public struct DirectiveNoteSet: Codable, Sendable, Equatable {
+    public var text: String?
+    public var expiresAt: String?
+    enum CodingKeys: String, CodingKey { case text, expiresAt = "expires_at" }
+    public init(text: String?, expiresAt: String? = nil) { self.text = text; self.expiresAt = expiresAt }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
+    }
+}
+
+/// The person's current note after a write; nil once cleared or already expired.
+public struct DirectiveNoteSetResult: Codable, Sendable, Equatable {
+    public let note: DirectiveNote?
+}
+
 /// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
 public struct PersonAvailability: Codable, Sendable, Equatable {
     public let person: String
@@ -1643,6 +1661,7 @@ public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalO
 public enum AssistantScope: String, Codable, Sendable {
     case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
     case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
+    case availability = "read.assistant.availability"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String; public let minimalReadMode: AssistantMinimalReadMode?

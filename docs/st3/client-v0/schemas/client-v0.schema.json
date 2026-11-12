@@ -430,6 +430,19 @@
       "type": "object", "additionalProperties": false, "required": ["notes"],
       "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
     },
+    "DirectiveNoteSet": {
+      "description": "Set or clear the session person's own directive note. `text` is required; null clears the note. The person always comes from the session.",
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {
+        "text": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096, "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused."}, {"type": "null"}]},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "DirectiveNoteSetResult": {
+      "description": "The person's current note after the write; null once cleared or already expired.",
+      "type": "object", "additionalProperties": false, "required": ["note"],
+      "properties": {"note": {"oneOf": [{"$ref": "#/$defs/DirectiveNote"}, {"type": "null"}]}}
+    },
     "PersonAvailability": {
       "description": "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person.",
       "type": "object", "additionalProperties": false,
@@ -953,6 +966,7 @@
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/PersonAvailabilities" },
+            { "$ref": "#/$defs/DirectiveNoteSetResult" },
             { "$ref": "#/$defs/PersonAvailability" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
@@ -4072,7 +4086,8 @@
       "read.assistant.terminal",
       "write.assistant.messages",
       "write.assistant.custom-reply",
-      "write.assistant.answers"
+      "write.assistant.answers",
+      "read.assistant.availability"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
@@ -4442,7 +4457,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "write.availability", "write.presence", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "write.availability", "write.presence", "write.notes", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
         }
       }
     },

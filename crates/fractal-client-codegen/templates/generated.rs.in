@@ -28,6 +28,20 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+/// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSet {
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// The person's current note after a write; `None` once cleared or already expired.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSetResult {
+    pub note: Option<DirectiveNote>,
+}
+
 /// A person's effective availability. Values are the schema's lowercase words; `presence` and
 /// `presence_observed_at` are `None` for anyone but the person.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4532,6 +4546,8 @@ pub enum AssistantScope {
     CustomReply,
     #[serde(rename = "write.assistant.answers")]
     Answers,
+    #[serde(rename = "read.assistant.availability")]
+    Availability,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

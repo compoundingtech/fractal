@@ -8,7 +8,7 @@ use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::store::directive_notes::DirectiveNote;
 
 #[derive(Args)]
-#[command(after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note. Notes never assign work, approve a gate or grant authority.")]
+#[command(after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note, from this CLI or from a paired device granted write.notes. Notes never assign work, approve a gate or grant authority.")]
 pub(super) struct NoteArgs {
     /// Read as this person or agent; defaults to the harness identity, else configured person.
     #[arg(long, global = true, value_parser = super::parse_actor_subject)]
@@ -87,9 +87,7 @@ pub(super) async fn run(
                 NoteCommand::Clear => (None, None),
             };
             let response: NoteResponse = client
-                .request("PUT", "/v1/notes", Some(&json!({
-                    "person": actor,
-                    "actor": actor,
+                .request("PUT", "/v1/client/notes", Some(&json!({
                     "text": text,
                     "expires_at": expires_at,
                 })))

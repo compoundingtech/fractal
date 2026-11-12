@@ -937,6 +937,7 @@ export type AssistantScope =
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
   | "write.assistant.answers"
+  | "read.assistant.availability"
 ;
 
 export type AssistantSenderClass = "external-assistant";
@@ -1817,6 +1818,15 @@ export type DirectiveNote = {
   time: Timestamp;
 };
 
+export type DirectiveNoteSet = {
+  expires_at?: (Timestamp | null);
+  text: (string | null);
+};
+
+export type DirectiveNoteSetResult = {
+  note: (DirectiveNote | null);
+};
+
 export type DirectiveNotes = {
   notes: Array<DirectiveNote>;
 };
@@ -1870,7 +1880,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | PersonAvailability | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -3511,6 +3521,7 @@ export type PersonPairingBegin = {
   | "write.client-diagnostics"
   | "write.availability"
   | "write.presence"
+  | "write.notes"
   | "read.glasses"
   | "control.glasses"
   | "terminal.read"
