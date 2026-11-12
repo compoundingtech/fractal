@@ -3,12 +3,12 @@
 use super::{AttentionItemView, Store};
 use std::collections::HashSet;
 
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     "person-step", "human-gate", "launch-approval", "unread-message", "agent-request",
-    "revision-approval", "harness-login", "harness-prompt", "fault", "unattributed",
+    "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "unattributed",
 ];
 
-pub type Counts = [(&'static str, u64); 10];
+pub type Counts = [(&'static str, u64); 11];
 
 /// Call inside the population refresher's `Store::read_snapshot`, alongside the population
 /// fold. No independent cut, timeout, mailbox read or fault collection is introduced here.
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(remote.iter().map(|(_, count)| count).sum::<u64>(), 2);
         assert_eq!(local[2], ("launch-approval", 1));
         assert_eq!(remote[1], ("human-gate", 1));
-        assert_eq!(remote[9], ("unattributed", 1));
+        assert_eq!(remote[10], ("unattributed", 1));
     }
 
     #[test]
@@ -181,12 +181,14 @@ mod tests {
             item("custom.question", "custom/question/a", "person/a", "one"),
             item("fault", "mission-run/a", "person/a", "broken-gate"),
             item("agent-request", "step-run/a", "person/a", "ask"),
+            item("model-drift", "agent/a", "person/a", "drift"),
         ];
         let counts = count_items(&rows, "local", |_| Ok("local".into())).unwrap();
-        assert_eq!(counts[9], ("unattributed", 1));
+        assert_eq!(counts[10], ("unattributed", 1));
+        assert_eq!(counts[9], ("model-drift", 1));
         assert_eq!(counts[8], ("fault", 1));
         assert_eq!(counts[4], ("agent-request", 1));
-        assert_eq!(counts.iter().map(|(_, count)| count).sum::<u64>(), 3);
+        assert_eq!(counts.iter().map(|(_, count)| count).sum::<u64>(), 4);
     }
 
     #[test]

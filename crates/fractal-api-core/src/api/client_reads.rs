@@ -982,7 +982,7 @@ pub async fn client_attention(
         &effective_query,
         move |state, _| {
             let mut items = client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             Ok(items)
         },
     )
@@ -1009,7 +1009,7 @@ pub async fn client_attention_detail(
     let mut items =
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
-    client_attention_compatibility(&mut items, session.custom_forms);
+    client_attention_compatibility(&mut items, session.attention_compatibility());
     let Json(item) = client_detail(items, "attention", &id)?;
     let mut items = [item];
     relay_attention_target_states(&state, &mut items)

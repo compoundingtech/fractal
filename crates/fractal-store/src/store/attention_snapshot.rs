@@ -1515,6 +1515,20 @@ impl Store {
                 return Ok(None);
             }
         }
+        if f["condition"] == "restart-fresh-session" {
+            // A newer restart (including the person's stale-handoff escape) supersedes
+            // this wait. Completion also ends the episode, even before recovery is written.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            let Some(request) = crate::restart::latest_request(self, source)? else {
+                return Ok(None);
+            };
+            if failure.subject != format!("agent-restart-handoff:{}", request.id)
+                || request.body["fields"]["fresh_session"] != true
+                || self.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
+            {
+                return Ok(None);
+            }
+        }
         // Upgrades retain historical operational episodes. A current login with a concrete
         // person has one derived person item; the old agent fault must not ask again.
         if f["condition"] == "provider-auth" {

@@ -2298,6 +2298,7 @@ dependencies = [
  "chrono-tz",
  "fractal-client",
  "fractal-drivers",
+ "fractal-kernel",
  "fractal-peer",
  "fractal-reconcile",
  "fractal-runtime",
