@@ -5180,6 +5180,72 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 }
 
 #[test]
+fn mission_workspace_respects_execution_members() {
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nmission \"workspace\" state=\"ready\" {\n goal \"Check workspace placement\"\n step \"wait\" { agentless }\n}\n",
+        "publisher",
+    ).unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    assert_eq!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap(),
+        Path::new(".").canonicalize().unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(root.path()), "publisher", &inputs).unwrap(),
+        root.path().canonicalize().unwrap(),
+    );
+    let missing = root.path().join("missing");
+    assert!(resolve_mission_workspace(&mission, Some(&missing), "publisher", &inputs).is_err());
+    mission
+        .gates
+        .push(fractal_daemon::model::GateSpec::Mechanical {
+            name: "remote-proof".into(),
+            command: "true".into(),
+            host: "executor".into(),
+            workspace: "${ST_WORKSPACE}".into(),
+            environment: BTreeMap::new(),
+            time_limit_ms: 1000,
+        });
+    let remote = Path::new("/srv/workspace-only-on-executor/../project");
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    assert!(
+        resolve_mission_workspace(&mission, Some(Path::new(".")), "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute path")
+    );
+    mission.gates.clear();
+    mission.declarations_kdl = Some("version 2\nhost \"executor\" {\n agent \"workspace/worker\" {\n workspace \"${ST_WORKSPACE}\"\n harness \"claude\" {}\n }\n}\n".into());
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    mission.declarations_kdl = None;
+    mission.steps.get_mut("wait").unwrap().uses_mission = Some(
+        fractal_daemon::model::UsedMissionSpec::StepOutput { step: "prepare".into() },
+    );
+    assert!(resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(), remote);
+}
+
+#[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
     for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
@@ -8869,7 +8935,7 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
                 mission: format!("mission/{mission}"),
                 revision: None,
                 id: Some("2026-10-07".into()),
-                workspace: root.path().to_path_buf(),
+                workspace: Some(root.path().to_path_buf()),
                 inputs: Vec::new(),
                 after: None,
                 report_to: None,
@@ -8894,6 +8960,107 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
             .unwrap()
             .is_none()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
+    for combined in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("publisher").unwrap());
+        let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+        let session: PlanningSessionView = client.post("/v1/launches", &json!({
+            "mission": "remote-launch", "request": b"Run the remote task.",
+            "workspace": root.path().display().to_string(), "requester": "person/test",
+            "idempotency_key": "remote-launch-plan"
+        })).await.unwrap();
+        let path = format!("/v1/launches/{}", urlencoding::encode(&session.id));
+        let candidate = b"version 2\nmission \"remote-launch\" state=\"ready\" {\n goal \"Run remotely\"\n step \"work\" {\n agentless\n host \"executor\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\"; restart \"never\" }\n }\n }\n}\n";
+        let _: PlanningSessionView = client.post(&format!("{path}/submit"), &PlanningCandidateSubmitRequest {
+            actor: session.planner, markdown: b"# Remote task".to_vec(),
+            kdl: candidate.to_vec(), idempotency_key: "remote-launch-submit".into(),
+        }).await.unwrap();
+        let preview: PlanningSessionView = client.post(&format!("{path}/preview"), &json!({})).await.unwrap();
+        let hash = preview.preview.unwrap().hash;
+        if !combined {
+            let _: PlanningSessionView = client.post(&format!("{path}/approve"), &PlanningApprovalRequest {
+                actor: "person/test".into(), preview_hash: hash.clone(), idempotency_key: "remote-launch-approve".into(),
+            }).await.unwrap();
+        }
+        let command = |workspace| if combined {
+            LaunchCommand::ApproveAndLaunch(LaunchApproveAndStartArgs {
+                session: session.id.clone(), preview_hash: hash.clone(), workspace,
+                inputs: Vec::new(), actor: "person/test".into(),
+            })
+        } else {
+            LaunchCommand::Run(LaunchRunArgs {
+                session: session.id.clone(), workspace, inputs: Vec::new(), actor: "person/test".into(),
+            })
+        };
+        let endpoint = Endpoint::Unix(root.path().join("st3.sock"));
+        let error = launch_cli::run_launch(&client, &endpoint, command(None), &PlannerSpec::default(), true).await.unwrap_err();
+        assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+        let remote = "/srv/only-on-executor/../launch";
+        launch_cli::run_launch(&client, &endpoint, command(Some(PathBuf::from(remote))), &PlannerSpec::default(), true).await.unwrap();
+        let runs: Vec<MissionRunView> = client.get("/v1/mission-runs?mission=remote-launch").await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].workspace, remote);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn missions_start_publishes_remote_workspace_without_resolving_it_locally() {
+    const FLEET: &str = "5d0c1c52-3f7a-4b0e-9b61-1f2d3c4b5a69";
+    let root = tempfile::tempdir().unwrap();
+    let publisher = Arc::new(Store::open_memory("publisher").unwrap());
+    let executor = Arc::new(Store::open_memory("executor").unwrap());
+    publisher.bind_fleet(FLEET).unwrap();
+    executor.bind_fleet(FLEET).unwrap();
+    let (client, server) = serve_test_store(publisher.clone(), root.path(), "publisher").await;
+    publish_text(
+        &client,
+        r#"version 2
+mission "remote-workspace" state="ready" {
+ goal "Execute on the declared member."
+ step "work" {
+  agentless
+  host "executor" {
+   exec "workspace-check" { command "true"; workspace "${ST_WORKSPACE}"; restart "never" }
+  }
+ }
+}
+        "#.into(),
+        "remote workspace regression".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let args = |workspace| MissionRunStartArgs {
+        mission: "remote-workspace".into(),
+        revision: None,
+        id: Some("remote-workspace/check".into()),
+        workspace,
+        inputs: Vec::new(),
+        after: None,
+        report_to: None,
+        report_completed: false,
+        follow: false,
+        actor: "person/test".into(),
+        print_kdl: false,
+    };
+    let error = start_mission_run(&client, args(None), true).await.unwrap_err();
+    assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+    let remote = "/srv/only-on-executor/../workspace";
+    start_mission_run(&client, args(Some(PathBuf::from(remote))), true).await.unwrap();
+    let exchange = publisher.export_replication_exchange(FLEET, &fractal_daemon::model::ReplicationInventory::default()).unwrap();
+    executor.receive_replication_exchange("publisher", FLEET, &exchange).unwrap();
+    executor.validate_replication_backlog().unwrap();
+    executor.apply_replication_repairs().unwrap();
+    executor.project_replication_backlog().unwrap();
+    let executor_root = tempfile::tempdir().unwrap();
+    let (executor_client, executor_server) = serve_test_store(executor, executor_root.path(), "executor").await;
+    let run: MissionRunView = executor_client.get("/v1/mission-runs/mission-run%2Fremote-workspace%2Fcheck").await.unwrap();
+    assert_eq!(run.workspace, remote);
+    executor_server.abort();
     server.abort();
 }
 
@@ -8948,7 +9115,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
             mission: "arrival".into(),
             revision: Some(revision.clone()),
             id: Some("arrival/after-replication".into()),
-            workspace: starter_root.path().to_path_buf(),
+            workspace: Some(starter_root.path().to_path_buf()),
             inputs: Vec::new(),
             after: None,
             report_to: None,
