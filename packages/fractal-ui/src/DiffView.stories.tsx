@@ -40,11 +40,15 @@ export default meta
 export const scenarioExemptions: readonly string[] = [
   'BareFence:primitive',
   'Compact:primitive',
+  'HoverCardPreview:primitive',
+  'HoverCardPreviewLight:primitive',
   'Narrow:primitive',
   'NarrowLight:primitive',
   'Split:primitive',
   'SplitLight:primitive',
   'Streaming:primitive',
+  'TranscriptToolDiff:primitive',
+  'TranscriptToolDiffLightNarrow:primitive',
   'Unified:primitive',
   'UnifiedLight:primitive',
 ]
