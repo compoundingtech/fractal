@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read source-pinned upgrade fragments with one Git batch process per tree instead of one process per fragment",
+  "replay": {"status": "none", "detail": "Release tooling only; no runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness contract change. Fragment validation and source pinning are unchanged."},
+  "downtime": {"status": "none", "detail": "No additional service interruption."},
+  "manual": {"status": "none", "detail": "No additional upgrade action required."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}
