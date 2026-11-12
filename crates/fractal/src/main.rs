@@ -3734,7 +3734,9 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the workspace; new agents default to the current directory.
+    /// Override the declaration's workspace with an absolute path on its member. A kept
+    /// declaration without it stays on its own workspace; starting a new agent here
+    /// defaults to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
     /// Set the typed-harness model; refused for existing command/argv agents.
@@ -14113,10 +14115,23 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     }
 }
 
+/// How `agents start` resolves the agent's workspace. A declared agent started without
+/// `--workspace` keeps its declaration's workspace, resolved on the placement host when the
+/// declaration was published. Anything else is an exact path for the placement host: the caller
+/// never canonicalizes it, so a path that only exists on another member stays valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartWorkspace {
+    /// Keep the declaration's workspace child untouched.
+    Keep,
+    /// Publish this exact path, asking the placement host to create it when it is missing.
+    Set(String, bool),
+}
+
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
     uris: &BTreeMap<String, String>,
+    workspace: &StartWorkspace,
 ) -> Result<String> {
     let mut agent = match existing {
         Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
@@ -14141,13 +14156,24 @@ fn agent_start_document(
     }) {
         replace_declaration_child(&mut body, kdl_node("host", [host]));
     }
-    if args.workspace.is_some() || existing.is_none() {
-        let path = args.workspace.as_deref().unwrap_or_else(|| Path::new("."));
-        let workspace = fs::canonicalize(path)
-            .with_context(|| format!("resolve workspace {}", path.display()))?
-            .display()
-            .to_string();
-        replace_declaration_child(&mut body, kdl_node("workspace", [workspace.as_str()]));
+    match workspace {
+        StartWorkspace::Keep => {}
+        StartWorkspace::Set(path, create) => {
+            let mut node = kdl_node("workspace", [path.as_str()]);
+            // An override swaps the path but keeps the declaration's own create policy: a
+            // declared `create` still applies to the new path, and callers never add one.
+            let create = *create
+                || body.get("workspace").is_some_and(|current| {
+                    current.entries().iter().any(|entry| {
+                        entry.name().is_some_and(|name| name.value() == "create")
+                            && matches!(entry.value(), kdl::KdlValue::Bool(true))
+                    })
+                });
+            if create {
+                node.entries_mut().push(KdlEntry::new_prop("create", true));
+            }
+            replace_declaration_child(&mut body, node);
+        }
     }
     if existing.is_none() {
         body.nodes_mut().push(kdl_node("restart", ["always"]));
