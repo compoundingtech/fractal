@@ -5442,6 +5442,76 @@ async fn availability_cli_agent_reads_without_presence_and_cannot_write() {
     ]).await);
     assert!(refusal.contains("agent") && !refusal.contains("daemon"), "{refusal}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_surfaces_to_an_asking_agent_in_ask_and_now() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let agent = declare_agent_for(&store, "asker", "person/ada");
+    let held = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "availability", "set", "--status", "away", "--interruptions", "urgent",
+        "--deadline-clock", "hold-all", "--until", "2099-01-01T00:00:00Z",
+    ]).await);
+    let since = held["deadline_clock_since"].as_str().unwrap().to_owned();
+    let expected = format!(
+        "person/ada is away until 2099-01-01T00:00:00.000Z; interruptions: urgent until 2099-01-01T00:00:00.000Z; deadline clock: hold-all since {since} until 2099-01-01T00:00:00.000Z"
+    );
+    let ask = [
+        "work", "ask", "--for", "person/ada", "--title", "Choose a release date",
+        "--reason", "The release needs a date", "--new-run", "release-date",
+        "--idempotency-key", "availability-ask",
+    ];
+
+    let asked = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &ask).await);
+    assert!(asked["subject"].as_str().is_some_and(|subject| !subject.is_empty()), "{asked}");
+    let seen = &asked["person_availability"];
+    assert_eq!(seen["person"], "person/ada");
+    assert_eq!(seen["status"], "away");
+    assert_eq!(seen["status_until"], "2099-01-01T00:00:00.000Z");
+    assert_eq!(seen["interruptions"], "urgent");
+    assert_eq!(seen["deadline_clock"], "hold-all");
+    assert!(seen["presence"].is_null(), "an asker never sees raw presence");
+    let human = run_lane_cli(&socket, &config_home, Some(&agent), false, &ask).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.trim_end().ends_with(&expected), "{human}");
+
+    // The person's own Now names their availability before the ask waiting on them.
+    let own = run_lane_cli(&socket, &config_home, None, false, &["now"]).await;
+    assert!(own.status.success(), "{}", String::from_utf8_lossy(&own.stderr));
+    let own = String::from_utf8_lossy(&own.stdout);
+    assert!(own.starts_with(&format!("{expected}\n\n1 alert\n")), "{own}");
+    let own = value(&run_lane_cli(&socket, &config_home, None, true, &["now"]).await);
+    assert_eq!(own["availability"]["people"][0]["person"], "person/ada");
+    assert_eq!(own["availability"]["people"][0]["presence"], "unknown");
+    assert!(own["value"]["items"].as_array().is_some_and(|items| !items.is_empty()), "{own}");
+
+    // An agent reading Now sees the people it works for, without their presence.
+    let seat = run_lane_cli(&socket, &config_home, Some(&agent), false, &["now"]).await;
+    assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+    assert!(String::from_utf8_lossy(&seat.stdout).starts_with(&format!("{expected}\n")));
+    let seat = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["now"]).await);
+    let people = seat["availability"]["people"].as_array().unwrap();
+    assert_eq!(people.len(), 1, "{seat}");
+    assert_eq!(people[0]["status"], "away");
+    assert!(people[0]["presence"].is_null());
+
+    // With no override, a locked device makes the person away; the agent never sees the raw
+    // presence but its Now must still name the presence-derived away so it parks.
+    let cleared = run_lane_cli(&socket, &config_home, None, true, &["availability", "clear"]).await;
+    assert!(cleared.status.success(), "{}", String::from_utf8_lossy(&cleared.stderr));
+    let locked = run_lane_cli(&socket, &config_home, None, true, &["availability", "presence", "locked"]).await;
+    assert!(locked.status.success(), "{}", String::from_utf8_lossy(&locked.stderr));
+    let seat = run_lane_cli(&socket, &config_home, Some(&agent), false, &["now"]).await;
+    assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+    let seat = String::from_utf8_lossy(&seat.stdout);
+    assert!(seat.starts_with("person/ada is away\n"), "{seat}");
+    let seat = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["now"]).await);
+    let people = seat["availability"]["people"].as_array().unwrap();
+    assert_eq!((people[0]["status"].as_str(), people[0]["status_source"].as_str()), (Some("away"), Some("presence")), "{seat}");
+    assert!(people[0]["presence"].is_null(), "{seat}");
+    server.abort();
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
     let root = tempfile::tempdir().unwrap();
