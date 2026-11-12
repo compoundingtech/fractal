@@ -590,18 +590,20 @@ pub async fn revise_mission_run(
             publication,
             &planned.subject_tokens,
             &format!("{}:publish", request.idempotency_key),
-            &actor,
-            &current.subject,
-            &crate::model::MissionRevisionOperation {
-                id: request.idempotency_key.clone(),
-                mission: replacement.id.clone(),
-                revision: replacement.revision.clone(),
-                from_generation: current.generation.clone(),
-                reason: request.reason.clone(),
-                cancellation: None,
+            fractal_store::store::RunRevisionApply {
+                actor: &actor,
+                run: &current.subject,
+                operation: &crate::model::MissionRevisionOperation {
+                    id: request.idempotency_key.clone(),
+                    mission: replacement.id.clone(),
+                    revision: replacement.revision.clone(),
+                    from_generation: current.generation.clone(),
+                    reason: request.reason.clone(),
+                    cancellation: None,
+                },
+                direct_key: &format!("{}:adopt", request.idempotency_key),
+                proposal_key: &format!("{}:propose", request.idempotency_key),
             },
-            &format!("{}:adopt", request.idempotency_key),
-            &format!("{}:propose", request.idempotency_key),
         ).map_err(ApiError::bad)?;
         let result = cached_revision_submission(
             &state,

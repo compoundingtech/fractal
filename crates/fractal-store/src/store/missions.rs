@@ -2,6 +2,11 @@ use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
 
+enum RunCreationLineage<'a> {
+    Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
+    Supersession(&'a MissionRunView, &'a str),
+}
+
 fn agent_metadata_only(previous: &Value, next: &Value) -> bool {
     fn operational_children(desired: &Value) -> impl Iterator<Item = &Value> {
         desired["children"].as_array().into_iter().flatten().filter(|child| {
@@ -242,7 +247,10 @@ impl Store {
             inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
             idempotency_key: options.idempotency_key.clone(),
         };
-        self.create_mission_run_with_retry(&request, None, None, None, Some((&source, options)))
+        self.create_mission_run_context(
+            &request, None, None, None,
+            Some(RunCreationLineage::Retry(&source, options)), None,
+        )
     }
 
     pub fn enrich_mission_run_lineage(&self, run: &mut MissionRunView) -> Result<()> {
@@ -257,20 +265,7 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, FractalError> {
-        self.create_mission_run_with_retry(request, child, occurrence_subject, latest_ref, None)
-    }
-
-    fn create_mission_run_with_retry(
-        &self,
-        request: &MissionRunRequest,
-        child: Option<ChildMissionContext>,
-        occurrence_subject: Option<&str>,
-        latest_ref: Option<(&str, &str)>,
-        retry: Option<(&MissionRunView, &MissionRunRetryRequest)>,
-    ) -> Result<MissionRunView, FractalError> {
-        self.create_mission_run_context(
-            request, child, occurrence_subject, latest_ref, retry, None, None,
-        )
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
     }
 
     /// Complete an authorized revision cutover inside its approval transaction.
@@ -363,7 +358,8 @@ impl Store {
             idempotency_key: format!("mission-supersede:{}:{publication}", source.subject),
         };
         self.create_mission_run_context(
-            &request, child, None, None, None, Some((source, publication)), Some(transaction),
+            &request, child, None, None,
+            Some(RunCreationLineage::Supersession(source, publication)), Some(transaction),
         )
     }
 
@@ -373,10 +369,14 @@ impl Store {
         child: Option<ChildMissionContext>,
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
-        retry: Option<(&MissionRunView, &MissionRunRetryRequest)>,
-        supersession: Option<(&MissionRunView, &str)>,
+        lineage: Option<RunCreationLineage<'_>>,
         provided_transaction: Option<&Transaction<'_>>,
     ) -> Result<MissionRunView, FractalError> {
+        let (retry, supersession) = match lineage {
+            Some(RunCreationLineage::Retry(source, options)) => (Some((source, options)), None),
+            Some(RunCreationLineage::Supersession(source, publication)) => (None, Some((source, publication))),
+            None => (None, None),
+        };
         let mission_identity = match provided_transaction {
             Some(transaction) => mission_storage_id(transaction, &request.mission)?,
             None => mission_storage_id(&self.readers.get(), &request.mission)?,

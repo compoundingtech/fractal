@@ -538,18 +538,20 @@ pub async fn propose_planning_variant(
         &intent,
         &preview.mission.subject_tokens,
         &format!("{}:publish", request.idempotency_key),
-        &request.actor,
-        run_subject,
-        &crate::model::MissionRevisionOperation {
-            id: request.idempotency_key.clone(),
-            mission: mission.id.clone(),
-            revision: mission.revision.clone(),
-            from_generation: current.generation,
-            reason: request.reason.clone(),
-            cancellation: None,
+        fractal_store::store::RunRevisionApply {
+            actor: &request.actor,
+            run: run_subject,
+            operation: &crate::model::MissionRevisionOperation {
+                id: request.idempotency_key.clone(),
+                mission: mission.id.clone(),
+                revision: mission.revision.clone(),
+                from_generation: current.generation,
+                reason: request.reason.clone(),
+                cancellation: None,
+            },
+            direct_key: &format!("{}:cutover", request.idempotency_key),
+            proposal_key: &format!("{}:proposal", request.idempotency_key),
         },
-        &format!("{}:cutover", request.idempotency_key),
-        &format!("{}:proposal", request.idempotency_key),
     ).map_err(ApiError::bad)?;
     let result = cached_revision_submission(
         &state,
@@ -724,18 +726,20 @@ pub async fn approve_planning_session(
             &intent,
             &preview.mission.subject_tokens,
             &format!("{approval_key}:publish"),
-            &request.actor,
-            &run_subject,
-            &crate::model::MissionRevisionOperation {
-                id: approval_key.clone(),
-                mission: mission.id.clone(),
-                revision: mission.revision.clone(),
-                from_generation: current.generation,
-                reason: "the requester approved the launch revision".into(),
-                cancellation: None,
+            fractal_store::store::RunRevisionApply {
+                actor: &request.actor,
+                run: &run_subject,
+                operation: &crate::model::MissionRevisionOperation {
+                    id: approval_key.clone(),
+                    mission: mission.id.clone(),
+                    revision: mission.revision.clone(),
+                    from_generation: current.generation,
+                    reason: "the requester approved the launch revision".into(),
+                    cancellation: None,
+                },
+                direct_key: &format!("{approval_key}:cutover"),
+                proposal_key: &format!("{approval_key}:proposal"),
             },
-            &format!("{approval_key}:cutover"),
-            &format!("{approval_key}:proposal"),
         ).map_err(ApiError::bad)?;
         let revision = cached_revision_submission(
             &state,

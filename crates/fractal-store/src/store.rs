@@ -3447,18 +3447,14 @@ impl Store {
 
     /// Publish a candidate and its explicit run revision under one writer fence.
     /// Cache the imperative API's response in that same transaction.
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_run_revision(
         &self,
         intent: &NormalizedIntent,
         expected: &BTreeMap<String, Vec<String>>,
         key: &str,
-        actor: &str,
-        run: &str,
-        operation: &MissionRevisionOperation,
-        direct_key: &str,
-        proposal_key: &str,
+        submission: RunRevisionApply<'_>,
     ) -> Result<ApplyResponse, FractalError> {
+        let RunRevisionApply { actor, run, operation, direct_key, proposal_key } = submission;
         let mut intent = intent.clone();
         let subject = if run.starts_with("mission-run/") {
             run.to_owned()
@@ -12162,6 +12158,15 @@ pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<Strin
         .filter(|(name, _)| name.as_str() != "_operation")
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect())
+}
+
+/// An explicit revision and its durable API response identities accompanying publication.
+pub struct RunRevisionApply<'a> {
+    pub actor: &'a str,
+    pub run: &'a str,
+    pub operation: &'a MissionRevisionOperation,
+    pub direct_key: &'a str,
+    pub proposal_key: &'a str,
 }
 
 #[derive(Clone, Copy)]
