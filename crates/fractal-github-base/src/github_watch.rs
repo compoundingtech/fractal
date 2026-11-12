@@ -830,12 +830,11 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Strip HTML only in prose. Every search consumes its prefix, and case folding happens once rather than once per
-/// script/style opener, keeping repeated hidden elements linear before the excerpt cut.
+/// Strip HTML only in prose. Every search consumes its prefix and compares fixed-size ASCII windows in place,
+/// keeping repeated hidden elements linear without allocating lowercase copies of the remaining document.
 fn without_html_tags(text: &str) -> String {
     let ranges = markdown_code_ranges(text);
     let mut range = 0;
-    let lower = text.to_ascii_lowercase();
     let mut visible = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {
@@ -869,7 +868,7 @@ fn without_html_tags(text: &str) -> String {
         }
         if (name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")) && !tag[1..].starts_with('/') {
             let close = if name.eq_ignore_ascii_case("script") { "</script" } else { "</style" };
-            rest = match lower[absolute + end + 1..].find(close) {
+            rest = match text.as_bytes()[absolute + end + 1..].windows(close.len()).position(|candidate| candidate.eq_ignore_ascii_case(close.as_bytes())) {
                 Some(close) => {
                     let closing = absolute + end + 1 + close;
                     text[closing..].find('>').map_or("", |end| &text[closing + end + 1..])
