@@ -261,6 +261,11 @@ recorded at once. Both writes answer the person's full `PersonAvailability`; inv
 [read fixture](fixtures/person-availability.json) and
 [write fixture](fixtures/availability-set.json).
 
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
@@ -2059,6 +2064,12 @@ filtering before offset selection and byte packing. Continuations bind the exact
 grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
+
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note}`: the grant
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,
