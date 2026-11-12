@@ -1987,35 +1987,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v22 adds `source.mapped` to kind selection, shifting the shared RNG schedule; hosted
-/// linux-tests on the storage PR left seed 34 untrimmed. The never-trim set is characterized by
-/// hosted CI; a lightly loaded runner diverges from it (#6210).
-const NEVER_TRIMS: &[u64] = &[34];
-// Growth beyond three non-trimming seeds needs review.
-const _: () = assert!(NEVER_TRIMS.len() <= 3);
-
-/// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
+/// Every fixed seed converges and trims a checkpoint with corpus v23.
+/// Retry lineage shifts the RNG schedule; v22's non-trimming seed is no exception here.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v22 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v23 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
-    assert_eq!(
-        outcome.trimmed,
-        !NEVER_TRIMS.contains(&seed),
-        "seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
-        if outcome.trimmed {
-            "trimmed"
-        } else {
-            "did not trim"
-        },
-        if NEVER_TRIMS.contains(&seed) {
-            "one of"
-        } else {
-            "not one of"
-        }
-    );
+    assert!(outcome.trimmed, "corpus v23 seed {seed} did not trim a checkpoint");
 }
 
 /// The seeds are independent, so each is its own test and the test runner spreads them over its

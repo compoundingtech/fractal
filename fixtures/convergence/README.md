@@ -305,6 +305,8 @@ is an optional string. The focused regression validates a generated input agains
 registry, admits it, and replicates it to the oracle. Each revision still applies its own
 admission rules; old-build checkpoint and comparison semantics are unchanged.
 
-Adding this kind changes the shared random schedule. Earlier versions' per-seed trim
-characterizations are not evidence for v23; preserve the exact assertions until the new corpus
-has been observed by the authoritative test lane.
+Adding this kind changes the shared random schedule. Hosted
+[run 43269741954](https://github.com/compoundingtech/fractal/actions/runs/43269741954)
+exercised every fixed seed: all trimmed, including seed 34. Therefore v23 requires actual
+checkpoint trimming for every fixed seed; v22's negative seed-34 expectation is not carried
+forward. Convergence and checkpoint checks remain mandatory.
