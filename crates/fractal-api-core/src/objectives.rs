@@ -3,8 +3,8 @@
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
 //! `slo/objectives.kdl` and the same report as `GET /v1/client/request-latency`, and CI's durations
-//! and counts, which `slo/objectives.kdl` ships and the Workspace CI runs a repository observer
-//! read feed, held in memory on the member that observes. A budget is an
+//! and counts, which `slo/objectives.kdl` ships and the Workspace CI runs a repository observation
+//! records feed, the same on every member. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
 //! shows. Nothing here measures anything. It reads those sources and says, for each row, its
 //! target, its current value, its window, what is left of its budget and what that means.
@@ -16,8 +16,8 @@
 
 use serde_json::{Value, json};
 
-use crate::resource::github_workflows::WorkspaceCi;
-use crate::store::AccountLimit;
+use crate::resource::github_workflows::{WORKSPACE_CI_FRESH_MS, WorkspaceCi};
+use crate::store::{AccountLimit, Store};
 
 const WINDOWS: [&str; 3] = ["1m", "5m", "1h"];
 /// A 99th-percentile target allows one sample in a hundred to run over.
@@ -62,7 +62,6 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             }
         }
     }
-    rows.extend(ci(crate::slo::targets(), crate::resource::github_workflows::workspace_ci().as_ref(), now_unix_ms));
     for limit in limits {
         let name = limit.account_ref.as_deref().unwrap_or(&limit.account);
         if !limit.windows.is_empty() {
@@ -362,16 +361,74 @@ fn ci_measure(path: &str) -> &'static str {
     }
 }
 
+/// The newest Workspace CI reading a repository observation holds, and the member whose
+/// observer recorded it.
+pub struct CiReading {
+    pub ci: WorkspaceCi,
+    pub member: String,
+}
+
+/// Repository observations read a page at a time while looking for Workspace CI readings.
+const REPOSITORY_PAGE: usize = 200;
+
+/// The newest `workspace_ci` reading among the `vcs.repository` observations, which replicate,
+/// so every member finds the same one; None when none holds one.
+pub fn ci_reading(store: &Store) -> anyhow::Result<Option<CiReading>> {
+    let mut newest: Option<(u64, String)> = None;
+    let mut after: Option<String> = None;
+    loop {
+        let page = store.resource_collection_page(None, Some("vcs.repository"), None, after.as_deref(), REPOSITORY_PAGE)?;
+        for resource in &page {
+            let (Some(subject), Some(ci)) = (resource["id"].as_str(), WorkspaceCi::from_facts(&resource["facts"])) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(at, _)| ci.observed_at_unix_ms > *at) {
+                newest = Some((ci.observed_at_unix_ms, subject.to_owned()));
+            }
+        }
+        if page.len() < REPOSITORY_PAGE {
+            break;
+        }
+        after = page.last().and_then(|resource| resource["id"].as_str()).map(str::to_owned);
+    }
+    let Some((_, subject)) = newest else { return Ok(None) };
+    // The reading and its member from one claim.
+    Ok(store.latest_observation(&subject, "resource.observed")?.and_then(|claim| {
+        let ci = WorkspaceCi::from_facts(&claim.body["fields"]["facts"])?;
+        Some(CiReading { ci, member: claim.origin })
+    }))
+}
+
+/// CI's objectives on this member, from the newest replicated Workspace CI reading.
+pub fn ci_rows(store: &Store, now_unix_ms: u64) -> anyhow::Result<Vec<Value>> {
+    Ok(ci(crate::slo::targets(), ci_reading(store)?.as_ref(), now_unix_ms))
+}
+
 /// CI's objectives: each percentile of a duration over the last day and each count over the last
-/// hour, from the Workspace CI runs `source` holds (None when this member reads none). A series
-/// nothing feeds, or one with no sample in its window, is no-data.
-fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: u64) -> Vec<Value> {
+/// hour, from the runs of `reading` (None when no member has recorded any). A series nothing
+/// feeds, one with no sample in its window, and a reading older than `WORKSPACE_CI_FRESH_MS` are
+/// no-data.
+fn ci(targets: &crate::slo::Targets, reading: Option<&CiReading>, now_unix_ms: u64) -> Vec<Value> {
     const DAY_MS: u64 = 86_400_000;
     const HOUR_MS: u64 = 3_600_000;
-    let unobserved = |path: &str| match source {
+    // How old the reading is, in whole seconds.
+    let age = reading.map(|reading| (now_unix_ms.saturating_sub(reading.ci.observed_at_unix_ms) / 1_000).max(1) * 1_000);
+    let stale = age.is_some_and(|age| age > WORKSPACE_CI_FRESH_MS);
+    let source = reading.filter(|_| !stale).map(|reading| &reading.ci);
+    let unobserved = |path: &str| match reading {
+        Some(reading) if stale => format!(
+            "The newest Workspace CI reading for {path}, by host/{}, is {} old, older than the {} three of its observer's polls allow",
+            reading.member, duration(age.unwrap_or_default()), duration(WORKSPACE_CI_FRESH_MS),
+        ),
         Some(_) => format!("Nothing feeds {path} yet"),
-        None => format!("This member reads no Workspace CI runs for {path}: only the member that runs a repository observer with main_performance_failures does"),
+        None => format!("No member has recorded Workspace CI runs for {path}: the repository observer that reads main_performance_failures records them"),
     };
+    let not_read = if stale { "reading too old" } else { "not observed" };
+    // Which member read the runs, and when, for a row a fresh reading feeds.
+    let fresh = reading.filter(|_| !stale).map_or_else(String::new, |reading| format!(
+        " Read by host/{} from {}'s Workspace CI runs {} ago.",
+        reading.member, reading.ci.repository, duration(age.unwrap_or_default()),
+    ));
     let durations = targets.duration.iter().map(|target| {
         let (p, within) = (target.percentile, duration(target.target_ms));
         let goal = format!("Goal: {p} of every 100 finish within {within}, so {} in 100 may run over.", 100 - p);
@@ -381,13 +438,13 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
             let (current, why) = match (source, fed) {
                 (Some(_), true) => ("no samples", format!("No sample of {} finished in the last day", target.path)),
                 (Some(_), false) => ("no source yet", unobserved(&target.path)),
-                (None, _) => ("not observed", unobserved(&target.path)),
+                (None, _) => (not_read, unobserved(&target.path)),
             };
             return json!({
                 "id": target.id(), "kind": "objective", "about": target.about,
                 "target": format!("p{p} ≤ {within}"), "current": current, "window": "1d",
                 "remaining_percent": null, "status": "no-data",
-                "explain": format!("{}. {goal} {why}, so there is no budget to spend or save.", target.about),
+                "explain": format!("{}. {goal} {why}, so there is no budget to spend or save.{fresh}", target.about),
             });
         };
         let n = samples.len() as u64;
@@ -404,7 +461,7 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
             "window": "1d", "remaining_percent": remaining,
             "status": if met { "met" } else { "missed" },
             "explain": format!(
-                "{}. {goal} In the last day {over} of {} ran over ({:.1}%), against an allowance of {}%, so {remaining:.0}% of the error budget is left. The p{p} is {value}. {}. {}",
+                "{}. {goal} In the last day {over} of {} ran over ({:.1}%), against an allowance of {}%, so {remaining:.0}% of the error budget is left. The p{p} is {value}. {}. {}{fresh}",
                 target.about, plural(n, "run"), share * 100.0, 100 - p, ci_measure(&target.path),
                 if met { "The goal is met." } else { "The goal is missed in the last day." },
             ),
@@ -418,13 +475,13 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
             let (current, why) = match (source, counted) {
                 (Some(_), Some(_)) => ("no samples", "No merge group or pull request run of Workspace CI finished in the last hour".to_owned()),
                 (Some(_), None) => ("no source yet", unobserved(&target.path)),
-                (None, _) => ("not observed", unobserved(&target.path)),
+                (None, _) => (not_read, unobserved(&target.path)),
             };
             return json!({
                 "id": target.name, "kind": "objective", "about": target.about,
                 "target": format!("≤ {max} an hour"), "current": current, "window": "1h",
                 "remaining_percent": null, "status": "no-data",
-                "explain": format!("{}. {goal} {why}, so there is nothing to count.", target.about),
+                "explain": format!("{}. {goal} {why}, so there is nothing to count.{fresh}", target.about),
             });
         };
         let count = flakes.count();
@@ -444,7 +501,7 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
             "window": "1h", "remaining_percent": remaining,
             "status": if met { "met" } else { "missed" },
             "explain": format!(
-                "{}. {goal} In the last hour {ejected}, and the test lanes of {} of {} had {} (tests nextest passed only on a retry): {count} in all. A pull request run is read only when it succeeded; merge group runs are read whatever their result. {}",
+                "{}. {goal} In the last hour {ejected}, and the test lanes of {} of {} had {} (tests nextest passed only on a retry): {count} in all. A pull request run is read only when it succeeded; merge group runs are read whatever their result. {}{fresh}",
                 target.about, flakes.listed, plural(flakes.runs, "finished run"), plural(flakes.flaky_tests, "flaky test"),
                 if met { "The goal is met." } else { "The goal is missed in the last hour." },
             ),
@@ -647,6 +704,31 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
             many.iter().filter_map(|row| row["id"].as_str()).collect::<Vec<_>>().join(", ")
         )),
     }
+}
+
+/// Record `facts` as `store`'s observation of the repository `resource/github/acme/garden`, as
+/// its observer does.
+#[cfg(test)]
+pub(crate) fn record_ci_reading(store: &Store, facts: Value) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: "resource/github/acme/garden".into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([("kind".into(), json!("vcs.repository")), ("facts".into(), facts)]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// Replicate `from`'s claims to `to`, as the peer `from` names itself.
+#[cfg(test)]
+pub(crate) fn replicate(from: &Store, to: &Store) {
+    use crate::store::tests_shared::{exchange_from, receive_and_project};
+    let exchange = exchange_from(from, &to.replication_inventory().unwrap());
+    receive_and_project(to, from.origin(), &exchange);
 }
 
 #[cfg(test)]
@@ -983,7 +1065,8 @@ mod tests {
     #[test]
     fn the_live_report_yields_a_row_for_every_target_in_the_targets_file() {
         let report = crate::api::request_latency_target_windows();
-        let rows = rows(&report, &[], 0, 0);
+        let mut rows = rows(&report, &[], 0, 0);
+        rows.extend(ci(crate::slo::targets(), None, 0));
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
@@ -998,7 +1081,7 @@ mod tests {
 
     #[test]
     fn ci_objectives_are_declared_with_their_targets_and_no_data_until_fed() {
-        let rows = rows(&json!({"targets": []}), &[], 0, 0);
+        let rows = ci(crate::slo::targets(), None, 0);
         for (id, target, window) in [
             ("merge-latency/p50", "p50 ≤ 10 min", "1d"),
             ("merge-latency/p95", "p95 ≤ 10 min", "1d"),
@@ -1023,10 +1106,9 @@ mod tests {
         }
         assert!(by_id(&rows, "merge-latency/p95")["explain"].as_str().unwrap().contains("5 in 100 may run over"));
         assert!(by_id(&rows, "flakes")["explain"].as_str().unwrap().contains("ci/flakes"));
-        // Objectives come before budgets.
-        let rows = super::rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(1.0), Some(1.0))], 10_000_000, 3_600_000);
-        let first_budget = rows.iter().position(|row| row["kind"] == "budget").unwrap();
-        assert!(rows[..first_budget].iter().any(|row| row["id"] == "flakes"));
+        // Every member's list carries them, with no reading too.
+        let rows = crate::api::slo_rows(&Store::open_memory("node").unwrap()).unwrap();
+        assert_eq!(by_id(&rows, "flakes")["status"], "no-data");
     }
 
     const NOW: &str = "2026-10-21T12:00:00Z";
@@ -1054,18 +1136,24 @@ mod tests {
         ci_rows_flaky(runs, &[])
     }
 
-    /// The rows from `runs`, of which those named in `flaky` had their artifacts listed.
-    fn ci_rows_flaky(runs: &[Value], flaky: &[(u64, u64)]) -> Vec<Value> {
+    /// The reading of `runs`, taken at `NOW` by `alder`, of which those named in `flaky` had their
+    /// artifacts listed.
+    fn reading(runs: &[Value], flaky: &[(u64, u64)]) -> CiReading {
         let runs = runs
             .iter()
             .map(|run| crate::resource::github_workflows::WorkspaceRun::from_run("acme/garden", run).expect("a fixture run"))
             .map(|mut run| {
-                run.flaky = flaky.iter().find(|(id, _)| *id == run.run_id).map(|(_, tests)| *tests);
+                run.flaky = flaky.iter().find(|(id, _)| *id == run.id).map(|(_, tests)| *tests);
                 run
             })
             .collect();
-        let source = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
-        ci(crate::slo::targets(), Some(&source), unix_ms(NOW))
+        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
+        CiReading { ci, member: "alder".to_owned() }
+    }
+
+    /// The rows from `runs`, of which those named in `flaky` had their artifacts listed.
+    fn ci_rows_flaky(runs: &[Value], flaky: &[(u64, u64)]) -> Vec<Value> {
+        ci(crate::slo::targets(), Some(&reading(runs, flaky)), unix_ms(NOW))
     }
 
     #[test]
@@ -1199,6 +1287,47 @@ mod tests {
             let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
             keys.sort_unstable();
             assert_eq!(keys, ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"]);
+        }
+    }
+
+    #[test]
+    fn every_member_reads_the_same_rows_from_the_replicated_reading() {
+        use crate::resource::github_workflows::WORKSPACE_CI_FIELD;
+        let now = unix_ms(NOW);
+        let runs = [ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 9.0, 30.0),
+            ci_run(3, "merge_group", "failure", 4.0, 10.0)];
+        let poller = Store::open_memory("alder").unwrap();
+        // An observation from before the field, or without main_performance_failures, holds no reading.
+        record_ci_reading(&poller, json!({"repository_id": 7, "node_id": "R_1"}));
+        assert!(ci_reading(&poller).unwrap().is_none());
+        assert_eq!(by_id(&super::ci_rows(&poller, now).unwrap(), "flakes")["current"], "not observed");
+        record_ci_reading(&poller, json!({"repository_id": 7, "node_id": "R_1", WORKSPACE_CI_FIELD: reading(&runs, &[(3, 1)]).ci}));
+        // A member that never polls GitHub holds the same observation once it replicates.
+        let member = Store::open_memory("birch").unwrap();
+        replicate(&poller, &member);
+        let there = super::ci_rows(&member, now).unwrap();
+        assert_eq!(there, super::ci_rows(&poller, now).unwrap());
+        assert_eq!(there, ci(crate::slo::targets(), Some(&reading(&runs, &[(3, 1)])), now));
+        assert_eq!(ci_reading(&member).unwrap().unwrap().member, "alder");
+        for row in &there {
+            assert_ne!(row["status"], "no-data", "{row}");
+            assert!(row["explain"].as_str().unwrap().ends_with(" Read by host/alder from acme/garden's Workspace CI runs 1 s ago."), "{row}");
+        }
+        assert_eq!(by_id(&there, "flakes")["current"], "2 in the last hour");
+    }
+
+    #[test]
+    fn a_reading_older_than_three_polls_is_no_data_never_met() {
+        let runs = [ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 9.0, 30.0)];
+        let at = |now: u64| ci(crate::slo::targets(), Some(&reading(&runs, &[])), now);
+        for row in at(unix_ms(NOW) + WORKSPACE_CI_FRESH_MS) {
+            assert_eq!(row["status"], "met", "{row}");
+            assert!(row["explain"].as_str().unwrap().ends_with("Workspace CI runs 15 min ago."), "{row}");
+        }
+        for row in at(unix_ms(NOW) + WORKSPACE_CI_FRESH_MS + 1_000) {
+            assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some("reading too old")), "{row}");
+            assert!(row["remaining_percent"].is_null(), "{row}");
+            assert!(row["explain"].as_str().unwrap().contains("by host/alder, is 15.0 min old, older than the 15 min three of its observer's polls allow"), "{row}");
         }
     }
 

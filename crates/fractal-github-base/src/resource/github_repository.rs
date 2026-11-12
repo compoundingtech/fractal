@@ -1809,11 +1809,14 @@ async fn observe_poll(
         ).await?;
         facts.insert(super::github_workflows::PERFORMANCE_FAILURES_FIELD.into(),
             serde_json::to_value(failures)?);
-        // The same observer, token and cadence read Workspace CI's recent runs for `st slo`. They
-        // are kept in memory only, never in the facts, and a failed read never fails this one.
-        super::github_workflows::observe_workspace_ci(
-            &client, &base, &repository, token, cache_for, now_ms() as u64,
-        ).await;
+        // The same observer, token and cadence read Workspace CI's recent runs for CI's
+        // objectives, which every member computes from this fact. A failed read records the
+        // previous reading unchanged and never fails this observation.
+        if let Some(ci) = super::github_workflows::observe_workspace_ci(
+            &client, &base, &repository, token, cache_for, request.previous_facts.as_ref(), now_ms() as u64,
+        ).await {
+            facts.insert(super::github_workflows::WORKSPACE_CI_FIELD.into(), serde_json::to_value(ci)?);
+        }
     }
     // Once either listing exhausts its reconciliation burst, throttle the observation,
     // including pagination in the other listing. Keep every frozen watermark and cursor.
@@ -2815,43 +2818,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_ci_runs_are_read_with_performance_failures_and_kept_out_of_the_facts() {
+    async fn workspace_ci_runs_are_read_with_performance_failures_into_the_facts() {
+        use super::super::github_workflows::{WorkspaceCi, WORKSPACE_CI_FIELD};
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
         github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(7, 1)]}));
         github.route(DAILY_RUNS, json!({"workflow_runs": []}));
         let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
-        // Without Workspace CI routes the reads fail, and the observation is what it was.
-        let without = observe_at(request(&[field], None, None), &base,
-            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
-        let since = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
-            chrono::Utc::now().timestamp_millis() - 86_400_000).unwrap().format("%Y-%m-%d");
+        let auth = GithubAuth::test("fixture-auth");
+        // Without Workspace CI routes the reads fail, and the observation records no reading.
+        let without = observe_at(request(&[field], None, None), &base, Some(&auth)).await.unwrap();
+        assert!(without.facts.get(WORKSPACE_CI_FIELD).is_none());
+        let now = chrono::Utc::now();
+        let since = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d");
         let pulls = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=pull_request&status=success&created=%3E%3D{since}&per_page=100");
         let groups = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=merge_group&status=completed&created=%3E%3D{since}&per_page=100");
+        let at = |minutes_ago: i64| (now - chrono::TimeDelta::minutes(minutes_ago)).to_rfc3339();
         let run = |id: u64, event: &str, branch: &str, conclusion: &str| json!({"id": 9_000_000 + id,
             "name": "Workspace CI", "path": ".github/workflows/fleet.yml", "event": event,
             "head_branch": branch, "status": "completed", "conclusion": conclusion,
-            "created_at": "2026-10-20T10:00:00Z", "run_started_at": "2026-10-20T10:00:30Z",
-            "updated_at": "2026-10-20T10:09:00Z", "repository": {"full_name": "acme/garden"}});
+            "created_at": at(20), "run_started_at": at(19), "updated_at": at(10),
+            "repository": {"full_name": "acme/garden"}});
         github.route(&pulls, json!({"total_count": 2, "workflow_runs": [
             run(1, "pull_request", "feature", "success"),
             run(2, "pull_request", "gh-readonly-queue/main/pr-4-abc", "success")]}));
         github.route(&groups, json!({"total_count": 2, "workflow_runs": [
             run(3, "merge_group", "gh-readonly-queue/main/pr-4-abc", "success"),
             run(4, "merge_group", "gh-readonly-queue/main/pr-5-def", "failure")]}));
+        for (id, artifacts) in [(1, json!([{"name": "nextest-flaky-linux-tests-2"}])), (3, json!([])), (4, json!([]))] {
+            github.route(&format!("/repos/acme/garden/actions/runs/{}/artifacts?per_page=100", 9_000_000 + id),
+                json!({"total_count": artifacts.as_array().unwrap().len(), "artifacts": artifacts}));
+        }
         github.take_requests();
         let with = observe_at(request(&[field], without.cursor.as_deref(), Some(without.facts.clone())),
-            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
-        assert_eq!(with.facts, without.facts, "the runs never enter the observed facts");
+            &base, Some(&auth)).await.unwrap();
+        let ci = WorkspaceCi::from_facts(&with.facts).expect("the runs are recorded");
+        assert_eq!(ci.runs.iter().map(|run| (run.id - 9_000_000, run.flaky)).collect::<Vec<_>>(),
+            [(1, Some(2)), (3, Some(0)), (4, Some(0))]);
         let requests = github.take_requests();
         for path in [&pulls, &groups] {
             assert!(requests.contains(&format!("GET {path} HTTP/1.1")), "{path}");
         }
-        let ci = super::super::github_workflows::workspace_ci().expect("the runs were kept");
-        assert_eq!(ci.runs.iter().map(|run| run.run_id - 9_000_000).collect::<Vec<_>>(), [1, 3, 4]);
+        assert_eq!(requests.iter().filter(|request| request.contains("/artifacts")).count(), 3);
+        // The next poll, on whichever member, lists no artifacts again: the counts come with the facts.
+        let next = observe_at(request(&[field], with.cursor.as_deref(), Some(with.facts.clone())),
+            &base, Some(&auth)).await.unwrap();
+        assert_eq!(WorkspaceCi::from_facts(&next.facts).unwrap().runs, ci.runs);
+        assert!(!github.take_requests().iter().any(|request| request.contains("/artifacts")));
+        // A failed read records the previous reading unchanged, so its age shows.
+        github.route(&pulls, json!({"total_count": 3, "workflow_runs": [run(1, "pull_request", "feature", "success")]}));
+        let failed = observe_at(request(&[field], next.cursor.as_deref(), Some(next.facts.clone())),
+            &base, Some(&auth)).await.unwrap();
+        assert_eq!(failed.facts[WORKSPACE_CI_FIELD], next.facts[WORKSPACE_CI_FIELD]);
         assert!(github.graphql_requests.lock().is_empty());
         // Without the field, nothing reads them.
-        observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("fixture-auth"))).await.ok();
+        github.take_requests();
+        observe_at(request(&["issues"], None, None), &base, Some(&auth)).await.ok();
         assert!(!github.take_requests().iter().any(|request| request.contains("/fleet.yml/")));
     }
 
