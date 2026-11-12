@@ -734,19 +734,28 @@ impl PersonWorkStore for Store {
                 && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
                 return Err(FractalError::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
+            // Projection releases the waiting origin. Remember its exact episode first so
+            // cancellation cannot fail a different attempt or an already-resumed step.
+            let waiting_origin = ask.as_ref().and_then(|ask| ask.body["fields"]["origin_step"].as_str()
+                .map(|origin| (ask, origin))).map(|(ask, origin)| {
+                    step(tx, origin).map(|view| view.filter(|view| view.status == "waiting-person"
+                        && view.blocked_reason.as_deref() == Some(ask.subject.as_str())
+                        && ask.body["fields"]["origin_attempt"].as_u64() == Some(u64::from(view.attempt))))
+                }).transpose().map_err(internal)?.flatten();
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
             }
-            if let Some(origin) = ask.as_ref().and_then(|a| a.body["fields"]["origin_step"].as_str()) {
-                if let Some(origin_view) = step(tx, origin).map_err(internal)? {
-                    if origin_view.status == "ready" {
-                        let response = append_claim_tx(tx, &self.origin, origin, "step-run.state", Some("daemon/runtime"),
-                            &json!({"fields": {"status": "ready", "attempt": origin_view.attempt, "readiness_epoch": origin_view.readiness_epoch,
-                                "reason": format!("Person response: {summary}")}}), &[claim.id], None).map_err(claim_append_error)?;
-                        project_mission_run_update(tx, &response)?;
-                    }
-                }
+            if let Some(origin_view) = waiting_origin {
+                // Programs receive AskCancelled through their durable result and may catch it.
+                // Native steps have no typed handler: cancellation is an ordinary step failure,
+                // letting the reconciler apply retries and the mission's finally handling.
+                let failed = cancel && !runs_program(tx, &origin_view).map_err(internal)?;
+                let reason = if failed { format!("ask cancelled by {}", input.actor) } else { format!("Person response: {summary}") };
+                let response = append_claim_tx(tx, &self.origin, &origin_view.subject, "step-run.state", Some("daemon/runtime"),
+                    &json!({"fields": {"status": if failed { "failed" } else { "ready" }, "attempt": origin_view.attempt,
+                        "reason": reason}}), &[claim.id], None).map_err(claim_append_error)?;
+                project_mission_run_update(tx, &response)?;
             }
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"))
         })

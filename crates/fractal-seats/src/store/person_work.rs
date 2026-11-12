@@ -133,7 +133,9 @@ pub mod tests {
             answer: None,
         };
         assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
-        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "ready");
+        let failed = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.blocked_reason.as_deref(), Some(format!("ask cancelled by {}", response.actor).as_str()));
     }
 
     #[test]
@@ -1980,7 +1982,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
                 if !standalone {
                     assert_eq!(
                         target.step_run(&origin.subject).unwrap().unwrap().status,
-                        "ready"
+                        if cancel { "failed" } else { "ready" }
                     );
                 }
                 target

@@ -1210,7 +1210,10 @@ failures return `validation-failed` with the answer IDs in the message. The aske
 typed answer from the `work` resource's `person_answers`.
 Only the assigned person or a session explicitly delegated by that person completes it. The
 requester may instead use `work.cancel-ask`. Completion resumes a live origin in the same attempt
-with a new readiness epoch; the response and evidence stay on the source. CLI equivalents are
+with a new readiness epoch; the response and evidence stay on the source.
+Cancellation fails a waiting native Data-DSL origin with reason `ask cancelled by ACTOR`,
+with ordinary retry and `finally` handling. A program origin receives typed `AskCancelled`
+and fails only if its program leaves that failure uncaught. CLI equivalents are
 `fractal work ask --for PERSON --title TEXT --reason TEXT --step STEP --as AGENT --idempotency-key KEY`
 (or `--new-run NAME`) and `fractal work done STEP --as PERSON --summary TEXT`.
 
