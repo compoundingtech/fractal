@@ -31,8 +31,10 @@ export async function installPulldown(bytes: BufferSource): Promise<void> {
   exports = instance.exports as unknown as PulldownExports
 }
 
-/** Loads the committed module once; resolves `false`, and keeps the JavaScript parser, if it cannot. */
+/** Loads the committed module once; resolves `false`, and keeps the JavaScript parser, if it cannot or pulldown is off. */
 export function loadPulldown(): Promise<boolean> {
+  // Off requests nothing, so a host without network access (the product embed) never fetches the module.
+  if (!enabled) return Promise.resolve(false)
   loading ??= (async () => {
     try {
       const response = await fetch(new URL('./markdown-pulldown.generated.wasm', import.meta.url))
@@ -46,7 +48,7 @@ export function loadPulldown(): Promise<boolean> {
   return loading
 }
 
-/** Turns pulldown off (or on again) for new mounts, for a kill switch or a comparison. */
+/** Turns pulldown off (or on again) for new mounts and loads, for a kill switch, a comparison or a host without network. */
 export const setPulldownEnabled = (on: boolean): void => { enabled = on }
 
 const encoder = new TextEncoder()

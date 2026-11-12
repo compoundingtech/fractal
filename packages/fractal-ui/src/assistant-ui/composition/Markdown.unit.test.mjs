@@ -72,6 +72,21 @@ const FRAGMENTS = [
   'Text with [ref][r] link.', '[r]: https://example.test/r', 'Note[^1].', '[^1]: A footnote.', '* star\n\n+ plus', '![image](https://example.test/i.png)', 'Trailing spaces   \n  indented', '   ```\n   three\n\nunindented\n   ```',
 ]
 
+test('switched off, the parser module is never requested', async () => {
+  // Runs before any load, so a request here could not be answered from the cached attempt.
+  const original = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = (...args) => { requests++; return original(...args) }
+  pulldown.setPulldownEnabled(false)
+  try {
+    assert.equal(await pulldown.loadPulldown(), false)
+    assert.equal(requests, 0)
+  } finally {
+    pulldown.setPulldownEnabled(true)
+    globalThis.fetch = original
+  }
+})
+
 test('a parser module that cannot load leaves Markdown on the JavaScript parser', async () => {
   // Node's fetch cannot read the module's file URL, so the load fails here the way a blocked or missing asset would.
   assert.equal(await pulldown.loadPulldown(), false)
