@@ -370,6 +370,8 @@ fn supersession_queue_installed(connection: &Connection) -> Result<bool, Fractal
     ).map_err(internal)
 }
 
+pub(super) const BOOTSTRAP_KEY: &str = "local_mission_supersession_heads_v1_bootstrapped";
+
 pub(super) fn install_schema(connection: &Connection) -> Result<(), FractalError> {
     let installed = supersession_queue_installed(connection)?;
     // Schema belongs to startup, before readers prepare request statements. Installing it
@@ -395,12 +397,34 @@ pub(super) fn install_schema(connection: &Connection) -> Result<(), FractalError
              json_extract(body,'$.fields.publication'))
          WHERE kind='reconcile.fault' AND json_extract(body,'$.fields.status')='faulted';",
     ).map_err(internal)?;
-    if !installed {
-        connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h2ae56f4d6910 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v1(mission_id)
-             SELECT mission_id FROM mission_definitions ORDER BY mission_id", [],
-        ).map_err(internal)?;
+    // Table creation may have committed before an interrupted existing-store open.
+    // Only a completed data bootstrap is a witness that existing heads were queued.
+    let bootstrapped = installed && connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')",
+        [BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+    ).map_err(internal)?;
+    if !bootstrapped {
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction().map_err(internal)?;
+            bootstrap_heads(&transaction)?;
+            transaction.commit().map_err(internal)?;
+        } else {
+            bootstrap_heads(connection)?;
+        }
     }
+    Ok(())
+}
+
+fn bootstrap_heads(connection: &Connection) -> Result<(), FractalError> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h86217191c9b5 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v1(mission_id)
+         SELECT mission_id FROM mission_definitions ORDER BY mission_id", [],
+    ).map_err(internal)?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hce6543b39244 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1')
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [BOOTSTRAP_KEY],
+    ).map_err(internal)?;
     Ok(())
 }
 
