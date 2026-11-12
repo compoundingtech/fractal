@@ -39,6 +39,10 @@ fn selection_at(
         let Some((member, _, _)) = members.get(subject) else {
             continue;
         };
+        // An agent's exec and pty tasks carry no native session to drain; they restart.
+        if matches!(member.kind.as_str(), "exec" | "pty") {
+            return Ok(None);
+        }
         // Retirement keeps the last authored seat policy even though its desired node is stop.
         let manual = if desired.kind == "stop" {
             owned_sets::manual_member_at(connection, member, at)?

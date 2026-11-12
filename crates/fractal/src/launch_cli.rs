@@ -602,6 +602,7 @@ async fn check_mission_file(
     let checked = run_gate_check(
         client,
         &intent,
+        None,
         &args.workspace,
         &args.inputs,
         |view, item| {
@@ -804,6 +805,7 @@ async fn retire_mission(client: &Client, args: MissionRetireArgs, json_output: b
             &MissionRetireRequest {
                 actor: args.actor,
                 idempotency_key: format!("mission-retire:{mission}:{nonce}"),
+                force_reason: args.force.then_some(args.reason).flatten(),
             },
         )
         .await?;

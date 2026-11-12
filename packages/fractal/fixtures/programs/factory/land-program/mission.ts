@@ -45,6 +45,13 @@ export default Fractal.mission(
     goal: 'Land one change on main and prove it live, or leave main as it was.',
     reportTo: factory,
     timeout: '2h',
+    stalledAfter: '10m',
+    concurrentRuns: 8,
+    authority: {
+      publish: ['scratch/*'],
+      start: ['factory/step/review'],
+      write: ['resource/factory/*'],
+    },
     input: Schema.Struct({ change: Schema.String, reviewer: Schema.Literals(['llm', 'scripted']) }),
     output: Schema.Struct({ class: steps.Class, merged: Schema.String, head: Schema.String }),
   },

@@ -1002,6 +1002,47 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
     assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
 }
 
+/// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
+/// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
+#[test]
+fn github_plugin_fixtures_conform_to_their_reads_and_the_envelope() {
+    let root = asset_root();
+    let manifest = json(root.join("fixtures/manifest.json"));
+    let envelope = contract_validator("Envelope");
+    let mut seen = 0;
+    for entry in manifest["fixtures"].as_array().unwrap() {
+        let file = entry["file"].as_str().unwrap();
+        if !file.starts_with("github-plugin-") {
+            continue;
+        }
+        seen += 1;
+        let value = json(root.join("fixtures").join(file));
+        let definition = entry["definition"].as_str().unwrap();
+        let errors = contract_validator(definition).iter_errors(&value).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} as {definition}: {errors:?}");
+        assert!(contract_validator("GithubPluginRead").is_valid(&value), "{file}");
+        let wrapped = serde_json::json!({
+            "api_version": "st3.client.v0",
+            "request_id": "request/example",
+            "snapshot": {
+                "id": "snapshot/example/1/0000000000000000",
+                "host_id": "host/example",
+                "store_index": 1,
+                "projection_version": "client-projection.v0",
+                "created_at": "2026-01-01T00:00:00.000Z"
+            },
+            "value": value,
+        });
+        let errors = envelope.iter_errors(&wrapped).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} in an Envelope: {errors:?}");
+    }
+    assert_eq!(seen, 12);
+    // A URL is never an item: a found read whose item misses fields does not conform.
+    assert!(!contract_validator("GithubPullRequestRead").is_valid(&serde_json::json!({
+        "status": "found", "fetched_at": "2026-11-07T06:40:00Z", "stale": false, "item": { "url": "https://github.com/acme/garden/pull/7" }
+    })));
+}
+
 #[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
@@ -1098,6 +1139,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "timeline.list",
         "events.list",
         "terminal.screen",
+        "read-positions.list",
     ] {
         assert!(
             read_ids.contains(required),
@@ -1149,6 +1191,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "terminal.attach",
         "terminal.detach",
         "pairing.revoke",
+        "read-position.advance",
     ] {
         assert!(
             actions.contains_key(required),
@@ -1365,6 +1408,7 @@ fn test_state(root: &Path) -> AppState {
     notify: Arc::new(Notify::new()),
     event_notify: watch::channel(0_u64).0,
     node: "client-v0-baseline".into(),
+    api_socket: root.join("api.sock"),
     state_dir: root.to_path_buf(),
     pty_root: root.join("pty"),
     pty_binary: PathBuf::from("pty"),
@@ -1718,7 +1762,7 @@ async fn client_v0_read_routes_conform_to_the_manifest() {
     assert_eq!(response.status(), StatusCode::OK);
     let envelope: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(envelope["api_version"], "st3.client.v0");
+    assert_eq!(envelope["api_version"], "fractal.client.v0");
     assert_eq!(
         envelope["snapshot"]["projection_version"],
         "client-projection.v0"
@@ -3580,7 +3624,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             client_json(app.clone(), &format!("/v1/client/{collection}")).await;
         assert_eq!(status, StatusCode::OK, "{collection}: {envelope}");
         assert_conforms(&validator, collection, &envelope);
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["value"]["kind"], "page");
         assert_eq!(envelope["value"]["collection"], collection);
         assert!(envelope["value"]["items"].is_array());
@@ -4969,6 +5013,88 @@ mission "timing/run" state="ready" {
     }).unwrap();
     let (status, denied) = client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+}
+
+#[tokio::test]
+async fn mission_detail_projects_a_program_steps_journal_and_its_fault() {
+    use sha2::Digest as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let bundle = b"export default {}";
+    let hash = hex::encode(sha2::Sha256::digest(bundle));
+    state.store.put_blob(bundle).unwrap();
+    let source = format!(
+        r#"version 2
+mission "program/land" state="ready" {{
+  goal "Land one change by program."
+  step "land" {{ program "/bundles/land.mjs" sha256="{hash}" stalled-after="10m" }}
+}}
+"#
+    );
+    let intent = fractal_daemon::graph::parse_intent(&source, state.store.origin()).unwrap();
+    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.clone(),
+        source_name: None,
+    }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "program-definition").unwrap();
+    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "program/land".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/avery".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "program-run".into(),
+    }).unwrap();
+    let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
+    state.store.set_step_state(&land, "working", None).unwrap();
+    let append = |kind: &str, fields: Value| {
+        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: land.clone(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    for (key, status, extra) in [
+        ("merge", "started", serde_json::json!({})),
+        ("merge", "failed", serde_json::json!({"ms": 900, "error": {"_tag": "Conflict"}})),
+        ("review", "started", serde_json::json!({"child": "mission-run/program/review"})),
+    ] {
+        let mut fields = serde_json::json!({"key": key, "status": status, "attempt": 1, "program": hash});
+        fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        append("program.step", fields);
+    }
+    append("reconcile.fault", serde_json::json!({
+        "scope": "program/stalled", "status": "faulted", "reason": "no journal entry for 10m; open key `review`",
+    }));
+
+    let app = fractal_daemon::api::router(state.clone());
+    let path = "/v1/client/missions/mission%2Fprogram%2Fland";
+    let (status, response) = client_json(app, path).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_conforms(&contract_validator("Envelope"), path, &response);
+    let envelope: fractal_client::Envelope<fractal_client::Resource> =
+        serde_json::from_value(response.clone()).unwrap();
+    let fractal_client::Resource::Mission(mission) = envelope.value else {
+        panic!("mission detail must be a mission resource");
+    };
+    let detail = &mission.run_details[0];
+    let step = detail.steps.as_ref().unwrap().iter().find(|step| step.path == "land").unwrap();
+    let program = step.program.as_ref().expect("a program step carries its journal");
+    assert_eq!(program.open_key.as_deref(), Some("review"));
+    assert_eq!((program.stalled_after_ms, program.truncated), (600_000, false));
+    let entries = program.entries.iter().map(|entry| (entry.key.as_str(), entry.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(entries, [("merge", "failed"), ("review", "started")]);
+    assert_eq!((program.entries[0].ms, program.entries[0].error.as_deref()), (Some(900), Some(r#"{"_tag":"Conflict"}"#)));
+    assert_eq!(program.entries[1].child.as_deref(), Some("mission-run/program/review"));
+    let fault = program.fault.as_ref().unwrap();
+    assert_eq!(fault.scope, "program/stalled");
+    let blocker = &response["value"]["run_details"][0]["blocker"];
+    assert_eq!((blocker["step"].as_str(), blocker["scope"].as_str()), (Some(land.as_str()), Some("program/stalled")));
 }
 
 #[tokio::test]

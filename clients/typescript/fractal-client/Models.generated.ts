@@ -22,6 +22,7 @@ export type ActionCommon = {
   "harness.answer"
   | "arrangement.edit"
   | "arrangement.membership.edit"
+  | "read-position.advance"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
@@ -90,6 +91,7 @@ export type ActionResult = {
   membership_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
+  read_position_at?: Timestamp;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -121,6 +123,7 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  last_prose_at?: (Timestamp | null);
   launch_contract?: {
 
 } | null;
@@ -1421,6 +1424,13 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person: ArrangementPerson;
   subject: ArrangementId;
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
+  collection: "read-positions";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1517,6 +1527,7 @@ export type CollectionName =
   | "glasses"
   | "arrangements"
   | "ordered-memberships"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -1838,7 +1849,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1855,6 +1866,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -1897,6 +1909,7 @@ export type ErrorCode = (
   | "agent-roster-not-ready"
   | "agent-roster-cut-not-ready"
   | "message-selectors-not-ready"
+  | "database-busy"
   | "rate-limited"
   | "runtime-not-local"
   | "runtime-authority-indeterminate"
@@ -1983,6 +1996,327 @@ export type Fence = {
   [key: string]: Revision;
 };
   terminal_sequence?: number;
+};
+
+export type GithubCheckRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  summary: (string | null);
+  url: string;
+  workflow: (string | null);
+};
+
+export type GithubChecks = {
+  head_sha: string;
+  runs: Array<GithubCheckRun>;
+  truncated: boolean;
+};
+
+export type GithubChecksRead = ({
+  fetched_at: string;
+  item: GithubChecks;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubComment = {
+  author: (GithubUser | null);
+  author_association: string;
+  body: string;
+  created_at: string;
+  id: number;
+  number: number;
+  owner: string;
+  reactions: Array<GithubReaction>;
+  repo: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubCommentRead = ({
+  fetched_at: string;
+  item: GithubComment;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubConversation = {
+  comments: Array<GithubComment>;
+  review_threads: Array<GithubReviewThread>;
+  reviews: Array<GithubReview>;
+  truncated: boolean;
+};
+
+export type GithubConversationRead = ({
+  fetched_at: string;
+  item: GithubConversation;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubFile = {
+  additions: number;
+  deletions: number;
+  patch: (string | null);
+  path: string;
+  previous_path: (string | null);
+  status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged";
+};
+
+export type GithubFiles = {
+  files: Array<GithubFile>;
+  total: number;
+  truncated: boolean;
+};
+
+export type GithubFilesRead = ({
+  fetched_at: string;
+  item: GithubFiles;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubIssue = {
+  assignees: Array<string>;
+  author: (GithubUser | null);
+  body: string;
+  closed_at: (string | null);
+  comments: number;
+  created_at: string;
+  is_pull_request: boolean;
+  labels: Array<GithubLabel>;
+  milestone: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  state: "open" | "closed";
+  state_reason: ("completed" | "not_planned" | "reopened" | null);
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubIssueRead = ({
+  fetched_at: string;
+  item: GithubIssue;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubItemLink = {
+  number: number;
+  owner: string;
+  repo: string;
+  state: string;
+  title: string;
+};
+
+export type GithubJob = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubLabel = {
+  color: string;
+  name: string;
+};
+
+export type GithubMovedTo = {
+  number: (number | null);
+  owner: string;
+  repo: string;
+};
+
+export type GithubPluginRead = (GithubPullRequestRead | GithubIssueRead | GithubCommentRead | GithubConversationRead | GithubChecksRead | GithubFilesRead | GithubRunRead);
+
+export type GithubPullRequest = {
+  additions: number;
+  author: (GithubUser | null);
+  base_ref: string;
+  body: string;
+  changed_files: number;
+  closed_at: (string | null);
+  closing_issues: Array<GithubItemLink>;
+  comments: number;
+  commits: number;
+  created_at: string;
+  deletions: number;
+  draft: boolean;
+  head_ref: string;
+  head_sha: string;
+  labels: Array<GithubLabel>;
+  merge_state: (
+  "clean"
+  | "dirty"
+  | "blocked"
+  | "behind"
+  | "unstable"
+  | "has_hooks"
+  | "draft"
+  | "unknown"
+ | null);
+  merged_at: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  requested_reviewers: Array<string>;
+  review_decision: ("approved" | "changes_requested" | "review_required" | null);
+  state: "open" | "closed" | "merged";
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubPullRequestRead = ({
+  fetched_at: string;
+  item: GithubPullRequest;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubReaction = {
+  content: string;
+  count: number;
+};
+
+export type GithubReview = {
+  author: (GithubUser | null);
+  body: string;
+  id: string;
+  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
+  submitted_at: (string | null);
+  url: string;
+};
+
+export type GithubReviewThread = {
+  comments: Array<GithubThreadComment>;
+  id: string;
+  line: (number | null);
+  outdated: boolean;
+  path: string;
+  resolved: boolean;
+};
+
+export type GithubRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  event: string;
+  head_branch: (string | null);
+  head_sha: string;
+  id: number;
+  jobs: Array<GithubJob>;
+  name: string;
+  owner: string;
+  pull_requests: Array<number>;
+  repo: string;
+  run_attempt: number;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubRunRead = ({
+  fetched_at: string;
+  item: GithubRun;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubThreadComment = {
+  author: (GithubUser | null);
+  body: string;
+  created_at: string;
+  id: string;
+  url: string;
+};
+
+export type GithubUser = {
+  login: string;
+  url: string;
 };
 
 export type Glass = ResourceHeader & {
@@ -2360,7 +2694,7 @@ export type Message = ResourceHeader & {
   kind: "message";
   sent_at: Timestamp;
   session_id?: (Id | null);
-  state: "sent" | "delivered" | "read" | "closed";
+  state: "sent" | "delivered" | "read" | "closed" | "expired";
   status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
@@ -2579,6 +2913,7 @@ export type MissionStep = {
   next_wake_at?: (Timestamp | null);
   nudged_at?: (Timestamp | null);
   path: string;
+  program?: MissionStepProgram;
   progress_at?: (Timestamp | null);
   since: Timestamp;
   started_at?: number | null;
@@ -2624,6 +2959,28 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepProgram = {
+  entries: Array<MissionStepProgramEntry>;
+  fault?: ({
+  reason: string;
+  scope: string;
+} | null);
+  last_entry_at?: (Timestamp | null);
+  open_key?: string | null;
+  stalled_after_ms: number;
+  truncated: boolean;
+};
+
+export type MissionStepProgramEntry = {
+  child?: string | null;
+  ended_at?: (Timestamp | null);
+  error?: string | null;
+  key: string;
+  ms?: number | null;
+  started_at?: (Timestamp | null);
+  status: ("started" | "completed" | "failed" | string);
 };
 
 export type MissionStepTransition = {
@@ -3267,6 +3624,33 @@ export type PushRegistrationStatus = ({
   registered: true;
 });
 
+export type ReadPosition = ResourceHeader & {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  kind: "read-position";
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionAdvanceParameters = {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionConversation = string;
+
+export type ReadPositionPage = {
+  collection: "read-positions";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<ReadPosition>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
 export type RelatedRunWait = {
   detail?: string;
   kind: string;
@@ -3328,6 +3712,7 @@ export type ResourceCollectionName =
   | "work"
   | "glasses"
   | "arrangements"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -4327,6 +4712,22 @@ export type UsageCredits = {
   used_microusd: number;
 };
 
+export type UsageHubQuota = ({
+  state: "disabled";
+} | {
+  reason: "transport" | "invalid_snapshot";
+  refresh_seconds: number;
+  state: "unavailable";
+} | {
+  refresh_seconds: number;
+  snapshot: {
+  accounts: Array<unknown>;
+  generatedAt: string;
+  schemaVersion: 3;
+};
+  state: "available";
+});
+
 export type UsageLimit = {
   account: string;
   account_ref?: string;
@@ -4508,6 +4909,7 @@ export type Work = ResourceHeader & {
   | "human"
   | "mixed"
   | "run"
+  | "program"
   | null
 ;
   generation_id: Id;
@@ -4519,6 +4921,7 @@ export type Work = ResourceHeader & {
   nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  program?: (WorkProgram | null);
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
@@ -4538,6 +4941,14 @@ export type WorkLabel = {
   since: Timestamp;
   state: WorkState;
   title?: string | null;
+};
+
+export type WorkProgram = {
+  child?: string | null;
+  last_entry_at_unix_ms?: number | null;
+  open_key?: string | null;
+  open_since_unix_ms?: number | null;
+  stalled_after_ms: number;
 };
 
 export type WorkState = 
@@ -4689,6 +5100,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'read-position.advance'; parameters: ReadPositionAdvanceParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |

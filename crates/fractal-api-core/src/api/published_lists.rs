@@ -375,6 +375,21 @@ fn spawn<R: Send + Sync + 'static>(
                     let (base, pending, generation) = list.base_and_pending();
                     let from_nothing = base.is_none();
                     let folded = fold(&reader, base.as_deref(), pending);
+                    if name == "work" && tracing::enabled!(tracing::Level::DEBUG) {
+                        let cut = match &folded {
+                            Ok(Folded::Published(publication, _) | Folded::Pending(publication)) => Some(publication.cut),
+                            _ => base.as_ref().map(|publication| publication.cut),
+                        };
+                        let head = reader.index().ok();
+                        tracing::debug!(
+                            publication_cut = ?cut,
+                            store_index = ?head,
+                            publication_cut_lag = ?head.zip(cut).map(|(head, cut)| head.saturating_sub(cut)),
+                            fold_duration_ms = %started.elapsed().as_millis(),
+                            pending = matches!(&folded, Ok(Folded::Pending(_))),
+                            "work publication fold"
+                        );
+                    }
                     if from_nothing && folded.is_err() {
                         // The next fold starts from nothing again.
                         list.fold_from_nothing_next();
@@ -1181,3 +1196,7 @@ pub fn work_window(rows: &WorkRows, actor: Option<&str>, limit: usize) -> (Vec<V
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_client_v0_tests;
+
+#[cfg(test)]
+#[path = "published_run_drain_tests.rs"]
+mod run_drain_tests;

@@ -49,17 +49,19 @@ pub(super) fn generic_claims_page(
 
 pub async fn put_document(
     State(state): State<AppState>,
-    bound: Option<axum::Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    // A seat writes only its own seat documents; a run, which has none, writes none.
     if let Some(bound) = bound.as_ref()
-        && !crate::handoff::may_write(&bound.0.0, &request.name)
+        && !crate::handoff::may_write(bound.actor(), &request.name)
     {
         return Err(ApiError::bad(FractalError::new(
             "document-not-yours",
             format!(
-                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
-                request.name
+                "`{}` belongs to a seat; a seat writes only doc/agents/… for itself, and `{}` is not that seat",
+                request.name,
+                bound.actor(),
             ),
         )));
     }
@@ -70,7 +72,7 @@ pub async fn put_document(
             &request.bytes,
             &request.expected_document,
             &request.idempotency_key,
-            bound.as_ref().map(|bound| bound.0.0.as_str()),
+            bound.as_ref().map(BoundActor::actor),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -797,7 +799,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     if target.contains('/')
         && state
             .store
-            .step_run(&step)
+            .step_run_fenced(&step)
             .map_err(ApiError::internal)?
             .is_some()
     {
@@ -957,7 +959,7 @@ pub async fn post_review(
             .and_then(Value::as_str)
         && owner.starts_with("step-run/")
     {
-        let step = state.store.step_run(owner).map_err(ApiError::internal)?;
+        let step = state.store.step_run_fenced(owner).map_err(ApiError::internal)?;
         let claimant = if let Some(step) = step {
             if step.claimant.is_some() || step.carried_claimant.is_some() {
                 step.claimant.or(step.carried_claimant)

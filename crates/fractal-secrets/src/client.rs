@@ -423,6 +423,27 @@ pub fn daemon_unreachable(error: &anyhow::Error) -> Option<&DaemonUnreachable> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<DaemonUnreachable>())
 }
+/// One logical mutation, including refused projection-drain attempts. No body, key or
+/// identity is exposed; `route` omits the query string.
+#[derive(Clone, Copy, Debug)]
+pub struct MutationObservation<'a> {
+    pub method: &'a str,
+    pub route: &'a str,
+    pub attempts: u32,
+    pub took: Duration,
+    pub retry_wait: Duration,
+}
+
+type MutationObserver = Box<dyn Fn(&MutationObservation<'_>) + Send + Sync>;
+static MUTATION_OBSERVER: std::sync::OnceLock<MutationObserver> = std::sync::OnceLock::new();
+
+/// Install optional per-call diagnostics once, before starting calls. Observing sends nothing.
+pub fn set_mutation_observer(
+    observer: impl Fn(&MutationObservation<'_>) + Send + Sync + 'static,
+) {
+    let _ = MUTATION_OBSERVER.set(Box::new(observer));
+}
+
 
 #[derive(Clone, Copy)]
 pub struct ClientDeadlines {
@@ -562,6 +583,21 @@ impl Client {
         Ok(client)
     }
 
+    /// Name the mission run a program effect acts as over the trusted Unix boundary. The daemon
+    /// accepts it only when the caller's run credential binds that run.
+    pub fn unix_run(path: impl Into<PathBuf>, run: impl Into<String>) -> Result<Self> {
+        let run = run.into();
+        anyhow::ensure!(
+            run.strip_prefix("mission-run/").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+            "Unix run authority must be one concrete `mission-run/<id>` subject"
+        );
+        let mut client = Self::unix(path);
+        client.person = Some(run);
+        Ok(client)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let first_page = path.starts_with("/v1/client/") && !request_has_page_cursor(path);
         for attempt in 0..3 {
@@ -667,21 +703,51 @@ impl Client {
             .transpose()?
             .unwrap_or_default();
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
+        let result = loop {
+            attempts += 1;
             let attempt_started = tokio::time::Instant::now();
             let error = match self.request_once(method, path, &bytes).await {
                 Ok(response) => {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
                     }
-                    return decode_api_response(&response);
+                    break decode_api_response(&response);
                 }
                 Err(error) => error,
             };
+            if mutation && api_error_parts(&error).is_some_and(|(status, code, _, details)| {
+                status == 503 && code == "database-busy"
+                    && details.get("reason").and_then(serde_json::Value::as_str)
+                        == Some("run-projection-drain")
+            }) {
+                // The completed refusal guarantees the action never ran. Reserve the entire
+                // next request deadline; never cancel a sent mutation and return this refusal.
+                let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let delay = jittered(pause);
+                if remaining < request_deadline(path, self.deadlines) + delay {
+                    break Err(error);
+                }
+                draining = true;
+                let slept = tokio::time::Instant::now();
+                tokio::time::sleep(delay).await;
+                retry_wait += slept.elapsed();
+                if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    < request_deadline(path, self.deadlines)
+                {
+                    break Err(error);
+                }
+                pause = (pause * 2).min(Duration::from_secs(1));
+                continue;
+            }
             if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
-                return Err(error);
+                break Err(error);
             }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
@@ -696,18 +762,18 @@ impl Client {
                 continue;
             }
             let Some(outage) = daemon_unreachable(&error) else {
-                return Err(error);
+                break Err(error);
             };
             if outage.full_replay && self.announce_outage_wait {
-                return Err(error);
+                break Err(error);
             }
             let repeatable = outage.phase() == OutagePhase::Connect || method == "GET";
             let waited = started.elapsed();
             if !repeatable || self.outage_wait.is_zero() {
-                return Err(error);
+                break Err(error);
             }
             if waited >= self.outage_wait {
-                return Err(outage.clone().after(waited).into());
+                break Err(outage.clone().after(waited).into());
             }
             if self.announce_outage_wait && !announced {
                 eprintln!(
@@ -717,9 +783,31 @@ impl Client {
                 );
                 announced = true;
             }
-            tokio::time::sleep(jittered(pause).min(self.outage_wait - waited)).await;
+            let remaining = if draining {
+                (self.outage_wait - waited).min(drain_deadline.saturating_duration_since(tokio::time::Instant::now()))
+            } else {
+                self.outage_wait - waited
+            };
+            let slept = tokio::time::Instant::now();
+            tokio::time::sleep(jittered(pause).min(remaining)).await;
+            retry_wait += slept.elapsed();
+            if draining && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                < request_deadline(path, self.deadlines)
+            {
+                break Err(error);
+            }
             pause = (pause * 2).min(Duration::from_secs(1));
+        };
+        if mutation && let Some(observer) = MUTATION_OBSERVER.get() {
+            observer(&MutationObservation {
+                method,
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
 
     async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
@@ -1785,6 +1873,15 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unix_run_client_names_exactly_one_mission_run() {
+        let client = Client::unix_run("/tmp/socket", "mission-run/0123abcd").unwrap();
+        assert_eq!(client.person.as_deref(), Some("mission-run/0123abcd"));
+        for run in ["mission-run/", "mission-run/a/b", "person/operator", "mission-run/a b"] {
+            assert!(Client::unix_run("/tmp/socket", run).is_err(), "{run}");
+        }
+    }
 
     #[tokio::test]
     async fn bind_422_warns_and_keeps_retrying() {

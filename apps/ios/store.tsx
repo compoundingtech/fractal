@@ -9,7 +9,7 @@ import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plain
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
-import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
+import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing, type PairingAdvertisement } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -19,7 +19,8 @@ import { sendFences } from './sendFence';
 import { sendRefusal } from './composer';
 import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
-import { quality, localDrafts } from './qualityNative';
+import { quality, localDrafts, readPositions } from './qualityNative';
+import { readPositionRemote, syncsReadPositions } from './readPosition';
 import { nativeCollectionSocket } from './modules/fractal-collections';
 import { FabricCarrier, routeLabel, selectRoute, shouldRetryFabric, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
@@ -40,7 +41,7 @@ import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
-import { approveRenewal, pendingRenewals, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
+import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -190,6 +191,9 @@ function useAppStore(proof?: FabricProfile) {
     return () => { current = false; };
   }, [proof, caps?.session_actor]);
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
+  // Read positions belong to this device's pairing: the gateway and the person signed in to it. A daemon
+  // that keeps them for every device syncs them below; this device's copy is then an offline cache.
+  useEffect(() => { if (!proof) void readPositions.load(url, caps?.session_actor ?? ''); }, [proof, url, caps?.session_actor]);
   // The request of a send Fractal never confirmed, so sending the same message again repeats it instead of making a second.
   // Attention the person acted on from here: Fractal closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
@@ -423,8 +427,7 @@ function useAppStore(proof?: FabricProfile) {
       const text = await response.text();
       if (!response.ok || text.length > 256 * 1024) throw new Error('Could not contact the renewal member. Your previous pairing was kept.');
       const envelope: unknown = JSON.parse(text);
-      if (!envelope || typeof envelope !== 'object' || !('api_version' in envelope) || envelope.api_version !== API_VERSION || !('value' in envelope)) throw new Error('Invalid renewal response');
-      return envelope.value;
+      return renewalResponseValue(envelope);
     },
   };
   const renewalRoute = (profile: PhoneProfile): string | undefined => {
@@ -633,6 +636,24 @@ function useAppStore(proof?: FabricProfile) {
     const follow = feed.followArrangements(arrangementPerson, { onArrangements: setArrangements, onIssue: setArrangementsIssue });
     return () => follow.close();
   }, [feed, arrangementPerson, arrangementsGranted]);
+  // Read positions: listed on connect and again on each frame of the person's collection, and this
+  // device's advances sent as actions. An older daemon without `read-positions` leaves them here alone.
+  const readPositionsSynced = syncsReadPositions(caps?.capabilities);
+  const readPositionsActor = caps?.session_actor;
+  useEffect(() => {
+    if (proof || status !== 'online' || !client || !feed || !readPositionsSynced || !arrangementPerson || !readPositionsActor) return;
+    const person = arrangementPerson;
+    const stop = readPositions.connect(url, readPositionsActor, readPositionRemote(person, {
+      list: async cursor => (await client.readPositionsList(person, cursor ? { cursor } : {})).value,
+      // Like a message: the snapshot a window frame already brought fences the first try, a fresh one any try after Fractal applied nothing.
+      advance: async parameters => {
+        const fences = sendFences(lastSnapshot.current, fence);
+        return (await retryTransient(3, async () => { const id = actionId(); return client.readPositionAdvance({ id, idempotency_key: id, fence: await fences(), parameters }); }, notApplied)).value;
+      },
+    }));
+    const follow = feed.followReadPositions(person, { onChanged: () => { void readPositions.relist(); } });
+    return () => { follow.close(); stop(); };
+  }, [proof, status, client, feed, url, readPositionsActor, arrangementPerson, readPositionsSynced]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
     if (inventoryGranted !== false) return;
@@ -768,14 +789,12 @@ function useAppStore(proof?: FabricProfile) {
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
-    let advertisement: { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };
+    let advertisement: PairingAdvertisement;
     try { advertisement = JSON.parse(text); } catch { throw new Error('Invalid pairing advertisement. The code was not submitted.'); }
-    if (advertisement.api_version !== API_VERSION || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
-      throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
-    }
+    const capabilities = requirePairingAdvertisement(advertisement);
     // A member that grants paired phones its gateway over Fabric learns this phone's NodeID here.
     const node = fabricBuilt ? fabricNode || await fabricIdentity().catch(() => '') : '';
-    const fabricFields = pairingFabricNode(advertisement.capabilities, node);
+    const fabricFields = pairingFabricNode(capabilities, node);
     const made = await createDeviceKey();
     if (!made) throw new Error('This build cannot make a device key; update the phone app.');
     let consumed = false;

@@ -22,6 +22,9 @@ struct TabBadge {
     ask: bool,
     needs_person: bool,
     inbox: bool,
+    /// Its agent said something since the person last read the conversation, on any device: a `•`
+    /// after the title, as the web's tab and the phone's row show it.
+    unread: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,6 +33,7 @@ struct SubjectBadge {
     ask: bool,
     activity: &'static str,
     needs_person: bool,
+    unread: bool,
 }
 
 impl SubjectBadge {
@@ -71,6 +75,7 @@ impl TabStatuses {
                         agent.state,
                         AgentState::NeedsYou | AgentState::NeedsLogin
                     ),
+                    unread: world.unread.contains(&agent.id),
                     ..SubjectBadge::default()
                 },
             );
@@ -176,6 +181,7 @@ impl TabBadge {
             + text::width(title)
             + usize::from(truncated)
             + count
+            + 2 * usize::from(self.unread)
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
@@ -208,7 +214,8 @@ impl TabBadge {
             + usize::from(!glyph.is_empty())
             + title.len()
             + if truncated { "…".len() } else { 0 }
-            + digits;
+            + digits
+            + if self.unread { " •".len() } else { 0 };
         let mut label = String::with_capacity(capacity);
         label.push(' ');
         label.push_str(glyph);
@@ -223,6 +230,9 @@ impl TabBadge {
         label.push_str(title);
         if truncated {
             label.push('…');
+        }
+        if self.unread {
+            label.push_str(" •");
         }
 
         label.push(' ');
@@ -3122,10 +3132,15 @@ impl Ui {
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
             inbox: matches!(pane, Some(Pane::List(0))),
+            unread: subject.unread,
         }
     }
 
     pub(super) fn refresh_tab_statuses(&mut self) {
+        self.world.unread = self.world.agents.items().iter()
+            .filter(|agent| self.reads.unread(&agent.id, agent.last_prose_ms))
+            .map(|agent| agent.id.clone())
+            .collect();
         self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
         self.refresh_recent_labels();
     }
@@ -5416,6 +5431,7 @@ mod tests {
         let (client, mut peer) = UnixStream::pair().unwrap();
         ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
             client, "agent/example/atlas/builder", "one".into(), 24, 80,
+            None,
         ));
         peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
         let start = Instant::now();
@@ -5531,6 +5547,7 @@ mod tests {
             let (client, _peer) = UnixStream::pair().unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 80,
+                None,
             ));
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -5558,6 +5575,7 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 200,
+                None,
             ));
             peer.write_all(&encode_packet(
                 MessageType::Screen, b"\x1b[?1003h\x1b[?1006h\x1b[?1004h",
@@ -5864,6 +5882,7 @@ mod tests {
                     ask,
                     needs_person,
                     inbox: false,
+                    unread: false,
                 };
                 let glyph = if attention.is_empty() { activity } else { attention };
                 assert_eq!(
@@ -5886,6 +5905,161 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tab_badge_unread_dot_follows_the_title_within_its_width() {
+        let long = "a".repeat(27);
+        let cut = format!(" ○ {}… • ", "a".repeat(25));
+        for (unread, title, expected) in [
+            (false, "Atlas", " ○ Atlas "),
+            (true, "Atlas", " ○ Atlas • "),
+            (true, long.as_str(), cut.as_str()),
+        ] {
+            let badge = TabBadge { activity: "○", unread, ..TabBadge::default() };
+            let label = badge.label(title, 80, true);
+            assert_eq!(label, expected);
+            assert_eq!(badge.width(title, true), text::width(&label), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_agent_with_prose_newer_than_its_read_position_is_marked_until_its_conversation_shows() {
+        // The same unread signal on the web, the TUI and the phone compares
+        // st's `last_prose_at` against where the person last read the conversation.
+        let mut ui = tab_badge_world();
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(60_000);
+        }
+        ui.set_world(next);
+        let badge = |ui: &Ui| {
+            let tab = ui.glasses.glass().layout.groups()[0].tabs[1].clone();
+            ui.tab_badge(&tab, Pane::parse(&tab.pane).as_ref())
+        };
+        assert!(!badge(&ui).unread, "never read here: nothing is new");
+        ui.reads.advance("agent/b", 60_000 - read_store::ROSTER_SKEW_MS);
+        ui.refresh_tab_statuses();
+        assert!(!badge(&ui).unread, "the same words, stamped a moment later");
+        let mut later = ui.world.clone();
+        if let Load::Ready(agents) = &mut later.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        ui.set_world(later);
+        assert!(badge(&ui).unread, "it said something since");
+        let strip = tab_badge_strip(&ui, 120);
+        assert!(strip.contains("Idle •"), "{strip}");
+        let listing = screens::agents_list(&ui.world, "⠋", 80);
+        let marked: Vec<_> = listing.items.iter().filter_map(|item| match item {
+            screens::Item::Row { index, right, .. } if right.first().is_some_and(|span| span.content == "• ") => {
+                Some(listing.ids[*index].as_str())
+            }
+            _ => None,
+        }).collect();
+        assert_eq!(marked, ["agent/b"], "its row in Agents is marked too");
+        // Its conversation, presented, is read up to its newest prose.
+        let timelines = presented_read_timeline(&mut ui, 90_000);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        assert!(ui.frame.borrow().panes.iter().any(|pane| pane.key == "chat:agent/b"), "the conversation shows");
+        ui.read_presented_conversations(&timelines);
+        assert!(!badge(&ui).unread);
+        assert!(ui.world.unread.is_empty());
+    }
+
+    fn presented_read_timeline(
+        ui: &mut Ui,
+        at: i64,
+    ) -> BTreeMap<String, fractal_conversation_ui::Timeline> {
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([{
+            "id": "prose", "sequence": 1, "revision": 1, "timestamp": read_store::timestamp(at).unwrap(),
+            "role": "assistant", "type": "content", "final": true,
+            "body": { "media_type": "text/plain", "text": "Presented prose" }
+        }])).unwrap();
+        ui.world.conversations.insert(
+            "agent/b".into(),
+            Load::Ready(adapt::conversation(&items, &BTreeMap::new())),
+        );
+        BTreeMap::from([("agent/b".into(), fractal_conversation_ui::Timeline {
+            items, ..Default::default()
+        })])
+    }
+
+    #[test]
+    fn presented_reads_queue_the_latest_advance_only_when_live_and_supported() {
+        let mut ui = tab_badge_world();
+        let now = Instant::now();
+        ui.show_tab(1);
+        ui.effects.clear();
+        for at in [60_000, 90_000] {
+            let timelines = presented_read_timeline(&mut ui, at);
+            let _ = screen(&ui);
+            ui.read_presented_conversations(&timelines);
+        }
+
+        ui.queue_read_advances(now, true);
+        assert!(ui.effects.is_empty(), "wait until st supports read positions");
+        ui.reads.connected(now);
+        assert_eq!(ui.reads.list_due(now), Some(true));
+        ui.reads.listed(Ok(Some(Vec::new())), now);
+        ui.queue_read_advances(now, false);
+        assert!(ui.effects.is_empty(), "do not send while offline");
+
+        ui.queue_read_advances(now, true);
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::AdvanceReadPosition { conversation, at_ms: 90_000 }] if conversation == "agent/b"),
+            "send the latest presented prose, not each intermediate read: {:?}",
+            ui.effects
+        );
+        ui.effects.clear();
+        let timelines = presented_read_timeline(&mut ui, 120_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        ui.queue_read_advances(now + read_store::COALESCE, true);
+        assert!(ui.effects.is_empty(), "only one advance may be in flight");
+    }
+
+    #[test]
+    fn roster_before_transcript_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let mut timelines = presented_read_timeline(&mut ui, 60_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "stale presented prose cannot consume the roster update");
+
+        ui.world.conversations.insert("agent/b".into(), Load::Loading);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "loading is not presentation");
+
+        timelines = presented_read_timeline(&mut ui, 90_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(!ui.reads.unread("agent/b", Some(90_000)), "the new prose is read only after presentation");
+    }
+
+    #[test]
+    fn failed_conversation_load_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let timelines = presented_read_timeline(&mut ui, 90_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        next.conversations.insert("agent/b".into(), Load::Failed("Transcript unavailable".into()));
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)));
     }
 
     #[test]
@@ -8048,7 +8222,7 @@ mod tests {
             let (client, mut peer) = UnixStream::pair().unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal_view_mut(agent).unwrap().native = Some(
-                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80),
+                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80, None),
             );
             peer.write_all(&encode_packet(
                 MessageType::Screen,
@@ -10206,6 +10380,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();
@@ -10299,6 +10474,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();

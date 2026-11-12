@@ -867,7 +867,7 @@ mod tests {
         let (client, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         ui.terminal_view_mut(&id).unwrap().native =
-            Some(NativeTerminal::spawn(client, &id, "one".into(), 24, 80));
+            Some(NativeTerminal::spawn(client, &id, "one".into(), 24, 80, None));
         peer.write_all(&encode_packet(
             MessageType::Screen,
             b"\x1b[?1004h\x1b[?1003h\x1b[?1006h\x1b[?2004h",

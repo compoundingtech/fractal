@@ -247,3 +247,50 @@ subject order and use `daemon/runtime`; native admission still rejects mail with
 terminal receipt. The focused expiry regression generates the outcome through the
 same path as random schedules and checks native admission and replication to the
 oracle, rather than treating corpus membership as write coverage.
+
+`claims-v19.json` captures the complete registry with `program.step`, the system-only, append-only
+journal entry of a program step run (docs/st3/program-engine.md §5). Versions 1 through 18 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
+do not hand-edit the snapshot. The simulation selects v19. Draws use the existing `step-run`
+subject family and the generic system-only append path.
+
+A drawn `client.operation-authorized` (in the corpus since v17) is not written. Every replica
+admits that kind only from a keyed member's signed envelope and holds an unkeyed writer's as
+unsigned; the simulated nodes have no member keys. Written, it stayed pending on every other node
+and the oracle and held every later checkpoint back, so the run never settled and the writer held
+a claim the oracle never saw. On hosted CI, v19's draws first wrote one, in seeds 1 and 34; off
+CI, schedules diverge and more seeds wrote one (seeds 3, 13, 17, 277 and 1597 in burst run
+42880734602). The input is still drawn, so a seed whose store refused it keeps its schedule.
+With v19 every fixed seed converges and trims (hosted run 42884923668), so the never-trim set is
+empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
+lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
+leaves seeds 55 and 610 untrimmed.
+
+`claims-v20.json` captures the complete registry with the source-enforcement kinds
+`source.debt.recorded`, `source.debt.closed` and `source.audited`. Versions 1 through 19 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v20.json`;
+do not hand-edit the snapshot. The simulation selects v20, and the draws use the generic append path.
+
+`claims-v21.json` adds `read-position.advanced` to the merged program-step and source-enforcement
+registry. Main's versions 1 through 20 remain byte-identical. The simulation now selects v21.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v21.json`;
+do not hand-edit it. Read-position draws use the person's native admission path and the focused
+regression checks admission and oracle replication. Preserve the keyed-only write exclusion:
+the unkeyed simulated fleet still draws, but cannot admit, operation authorizations.
+Changing selected kinds and random draws changes subsequent actions in the shared SplitMix64
+schedule, including checkpoint work. Earlier trim characterization is not evidence for v21;
+do not add trim exceptions without observing the generated inputs.
+
+`claims-v22.json` adds `source.mapped`, the durable, system-written source map of one agent or
+mission revision (docs/st3/owned-sets.md). Versions 1 through 21 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v22.json`;
+do not hand-edit it. The simulation selects v22. A draw stages one text on the writer and claims
+it under `blob_hash` on `agent/<id>@<revision>`, as a set publication does, so the claim's append
+promotes the text into the shared blobs that replicate with it. The focused regression checks
+admission and that the oracle receives the claim with its text.
+With v22 every fixed seed converges; seed 34 is the exact never-trim set, observed by hosted
+linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
+cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).

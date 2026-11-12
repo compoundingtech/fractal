@@ -376,6 +376,15 @@ impl Node {
         let _ = fs::remove_file(self.socket());
     }
 
+    /// Stop this node as [`Self::stop`] does, except the seat PTY servers `servers`: a deploy
+    /// stops the daemon's service, and its seats run on in work scopes of their own.
+    fn stop_leaving_seats(&mut self, servers: &[u32]) {
+        let mut daemon = self.daemon.take().expect("the node's daemon runs");
+        daemon.kill_releasing(servers).unwrap();
+        daemon.wait().unwrap();
+        self.stop();
+    }
+
     /// Send `signal` (such as `STOP` or `CONT`) to this node's daemon and worker.
     fn signal(&self, signal: &str) {
         for pid in [
@@ -910,6 +919,101 @@ mission "orchard/weekly" state="ready" {{
     assert_eq!(occurrences, vec![0, 1]);
 }
 
+/// Seats on `nodes` run in the real `pty`, which the development and CI environments provide.
+fn use_real_pty(nodes: &[&Node]) {
+    let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("pty"))
+        .find(|path| path.is_file())
+        .expect("the development and CI environments provide the real pty binary");
+    for node in nodes {
+        let launcher = node.root.join("bin/pty");
+        fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(&pty, launcher).unwrap();
+    }
+}
+
+/// A deploy stops the daemon while its seats run on in work scopes of their own. The restarted
+/// daemon re-adopts each surviving PTY: the same incarnation runs on under its control, and it
+/// neither records that incarnation's end nor launches another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_daemon_readopts_a_seat_pty_that_survived_its_stop() {
+    use fractal_drivers::host_lock::process_alive;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const SUBJECT: &str = "agent/readopt/worker";
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "amber").await;
+    use_real_pty(&[&node]);
+    let source = root.path().join("seat.kdl");
+    fs::write(
+        &source,
+        r#"version 2
+agent "readopt/worker" {
+    host "amber"
+    restart "always"
+    argv "sh" "-c" "echo readopt-seat-ready; while :; do sleep 1; done"
+}
+"#,
+    )
+    .unwrap();
+    node.st_ok(&["apply", "--no-gate-check", source.to_str().unwrap(), "--as", PERSON]);
+    let actual = |node: &Node| {
+        node.st_json(&["subject", "show", SUBJECT])["status"]["subjects"][0]["actual"].clone()
+    };
+    wait_until("the seat runs", 30, || async {
+        actual(&node)["status"] == "running"
+    })
+    .await;
+    let incarnation = actual(&node)["incarnation_id"].as_str().unwrap().to_owned();
+    // An incarnation names its PTY server's PID and creation time.
+    let server: i32 = incarnation.split_once(':').unwrap().0.parse().unwrap();
+    let runtime_observations = |claims: Vec<Value>| {
+        claims
+            .into_iter()
+            .filter(|claim| claim["subject"] == SUBJECT && claim["kind"] == "runtime.observed")
+            .map(|claim| (claim["id"].clone(), claim["body"]["fields"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = runtime_observations(node.claims().await);
+    node.stop_leaving_seats(&[server as u32]);
+    assert!(process_alive(server), "the seat's PTY server outlives its daemon");
+    node.start().await;
+    let peek = node.st_ok(&["terminals", "peek", SUBJECT]);
+    assert!(
+        peek.contains("readopt-seat-ready"),
+        "the restarted daemon reaches the surviving terminal: {peek}"
+    );
+    // Only a daemon that adopted the incarnation ends it: the stop must reach the same process.
+    node.st_ok(&["agents", "stop", SUBJECT, "--as", PERSON]);
+    wait_until("the restarted daemon stops the adopted seat", 30, || async {
+        actual(&node)["status"] == "stopped"
+    })
+    .await;
+    wait_until("the adopted PTY server exits", 30, || async {
+        !process_alive(server)
+    })
+    .await;
+    let after = runtime_observations(node.claims().await)
+        .into_iter()
+        .filter(|observation| !before.contains(observation))
+        .map(|(_, fields)| fields)
+        .collect::<Vec<_>>();
+    assert!(
+        after.iter().all(|fields| {
+            fields["incarnation_id"] == incarnation.as_str() && fields["status"] != "vanished"
+        }),
+        "after its restart the daemon observes only the surviving incarnation {incarnation}, \
+         and never as vanished: {after:#?}\n{}",
+        node.logs()
+    );
+    assert_eq!(
+        after.last().map(|fields| fields["status"].clone()),
+        Some(json!("stopped")),
+        "{after:#?}"
+    );
+}
+
 /// A stopped origin's earlier running claims must not fence a seat placed on another host.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stopped_seat_is_reachable_after_a_cross_host_move() {
@@ -945,17 +1049,9 @@ enum SeatMove {
 async fn cross_host_seat_move(mode: SeatMove) {
     const SUBJECT: &str = "agent/move/worker";
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "amber").await;
+    let a = anchor(root.path(), "amber").await;
     let b = joined(root.path(), &a, "cobalt", &[]).await;
-    let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|directory| directory.join("pty"))
-        .find(|path| path.is_file())
-        .expect("the development and CI environments provide the real pty binary");
-    for node in [&a, &b] {
-        let launcher = node.root.join("bin/pty");
-        fs::remove_file(&launcher).unwrap();
-        std::os::unix::fs::symlink(&pty, launcher).unwrap();
-    }
+    use_real_pty(&[&a, &b]);
     let source = root.path().join("seat.kdl");
     fs::write(
         &source,
@@ -991,7 +1087,10 @@ agent "move/worker" {
         .await;
     }
     if mode == SeatMove::SourceOffline {
-        a.stop();
+        // Offline, as a sleeping laptop is: its daemon and worker are frozen while its seat's
+        // process stays alive. Stopping the node would reap the process with the daemon's
+        // fixture scope, and leave the returning source nothing to retire.
+        a.signal("STOP");
         b.st_ok(&[
             "agents",
             "start",
@@ -1057,7 +1156,7 @@ agent "move/worker" {
             peek.contains("moved-seat-ready"),
             "destination is reachable while source is offline: {peek}"
         );
-        a.start().await;
+        a.signal("CONT");
         wait_until(
             "returning source retires its old incarnation",
             30,
@@ -2529,11 +2628,25 @@ async fn a_frozen_member_is_not_reported_up() {
     for index in 0..20 {
         a.note(&format!("unsent-{index}")).await;
     }
-    wait_until("a stops counting the frozen b as up", 120, || async {
-        peer_status(&a, "b")["status"] == "last-seen"
-    })
-    .await;
-    let peer = peer_status(&a, "b");
+    // a's status counts envelopes, and a note becomes one when an exchange seals it
+    // (Store::replication_status_sealed: "A batch written since the last exchange counts once it
+    // is sealed"). The exchange a starts as b freezes seals only the notes written by then, and
+    // then hangs on the frozen b until it times out, so the rest count once the next attempt
+    // seals them. An exchange that b answered just before it froze can still be measured once its
+    // response arrives, counting the first notes as local-only rather than added since: count
+    // both.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let peer = loop {
+        let peer = peer_status(&a, "b");
+        if peer["status"] == "last-seen" && unsent(&peer) >= 20 {
+            break peer;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a did not count the frozen b as last-seen with every unsent note: {peer}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert!(
         peer["last_error"]
             .as_str()
@@ -2542,9 +2655,6 @@ async fn a_frozen_member_is_not_reported_up() {
     );
     assert!(peer["last_failure_at_unix_ms"].is_u64(), "{peer}");
     assert_eq!(peer["sync"]["stale"], true, "{peer}");
-    // An exchange that b answered just before it froze can still be measured once its response
-    // arrives, counting the first notes as local-only rather than added since: count both.
-    assert!(unsent(&peer) >= 20, "{peer}");
     let text = a.st_ok(&["replication", "status"]);
     assert!(text.contains("peer\tb\tlast-seen"), "{text}");
     assert!(text.contains("last attempt failed"), "{text}");
@@ -3064,7 +3174,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain, with the login
+    // shell the fixture executable writes under the test's HOME (fractal-secrets test_support).
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -3076,6 +3187,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.bash_profile",
                 "home/.zprofile",
                 "home/.zshrc",
+                "home/.cache",
+                "home/.cache/fractal-fixture",
                 "config",
                 "config/fish",
                 "config/fish/config.fish",
@@ -3089,6 +3202,8 @@ async fn uninstall_leaves_nothing_behind() {
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
+            || (relative.parent() == Some(Path::new("home/.cache/fractal-fixture"))
+                && relative.to_string_lossy().contains("/login-shell-"))
             || relative.to_string_lossy().ends_with(".log");
         if !expected {
             remaining.push(relative);
@@ -4884,13 +4999,15 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
         !a.notes().await.contains("custom/fleet-test/r-after"),
         "a admitted a removed member's write relayed through c"
     );
-    // c admitted it before it knew; doctor says so.
-    let doctor = c.st(&["--json", "doctor"]);
-    let report = String::from_utf8_lossy(&doctor.stdout);
-    assert!(
-        report.contains("beyond high water"),
-        "c's doctor does not report what it admitted from r: {report}"
-    );
+    // c admitted it before it knew; doctor says so once the daemon has counted. c's daemon counts
+    // 30 s after it starts, and again at most once a minute after doctor finds the removal arrived
+    // since the last count (fleet_admission_check).
+    wait_until("c's doctor reports what it admitted from r", 90, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let counted = String::from_utf8_lossy(&doctor.stdout).contains("beyond high water");
+        async move { counted }
+    })
+    .await;
     // From now on c refuses r too.
     r.note("r-later").await;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -5660,6 +5777,16 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         )
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        // Managed harness launch takes omp from the runtime profile's wrapper directory, never
+        // from PATH (fractal-drivers managed_launch).
+        let profile = node.root.join("runtime-profile.json");
+        fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": node.root.join("bin")}}},
+        })).unwrap()).unwrap();
+        node.env.extend([
+            ("AGENT_RUNTIME_PROFILE".to_owned(), profile.display().to_string()),
+            ("AGENT_PERSONA".to_owned(), "generalist".to_owned()),
+        ]);
         node.start().await;
     }
     let workspace = root.path().join("workspace");
@@ -7983,14 +8110,31 @@ fn leave_in_outbox(node: &Node, subject: &str, from: &str, to: &str, attempts: i
         expected_subject: None,
         idempotency_key: None,
     };
+    leave_claim_in_outbox(node, &claim, attempts);
+}
+
+/// Leave `claim` in stopped `node`'s message outbox, refused `attempts` times already.
+fn leave_claim_in_outbox(node: &Node, claim: &ClaimInput, attempts: i64) {
     let queued_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
     rusqlite::Connection::open(node.state_dir().join("claims.sqlite3"))
         .unwrap()
         .execute(
             "INSERT INTO local_message_outbox(subject, claim, queued_at_unix_ms, attempts) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![subject, serde_json::to_string(&claim).unwrap(), queued_at, attempts],
+            rusqlite::params![claim.subject, serde_json::to_string(claim).unwrap(), queued_at, attempts],
         )
         .unwrap();
+}
+
+/// How often the drain has tried `subject` in `node`'s message outbox, and its last error.
+fn outbox_attempts(node: &Node, subject: &str) -> (i64, Option<String>) {
+    rusqlite::Connection::open_with_flags(node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT attempts, last_error FROM local_message_outbox WHERE subject=?1",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
 }
 
 /// The subjects waiting in `node`'s message outbox; the read fails if the table is missing.
@@ -8167,43 +8311,74 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
 }
 
 /// The daemon drains what a stopped member left in its message outbox when it starts: an
-/// agent's message reaches the shard once, a message the shard already holds is only removed,
-/// and a person's message, which the shard refuses, goes to the graph after the retry pause.
-/// The refused row is left refused one time short of the limit, so the test waits for one pause
-/// (30 s), not three; the unit tests count the refusals.
+/// agent's message to a seat on this member reaches the shard once, a message the shard already
+/// holds is only removed, and a person's message, which is never routed to the stream
+/// (message_routing), goes to the graph at once. A message the shard refuses, here because an
+/// earlier send under its key wrote other content, holds up none of them: refused at startup for
+/// the last time it may be, it waits out the retry pause, is tried on the graph, which refuses it
+/// too, and stays with its error for an operator, in neither store. It is left refused one time
+/// short of the limit, so the test waits for one pause (30 s), not three; the unit tests count
+/// the refusals.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
+    use fractal_store::store::message_outbox::ATTEMPTS;
     let root = tempfile::tempdir().unwrap();
     let mut n = Node::new(root.path(), "n");
     n.start().await;
+    // The reader is a seat on this member, so an agent's mail to it routes to the stream. A
+    // slash-qualified name keeps its subject; a simple one would take the host as a prefix.
+    let reader = "agent/fleet/fixture-reader";
+    let declaration = root.path().join("reader.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"fleet/fixture-reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        n.root
+    )).unwrap();
+    n.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let held = "message/0000000000000f01";
     append_stream_item(&n, held).await;
+    let key = "fleet-outbox-keyed";
+    assert!(append_keyed_stream_item(&n, "message/0000000000000f00", reader, key).await);
     n.stop();
     let eligible = "message/0000000000000f02";
-    let refused = "message/0000000000000f03";
+    let personal = "message/0000000000000f03";
+    let refused = "message/0000000000000f04";
     // The drain stopped after the shard append, before the delete.
-    leave_in_outbox(&n, held, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, eligible, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, refused, PERSON, "agent/fleet-reader", fractal_store::store::message_outbox::ATTEMPTS - 1);
+    leave_in_outbox(&n, held, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, eligible, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, personal, PERSON, reader, 0);
+    let mut refused_claim = keyed_message(refused, key, "through the outbox");
+    refused_claim.fields.insert("to".into(), json!(reader));
+    leave_claim_in_outbox(&n, &refused_claim, ATTEMPTS - 1);
 
     n.start().await;
+    // The drain tries the refused row last; wait until it records that attempt too.
     wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
-        outbox(&n) == [refused]
+        outbox(&n) == [refused] && outbox_attempts(&n, refused).0 >= ATTEMPTS
     })
     .await;
     for subject in [held, eligible] {
         assert_eq!(stream_items(&n, subject).await, 1, "{subject}");
         assert_eq!(graph_messages(&n, subject).await, 0, "{subject}");
     }
-    assert_eq!(stream_items(&n, refused).await, 0);
-    assert_eq!(graph_messages(&n, refused).await, 0);
+    assert_eq!(graph_messages(&n, personal).await, 1);
+    assert_eq!(stream_items(&n, personal).await, 0);
+    let (attempts, error) = outbox_attempts(&n, refused);
+    assert_eq!(attempts, ATTEMPTS);
+    assert!(error.as_deref().is_some_and(|error| error.starts_with("idempotency-mismatch")), "{error:?}");
 
-    // Refused once more at startup, it waits out the pause and goes to the graph.
-    wait_until("the refused message goes to the graph", 90, || async { outbox(&n).is_empty() }).await;
-    assert_eq!(graph_messages(&n, refused).await, 1);
+    // Refused as often as the shard may refuse it, it waits out the pause and goes to the graph,
+    // which replays the stream under the same key and refuses it too.
+    wait_until("the refused message is tried on the graph after the pause", 90, || async {
+        outbox_attempts(&n, refused).0 > ATTEMPTS
+    })
+    .await;
+    assert_eq!(outbox(&n), [refused]);
+    let (_, error) = outbox_attempts(&n, refused);
+    assert!(error.as_deref().is_some_and(|error| error.starts_with("idempotency-mismatch")), "{error:?}");
+    assert_eq!(graph_messages(&n, refused).await, 0);
     assert_eq!(stream_items(&n, refused).await, 0);
     for subject in [held, eligible] {
         assert_eq!(stream_items(&n, subject).await, 1, "{subject}");

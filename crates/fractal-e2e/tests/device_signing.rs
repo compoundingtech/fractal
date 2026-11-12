@@ -1116,7 +1116,7 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = reqwest::Client::new();
     let expected = json!({
-        "api_version": fractal_client::API_VERSION,
+        "api_version": fractal_daemon::api::CLIENT_API_VERSION,
         "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "granted"}],
     });
     for phase in 0..3 {
@@ -1509,6 +1509,7 @@ fn state_on(root: &Path, store: Store) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "signing-node".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),

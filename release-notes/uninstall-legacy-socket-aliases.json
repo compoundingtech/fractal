@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal uninstall removes the legacy st3.sock and st3-client.sock names and their reservation locks beside the daemon's sockets",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "The daemon still serves and reserves the legacy socket names as before; uninstall, which runs only after the daemon stopped, now also removes those names and their lock files."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required. An earlier uninstall may have left st3.sock, st3-client.sock or their .reservation.lock files in the runtime directory; they are inert and may be deleted."},
+  "recovery": {"status": "none", "detail": "Revert the change; the files only stay behind again."}
+}

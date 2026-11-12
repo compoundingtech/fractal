@@ -46,6 +46,10 @@ export const APP_CASE_OVERRIDES = new Map([
   // The Usage pane's served tone inks and row/chart layout run in both schemes at both widths on every commit.
   ['fractal-app-usagepane--all-states', FULL],
   ['fractal-app-usagepane--populated', FULL],
+  // The dev-bar build popover must show its first change without scrolling at phone width, and mark changes seen
+  // only once that entry is in view when a short viewport bounds the popover.
+  ['fractal-app-developer-bar-build-and-changes--narrow-unseen', [['dark', 390], ['light', 390]]],
+  ['fractal-app-developer-bar-build-and-changes--short-viewport-unseen', [['dark', 390], ['light', 390]]],
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])

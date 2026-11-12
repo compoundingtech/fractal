@@ -20,7 +20,7 @@ impl Store {
             return Err(FractalError::new("invalid-person-rename", "a rename needs distinct people and a nonempty idempotency key"));
         }
         validate_claim_subject(&input.actor)?;
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             identities::check_fleet_registry_conn(
                 tx, &self.origin, configured_peers, &self.fractal.schema_digest(),
             )?;
@@ -148,7 +148,7 @@ impl Store {
                 &json!({"fields": {"old_person": input.old_person, "new_person": input.new_person, "report": report},
                     "idempotency_key": input.idempotency_key}), &[], None).map_err(claim_append_error)?;
             Ok(report)
-        }).map_err(internal)?
+        })
     }
 }
 

@@ -128,6 +128,7 @@ pub use harness_questions::{
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod message_reads;
+pub mod relayed_close_maintenance;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod population_metrics;
@@ -136,6 +137,7 @@ pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
+mod source_maps;
 pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
@@ -189,6 +191,7 @@ pub mod records;
 mod write_principal;
 mod native_delivery;
 pub mod replication;
+mod replication_replay;
 mod runs;
 pub mod sessions;
 pub mod work;
@@ -258,6 +261,8 @@ pub struct AppState {
     pub event_notify: watch::Sender<u64>,
     pub node: String,
     pub state_dir: std::path::PathBuf,
+    /// Configured API socket, including its instance-specific basename.
+    pub api_socket: std::path::PathBuf,
     pub pty_root: std::path::PathBuf,
     pub pty_binary: std::path::PathBuf,
     pub fleet_id: Option<String>,
@@ -272,8 +277,9 @@ pub struct AppState {
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
-pub const CLIENT_API_VERSION: &str = "st3.client.v0";
+pub const CLIENT_API_VERSION: &str = "fractal.client.v0";
+/// Frozen hash input; changing it invalidates issued preview tokens.
+const LAUNCH_PREVIEW_HASH_API_VERSION: &str = "st3.client.v0";
 pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
@@ -348,7 +354,7 @@ pub struct ClientListQuery {
     /// when the latest roster refresh failed and none is in flight.
     #[serde(default)]
     pub fresh: bool,
-    /// Agents: wait for publication of this host-local mutation store_index, not the head.
+    /// Agents and current work: wait for this host-local cut instead of sampling a newer head.
     pub min_cut: Option<u64>,
 }
 
@@ -559,6 +565,10 @@ impl ApiError {
         }
     }
 }
+/// Carried through JSON framing so telemetry counts the typed refusal, never a parsed body.
+#[derive(Clone, Copy)]
+struct RunProjectionDrainRefusal;
+
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -573,6 +583,11 @@ impl IntoResponse for ApiError {
         let mut response = (self.status, Json(body)).into_response();
         if self.code == "read-deadline" {
             response.extensions_mut().insert(crate::otel::ReadDeadline);
+        }
+        if self.code == "database-busy"
+            && self.details.get("reason").and_then(Value::as_str) == Some("run-projection-drain")
+        {
+            response.extensions_mut().insert(RunProjectionDrainRefusal);
         }
         response
     }
@@ -733,8 +748,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/gate-checks", post(runs::start_gate_check))
         .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
-        .route("/v1/sets/apply", post(owned_sets::apply))
-        .route("/v1/intent/apply", post(launches::apply_with_bound))
+        .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
+        .route("/v1/source/status", get(owned_sets::source_status))
+        .route("/v1/source-maps", get(source_maps::get))
+        .route("/v1/source-blobs/{hash}", get(source_maps::blob))
+        .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
@@ -849,6 +867,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records", get(replication::replication_records))
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
+        .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
         .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
@@ -1114,6 +1133,9 @@ pub async fn response_envelope(
     };
     let response = read_deadline::envelope(state, request, next).await;
     duration.outcome = crate::otel::RequestOutcome::from_response(Some(&response));
+    if response.extensions().get::<RunProjectionDrainRefusal>().is_some() {
+        crate::otel::record_run_projection_drain_refusal(duration.method, duration.route);
+    }
     response
 }
 
@@ -1160,6 +1182,14 @@ async fn response_envelope_unbounded(
         request.extensions_mut().insert(ClientMessageRequestId(request_id.clone()));
     }
     let request_path = request.uri().path().to_owned();
+    let receive_correlation = (request_path == "/v1/internal/replication/receive").then(|| {
+        let id = replication::receive_correlation(request.headers());
+        request.headers_mut().insert(
+            "x-fractal-exchange-id",
+            axum::http::HeaderValue::from_str(&id.to_string()).expect("a UUID is a valid header"),
+        );
+        id
+    });
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
     let served_remote = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1203,7 +1233,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration" | "/v1/replication/replay");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
@@ -1519,6 +1549,7 @@ async fn response_envelope_unbounded(
         Served {
             long_poll,
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
+            receive_correlation,
         },
     );
     finish_request_trace(otel, status);
@@ -1624,12 +1655,12 @@ pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
-/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+/// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
-/// Every target's live windows, and every path's: see `slo/targets.toml`.
+/// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
@@ -1639,8 +1670,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
 }
 
-/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
-/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// Close each UTC minute of the member's CPU as it ends, for the `cpu` objective in
+/// `slo/objectives.kdl`: read the daemon's CPU at the boundary beside the newest reading each of
 /// the `workers` replication workers this member runs has sent, note a replication catch-up, and
 /// check the seats of the minute closed one boundary earlier, once every harness observation
 /// stamped inside it has committed. The first boundary is this daemon's start.
@@ -1714,6 +1745,7 @@ fn asks_to_wait(query: &str) -> bool {
 pub struct Served {
     long_poll: bool,
     remote: bool,
+    receive_correlation: Option<uuid::Uuid>,
 }
 
 /// A client collections socket's subscription sent its first snapshot or screen.
@@ -1848,7 +1880,11 @@ fn record_request_latency(
     // Request latency is an operational sample, not a graph change. Publishing a
     // claim here causes replication and reconciliation on every node, including
     // during the contention that made the request slow in the first place.
-    eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    if let Some(correlation_id) = served.receive_correlation {
+        eprintln!("st3: slow request {path} correlation_id={correlation_id} took {} ms", elapsed.as_millis());
+    } else {
+        eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    }
 }
 
 pub use crate::model::new_request_id;
@@ -1945,7 +1981,7 @@ pub fn client_host_id(node: &str) -> String {
 pub fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
     let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": request_id,
         "code": client_error_code(raw.get("code").and_then(Value::as_str)),
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
@@ -2022,6 +2058,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "retire-incarnation-mismatch"
         | "invalid-custody-successor"
         | "custody-pending"
+        | "set-managed-subject"
         | "not-found"
         | "forbidden"
         | "pairing-origin-required"
@@ -2222,6 +2259,39 @@ pub fn client_page_expired(message: impl Into<String>) -> ApiError {
     }
 }
 
+/// Launch page hashes retain their original visualization bytes independently of wire names.
+fn client_items_digest(collection: &str, items: &[Value]) -> anyhow::Result<String> {
+    use serde::ser::{SerializeMap as _, SerializeSeq as _, Serializer as _};
+    struct HashValue<'a> { value: &'a Value, visualization: bool }
+    impl Serialize for HashValue<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let Some(object) = self.value.as_object() else { return self.value.serialize(serializer); };
+            let mut map = serializer.serialize_map(Some(object.len()))?;
+            for (key, value) in object {
+                if self.visualization && key == "version" && value == "fractal.visualization.v0" {
+                    // Frozen cache/cursor hash input, not an emitted version.
+                    map.serialize_entry(key, "st3.visualization.v0")?;
+                } else if !self.visualization && key == "visualization" {
+                    map.serialize_entry(key, &HashValue { value, visualization: true })?;
+                } else {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            map.end()
+        }
+    }
+    let bytes = if collection == "launches" || (collection.starts_with("launches/") && collection.ends_with("/variants")) {
+        let mut serializer = serde_json::Serializer::new(Vec::with_capacity(128));
+        let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+        for value in items { sequence.serialize_element(&HashValue { value, visualization: false })?; }
+        serde::ser::SerializeSeq::end(sequence)?;
+        serializer.into_inner()
+    } else {
+        serde_json::to_vec(items)?
+    };
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 pub fn client_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -2376,9 +2446,7 @@ fn client_page_read_projected(
             cursor.expires_at_unix_ms,
         )
     } else {
-        let items_digest = hex::encode(Sha256::digest(
-            serde_json::to_vec(&items).map_err(ApiError::internal)?,
-        ));
+        let items_digest = client_items_digest(collection, &items).map_err(ApiError::internal)?;
         let cached = client_page_cache()
             .lock()
             .expect("client page cache poisoned")
@@ -2945,11 +3013,13 @@ fn client_work_values(
                     .into_iter()
                     .flat_map(|summaries| summaries.iter().copied()),
             );
+            let spec = work
+                .agentless
+                .then(|| step_specs.get(&work.run).and_then(|steps| steps.get(&work.step)))
+                .flatten();
             let gate_kind = if work.agentless {
-                let spec = step_specs
-                    .get(&work.run)
-                    .and_then(|steps| steps.get(&work.step));
                 match spec {
+                    Some(spec) if spec.program.is_some() => Some("program"),
                     Some(spec) if spec.after_run.is_some() => Some("run"),
                     Some(spec) if spec.gates.is_empty() => Some("watch"),
                     Some(spec)
@@ -2993,6 +3063,21 @@ fn client_work_values(
             } else {
                 None
             };
+            // What a program step runs now: its innermost open key, from the newest entries.
+            let program = spec
+                .and_then(|spec| spec.program.as_ref())
+                .map(|program| -> anyhow::Result<Value> {
+                    let journal = store.program_journal(&work.subject, work.attempt, crate::program_journal::SUMMARY_ENTRIES)?;
+                    let open = journal.innermost();
+                    Ok(json!({
+                        "open_key": open.map(|entry| &entry.key),
+                        "open_since_unix_ms": open.and_then(|entry| entry.started_at_unix_ms),
+                        "child": open.and_then(|entry| entry.child.as_ref()),
+                        "last_entry_at_unix_ms": journal.last_entry_at_unix_ms,
+                        "stalled_after_ms": crate::program_journal::stalled_after_ms(program),
+                    }))
+                })
+                .transpose()?;
             Ok(json!({
                 "id": work.subject,
                 "kind": "work",
@@ -3010,6 +3095,7 @@ fn client_work_values(
                 "state": state,
                 "agentless": work.agentless,
                 "gate_kind": gate_kind,
+                "program": program,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
@@ -3914,6 +4000,15 @@ fn client_agent_cards_presented(
                     .as_ref()
                     .map(|harness| harness.incarnation_id.as_str()),
             )?;
+            // The agent's own newest words, for clients' "new since you last looked".
+            let last_prose_at = store.agent_last_prose_at(
+                &subject.subject,
+                subject
+                    .harness
+                    .as_ref()
+                    .map(|harness| harness.incarnation_id.as_str()),
+                snapshot_index,
+            )?;
             let silent_since = if harness_state.as_deref() == Some("working") {
                 let working_since = match subject.harness.as_ref() {
                     Some(harness) => store
@@ -4162,6 +4257,7 @@ fn client_agent_cards_presented(
                     .or_else(|| desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace)),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
                 "last_activity_at": last_activity_at.map(client_timestamp),
+                "last_prose_at": last_prose_at.map(client_timestamp),
                 "silent_since": silent_since.map(client_timestamp),
                 "fault": fault,
                 "incarnation_id": incarnation_id,
@@ -5400,14 +5496,40 @@ fn message_delivery_for(
         })
     };
     let mut status = message.status.clone();
-    if let Some(host) = message_reads::relay_host(store, message)? {
-        match relayed {
-            Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) => {
-                if crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status) {
-                    status = (*relayed).to_owned();
-                }
+    let host = message_reads::relay_host(store, message)?;
+    if host.is_some()
+        && let Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) = relayed
+        && crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status)
+    {
+        status = (*relayed).to_owned();
+    }
+    // Durable expiry wins over seat diagnostics and an unavailable remote, but
+    // never over actual consumption, including a receipt just relayed by its host.
+    if let Some(expiry) = store.message_expiry(&message.subject)? {
+        if expiry.superseded
+            && let Some(current) = store.message(&message.subject)?
+            && crate::store::message_marks::rank(&current.status) > crate::store::message_marks::rank(&status)
+        {
+            status = current.status;
+        }
+        if !expiry.superseded && !matches!(status.as_str(), "delivered" | "read") {
+            if host.is_some()
+                && let Some(message_reads::Relayed::Answered { consumed: Some(phase), .. }) = relayed
+            {
+                return message_delivery_value(store, &message.to, phase, sent_at, now);
             }
-            Some(message_reads::Relayed::Answered { status: None, .. }) => {}
+            return Ok(json!({
+                "state": "expired", "phase": "expired",
+                "reason": expiry.claim.body["fields"]["reason"],
+                "age_ms": now.saturating_sub(sent_at),
+                "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+            }));
+        }
+        return message_delivery_value(store, &message.to, &status, sent_at, now);
+    }
+    if let Some(host) = host {
+        match relayed {
+            Some(message_reads::Relayed::Answered { .. }) => {}
             Some(message_reads::Relayed::Unknown { reason, .. }) => {
                 return Ok(unknown(reason.clone()));
             }
@@ -5588,7 +5710,7 @@ fn launch_preview_token_values(
     diagnostics: &[Value],
 ) -> anyhow::Result<String> {
     let input = json!({
-        "api_version": CLIENT_API_VERSION,
+        "api_version": LAUNCH_PREVIEW_HASH_API_VERSION,
         "launch_id": format!("launch/{launch_id}"),
         "variant_id": format!("launch-variant/{launch_id}/{variant}"),
         "candidate_revision": candidate_revision,
@@ -5682,7 +5804,7 @@ fn launch_visualization(
             .push(format!("step/{}", step.path));
     }
     json!({
-        "version": "st3.visualization.v0",
+        "version": "fractal.visualization.v0",
         "views": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"],
         "mission": format!("mission/{}", mission.id),
         "nodes": nodes,
@@ -5848,7 +5970,7 @@ fn client_launch_variant_resources(
                 (
                     json!({}),
                     Vec::new(),
-                    json!({"version": "st3.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
+                    json!({"version": "fractal.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
                     json!({"changes": [], "predicted_actions": []}),
                     None,
                 )
@@ -7481,6 +7603,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let Some(agent) = ancestry.agent() {
                         request.extensions_mut().insert(BoundAgent(agent.to_owned()));
                     }
+                    if let HarnessAncestry::Run(credential) = &ancestry {
+                        request.extensions_mut().insert(credential.clone());
+                    }
                     if matches!(ancestry, HarnessAncestry::Unavailable) {
                         request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
@@ -7524,10 +7649,40 @@ mod gateway_listener_tests;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HarnessAncestry {
     Bound(String),
+    /// A program effect: an ancestor carries the run credential its attempt was started with
+    /// (docs/st3/program-engine.md §3). The guard resolves it to `mission-run/RUN`.
+    Run(RunCredential),
     Person,
     #[default]
     Unavailable,
 }
+
+/// A run credential read from a caller's exec-time environment. Its `Debug` never shows the
+/// secret, so ancestry diagnostics cannot leak it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunCredential(String);
+
+impl RunCredential {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RunCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RunCredential(..)")
+    }
+}
+
+/// The run a request's credential binds, set by the serving guard and never by a client.
+#[derive(Clone, Debug)]
+pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
+
+pub use crate::store::run_credentials::RUN_CREDENTIAL_ENV;
 
 impl HarnessAncestry {
     fn agent(&self) -> Option<&str> {
@@ -7551,6 +7706,15 @@ impl HarnessAncestry {
     fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
         let primary = lookup("ST_AGENT");
         let legacy = lookup("FRACTAL_AGENT");
+        // A program effect acts as its run, never as an agent too: one environment naming both
+        // cannot be bound to either.
+        if let Some(credential) = lookup(RUN_CREDENTIAL_ENV) {
+            return if credential.is_empty() || primary.is_some() || legacy.is_some() {
+                Self::Unavailable
+            } else {
+                Self::Run(RunCredential::new(credential))
+            };
+        }
         if primary.is_none() && legacy.is_none() {
             return Self::Person;
         }
@@ -8000,6 +8164,38 @@ pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+/// The identity a local request is bound to by its caller's ancestry: an agent harness, or the
+/// mission run a program effect acts as. Handlers that hold a bound caller to its own identity
+/// read this one extractor, so a bound run is never mistaken for an unbound person.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundActor {
+    Agent(String),
+    Run(String),
+}
+
+impl BoundActor {
+    pub fn of(extensions: &axum::http::Extensions) -> Option<Self> {
+        extensions.get::<BoundAgent>().map(|agent| Self::Agent(agent.0.clone()))
+            .or_else(|| extensions.get::<BoundRun>().map(|run| Self::Run(run.0.run.clone())))
+    }
+
+    /// The bound identity: the agent as the harness names it, or `mission-run/RUN`.
+    pub fn actor(&self) -> &str {
+        match self { Self::Agent(actor) | Self::Run(actor) => actor }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for BoundActor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(Self::of(&parts.extensions))
+    }
+}
+
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
@@ -8010,6 +8206,16 @@ async fn guard_bound_actor(
     request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
     let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A run credential binds only while its attempt runs; one that no longer binds leaves the
+    // caller unverifiable, so it writes nothing.
+    request.extensions_mut().remove::<BoundRun>();
+    if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
+        let lookup = store.clone();
+        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+            Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
+            _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
+        }
+    }
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
@@ -8067,7 +8273,9 @@ pub async fn guard_bound_request(
     bound_agent: Option<&str>,
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
-    let Some(bound_agent) = bound_agent else {
+    // A bound run follows the rules of a bound agent, as the actor `mission-run/RUN`.
+    let bound_run = request.extensions().get::<BoundRun>().map(|run| run.0.run.clone());
+    let Some(bound_agent) = bound_agent.or(bound_run.as_deref()) else {
         return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
             guard_unverifiable_request(request).await
         } else {
@@ -8092,9 +8300,11 @@ pub async fn guard_bound_request(
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
-    let bound_identity = public_identity(
-        store, crate::store::identities::IdentityKind::Agent, bound_agent,
-    )?.identity;
+    let bound_identity = if bound_run.as_deref() == Some(bound_agent) {
+        bound_agent.to_owned()
+    } else {
+        public_identity(store, crate::store::identities::IdentityKind::Agent, bound_agent)?.identity
+    };
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
     for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
@@ -8165,7 +8375,8 @@ pub async fn guard_bound_request(
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+    // A publication carries program bundles, so the buffer matches the publication route limit.
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT)
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
@@ -8207,7 +8418,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT).await.map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
         && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
     {
@@ -8254,7 +8465,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10767,6 +10978,10 @@ pub struct AgentSuspensionRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Suspend or resume a member of an `enforce` owned set anyway, recording source debt with
+    /// `reason`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// The seat a suspend or resume names: a declared service seat with no conflicting declaration.
@@ -10908,6 +11123,11 @@ pub fn request_suspend(
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Suspend, force_reason)
+        .map_err(ApiError::bad)?;
     let (current, member, token) = suspension_target(state, &subject)?;
     if let Some(suspension) =
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
@@ -10964,20 +11184,25 @@ pub fn request_suspend(
         ),
         ("incarnation_id".into(), Value::String(incarnation.into())),
     ]);
-    if let Some(reason) = request.reason.filter(|reason| !reason.trim().is_empty()) {
-        fields.insert("reason".into(), Value::String(reason));
+    if let Some(reason) = request.reason.as_ref().filter(|reason| !reason.trim().is_empty()) {
+        fields.insert("reason".into(), Value::String(reason.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![token],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![token],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Suspend,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -10999,6 +11224,11 @@ pub fn request_resume(
     {
         return Ok(prior);
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Resume, force_reason)
+        .map_err(ApiError::bad)?;
     let (_, member, token) = suspension_target(state, &subject)?;
     check_suspension_fence(fence.as_ref(), None, &token)?;
     let suspension = crate::suspension::current(&state.store, &subject)
@@ -11060,17 +11290,22 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![launch_token, suspend],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![launch_token, suspend],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Resume,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -11125,18 +11360,68 @@ async fn apply_with_authority(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
-    let mut response = state
-        .store
-        .apply_as(
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
+    let mut response = match request.force_reason.as_deref().map(str::trim) {
+        None => state.store.apply_as(
             &intent,
             &request.expected_subjects,
             &request.idempotency_key,
             Some(actor),
-        )
-        .map_err(ApiError::bad)?;
+        ),
+        Some(reason) if !reason.is_empty() => state.store.apply_forced(
+            &intent,
+            &request.expected_subjects,
+            &request.idempotency_key,
+            Some(actor),
+            reason,
+        ),
+        Some(_) => Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason")),
+    }
+    .map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
+}
+
+/// The request body a publication may use: program bundles travel inside it as base64, and a set
+/// apply may also carry a source map of at most `MAX_MAP_BYTES`.
+pub const PUBLICATION_BODY_LIMIT: usize = 32 * 1024 * 1024 + fractal_schema::source_map::MAX_MAP_BYTES;
+
+/// Verify each program bundle a publication carries against the hash its intent names, then stage
+/// the bytes as local blobs; the `mission.published` claim that names the hash promotes them
+/// (docs/st3/program-engine.md §4). A bundle the intent does not name is refused, so a publication
+/// cannot stage arbitrary bytes, and nothing is staged unless every bundle checks out.
+pub(crate) fn store_program_bundles(
+    state: &AppState,
+    intent: &crate::model::NormalizedIntent,
+    bundles: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    use base64::Engine as _;
+    let named = intent.missions.values().flat_map(|mission| mission.programs()).map(|(_, program)| program.bundle_hash.as_str()).collect::<BTreeSet<_>>();
+    let mut verified = Vec::with_capacity(bundles.len());
+    for (hash, encoded) in bundles {
+        if !named.contains(hash.as_str()) {
+            return Err(ApiError::bad(FractalError::new(
+                "unused-program-bundle",
+                format!("the publication carries program bundle {hash}, which none of its programs names"),
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| {
+            ApiError::bad(FractalError::new("invalid-program-bundle", format!("program bundle {hash} is not base64: {error}")))
+        })?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != *hash {
+            return Err(ApiError::bad(FractalError::new(
+                "program-bundle-hash-mismatch",
+                format!("program bundle {hash} has sha256 {actual}"),
+            )));
+        }
+        verified.push(bytes);
+    }
+    for bytes in verified {
+        state.store.put_blob(&bytes).map_err(ApiError::internal)?;
+    }
+    Ok(())
 }
 
 /// One write a rule in audit mode would have refused.
@@ -11182,13 +11467,19 @@ async fn post_delivery_hold(
     State(state): State<AppState>,
     Json(request): Json<crate::delivery_hold::HoldRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let force = request.force;
     let input =
         crate::delivery_hold::input(request, client_now_ms() as u64).map_err(ApiError::bad)?;
     let store = state.store.clone();
     let (claim, appended) = blocking_action(move || {
-        if input.fields.get("held") == Some(&Value::Bool(true))
-            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true))
-        {
+        use crate::store::owned_sets::Verb;
+        let holding = input.fields.get("held") == Some(&Value::Bool(true))
+            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true));
+        let reason = input.fields.get("reason").and_then(Value::as_str).map(str::to_owned);
+        let force_reason = force.then_some(reason.as_deref()).flatten();
+        if holding {
+            // An owned set's source policy refuses, audits or records an ad hoc hold as debt.
+            store.source_gate(&input.subject, Verb::Hold, force_reason)?;
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -11203,7 +11494,11 @@ async fn post_delivery_hold(
                 ));
             }
         }
-        store.append_claim_outcome(&input)
+        if holding {
+            store.append_source_gated(&input.subject, &input, Verb::Hold, force_reason)
+        } else {
+            store.append_claim_outcome(&input)
+        }
     })
     .await?;
     if appended {
@@ -11291,6 +11586,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
     Ok(rows)
 }
 

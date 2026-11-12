@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Program steps wait on linked child runs and native person asks: the run's evaluation starts or adopts a child (`create_child_mission_run`, key program:STEP:ATTEMPT:KEY) or asks on the program step as `daemon/program`, journals the result under the program's key and resolves the program; a full mission's start waits until a run holding it ends; a step that ends, fails or retries cancels the children and asks it still waits on",
+  "replay": {"status": "changed", "detail": "`program.step` claims gain `started` entries for child-run and ask keys, one when the request arrives and one naming the child run or ask in `child`; their results are completed/failed entries with `child` set, fenced like other results (program:STEP:ATTEMPT:KEY:result). Child runs carry idempotency key program:STEP:ATTEMPT:KEY and the program step as parent_step_run; asks are `work.person-asked` claims whose actor is `daemon/program`."},
+  "schema": {"status": "none", "detail": "No table or migration; the `child` field of `program.step` was registered with the claim kind."},
+  "rules": {"status": "changed", "detail": "`ask_person` admits the requester `daemon/program` for an agentless step's current attempt, given as the ask's incarnation, without a claim; only the daemon acts as `daemon/*`. Agent asks keep the claimant fence."},
+  "compatibility": {"status": "changed", "detail": "A program step that waits on an ask is `waiting-person`; its program stays loaded and its timeout clock pauses, as for a worker's ask. Ask deadlines and default answers follow the fleet's ask-deadline policy: a program that names a deadline or default while deadlines are off fails its step with `ask-deadlines-off`."},
+  "downtime": {"status": "none", "detail": "No restart or migration beyond a normal deploy; a program waiting on a child run or ask resumes and adopts it."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "A child run or ask is adopted by key after a host or daemon restart; a key already journaled replays without a new request."}
+}

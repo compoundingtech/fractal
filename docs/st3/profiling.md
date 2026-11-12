@@ -51,6 +51,68 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Replication receive costs
+
+Each completed graph receive handler emits one `replication receive summary` INFO record,
+including errors. `correlation_id` is the canonical UUID from `x-fractal-exchange-id`, or a
+generated UUID when that header is missing or invalid. The receive's slow-request and
+independent writer-hold diagnostics use the same ID. IDs are log fields, never metric labels;
+request bodies and invalid header values are not logged.
+
+The summary has six named phase records, each with `elapsed`, `writer_wait` and `writer_hold`
+durations: `receipt_ingest` (initial state inspection, exchange receipt and transport observation),
+`admission_prelude` (local sealing and judging), `admission` (backlog validation, including its
+admission mutex), `repairs`, `projection`, and `response_postcommit` (response construction and
+notifications after projection). Unreached phases remain zero. `admit_ms` describes admission
+only, excluding the separately reported prelude and repairs. `project_ms` retains projection
+wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
+include response-envelope serialization or network delivery.
+
+Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
+loans measure borrower ownership through transaction finalization and postcommit observer
+cleanup, before connection return. Batched callbacks measure their queue wait and exclusive
+savepoint execution on the writer thread. Captured request and phase scopes restore the
+previous thread context after callback return or unwind. Phase wall time contains writer
+wait/hold and nested rebuild/final-drain work: these costs are **non-additive**.
+
+A group commit emits one `replication receive shared finalization` event if any receive
+participated. It reports a process-local `batch_id`, `prepare_ms`, `finalization_ms` (finalizers,
+COMMIT or rollback, and postcommit observers), and the participating `(correlation_id, phase)`
+pairs. It is explicitly `shared=true`, `additive=false`: no request owns that shared duration.
+Its participant set is bounded by the existing writer batch limit, including distinct phases
+of the same request. Shared hold diagnostics carry `shared_batch_id`, not one receive ID.
+Non-receive writer diagnostics retain their existing attribution.
+
+The summary's `shared_event_join` equals its `correlation_id`: join that ID against **all**
+shared events' participant pairs for the authoritative links. `shared_finalizations` counts
+distinct participating batches; optional `first_shared_batch` and `last_shared_batch` are
+only bounded index hints, **not an exhaustive list**. Summaries retain no growing batch-ID
+list. Shared event timing and links finish before batched acknowledgements, so a completed
+request cannot snapshot before its shared accounting arrives.
+
+## Conversation relay reads
+
+`st.conversation.relay_read.duration` is one histogram in seconds, recorded for successful
+and failed conversation relays (not dependent on trace sampling). Its only labels are
+`st.conversation.owner` (the provenance's `host/<configured-peer>`, `local`, or `unknown`)
+and `st.conversation.operation` (`timeline`, `session_detail`, `changes`, `first_snapshot`).
+`first_snapshot` means a changes request without an `after` cursor; long-poll durations
+include intentional waiting. Discovered, unconfigured owners collapse to `unknown`.
+No session or agent id becomes a metric label.
+
+Sampled owner timeline requests carry `st.conversation.*` attributes on the existing
+request span: `reader_admission_ms` (SQLite reader acquisition and snapshot establishment),
+`graph_sql_ms` (graph runtime/message query calls, including their reader admission),
+`fold_mutex_wait_ms`, `native_admission_ms` (bounded native-reader permit wait),
+`native_fold_ms`, `display_preparation_ms`, and `header_overlay_ms`. The graph timing
+includes row decoding but excludes session filtering and display conversion; it overlaps
+SQLite reader admission, so these attributes are not an additive partition.
+Repeated native refills and header/overlay work accumulate within the request.
+Counts are `requested_limit` (effective clamped page request), `native_read_limit`
+(sum of requested native slice sizes), `native_prepared_items` (before page truncation),
+and `graph_rows` (returned graph message rows before session filtering).
+Stages not reached are absent, not synthetic zero-duration work.
+
 ## Background task CPU
 
 The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
@@ -152,7 +214,7 @@ move observers after acknowledgements.
 
 ## Targets and live windows
 
-[`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
+[`slo/objectives.kdl`](../../slo/objectives.kdl) holds the objectives Fractal ships ([objectives](objectives.md)): reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
 the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
@@ -306,7 +368,7 @@ holds the history. Each point carries `target`, `series` (`owner` or `remote` fo
 the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
-figure from `slo/targets.toml`, so one query sets a host's number against its target),
+figure from `slo/objectives.kdl`, so one query sets a host's number against its target),
 `st_slo_cpu_cores` (the member's cores by `window`, sent only once known) and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
 phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only

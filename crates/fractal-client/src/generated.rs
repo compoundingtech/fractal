@@ -103,6 +103,7 @@ pub enum ErrorCode {
     RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
+    SetManagedSubject,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -145,6 +146,7 @@ pub enum ErrorCode {
     AgentRosterNotReady,
     AgentRosterCutNotReady,
     MessageSelectorsNotReady,
+    DatabaseBusy,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
@@ -1668,6 +1670,9 @@ pub struct MissionStep {
     pub loop_max_rounds: Option<u64>,
     #[serde(default)]
     pub loop_reason: Option<String>,
+    /// Mission detail only: a program step's current attempt journal. Absent for other steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<MissionStepProgram>,
     /// Earliest work eligibility, not a promise of wake dispatch.
     #[serde(default)]
     pub next_wake_at: Option<String>,
@@ -1695,6 +1700,43 @@ pub struct MissionStep {
     /// Mission detail only: this remaining step's own p25/p75 duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta: Option<MissionStepEta>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgram {
+    /// The most recently started key without a result.
+    #[serde(default)]
+    pub open_key: Option<String>,
+    /// Each key's latest entry in this attempt, in the order the keys first appear.
+    pub entries: Vec<MissionStepProgramEntry>,
+    /// Older journal entries exist beyond the ones read.
+    pub truncated: bool,
+    #[serde(default)]
+    pub last_entry_at: Option<String>,
+    pub stalled_after_ms: u64,
+    /// The open `program/host` or `program/stalled` fault on the step.
+    #[serde(default)]
+    pub fault: Option<MissionStepProgramFault>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgramEntry {
+    pub key: String,
+    /// `started`, `completed` or `failed`; a later word decodes as is.
+    pub status: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub child: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgramFault {
+    pub scope: String,
+    pub reason: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionStepAttempt {
@@ -1829,6 +1871,9 @@ pub struct Work {
     pub progress_at: Option<String>,
     pub state: String,
     pub gate_kind: Option<String>,
+    /// A program step's innermost open journal key and journal timing.
+    #[serde(default)]
+    pub program: Option<WorkProgram>,
     pub attempt: u64,
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
@@ -1863,6 +1908,19 @@ pub struct Work {
     pub person_answers: Vec<PersonAnswerRecord>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
+}
+/// A program step's innermost open journal key and journal timing.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct WorkProgram {
+    #[serde(default)]
+    pub open_key: Option<String>,
+    #[serde(default)]
+    pub open_since_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub child: Option<String>,
+    #[serde(default)]
+    pub last_entry_at_unix_ms: Option<u64>,
+    pub stalled_after_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentRelationship {
@@ -1927,6 +1985,9 @@ pub struct Agent {
     pub activity: Option<String>,
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
+    /// When the agent last said something itself; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prose_at: Option<String>,
     pub silent_since: Option<String>,
     #[serde(default)]
     pub down_since: Option<String>,
@@ -3500,6 +3561,8 @@ pub enum ActionType {
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
     ArrangementMembershipEdit,
+    #[serde(rename = "read-position.advance")]
+    ReadPositionAdvance,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -4097,6 +4160,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::PromptRespond,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn read_position_advance(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ReadPositionAdvanceParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ReadPositionAdvance,
             idempotency_key,
             fence,
             &parameters,
@@ -4912,6 +4989,9 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    /// `read-position.advance`: the stored position after the forward-only merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_position_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -5815,6 +5895,36 @@ pub struct ArrangementPage {
     pub sync: Option<SyncNotice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated: Option<ReplicatedNotice>,
+}
+
+/// One person's read position in one conversation: the newest prose they have seen there.
+/// Forward-only; the daemon keeps the max of every advance.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPosition {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub owner: String,
+    pub conversation: String,
+    pub at: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPositionPage {
+    pub kind: String,
+    pub collection: String,
+    #[serde(default)]
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<ReadPosition>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ReplicatedNotice>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPositionAdvanceParameters {
+    pub owner: String,
+    pub conversation: String,
+    pub at: String,
 }
 
 pub type OrderedMembershipOperation = fractal_schema::ordered_membership::Operation;

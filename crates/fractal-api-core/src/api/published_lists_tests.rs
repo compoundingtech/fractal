@@ -130,7 +130,7 @@ fn published_missions_match_the_direct_fold_through_work_leases_failure_and_reti
 
     // A new mission, a retired one, and a rejected write that changes nothing.
     mission(&store, "garden/delta");
-    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma").unwrap();
+    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma", None).unwrap();
     assert!(store
         .work_action(&plant, "progress", &WorkRequest {
             wait_ms: None,
@@ -1174,6 +1174,80 @@ async fn http_work_pages_come_from_publications_and_never_read_the_list_directly
     assert_eq!(store.direct_work_reads(), direct, "an ended list is never read directly");
 }
 
+#[tokio::test]
+async fn work_fresh_retry_pins_the_first_cut_while_the_index_keeps_advancing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    let list = store.published_work_list();
+    list.start();
+    fold_work_checked(store);
+    mission(store, "garden/first");
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+    assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+    let wanted = refused.details["wanted_cut"].as_u64().unwrap();
+    let (publication, _) = folded_at_once(fold_work(store, None, None));
+    assert_eq!(publication.cut, wanted);
+    // Each subsequent request sees a newer head, but the first requested cut suffices.
+    mission(store, "garden/second");
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        let query = ClientListQuery { min_cut: Some(wanted), ..fresh.clone() };
+        async move { work_page(&state, query).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    mission(store, "garden/third");
+    assert!(list.publish(publication, list.generation()).is_some());
+    waiting.await.unwrap().unwrap();
+    for name in ["garden/fourth", "garden/fifth"] {
+        mission(store, name);
+        let (Extension(snapshot), _) = client_work(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { min_cut: Some(wanted), ..fresh.clone() }),
+        ).await.unwrap();
+        assert_eq!(snapshot.store_index, wanted);
+        assert!(store.index().unwrap() > wanted);
+    }
+}
+
+#[tokio::test]
+async fn work_fresh_without_min_cut_still_samples_each_request() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    for name in ["garden/first", "garden/second"] {
+        mission(store, name);
+        let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+        assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+        assert_eq!(refused.details["wanted_cut"], json!(store.index().unwrap()));
+    }
+}
+
+#[tokio::test]
+async fn work_min_cut_rejects_future_indexes_and_accepts_zero_and_current() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let head = store.index().unwrap();
+    for fresh in [false, true] {
+        let refused = work_page(&state, ClientListQuery {
+            fresh, min_cut: Some(head + 1), ..work_query(None, 200)
+        }).await.unwrap_err();
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        for cut in [0, head] {
+            work_page(&state, ClientListQuery {
+                fresh, min_cut: Some(cut), ..work_query(None, 200)
+            }).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn an_actors_order_is_built_once_per_publication_by_its_first_read() {
     let _clock = Clock::at(start_time());
@@ -1312,6 +1386,9 @@ fn an_incremental_fold_reads_only_the_seats_it_can_reorder() {
         seat_mission(&store, &name, &seat);
         runs.insert(n, ready_run(&store, &name, &format!("seat-{n}-1")));
     }
+    // Equal join times use run identity, not creation order. Make the second run
+    // join later so moving it to the top must change the queue.
+    _clock.set(now_ms() + 1);
     let second = ready_run(&store, "garden/seat-5", "seat-5-2");
     store.published_work_list().start();
     // From nothing: every shown seat once, charged as the cold fold.

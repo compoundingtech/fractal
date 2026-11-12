@@ -252,6 +252,13 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
     }
+    // A read position is shown only by its own collection, which shows nothing else.
+    if collection == fractal_schema::read_positions::COLLECTION {
+        return kind != fractal_schema::read_positions::KIND;
+    }
+    if kind == fractal_schema::read_positions::KIND {
+        return true;
+    }
     match collection {
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
@@ -334,6 +341,7 @@ const ACTIONS: &[&str] = &[
     "arrangement.edit",
     "harness.answer",
     "arrangement.membership.edit",
+    "read-position.advance",
     "attention.resolve",
     "review.approve",
     "review.reject",
@@ -397,6 +405,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
+    "read-position.advance",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -556,9 +565,25 @@ impl ClientSession {
         };
         // Free mode: an agent's local session holds every scope a person's does. Its actions
         // still record the agent as their actor.
-        Ok(Self {
-            actor: person.into(),
-            authority_actor: person.into(),
+        Ok(Self::acting(person))
+    }
+
+    /// A program effect's local session, acting as `run` (docs/st3/program-engine.md §3). Only a
+    /// request its run credential binds to that same run may name it; run authority then decides
+    /// each write.
+    pub fn local_run(run: &str, bound_run: Option<&str>) -> Result<Self, ApiError> {
+        if bound_run != Some(run) {
+            return Err(forbidden(
+                "a trusted Unix client acts as a mission run only when its run credential binds that run",
+            ));
+        }
+        Ok(Self::acting(run))
+    }
+
+    fn acting(actor: &str) -> Self {
+        Self {
+            actor: actor.into(),
+            authority_actor: actor.into(),
             pairing_grant: None,
             pairing_issued_here: false,
             grant_expires_at: None,
@@ -566,14 +591,14 @@ impl ClientSession {
             transport: "unix",
             local_peer: false,
             peer_process: None,
-            custom_forms,
+            custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+        }
     }
 
     pub fn pairing() -> Self {
@@ -638,6 +663,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    // Synced read positions: list, follow and advance the session person's own positions.
+    // Granted only when all three are allowed, so a client never sends a doomed advance.
+    capabilities.push(json!({"id":"read-positions", "version":1, "state":if session.allows("read.projections") && session.allows("read.arrangements") && session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         if *action == "harness.answer" {
             return super::harness_questions::capability(state, session);
@@ -776,10 +804,15 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
-            let mut session = ClientSession::local(person)?;
+            let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
+            let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
+                Some(run) => ClientSession::local_run(run, bound_run)?,
+                None => ClientSession::local(person)?,
+            };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
@@ -2039,6 +2072,7 @@ fn session_messages(
     incarnation: Option<&str>,
     before: Option<u64>,
 ) -> Result<Vec<ClaimRecord>, ApiError> {
+    let (mut messages, started, ended) = crate::otel::conversation_phase("st.conversation.graph_sql_ms", || -> Result<_, ApiError> {
     let (started, ended) = match incarnation {
         Some(incarnation) => state.store.conversation_runtime_span(owner, incarnation)
             .map_err(ApiError::internal)?,
@@ -2046,9 +2080,12 @@ fn session_messages(
     };
     // Every stream item the endpoint has, as the graph's newest sends: a delta read takes those
     // past its cursor's stream position.
-    let mut messages = state.store.conversation_messages_at(
+    let messages = state.store.conversation_messages_at(
         owner, before, 0, Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(0)),
     ).map_err(ApiError::internal)?;
+    crate::otel::conversation_count("st.conversation.graph_rows", messages.len());
+    Ok((messages, started, ended))
+    })?;
     messages.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
     Ok(messages)
 }
@@ -2185,6 +2222,7 @@ fn conversation_page_header(
         return None;
     }
     let _header = crate::profile::span("conversation/header");
+    crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     let derived = crate::conversation_header::derive(
         items,
         window_truncated || crate::conversation_header::window_truncated(items),
@@ -2193,6 +2231,7 @@ fn conversation_page_header(
         derived,
         conversation_register_value(state, session_id).as_ref(),
     )
+    })
 }
 
 /// The live latest-wins values for a conversation, e.g. `working`. Wire the register here when
@@ -2252,6 +2291,7 @@ pub fn native_session_messages(
             incarnation.as_deref(),
             snapshot.store_index.checked_add(1),
         )?;
+        crate::otel::conversation_phase("st.conversation.header_overlay_ms", || -> Result<(), ApiError> {
         for claim in messages {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             let from = fields.get("from").and_then(Value::as_str);
@@ -2268,6 +2308,8 @@ pub fn native_session_messages(
             items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
+            Ok(())
+        })?;
     }
     items.reverse();
     Ok(items)
@@ -2485,6 +2527,31 @@ pub fn native_slice_page_at_generation(
     source: &crate::external_sessions::ExternalSession,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed,
+        #[cfg(any(test, feature = "test-support"))]
+        false,
+    )
+}
+
+/// The pre-split display path, retained only to compare complete page responses in tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn legacy_native_slice_page_for_test(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_slice_page_impl(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+    #[cfg(any(test, feature = "test-support"))] legacy_display: bool,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let legacy_display = false;
     let preparation = crate::profile::span("conversation/native-preparation");
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
@@ -2515,6 +2582,7 @@ pub fn native_slice_page_at_generation(
         }
     }
     let limit = cursor.as_ref().map_or(requested_limit, |cursor| cursor.limit);
+    crate::otel::roster_attribute("st.conversation.requested_limit", limit as i64);
     let expires_at_unix_ms = cursor.as_ref().map_or_else(
         || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
         |cursor| cursor.expires_at_unix_ms,
@@ -2534,8 +2602,12 @@ pub fn native_slice_page_at_generation(
         Vec::new()
     };
     drop(preparation);
+    // Acquire after the first fold lock, then retain the same permit through refills,
+    // the header read and preparation: no second try-acquire decision under load.
+    let mut admission = conversation_blocks::NativeReadAdmission::default();
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, legacy_display,
+        &mut admission,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2551,7 +2623,8 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, legacy_display,
+                &mut admission,
             )?.0)
         } else {
             None
@@ -2559,16 +2632,38 @@ pub fn native_slice_page_at_generation(
         let head = head.as_ref().unwrap_or(&native);
         native_head_fence(head, &source_basis, native.generation)?;
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
-        conversation_page_header(
-            state, session, session_id, &head.items[..count],
+        let header_items = (!legacy_display).then(|| {
+            conversation_blocks::header_items(source, session_id, &head.items[..count])
+        });
+        let mut header = conversation_page_header(
+            state, session, session_id, header_items.as_deref().unwrap_or(&head.items[..count]),
             head.has_more || head.items.len() > count,
-        )
+        );
+        if !legacy_display && let Some(value) = &mut header {
+            conversation_blocks::bound_header(value);
+        }
+        header
     } else {
         None
     };
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
+    if !legacy_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        crate::otel::conversation_phase("st.conversation.display_preparation_ms", || -> Result<(), ApiError> {
+        for item in &mut native.items {
+            conversation_blocks::prepare_one(source, session, session_id, &source_basis, item)?;
+        }
+            crate::otel::conversation_count("st.conversation.native_prepared_items", native.items.len());
+            Ok(())
+        })?;
+    }
+    if conversation_blocks::basis(source)? != source_basis {
+        return Err(client_page_expired("the transcript changed while preparing the page"));
+    }
+    drop(admission);
     let overlay = crate::profile::span("conversation/overlay");
+    let (mut items, mut has_more) = crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
     let messages = messages.into_iter().map(|item| {
@@ -2598,8 +2693,10 @@ pub fn native_slice_page_at_generation(
             messages.next().expect("peeked message entry")
         });
     }
-    let mut has_more = items.len() > limit || native.has_more;
+    let has_more = items.len() > limit || native.has_more;
     items.truncate(limit);
+    (items, has_more)
+    });
     drop(overlay);
     let _page_preparation = crate::profile::span("conversation/page-preparation");
     let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
@@ -2674,9 +2771,10 @@ pub fn canonical_native_slice(
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
     prepare_display: bool,
+    admission: &mut conversation_blocks::NativeReadAdmission,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit, prepare_display,
+        source, session, session_id, order, before, limit, prepare_display, admission,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2696,7 +2794,7 @@ pub fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
-            prepare_display,
+            prepare_display, admission,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
@@ -3373,6 +3471,7 @@ fn timeline_value_with_subject(
     query: &ClientListQuery,
     owner_subject: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::otel::conversation_scope(|| {
     require_scope(session, "read.projections")?;
     let session_id = client_detail_id("session", id);
     let managed_owner = || match owner_subject {
@@ -3424,6 +3523,7 @@ fn timeline_value_with_subject(
     let managed = managed_owner()?;
     crate::performance::task("conversation/first-page", || {
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
+    })
     })
 }
 
@@ -4509,6 +4609,8 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
         }
         "pairing" => "control.pairing",
         "arrangement" => "control.arrangements",
+        // Read positions are person workspace state, granted with arrangements.
+        "read-position" => "control.arrangements",
         _ => return None,
     })
 }

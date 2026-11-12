@@ -639,7 +639,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(), state_dir: root.path().into(),
+        node: "todo-liveness".into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
         native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
@@ -1800,6 +1800,74 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn a_program_effect_acts_as_its_run() {
+    assert_eq!(run_actor(Some("secret"), Some("abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(Some("secret"), Some("mission-run/abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(None, Some("abc")), None);
+    assert_eq!(run_actor(Some(""), Some("abc")), None);
+    assert_eq!(run_actor(Some("secret"), Some("")), None);
+    assert_eq!(parse_actor_subject("mission-run/abc").as_deref(), Ok("mission-run/abc"));
+    assert!(parse_actor_subject("mission-run/").is_err());
+}
+
+/// A run publishes missions as itself: `apply` and `missions publish` take `--as mission-run/RUN`,
+/// and `apply` defaults to it when it holds a run credential. The commands a run's authority cannot
+/// grant still take only a person or an agent.
+#[test]
+fn a_run_is_a_mission_publication_actor() {
+    for actor in ["person/operator", "agent/example/worker", "mission-run/abc"] {
+        assert_eq!(parse_mission_publication_actor(actor).as_deref(), Ok(actor));
+    }
+    for actor in ["mission-run/", "mission-run/abc/", "mission/abc", "person/", "abc"] {
+        assert!(parse_mission_publication_actor(actor).is_err(), "{actor}");
+    }
+    assert!(parse_publication_actor("mission-run/abc").is_err());
+    for command in [
+        vec!["st", "apply", "notes.kdl", "--as", "mission-run/abc"],
+        vec!["st", "missions", "publish", "notes.kdl", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_ok(), "{command:?}");
+    }
+    for command in [
+        vec!["st", "missions", "retire", "x/notes", "--as", "mission-run/abc"],
+        vec!["st", "agents", "rollout", "fleet/worker", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
+    }
+    let Command::Apply(args) = Cli::try_parse_from(["st", "apply", "notes.kdl", "--as", "mission-run/abc"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected apply")
+    };
+    assert_eq!(own_publication_actor(args.actor, "apply").unwrap(), "mission-run/abc");
+    // Without `--as`, apply resolves its actor from its environment when it runs.
+    assert!(Cli::try_parse_from(["st", "apply", "notes.kdl"]).is_ok());
+}
+
+/// A run's authority grants mission publication, never an owned set: `apply --set` as a run is
+/// refused before anything is read or written, while a person still publishes the set.
+#[test]
+fn a_run_cannot_publish_an_owned_set() {
+    let apply = |actor: &str| {
+        let Command::Apply(args) = Cli::try_parse_from([
+            "st", "apply", "missing.kdl", "--set", "garden", "--repository", "fixture/garden",
+            "--ref", "main", "--sha", "abc", "--source-sequence", "1", "--expect-set", "absent",
+            "--as", actor,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected apply")
+        };
+        apply_actor(&args)
+    };
+    let refusal = apply("mission-run/abc").unwrap_err().to_string();
+    assert!(refusal.contains("fractal apply --set cannot publish as `mission-run/abc`"), "{refusal}");
+    assert_eq!(apply("person/operator").unwrap(), "person/operator");
+}
+
+#[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [
         (["changes", "sync"], vec!["--repository", "fixture/garden"]),
@@ -2947,6 +3015,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "pi-delivery-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -3045,6 +3114,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "trace-cursor-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -3126,6 +3196,7 @@ async fn trace_wait_starts_after_existing_events() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "wait-cursor-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -6343,6 +6414,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "message-read-state".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -6441,6 +6513,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
@@ -7871,6 +7944,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         reason: "adopted hold".into(),
         idempotency_key: "adopt-test".into(),
         legacy_adoption: true,
+        force: false,
     };
     let deadline = request.until_unix_ms;
     let mut paths = NativePaths {
@@ -8036,6 +8110,52 @@ async fn a_closed_message_missing_from_the_active_page_archives_its_projected_fi
     .await
     .unwrap();
     assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(filename).is_file());
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_staged_native_mail_is_archived_without_receipts_and_delivery_supersedes_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("expiry").unwrap());
+    let seat = "agent/eval.worker";
+    let append = |status: &str, fields: BTreeMap<String, Value>| {
+        store.append_claim(&ClaimInput {
+            subject: "message/expiry".into(), kind: format!("message.{status}"),
+            actor: Some(if status == "expired" { "daemon/runtime" } else { seat }.into()), fields, evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("sent", BTreeMap::from([
+        ("from".into(), json!("person/eval")), ("to".into(), json!(seat)),
+        ("content".into(), json!("Brief")), ("status".into(), json!("sent")),
+    ]));
+    let (client, server) = serve_test_store(store.clone(), root.path(), "expiry").await;
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    let reconcile = || forward_projected_messages(
+        &client, seat, &inbox, &archive, "app-server",
+        NativeDeliveryReceipts::Codex {
+            state_dir: root.path(), identity: "eval.worker", runtime_id: "worker",
+        },
+    );
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.message("message/expiry").unwrap().unwrap().status, "staged");
+    let filename = fractal_drivers::message::list_dir(&inbox).unwrap()[0].filename.clone();
+    append("expired", BTreeMap::from([
+        ("status".into(), json!("expired")), ("reason".into(), json!("cutoff-uncertain-attempt")),
+    ]));
+    assert!(reconcile().await.unwrap().is_empty());
+    assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(&filename).is_file());
+    for kind in ["message.delivered", "message.read"] {
+        assert!(store.claims_for_subject_kind_at("message/expiry", kind, None, false, 1).unwrap().claims.is_empty());
+    }
+    append("delivered", BTreeMap::from([("status".into(), json!("delivered"))]));
+    assert_eq!(message_page(&client, Some(seat), false, None).await.unwrap().items[0].status, "delivered");
+    let index = store.index().unwrap();
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.index().unwrap(), index, "delivered-unread replay writes no receipt");
     assert!(archive.join(filename).is_file());
     server.abort();
 }
@@ -8545,6 +8665,7 @@ async fn serve_test_store(
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -8596,9 +8717,17 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             adopt: vec![],
             allow_empty: false,
             confirm_retire: None,
+            source_policy: None,
+            enforce: None,
+            publisher: vec![],
+            namespace: vec![],
+            unmanaged_allow: vec![],
+            force: false,
+            reason: None,
+            source_map: None,
             dry_run: false,
             at_index: None,
-            actor: "person/test".into(),
+            actor: Some("person/test".into()),
             workspace: root.to_owned(),
             no_gate_check: false,
             check: false,
@@ -9754,7 +9883,7 @@ impl MovedSeat {
             owning_person: None,
             store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0).0,
-            node: "cedar".into(), state_dir: root.path().into(),
+            node: "cedar".into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: "pty".into(),
             fleet_id: Some(MOVED_FLEET.into()), configured_peers: vec![], client_relay: None,
             native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),

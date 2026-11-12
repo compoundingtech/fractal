@@ -48,6 +48,8 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+mod assistant_admission;
+
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
 use fractal_daemon::AdhocWorkStore;
@@ -141,6 +143,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/source-blobs/{hash}",
+        "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
+    ),
     (
         "GET /v1/custom/decision-inputs",
         "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
@@ -479,6 +485,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",
@@ -491,6 +501,34 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
     ),
     (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
@@ -717,6 +755,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/arrangements?person=person%2Fada",
     ),
     get(
+        "GET /v1/client/read-positions",
+        "/v1/client/read-positions?person=person%2Fada",
+    ),
+    get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
@@ -735,6 +777,8 @@ const PROBES: &[Probe] = &[
     post("POST /v1/sets/apply", "/v1/sets/apply", |_, attempt| {
         owned_set_request(&format!("apply-{attempt}"))
     }),
+    get("GET /v1/source/status", "/v1/source/status"),
+    get("GET /v1/source-maps", "/v1/source-maps?subject=agent/bench/cost/fixture&texts=true"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -856,6 +900,8 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
     // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
     get("GET /v1/client/quota", "/v1/client/quota"),
+    // The unconfigured usage hub returns disabled locally without an external request.
+    get("GET /v1/client/usage/quota", "/v1/client/usage/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -1480,6 +1526,23 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
     )
 }
 
+/// Retained advances grow while the projected answer stays one conversation.
+fn seed_read_positions(store: &Store, scale: f64) {
+    for advance in 0..((scale * 10_000.0).round() as u64).max(1) {
+        store.append_claim(&ClaimInput {
+            subject: fractal_schema::read_positions::subject(ARRANGEMENT_OWNER),
+            kind: fractal_schema::read_positions::KIND.into(),
+            actor: Some(ARRANGEMENT_OWNER.into()),
+            fields: BTreeMap::from([
+                ("owner".into(), json!(ARRANGEMENT_OWNER)),
+                ("conversation".into(), json!(ARRANGEMENT_PLACEMENT)),
+                ("at_ms".into(), json!(advance)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).expect("the read-position cost fixture must publish");
+    }
+}
+
 const MEMBERSHIP_OWNER: &str = "person/avery";
 const MEMBERSHIP_SUBJECT: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
 const MEMBERSHIP_PATH: &str =
@@ -1860,6 +1923,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -1973,6 +2037,7 @@ mission "cost/history" state="ready" {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -3115,6 +3180,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -3151,6 +3222,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty,
@@ -3352,10 +3424,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         publication["revision"].as_str(),
         Some(expected_publication_revision.as_deref().unwrap())
     );
-    client
-        .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
+    // The fixture set carries a source map, so the source-map read probe answers a real claim.
+    let mut fixture_set = owned_set_request("fixture");
+    fixture_set["source_map"] = json!({
+        "schema": "fractal.source-map/v1",
+        "files": [{"repository": "acme/garden", "path": "graph/fixture.ts", "blob": "b".repeat(40),
+            "text": "export default fixture\n"}],
+        "subjects": {"agent/bench/cost/fixture": {"declaration": 0, "inputs": [0]}},
+    });
+    let applied: Value = client
+        .post("/v1/sets/apply", &fixture_set)
         .await
         .expect("the owned-set read fixture must publish");
+    assert_eq!(applied["publication"]["source_maps"]["recorded"], 1, "{applied}");
     let selected: Value = person
         .get("/v1/client/sets/bench/cost/fixture")
         .await
@@ -3382,6 +3463,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = arrangement_person
+        .get("/v1/client/read-positions?person=person%2Fada")
+        .await
+        .expect("the read-position list probe must read the selected owner's projection");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["owner"], ARRANGEMENT_OWNER);
+    assert_eq!(page["items"][0]["conversation"], ARRANGEMENT_PLACEMENT);
     let page: Value = membership_person
         .get(MEMBERSHIP_PATH)
         .await
@@ -3524,7 +3612,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 let client = if path == MEMBERSHIP_PATH {
                     membership_person.clone()
-                } else if path.starts_with("/v1/client/arrangements") {
+                } else if path.starts_with("/v1/client/arrangements") || path.starts_with("/v1/client/read-positions") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()

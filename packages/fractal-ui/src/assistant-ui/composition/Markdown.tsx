@@ -1,6 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Link, VisuallyHidden } from 'react-aria-components'
+import { HoverCard } from '../entity/HoverCard'
+import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import type { Root } from 'hast'
@@ -82,7 +84,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -261,8 +263,11 @@ const MARKDOWN_COMPONENTS: Components = {
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
+/** A file the agent touched, mentioned in prose: its hover is the resource's canonical card. */
 export function ResourceChip({ resource, onOpen }: { resource: InlineResource; onOpen?: (path?: string) => void }) {
-  return <TooltipTrigger delay={300}><Button onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>
+  return <HoverCard placement="bottom start" content={() => <ResourceEntityCard id={resource.path} title={resource.path} kind="File" icon="attach" summary={[`+${resource.added} \u2212${resource.removed}`]} {...(resource.preview ? { preview: resource.preview.split('\n'), previewKind: 'diff' as const } : {})} />}>
+    <Button data-search-content onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button>
+  </HoverCard>
 }
 /** Complete only the unfinished prose tail; fenced code and settled literal punctuation are untouched. */
 export function completeStreamingTail(source: string): string {
@@ -402,5 +407,5 @@ const styles = stylex.create({
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
-  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
 })

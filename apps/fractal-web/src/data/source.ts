@@ -137,13 +137,14 @@ export interface AgentSubagent {
   readonly lease_expires_at: string
 }
 
-/** Retained native work identity; the title is optional and never synthesized from a goal. */
+/** Retained native work identity; the title is optional and never synthesized from the separately reported goal. */
 export interface AgentWork {
   readonly id: string
   readonly missionId: string
   readonly runId: string
   readonly path: string
   readonly title?: string
+  readonly goal?: string
   readonly state: string
 }
 
@@ -153,6 +154,8 @@ export interface Agent {
   readonly terminal: string
   /** An authoritative empty runtime list proves this agent has no terminal. */
   readonly terminalDisabledReason?: string
+  /** The roster's runtime ids, joined: a remembered failed attach holds only while this stays the same. */
+  readonly runtimeKey?: string
   readonly name: string
   readonly lifecycle: SeatLifecycle
   readonly host: string
@@ -178,6 +181,8 @@ export interface Agent {
   readonly ask: Known<string>
   /** Last observed activity, not the boundary of the current status. */
   readonly lastActivityAt: Known<number>
+  /** Newest conversation prose; omitted by daemons predating read-position support. */
+  readonly lastProseAt?: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
   readonly subagents?: readonly AgentSubagent[]
@@ -200,6 +205,8 @@ export interface Fleet {
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
+  /** The latest window said more rows exist than it carried. */
+  readonly hasMore?: boolean
 }
 
 /** A roster whose latest frame decoded completely. */

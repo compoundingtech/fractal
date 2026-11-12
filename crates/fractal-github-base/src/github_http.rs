@@ -427,13 +427,22 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
-/// Select from the supplied root only. Token files are reopened for each read batch.
-pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
-    let root = match pat {
+fn token_root(pat: &GithubAuth) -> Option<&std::path::Path> {
+    match pat {
         GithubAuth::Read { source, .. } => Some(source.root.as_path()),
         _ => SOURCE.get().and_then(|config| config.github.app_token_root.as_deref()),
-    };
-    app_read::select(root, owner, app, pat.pat())
+    }
+}
+
+/// Select from the supplied root only. Token files are reopened for each read batch.
+pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
+    app_read::select(token_root(pat), owner, app, pat.pat())
+}
+
+/// The installation that may read `owner`'s commit statuses, if its token grants them.
+pub fn statuses_auth(owner: &str, pat: &GithubAuth) -> Option<GithubAuth> {
+    let source = app_read::statuses_source(token_root(pat)?, owner)?;
+    Some(GithubAuth::Read { source, pat: Box::new(pat.pat().clone()) })
 }
 
 impl GithubAuth {
@@ -481,6 +490,9 @@ pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
         return auth.pat().clone();
     };
     if statuses {
+        if let Some(selected) = statuses_auth(owner, auth) {
+            return selected;
+        }
         if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
             app_read::fallback(owner, app, "statuses");
         }
@@ -502,6 +514,29 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
     let request_auth = auth.request_scope();
     let mut response = send_selected_read(request, &mut request_auth.clone()).await?;
     response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
+}
+
+/// One admitted, credentialed read hop that never follows a redirect: a 3xx comes back as itself,
+/// for a caller that maps it (the client GitHub plugin reads report `moved` and never fetch it).
+pub async fn send_read_once(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    let url = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .map(|request| request.url().to_string())
+        .context("GitHub read request cannot be built")?;
+    let request_auth = auth.request_scope();
+    let mut selected = if url.ends_with("/graphql") { request_auth.clone() } else { read_auth_for_url(&url, &request_auth) };
+    let fallback = match &selected {
+        GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+        _ => None,
+    };
+    let principal = selected.cache_principal().to_owned();
+    let mut response = send_selected_read(request, &mut selected).await?;
+    let ineligible = request_auth.used_fallback()
+        || fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        || selected.cache_principal() != principal;
+    response.extensions_mut().insert(ReadCacheEligibility(!ineligible));
     Ok(response)
 }
 

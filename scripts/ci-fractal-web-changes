@@ -79,6 +79,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/**/*.stories.tsx",
     # Changelog stories render the app's changelog view and seen state.
     "apps/fractal-web/src/changelog/**",
+    # The dev-bar build and changes stories render the real segment.
+    "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
     "apps/fractal-web/src/embed/**",
     "apps/fractal-web/src/web/AlertDetailsPane.tsx",
     "apps/fractal-web/src/web/AlertFlashBand.tsx",
@@ -181,6 +183,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/monitor/usageFixtures.ts",
     "apps/fractal-web/src/monitor/usageModel.ts",
     "apps/fractal-web/src/monitor/UsageSection.tsx",
+    "apps/fractal-web/src/monitor/usageSectionState.ts",
     "apps/fractal-web/src/monitor/usageSectionView.ts",
     "apps/fractal-web/src/monitor/wire.ts",
     "apps/fractal-web/src/resources/agent/model.ts",

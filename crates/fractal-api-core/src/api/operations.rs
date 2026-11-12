@@ -135,6 +135,7 @@ pub async fn doctor(
         client_now_ms(),
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
+    report.checks.extend(crate::github_webhook::doctor_line(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -233,7 +234,7 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     if bound.is_some() || request.actor.is_some() {
@@ -249,14 +250,14 @@ pub async fn apply_operational_repair(
 /// before mutation, even if it would silently ignore an unknown actor field.
 pub async fn apply_attributed_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     let bound = bound.ok_or_else(|| ApiError::bad(FractalError::new(
         "foreign-agent-actor",
         "attributed repair apply requires an authenticated harness binding",
     )))?;
-    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+    apply_operational_repair_with_actor(state, request, Some(bound.actor().to_owned())).await
 }
 
 async fn apply_operational_repair_with_actor(

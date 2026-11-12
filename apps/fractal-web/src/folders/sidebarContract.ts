@@ -10,6 +10,8 @@ export type SidebarAgent = {
   /** Native children belong to this seat, not the arrangement roster. */
   readonly parent?: string
   readonly childId?: string
+  /** A further current mission of the parent seat: its row opens the mission and stays keyboard reachable. Never moves. */
+  readonly missionId?: string
 }
 export type SidebarFolder = { readonly _tag: 'Folder'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarGroup = { readonly _tag: 'Group'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
@@ -45,6 +47,8 @@ export type AgentFoldersProps = {
   /** Native RAC item name; the host supplies displayed title and observed status. */
   readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
+  /** Activating a mission child row. */
+  readonly onOpenMission?: (mission: string) => void
   readonly renderAgent?: (agent: SidebarAgent, touchDisclosure?: React.ReactNode) => React.ReactNode
   /** Opt-in exact sizes for the supplied agent renderer; folders and status messages remain content-sized. */
   readonly agentRowHeight?: (agent: SidebarAgent) => { readonly compact: number; readonly touch?: number } | undefined

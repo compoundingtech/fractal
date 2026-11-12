@@ -149,6 +149,14 @@ class Node:
                     "XDG_DATA_HOME": str(root / "home/.local/share"),
                     "XDG_RUNTIME_DIR": str(root / "run"), "ST3_ENDPOINT": str(self.endpoint),
                     "ST3_DAEMON_WAIT": "0"}
+        # Managed harness launch reads its wrappers from the runtime profile, so point it at the
+        # stand-ins: the launched omp, claude or codex is this directory's executable of that name.
+        runtime_profile = root / "runtime-profile.json"
+        runtime_profile.write_text(json.dumps({
+            "personas": {"launch": {"generalist": {"harnessBin": str(root / "bin")}}},
+        }))
+        self.env["AGENT_RUNTIME_PROFILE"] = str(runtime_profile)
+        self.env["AGENT_PERSONA"] = "generalist"
         # The daemon rebuilds PATH from a login shell; pin it to the isolated one.
         profile = f"export PATH={shlex.quote(self.path)}\n"
         for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv"):

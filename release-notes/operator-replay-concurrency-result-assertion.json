@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Assert replay completion and classify the operator command in actor, action coverage and route-family inventories",
+  "replay": {"status": "none", "detail": "Replay behavior is unchanged; the concurrency fixture now checks its successful replay response."},
+  "schema": {"status": "none", "detail": "No schema or audit format changes."},
+  "rules": {"status": "none", "detail": "No admission or graph rules change."},
+  "compatibility": {"status": "none", "detail": "The actor snapshot is recovered from the exact CI-generated contract, and the action coverage and legacy-handler scan now include replication replay. No wire changes."},
+  "downtime": {"status": "none", "detail": "No runtime change."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No recovery change."}
+}

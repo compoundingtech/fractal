@@ -247,4 +247,4 @@ pub fn start_push_registration_cleanup(state: &AppState) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

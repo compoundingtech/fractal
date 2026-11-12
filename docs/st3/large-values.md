@@ -94,6 +94,43 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### GitHub event observation fold inventory
+
+`fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
+the repository's subject prefix bounds and selects the canonical first observation per event
+subject. It reads existing subject, fields JSON and accepted-time TEXT values, retaining the
+current inline representation rather than adding storage. The eventual reference representation
+must preserve whole canonical fields and subject identity before listing limits are applied.
+`fractal_github::idle_holds` owns `lv-haa1264e7b371`, replacing `lv-h13f5ed40c752`:
+its queue-exit reader binds the thread's exit-subject bounds and reads one canonical accepted-time
+TEXT value per event subject. The canonical selector also reads claim/batch identity and position
+metadata. Both are dynamic SQL readers, not size proofs. Their maintainers retain the
+`trace-statement-and-value-representation` task; representation changes must not count repeated
+observations as new events or move a queue-exit time.
+
+### Agent prose seek indexes
+
+`fractal_store::store` owns the `claims_timeline_prose_time_index` and
+`local_observations_timeline_prose_index` prose-only partial indexes. They reuse the existing subject,
+incarnation and acceptance-time TEXT values, plus integer arrival/snapshot/time columns.
+They add no payload copies or logical input limits, but their variable keys remain inline:
+indexed seeks bound non-prose-history work, not encoded key size. The existing
+`chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
+numeric accepted-time ordering, local arrival order and snapshot fences during reference
+conversion. The indexes add no new value representation.
+
+### Source map texts and claims
+
+`fractal_store::store::source_maps` owns `lv-hefc9d72adcbd`: a set publication's source map
+stages each newly named file text in `local_blobs` (hash TEXT, bytes BLOB, size INTEGER), the
+same staged representation as `put_blob`, and the `source.mapped` claim that names it promotes
+it into `blobs` in the same transaction. The producer caps a file at 1 MiB and a map at 32 MiB;
+those limits are the producer's own and are not a general bound. It also owns
+`lv-hcd0064dd968e`, the reader that selects the canonical first `source.mapped` claim body of
+one `subject@revision`. Both keep the existing inline blob and claim-body representations; the
+eventual chunked or referenced blob format must keep sha256 identity and claim-referenced
+replication and retention.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,
@@ -201,6 +238,8 @@ These accept existing inline representations, not a value-size or cost bound.
 | `lv-h82624af80f95` | `fractal_store::store` schema adds request, answer, reassignment, reviewer-routing and exact episode indexes. | Existing variable inline keys enable indexed episode seeks but are not bounded-size proof; reference/chunk variable columns and index expressions without changing fold semantics. |
 
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
+
+The same flow takes a `source_forced` flag: a mission retire that its owning set's source gate admitted as forced skips only the plain `set-managed-subject` refusal, and records its source debt in the same transaction. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
 
 ### Agent answer atomicity inventory review
 
@@ -532,6 +571,26 @@ and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
 
+## Assistant principal admission index review
+
+`fractal_store::store` owns schema site `lv-hb9696ca837f7`, replacing
+`lv-h22c8c670811c`. The added principal admission index retains claim-kind TEXT
+and the effective principal JSON field inline; absent principals use the fixed
+`assistant/chatgpt` key. The composite seek changes neither claim bodies nor
+admission semantics. These keys remain variable-size, and SQLite maintains them
+on insertion and deletion; indexed lookup is not a byte-size or startup-cost
+proof. The producer maintainer retains `chunk-or-reference-variable-columns`
+responsibility while preserving effective-principal matching and claim authority.
+
+`fractal_api_core::api::client_v0::external_grants` owns the conservative
+read-only sink `lv-h99f1a302c7b1`. Its prepared admission query binds fixed claim
+kinds, an assistant principal and an optional expiry cutoff, then returns claim
+IDs after revocation and latest-policy filtering. It adds no writer or body copy;
+principal, subject and claim-ID TEXT keys remain variable-size. The producer
+maintainer retains `trace-statement-and-value-representation` responsibility for
+these bindings and returned identifiers; fewer candidates and indexed seeks do
+not establish encoded-size or execution-cost bounds.
+
 ## Incremental observed credit heads
 
 `fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
@@ -580,3 +639,21 @@ commit. Preserve these scenarios when the representation changes.
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+### GitHub plugin read fixture includes (PR #6396)
+
+The `fractal_api_client_v0::api::client_v0::github_plugin_reads::tests` maintainer
+owns `lv-ha3a3bb1e957c` and `lv-h8fa94b508404`, reviewed for
+[PR #6396](https://github.com/compoundingtech/fractal/pull/6396).
+The former includes the shared GitHub wire JSON fixtures; the latter includes
+the capabilities JSON used to negotiate the real client's response ceiling.
+They contain test-only paths, item bodies, patches and capability metadata,
+not SQL statements, database columns or index keys, and are parsed in memory.
+Keeping exact fixture bytes inline preserves the cross-client wire assertions;
+neither site writes those bytes to SQLite or changes a production representation.
+The lexical catalog conservatively inventories these includes. The owning module
+retains `trace-statement-and-value-representation`: trace any future fixture or
+consumer change before adding SQL execution or persistence, and review the
+resulting value/column representation rather than treating these markers as a
+permanent storage exemption.
+

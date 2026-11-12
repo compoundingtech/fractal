@@ -598,6 +598,7 @@
       "retire-incarnation-mismatch",
       "invalid-custody-successor",
       "custody-pending",
+      "set-managed-subject",
       "attention-migrated",
       "arrangement-exists",
       "arrangement-folder-exists",
@@ -640,6 +641,7 @@
       "agent-roster-not-ready",
       "agent-roster-cut-not-ready",
       "message-selectors-not-ready",
+      "database-busy",
       "rate-limited",
       "runtime-not-local",
       "runtime-authority-indeterminate",
@@ -736,6 +738,10 @@
     "OrderedMembership": {"type": "object", "additionalProperties": false, "required": ["id", "container", "member", "position", "revision"], "properties": {"id": {"$ref": "#/$defs/ArrangementSubject"}, "container": {"$ref": "#/$defs/ArrangementId"}, "member": {"$ref": "#/$defs/ArrangementSubject"}, "position": {"$ref": "#/$defs/OrderedMembershipPosition"}, "revision": {"$ref": "#/$defs/Revision"}}},
     "OrderedMembershipState": {"description": "Always-observable state of a whole membership container, not only the held window. `live_count` counts live members; `changed_index` is an opaque host-local monotonic invalidation frontier scoped by `snapshot.host_id`: a larger value on the same host means the container may have changed. It is not a canonical revision, a count of global history, or comparable across hosts.", "type": "object", "additionalProperties": false, "required": ["container", "live_count", "changed_index"], "properties": {"container": {"$ref": "#/$defs/ArrangementId"}, "live_count": {"type": "integer", "minimum": 0}, "changed_index": {"type": "integer", "minimum": 0}}},
     "OrderedMembershipPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "ordered-memberships"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/OrderedMembership"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
+    "ReadPositionConversation": {"type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$", "maxLength": 512, "description": "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes."},
+    "ReadPosition": {"description": "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim.", "allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "conversation", "at"], "properties": {"kind": {"const": "read-position"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp"}}}]},
+    "ReadPositionPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "read-positions"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/ReadPosition"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
+    "ReadPositionAdvanceParameters": {"type": "object", "additionalProperties": false, "required": ["owner", "conversation", "at"], "properties": {"owner": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person."}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp", "description": "The newest prose time seen; an `at` not beyond the stored position completes without a claim."}}},
     "Id": { "x-st-ref": "*", "description": "Subject reference `family/rest`.", "type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$" },
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
@@ -919,9 +925,11 @@
             { "$ref": "#/$defs/AgentQueue" },
             { "$ref": "#/$defs/AgentRelatedRuns" },
             { "$ref": "#/$defs/UsagePeriod" },
+            { "$ref": "#/$defs/UsageHubQuota" },
             { "$ref": "#/$defs/MailBacklog" },
             { "$ref": "#/$defs/SloList" },
-            { "$ref": "#/$defs/SloHistory" }
+            { "$ref": "#/$defs/SloHistory" },
+            { "$ref": "#/$defs/GithubPluginRead" }
           ]
         }
       }
@@ -1201,7 +1209,7 @@
             "to": { "$ref": "#/$defs/Id" },
             "title": { "type": ["string", "null"] },
             "content": { "type": "string" },
-            "state": { "enum": ["sent", "delivered", "read", "closed"] },
+            "state": { "enum": ["sent", "delivered", "read", "closed", "expired"] },
             "sent_at": { "$ref": "#/$defs/Timestamp" },
             "session_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
             "in_reply_to": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
@@ -1562,6 +1570,14 @@
         "samples": { "type": "integer", "minimum": 0 },
         "steps": { "type": "array", "items": { "type": ["number", "null"], "minimum": 0, "maximum": 100 } }
       }
+    },
+    "UsageHubQuota": {
+      "description": "The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged.",
+      "oneOf": [
+        {"type": "object", "required": ["state"], "properties": {"state": {"const": "disabled"}}},
+        {"type": "object", "required": ["state", "refresh_seconds", "reason"], "properties": {"state": {"const": "unavailable"}, "refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "reason": {"enum": ["transport", "invalid_snapshot"]}}},
+        {"type": "object", "required": ["state", "refresh_seconds", "snapshot"], "properties": {"state": {"const": "available"}, "refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "snapshot": {"type": "object", "required": ["schemaVersion", "generatedAt", "accounts"], "properties": {"schemaVersion": {"const": 3}, "generatedAt": {"type": "string", "format": "date-time"}, "accounts": {"type": "array"}}}}}
+      ]
     },
     "UsagePeriod": {
       "type": "object", "additionalProperties": false,
@@ -2036,6 +2052,7 @@
         "loop_round": { "type": ["integer", "null"], "minimum": 0, "description": "Current round of this step's loop, enriched on mission detail reads." },
         "loop_max_rounds": { "type": ["integer", "null"], "minimum": 0 },
         "loop_reason": { "type": ["string", "null"] },
+        "program": { "$ref": "#/$defs/MissionStepProgram", "description": "Mission detail only, on the runs it enriches: a program step's current attempt journal. Absent for other steps and on older daemons." },
         "next_wake_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Observed not-before time: earliest work eligibility, not a promise of wake dispatch." },
         "wake_reason": { "type": ["string", "null"], "description": "The deferral's blocked reason, or the observed wake failure when no deferral reason exists." },
         "wake": { "oneOf": [{ "$ref": "#/$defs/MissionWake" }, { "type": "null" }] },
@@ -2046,6 +2063,31 @@
         "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
         "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
         "eta": { "$ref": "#/$defs/MissionStepEta" }
+      }
+    },
+    "MissionStepProgram": {
+      "type": "object",
+      "required": ["entries", "truncated", "stalled_after_ms"],
+      "properties": {
+        "open_key": { "type": ["string", "null"], "description": "The innermost open key: the most recently started key without a result." },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/MissionStepProgramEntry" }, "description": "Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read." },
+        "truncated": { "type": "boolean", "description": "Older journal entries exist beyond the ones read." },
+        "last_entry_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "stalled_after_ms": { "type": "integer", "minimum": 1, "description": "How long the journal may go without a new entry before the step raises `program/stalled`." },
+        "fault": { "oneOf": [{ "type": "object", "required": ["scope", "reason"], "properties": { "scope": { "type": "string" }, "reason": { "type": "string" } } }, { "type": "null" }], "description": "The open `program/host` or `program/stalled` fault on the step." }
+      }
+    },
+    "MissionStepProgramEntry": {
+      "type": "object",
+      "required": ["key", "status"],
+      "properties": {
+        "key": { "type": "string" },
+        "status": { "anyOf": [{ "enum": ["started", "completed", "failed"] }, { "type": "string" }] },
+        "started_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "ended_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "ms": { "type": ["integer", "null"], "minimum": 0, "description": "The effect's duration." },
+        "error": { "type": ["string", "null"], "description": "The typed failure with its `_tag` and fields, cut to 300 characters." },
+        "child": { "type": ["string", "null"], "description": "The child mission run or ask subject the key waits on." }
       }
     },
     "MissionStepAttempt": {
@@ -2337,7 +2379,18 @@
           "required": ["kind", "mission_run_id", "generation_id", "definition_id", "path", "state", "attempt", "readiness_epoch", "goals", "constraints"],
           "properties": {
             "kind": { "const": "work" },
-            "gate_kind": { "enum": ["watch", "predicate", "command", "llm", "human", "mixed", "run", null] },
+            "gate_kind": { "enum": [
+              "watch",
+              "predicate",
+              "command",
+              "llm",
+              "human",
+              "mixed",
+              "run",
+              "program",
+              null
+            ] },
+            "program": { "oneOf": [{ "$ref": "#/$defs/WorkProgram" }, { "type": "null" }], "description": "A program step's innermost open journal key and journal timing; null for other work." },
             "mission_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }], "description": "The mission this work's run belongs to." },
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "generation_id": { "$ref": "#/$defs/Id" },
@@ -2369,6 +2422,17 @@
           }
         }
       ]
+    },
+    "WorkProgram": {
+      "type": "object",
+      "required": ["stalled_after_ms"],
+      "properties": {
+        "open_key": { "type": ["string", "null"], "description": "The most recently started journal key without a result: the innermost open key." },
+        "open_since_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
+        "child": { "type": ["string", "null"], "description": "The child mission run or ask subject the open key waits on." },
+        "last_entry_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
+        "stalled_after_ms": { "type": "integer", "minimum": 1, "x-st-codec": "duration-ms", "description": "How long the journal may go without a new entry before the step has made no progress." }
+      }
     },
     "AgentWorkspace": {
       "type": "object",
@@ -2411,6 +2475,7 @@
             "activity": { "type": ["string", "null"], "description": "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." },
             "host_id": { "oneOf": [{ "$ref": "#/$defs/HostId" }, { "type": "null" }] },
             "last_activity_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+            "last_prose_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When the agent last said something: assistant message or content in its current incarnation's timeline, or mail it sent. Tool calls and words to the agent do not count. Clients compare it with a reader's position for \"new since you last looked\". Absent on older daemons." },
             "mail_custody": { "$ref": "#/$defs/AgentMailCustody", "description": "Pending mail held for the named successor; omitted without custody." },
             "silent_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
@@ -3466,6 +3531,7 @@
             "harness.answer",
             "arrangement.edit",
             "arrangement.membership.edit",
+            "read-position.advance",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -3672,6 +3738,7 @@
         {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256, "description": "At most 256 UTF-8 bytes; runtime enforces byte length before settlement."}]}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
+        {"properties": {"type": {"const": "read-position.advance"}, "parameters": {"$ref": "#/$defs/ReadPositionAdvanceParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -3927,7 +3994,8 @@
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
-        "membership_revision": { "$ref": "#/$defs/Revision" }
+        "membership_revision": { "$ref": "#/$defs/Revision" },
+        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
@@ -4579,6 +4647,7 @@
       "glasses",
       "arrangements",
       "ordered-memberships",
+      "read-positions",
       "summary",
       "clients",
       "usage",
@@ -4595,6 +4664,7 @@
       "work",
       "glasses",
       "arrangements",
+      "read-positions",
       "summary",
       "clients",
       "usage",
@@ -4710,6 +4780,17 @@
             "kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128},
             "collection": {"const": "ordered-memberships"},
             "person": {"$ref": "#/$defs/ArrangementPerson"}, "subject": {"$ref": "#/$defs/ArrangementId"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "id", "collection", "person"],
+          "properties": {
+            "kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "collection": {"const": "read-positions"},
+            "trace": {"$ref": "#/$defs/SubscribeTraceContext"},
+            "person": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person; requires the read-positions capability."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200}
           }
         },
@@ -4970,6 +5051,32 @@
           }
         }
       ]
-    }
+    },
+    "GithubUser": {"description": "A GitHub account, by login and profile page; avatars are never fetched.", "type": "object", "additionalProperties": false, "required": ["login", "url"], "properties": {"login": {"type": "string"}, "url": {"type": "string"}}},
+    "GithubLabel": {"type": "object", "additionalProperties": false, "required": ["name", "color"], "properties": {"name": {"type": "string"}, "color": {"type": "string"}}},
+    "GithubItemLink": {"description": "A pull request or issue another item links to, such as a closing issue.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "title", "state"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "title": {"type": "string"}, "state": {"type": "string"}}},
+    "GithubPullRequest": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "url", "title", "body", "state", "draft", "merge_state", "review_decision", "author", "base_ref", "head_ref", "head_sha", "additions", "deletions", "changed_files", "commits", "comments", "created_at", "updated_at", "merged_at", "closed_at", "labels", "requested_reviewers", "closing_issues"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "state": {"enum": ["open", "closed", "merged"]}, "draft": {"type": "boolean"}, "merge_state": {"oneOf": [{"enum": ["clean", "dirty", "blocked", "behind", "unstable", "has_hooks", "draft", "unknown"]}, {"type": "null"}]}, "review_decision": {"oneOf": [{"enum": ["approved", "changes_requested", "review_required"]}, {"type": "null"}]}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "base_ref": {"type": "string"}, "head_ref": {"type": "string"}, "head_sha": {"type": "string"}, "additions": {"type": "integer", "minimum": 0}, "deletions": {"type": "integer", "minimum": 0}, "changed_files": {"type": "integer", "minimum": 0}, "commits": {"type": "integer", "minimum": 0}, "comments": {"type": "integer", "minimum": 0}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "merged_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "closed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "labels": {"type": "array", "items": {"$ref": "#/$defs/GithubLabel"}}, "requested_reviewers": {"type": "array", "items": {"type": "string"}}, "closing_issues": {"type": "array", "items": {"$ref": "#/$defs/GithubItemLink"}}}},
+    "GithubIssue": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "url", "title", "body", "state", "state_reason", "author", "assignees", "labels", "milestone", "comments", "created_at", "updated_at", "closed_at", "is_pull_request"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "state": {"enum": ["open", "closed"]}, "state_reason": {"oneOf": [{"enum": ["completed", "not_planned", "reopened"]}, {"type": "null"}]}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "assignees": {"type": "array", "items": {"type": "string"}}, "labels": {"type": "array", "items": {"$ref": "#/$defs/GithubLabel"}}, "milestone": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "comments": {"type": "integer", "minimum": 0}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "closed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "is_pull_request": {"type": "boolean"}}},
+    "GithubReaction": {"type": "object", "additionalProperties": false, "required": ["content", "count"], "properties": {"content": {"type": "string"}, "count": {"type": "integer", "minimum": 0}}},
+    "GithubComment": {"description": "An issue or pull request comment; number is the item it is on.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "id", "number", "url", "author", "author_association", "body", "created_at", "updated_at", "reactions"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "id": {"type": "integer", "minimum": 0}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "author_association": {"type": "string"}, "body": {"type": "string"}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "reactions": {"type": "array", "items": {"$ref": "#/$defs/GithubReaction"}}}},
+    "GithubReview": {"type": "object", "additionalProperties": false, "required": ["id", "author", "state", "body", "submitted_at", "url"], "properties": {"id": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "state": {"enum": ["approved", "changes_requested", "commented", "dismissed", "pending"]}, "body": {"type": "string"}, "submitted_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}}},
+    "GithubThreadComment": {"type": "object", "additionalProperties": false, "required": ["id", "author", "body", "created_at", "url"], "properties": {"id": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "body": {"type": "string"}, "created_at": {"type": "string"}, "url": {"type": "string"}}},
+    "GithubReviewThread": {"type": "object", "additionalProperties": false, "required": ["id", "path", "line", "resolved", "outdated", "comments"], "properties": {"id": {"type": "string"}, "path": {"type": "string"}, "line": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}, "resolved": {"type": "boolean"}, "outdated": {"type": "boolean"}, "comments": {"type": "array", "items": {"$ref": "#/$defs/GithubThreadComment"}}}},
+    "GithubConversation": {"description": "Latest opinionated reviews, review threads and issue comments, at most 100 of each; truncated when GitHub has more.", "type": "object", "additionalProperties": false, "required": ["reviews", "review_threads", "comments", "truncated"], "properties": {"reviews": {"type": "array", "items": {"$ref": "#/$defs/GithubReview"}}, "review_threads": {"type": "array", "items": {"$ref": "#/$defs/GithubReviewThread"}}, "comments": {"type": "array", "items": {"$ref": "#/$defs/GithubComment"}}, "truncated": {"type": "boolean"}}},
+    "GithubCheckRun": {"type": "object", "additionalProperties": false, "required": ["name", "workflow", "status", "conclusion", "started_at", "completed_at", "url", "summary"], "properties": {"name": {"type": "string"}, "workflow": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}, "summary": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "GithubChecks": {"description": "Check runs and statuses on a pull request's head, at most 100.", "type": "object", "additionalProperties": false, "required": ["head_sha", "runs", "truncated"], "properties": {"head_sha": {"type": "string"}, "runs": {"type": "array", "items": {"$ref": "#/$defs/GithubCheckRun"}}, "truncated": {"type": "boolean"}}},
+    "GithubFile": {"type": "object", "additionalProperties": false, "required": ["path", "previous_path", "status", "additions", "deletions", "patch"], "properties": {"path": {"type": "string"}, "previous_path": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "status": {"enum": ["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]}, "additions": {"type": "integer", "minimum": 0}, "deletions": {"type": "integer", "minimum": 0}, "patch": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "GithubFiles": {"description": "A pull request's files, at most 3,000 and a bounded amount of patch text; truncated past either.", "type": "object", "additionalProperties": false, "required": ["total", "files", "truncated"], "properties": {"total": {"type": "integer", "minimum": 0}, "files": {"type": "array", "items": {"$ref": "#/$defs/GithubFile"}}, "truncated": {"type": "boolean"}}},
+    "GithubJob": {"type": "object", "additionalProperties": false, "required": ["name", "status", "conclusion", "started_at", "completed_at", "url"], "properties": {"name": {"type": "string"}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}}},
+    "GithubRun": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "id", "name", "event", "status", "conclusion", "head_branch", "head_sha", "url", "run_attempt", "started_at", "completed_at", "pull_requests", "jobs"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "id": {"type": "integer", "minimum": 0}, "name": {"type": "string"}, "event": {"type": "string"}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "head_branch": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "head_sha": {"type": "string"}, "url": {"type": "string"}, "run_attempt": {"type": "integer", "minimum": 0}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "pull_requests": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "jobs": {"type": "array", "items": {"$ref": "#/$defs/GithubJob"}}}},
+    "GithubMovedTo": {"description": "Where a 301 from GitHub points, parsed back to a typed item; never followed.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "number"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}},
+    "GithubPullRequestRead": {"description": "One GitHub plugin read of a GithubPullRequest: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubPullRequest"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubIssueRead": {"description": "One GitHub plugin read of a GithubIssue: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubIssue"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubCommentRead": {"description": "One GitHub plugin read of a GithubComment: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubComment"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubConversationRead": {"description": "One GitHub plugin read of a GithubConversation: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubConversation"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubChecksRead": {"description": "One GitHub plugin read of a GithubChecks: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubChecks"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubFilesRead": {"description": "One GitHub plugin read of a GithubFiles: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubFiles"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubRunRead": {"description": "One GitHub plugin read of a GithubRun: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubRun"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubPluginRead": {"description": "Any GitHub plugin read; the non-found states are shared, so the reads are told apart by route, not shape.", "anyOf": [{"$ref": "#/$defs/GithubPullRequestRead"}, {"$ref": "#/$defs/GithubIssueRead"}, {"$ref": "#/$defs/GithubCommentRead"}, {"$ref": "#/$defs/GithubConversationRead"}, {"$ref": "#/$defs/GithubChecksRead"}, {"$ref": "#/$defs/GithubFilesRead"}, {"$ref": "#/$defs/GithubRunRead"}]}
   }
 }

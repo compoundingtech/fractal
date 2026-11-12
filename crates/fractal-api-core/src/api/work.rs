@@ -41,11 +41,23 @@ fn bind_work_incarnation(
     Ok(current)
 }
 
+/// Only the daemon's program engine asks, or cancels an ask, as the program asker.
+fn refuse_program_asker(actor: &str) -> Result<(), ApiError> {
+    if actor == crate::model::PROGRAM_ASKER {
+        return Err(ApiError::bad(FractalError::new(
+            "reserved-actor",
+            format!("`{actor}` is the daemon's program engine; a request cannot act as it"),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn ask_person(
     State(state): State<AppState>,
     bound: Option<Extension<BoundAgent>>,
     Json(mut request): Json<PersonAskRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    refuse_program_asker(&request.actor)?;
     let expected = bind_work_incarnation(
         &state,
         bound.as_ref(),
@@ -114,6 +126,7 @@ pub async fn cancel_person_ask(
     State(state): State<AppState>,
     Json(request): Json<PersonStepResponse>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    refuse_program_asker(&request.actor)?;
     let result = state
         .store
         .finish_person_step(&request, true)
@@ -291,7 +304,7 @@ pub async fn wake_work(
     }
     let step = state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let agent = step.assigned_to.as_deref().ok_or_else(|| {
@@ -410,7 +423,7 @@ pub async fn retry_work(
     };
     state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let store = state.store.clone();
@@ -438,7 +451,7 @@ pub async fn publish_work_mission(
     )?;
     let step = state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let actor = if request.actor.contains('/') {
@@ -679,7 +692,60 @@ pub async fn post_work_action(
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
+    if request.actor.as_deref().is_some_and(|actor| actor.starts_with("exec/")) {
+        return exec_clock_response(state, action, subject, request).await;
+    }
     work_action_response_viewing(state, action, subject, request, None, None, lease_view).await
+}
+
+/// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch
+/// is its fence, as an incarnation is a seat's: the request names the start operation its runtime
+/// put in its environment (`ST3_START_OPERATION`) or its generation, and is refused unless that is
+/// the exec's live generation on this host. The fence refuses earlier launches, other attempts and
+/// other hosts; like a seat's incarnation it is not a secret that authenticates the caller.
+async fn exec_clock_response(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+) -> Result<Json<StepRunView>, ApiError> {
+    let Some(launch) = request.incarnation.clone().filter(|launch| !launch.is_empty()) else {
+        return Err(ApiError::bad(FractalError::new(
+            "missing-work-incarnation",
+            "an exec's work action names its launch: the ST3_START_OPERATION its runtime gave it",
+        )));
+    };
+    let store = state.store.clone();
+    let runtime = fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+    let node = state.node.clone();
+    let response = blocking_action(move || {
+        let read = |error: anyhow::Error| FractalError::new("store-read-failed", format!("{error:#}"));
+        let exec = request.actor.as_deref().unwrap_or_default();
+        // An exact retry answers from its record, even after the exec has exited.
+        if store.cached_idempotency_response::<StepRunView>(&request.idempotency_key).map_err(read)?.is_none() {
+            let generation = store
+                .desired_subject_with_writer(exec)
+                .map_err(read)?
+                .and_then(|(desired, _)| desired.member)
+                .filter(|member| !member.terminal && member.host == node)
+                .map(|member| runtime.observe(&member.runtime_id))
+                .transpose()
+                .map_err(read)?
+                .flatten();
+            let live = matches!(&generation, Some(fractal_runtime::ExecObservation::Running(generation))
+                if generation.start_operation.as_deref() == Some(launch.as_str()) || generation.generation_id == launch);
+            if !live {
+                return Err(FractalError::new(
+                    "inactive-work-incarnation",
+                    format!("`{launch}` is not the live launch of `{exec}` on this host"),
+                ));
+            }
+        }
+        store.work_action_answering(&subject, &action, &request, None, None, true)
+    })
+    .await?;
+    signal_changed(&state);
+    Ok(Json(response))
 }
 
 /// Add time to the execution budget of the step attempt this seat holds.

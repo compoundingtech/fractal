@@ -39,6 +39,132 @@ fractal terminals peek agent/garden/worker
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
+## Planned graph replay
+
+Run `fractal replication replay` locally for the claim count, last measured replay
+duration (if known), and writer-lock warning. It is an estimate only: no replay runs
+without `fractal replication replay --confirm`. Schedule a planned window because the
+daemon holds its writer for the entire replay, delaying other writes. The daemon logs
+start and completion and keeps the operator, start time, duration and result in
+`replication-replay-audit.jsonl` in its state directory. A concurrent replay is refused,
+not queued. Do not restart the daemon to “fix” a replay; let the running replay finish.
+The estimate names any blocked owned sets. Canonical replay removes their retained
+physical `desired` and `mission_definitions` rows and cannot rebuild them while the
+sets remain blocked; authoritative claims and set receipts are not deleted. Resolve
+the blockers first if those retained rows must remain available. `--confirm` prints
+the same warning before starting; it does not add another confirmation flag.
+
+## Writer queue waits
+
+When an interactive request is slow during replication, distinguish time queued
+for the store writer from time holding it. Request-parented `st.db.writer` spans
+report `writer_wait_ms`, `writer_hold_ms`, the `queue` class (`foreground` or
+`background`), and the static `code.file.path`/`code.line.number` caller site.
+These children require a sampled trace context, not `ST3_STORAGE_PHASE_SPANS`.
+Caller sites are trace attributes, not metric dimensions.
+
+Foreground batched writes and foreground loans retain arrival order. Background
+loans yield to pending foreground work, with one background turn after at most
+eight foreground turns to prevent starvation. This bounds dispatch turns, not
+wall time: an active envelope, transaction commit, and its finalization are not
+preemptible. A long background hold can therefore still delay an interactive
+request even when scheduling priority is correct.
+
+Replication verdict pages use background loans and revalidate trust roots after
+each acquisition, including the transaction that activates the authority fold.
+
+Compare the caller site and hold stages before attributing a slow request to
+queue priority or changing admission chunk sizes.
+
+## Raw terminal setup stalls
+
+Raw terminal setup logs bounded DEBUG phase events, not terminal contents or
+capabilities. The API handler records its start timestamp (`started_at_unix_ms`)
+and monotonic `elapsed_ms` for `auth`, `lookup`, `capability`, `owner-open`, and
+`upgrade`; completed lookup, capability, and open phases also record
+`duration_ms`. Here `auth` is the handler's scope/person check, after transport
+authentication. For remote ATTACH, the owner peer separately records
+`peer-auth`, `owner-attachment`, `owner-open`, and `peer-upgrade`. PEEK uses its
+existing owner lease-admission path instead. A phase start without completion
+locates the unfinished or rejected operation; it does not prove a timeout cause.
+After upgrade, `first-frame` records the first successfully sent PTY byte chunk,
+with elapsed time measured from the splice's start and the terminal/incarnation
+in its `raw_terminal_stream` span. There are no per-frame debug events.
+
+The TUI records an attempt UUID and target agent on every phase event. Its
+attempt-scoped lifecycle records a terminal outcome with the phase reached and
+elapsed time even on outer deadline expiry, selection changes, or drop; failures
+are INFO-level outcomes rather than completion-only DEBUG messages. Capability
+issuance and combined client connect/upgrade retain their 8-second budgets.
+Only a capability-issuance timeout retries automatically, at most twice after
+1 and 2 seconds, keeping the selected incarnation. Each cancelled issuance
+future is dropped before retry; an unused capability opens no PTY and expires
+after 60 seconds. Upgrade timeouts name that phase and offer Ctrl-R, without an
+automatic retry. The overall setup deadline and single-flight guard still apply.
+
+Without any opt-in variable, every non-successful terminal attempt also emits
+one `tracing::info!` event and is retained in
+`$XDG_CACHE_HOME/st3/stui/attach.log` (otherwise
+`~/.cache/st3/stui/attach.log`), beside `slow.log` and `exits.log`. This uses the
+same cache-log permissions and 100 KB reset bound as those existing logs.
+It records only attempt ID, target agent, phase reached, outcome, and timing;
+it requires no tracing subscriber or OTEL exporter. Start and success events
+remain exclusive to the opt-in sink described below.
+
+For a private, device-local reproduction log, launch the TUI with an absolute
+JSONL destination:
+
+```sh
+FRACTAL_TUI_ATTACH_TRACE_FILE="$HOME/raw-attach.jsonl" fractal ui --client
+```
+
+This file is the actual client diagnostic sink (`service="fractal-tui"`), not an
+OTEL export or daemon journal. It contains identifiers and timing, not terminal
+contents, credentials, or capabilities; treat it as private. Open the target pane
+without typing provider input. `first-frame-decoded` means the client decoded a
+PTY protocol frame; `first-screen-rendered` follows a native screen draw and
+successful synchronized terminal-frame completion. Neither is inferred from
+server first-byte timing.
+
+Use a separate file per TUI process. New files have mode 0600; an existing file
+must be a regular, single-link, non-symlink file owned by the current user with
+mode 0600, or logging stays disabled. Appends stop at 4 MiB without truncation.
+The sink is best-effort on I/O errors, size exhaustion, or lock contention; it
+never waits for another process's log lock. Records include `at_unix_ms` for
+server correlation and monotonic elapsed time for local phase duration.
+
+Server phase DEBUG events use the daemon's stderr sink. Under a user service,
+read its journal (for the standard deployment,
+`journalctl --user -u smalltalk.service`). Enable the relevant modules in the
+managed daemon's `RUST_LOG`, for example
+`info,fractal_api_client_v0::api::client_v0::raw_terminal=debug,fractal_api_core::api::client_v0::raw_terminal=debug,fractal_peer::peer=debug`.
+Changing a running service's environment requires its normal authorized
+deployment; the TUI does not change daemon logging or restart it. Existing OTEL
+request spans use `service.name="st-daemon"`; DEBUG stderr events are not exported
+by its INFO-and-above OTEL log filter. Correlate server terminal/incarnation and
+request times separately from the client attempt UUID.
+
+Endpoint resolution, Unix connect, and WebSocket upgrade are private generated
+client boundaries: they are **not separable without codegen** from this caller.
+For remote connections the generated connector also combines DNS/TCP/TLS and
+upgrade. Separate client-side connect/upgrade and first-binary-arrival timing
+must be added at the next client regeneration; server `first-frame` is a send
+measurement, not proof that the TUI received or rendered a screen.
+
+The HTTP upgrade includes server authority checks, runtime lookup, and opening
+the owner's transport. A client-side upgrade timeout cannot identify which of
+these operations stalled. Runtime lookup and local PTY opening retain their
+incarnation fences: the local socket must prove the selected daemon PID and
+registry creation time before any PTY frame is sent.
+
+Dropping an in-progress HTTP upgrade closes the client's connection; it is not a
+remote cancellation acknowledgment. The remote request can still be opening its
+owner transport. Failed upgrades drop their captured transports, and established
+bridges propagate connector closure, but there is no acknowledgment that all
+remote cleanup completed before another attempt. Do not automatically retry an
+upgrade timeout on the assumption that dropping its future completed remote
+cleanup. Keep provider input out of setup diagnostics.
+
 ## Linux PID namespaces and procfs
 
 The runtime requires `/proc` to describe its own PID namespace. Entering a child
@@ -86,6 +212,33 @@ fractal usage --hours 24 --by mission
 ```
 
 These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
+
+## A conversation does not follow new entries
+
+The footer's updated time means a frame arrived, not that its newest entry was
+displayed. To locate a stale conversation inside the TUI, start a new process:
+
+```sh
+umask 077
+FRACTAL_TUI_FRESHNESS=1 FRACTAL_TUI_FRESHNESS_LOG="$HOME/tui-freshness.log" fractal tui
+```
+
+This opt-in DEBUG trace writes only the `fractal_tui::freshness` target to the
+append-only log, not the terminal. No `RUST_LOG` setting is required. Unset the
+variables to disable it. Protect the file: identifiers, endpoints and timestamps
+are metadata, not anonymous data. No message bodies, headers, tool arguments,
+rendered text, or authentication credentials are recorded.
+
+Compare `frame` (subscription, target, session, replacement flag, count and maximum
+timestamp/sequence/id), `held` (merged session, newest entry and count), `adapted`
+(last displayed entry and count), and `document` (last rendered entry and line
+count). Filtering and folded tool runs can intentionally change the last ID.
+`startup` and `connected` identify the binary build and endpoint; `update_before`,
+`presented`, `end_before` and `end_after` record pane keys, focused/main pane,
+follow state, top, total and height. `document` runs during drawing, so use
+`presented` for the complete frame's pane binding. End's `end_after` is before
+redrawing; the next `document`/`presented` pair shows the resulting viewport.
+The first stage that stops advancing identifies where to investigate next.
 
 ## Recover the cause
 
