@@ -470,6 +470,18 @@ pub async fn get_mission_run(
     Ok(Json(found))
 }
 
+pub async fn retry_mission_run(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+    Json(request): Json<crate::model::MissionRunRetryRequest>,
+) -> Result<Json<MissionRunView>, ApiError> {
+    let store = state.store.clone();
+    let mut retried = blocking_action(move || store.retry_mission_run(&run, &request)).await?;
+    present_mission_run(&state.store, &mut retried).map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(retried))
+}
+
 pub async fn revise_mission_run(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,

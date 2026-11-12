@@ -1792,6 +1792,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "mission-run.retry-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
             "mission-run.state",
             &["mission-run"],
             WritePolicy::SystemOnly,
@@ -3404,6 +3413,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("stalled_after_ms", integer()),
             ("report_stalls", boolean()),
             ("report_completed", boolean()),
+        ],
+        "mission-run.retry-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("retry", required_reference_to(&["mission-run"])),
+            ("reason", string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -5088,6 +5102,7 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("mission-run.retry-linked").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }

@@ -5222,6 +5222,36 @@ fn mission_start_explicit_paths_and_default_ids_are_preserved() {
 }
 
 #[test]
+fn mission_retry_defaults_to_latest_and_requires_an_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "demo/failed", "--as", "person/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "demo/failed");
+    assert_eq!(args.actor, "person/operator");
+    assert!(!args.same_revision);
+    assert!(args.reason.is_none());
+    assert!(Cli::try_parse_from(["fractal", "missions", "retry", "demo/failed"]).is_err());
+}
+
+#[test]
+fn mission_retry_accepts_same_revision_reason_and_agent_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "mission-run/demo/failed",
+        "--same-revision", "--reason", "the worker is available", "--as", "agent/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "mission-run/demo/failed");
+    assert_eq!(args.actor, "agent/operator");
+    assert!(args.same_revision);
+    assert_eq!(args.reason.as_deref(), Some("the worker is available"));
+}
+
+#[test]
 fn mission_start_accepts_an_explicit_run_id() {
     let cli = Cli::try_parse_from([
         "st3",
@@ -8845,6 +8875,54 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn mission_retry_command_creates_distinct_runs_through_the_api() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("single").unwrap());
+    let (client, server) = serve_test_store(store.clone(), root.path(), "single").await;
+    publish_text(
+        &client,
+        "version 2\nmission \"arrival\" state=\"ready\" {\n goal \"Retry the failed run.\"\n concurrent-runs max=2\n step \"work\" { }\n}\n".into(),
+        "retry command fixture".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "arrival".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/test".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "cli-retry-source".into(),
+    }).unwrap();
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    for same_revision in [false, true] {
+        run_mission_view(
+            &client,
+            &Endpoint::Unix(root.path().join("st3.sock")),
+            MissionViewCommand::Retry(MissionRunRetryArgs {
+                run: source.id.clone(),
+                actor: "person/test".into(),
+                same_revision,
+                reason: Some("the worker is available".into()),
+            }),
+            true,
+        ).await.unwrap();
+    }
+    let source_after = store.mission_run(&source.subject).unwrap().unwrap();
+    assert_eq!(source_after.status, "failed");
+    assert_eq!(source_after.generation, source.generation);
+    assert_eq!(source_after.retried_by.len(), 2, "each invocation has a unique idempotency key");
+    assert_ne!(source_after.retried_by[0], source_after.retried_by[1]);
+    for subject in &source_after.retried_by {
+        let retried = store.mission_run(subject).unwrap().unwrap();
+        assert_eq!(retried.retry_of.as_deref(), Some(source.subject.as_str()));
+        assert_eq!(retried.revision, source.revision);
+        assert_eq!(retried.workspace, source.workspace);
+    }
+    server.abort();
 }
 
 #[tokio::test]
