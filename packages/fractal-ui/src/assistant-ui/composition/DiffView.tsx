@@ -71,17 +71,43 @@ class PierreBoundary extends React.Component<{ readonly fallback: React.ReactNod
   override render() { return this.state.failed ? this.props.fallback : this.props.children }
 }
 
-/** Resolve light/dark from the surface the diff sits on, so an in-app theme override wins over the OS. */
+function schemeOf(node: HTMLElement): 'light' | 'dark' {
+  const value = getComputedStyle(node).getPropertyValue('--fractal-diff-canvas').trim()
+  const hex = /^#([0-9a-f]{6})/i.exec(value)?.[1]
+  const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value)
+  const [r, g2, b] = hex ? [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16)) : rgb ? [rgb[1], rgb[2], rgb[3]].map(Number) : [10, 10, 10]
+  return (0.2126 * r! + 0.7152 * g2! + 0.0722 * b!) / 255 > 0.5 ? 'light' : 'dark'
+}
+
+// One document-wide observer for every mounted DiffView: a theme switch restamps a class or data
+// attribute on some ancestor without remounting the diff, so re-read each host's surface then.
+const schemeHosts = new Set<() => void>()
+let schemeObserver: MutationObserver | undefined
+let schemeFrame = 0
+const watchScheme = (recheck: () => void) => {
+  schemeHosts.add(recheck)
+  if (schemeObserver === undefined && typeof MutationObserver !== 'undefined') {
+    schemeObserver = new MutationObserver(() => {
+      if (schemeFrame !== 0) return
+      schemeFrame = requestAnimationFrame(() => { schemeFrame = 0; for (const host of schemeHosts) host() })
+    })
+    schemeObserver.observe(document.documentElement, { attributes: true, subtree: true, attributeFilter: ['class', 'data-scheme', 'data-theme'] })
+  }
+  return () => {
+    schemeHosts.delete(recheck)
+    if (schemeHosts.size === 0) { schemeObserver?.disconnect(); schemeObserver = undefined }
+  }
+}
+
+/** Resolve light/dark from the surface the diff sits on, so an in-app theme override wins over the OS, live. */
 function useScheme(host: React.RefObject<HTMLElement | null>) {
   const [scheme, setScheme] = React.useState<'light' | 'dark'>('dark')
   React.useLayoutEffect(() => {
     const node = host.current
     if (!node) return
-    const value = getComputedStyle(node).getPropertyValue('--fractal-diff-canvas').trim()
-    const hex = /^#([0-9a-f]{6})/i.exec(value)?.[1]
-    const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value)
-    const [r, g2, b] = hex ? [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16)) : rgb ? [rgb[1], rgb[2], rgb[3]].map(Number) : [10, 10, 10]
-    setScheme((0.2126 * r! + 0.7152 * g2! + 0.0722 * b!) / 255 > 0.5 ? 'light' : 'dark')
+    const recheck = () => setScheme(schemeOf(node))
+    recheck()
+    return watchScheme(recheck)
   }, [host])
   return scheme
 }

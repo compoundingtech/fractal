@@ -179,6 +179,26 @@ export const HoverCardPreview: Story = {
 }
 export const HoverCardPreviewLight: Story = { args: { scheme: 'light' }, render: HoverCardPreview.render, play: HoverCardPreview.play }
 
+/** A live theme switch (no remount) moves Pierre's color-scheme with the surface. */
+export const SchemeSwitch: Story = {
+  render: args => {
+    const [scheme, setScheme] = React.useState<'dark' | 'light'>('dark')
+    return <div>
+      <button type="button" onClick={() => setScheme(value => value === 'dark' ? 'light' : 'dark')}>Switch scheme</button>
+      <Canvas scheme={scheme} width={args.width}><DiffView patch={args.patch} header /></Canvas>
+    </div>
+  },
+  play: async ({ canvasElement }) => {
+    const view = await rendered(canvasElement)
+    const pierreHost = () => [...view.querySelectorAll<HTMLElement>('*')].find(element => element.shadowRoot)!
+    await expect(getComputedStyle(pierreHost()).colorScheme).toBe('dark')
+    await userEvent.click(canvasElement.querySelector('button')!)
+    await waitFor(() => expect(getComputedStyle(pierreHost()).colorScheme).toBe('light'), { timeout: 5_000 })
+    await userEvent.click(canvasElement.querySelector('button')!)
+    await waitFor(() => expect(getComputedStyle(pierreHost()).colorScheme).toBe('dark'), { timeout: 5_000 })
+  },
+}
+
 const styles = stylex.create({
   canvas: { minHeight: '100vh', backgroundColor: surface.canvas, color: text.fg, fontFamily: type.fontSans, padding: space.xl, boxSizing: 'border-box' },
   frame: (width: number) => ({ width, maxWidth: '100%', borderWidth: 1, borderStyle: 'solid', borderColor: border.border }),
