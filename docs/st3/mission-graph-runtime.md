@@ -1118,17 +1118,29 @@ own outcome, such as `decline`); without one there is no answer object. No new o
 so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
 entry as `timed_out`. A retry with the same idempotency key must name the same deadline
 (recorded as `deadline_ms` when the asker named one) and default, or it is refused with
-`idempotency-conflict`. The reconciler arms one wake for the earliest deadline among the asks it
-resolves, so nothing polls for them.
+`idempotency-conflict`. The reconciler arms one wake for the earliest effective deadline among
+the asks it resolves, so nothing polls for them.
+
+The asked person's deadline clock (`person.deadline-clock-set`) moves deadlines. An ask is
+urgent when its asker named a `deadline_ms` of at most one hour; an ask on the fleet default,
+or one that named a longer deadline, is routine. `hold-all` holds every ask and `hold-routine`
+only routine ones. An ask's effective deadline is its stored deadline plus the time a hold that
+applies to it was in force since it was asked: a hold `until` a time counts until then, and one
+the person ends with `run` counts until that claim. While an open hold with no end applies,
+the ask has no deadline: nothing resolves it, the reconciler arms no wake for it, and the
+person's home shows none. Resuming the clock is a claim that wakes the reconciler, which then
+arms the wake for the moved deadline. A browser pairing request always expires on time. Only
+the ask's own member resolves it, so an ask taken by a member on a build without the deadline
+clock resolves at its stored deadline until that member upgrades.
 
 Only the ask's own member applies the default, but the person may answer on any member. A member
-with deadlines on refuses a person's answer stored at or after the ask's `deadline_unix_ms` with
+with deadlines on refuses a person's answer stored at or after the ask's effective deadline with
 `stale-fence`: the time the answer's claim is written decides, not when it was sent, and the
 refusal rolls that write back. A member with deadlines off accepts it, so the refusal holds
 everywhere only once deadlines are on on every member; such a late answer is then dropped as below.
 An answer made before the deadline can still reach the ask's member after the default was applied
 there. Then the person's answer stands and the default does not: every member keeps, of an ask's
-responses, a person's answer accepted before the deadline (or, for an ask made without one, before
+responses, a person's answer accepted before the effective deadline (or, for an ask made without one, before
 the default was applied) over the default, and drops a person's answer accepted after it. Members
 hold the same claims with the same accept times, so they agree. The asking step's `person_answers`
 then lists only the person's answer, its constraints say the answer replaces the default, and when
@@ -1144,7 +1156,7 @@ removes it, so turning them on again counts afresh), or from when it was
 asked, whichever is later. Old asks therefore do not all resolve at once when deadlines are
 turned on. An update waits for nobody and has no deadline.
 
-The person's home shows each ask's deadline and default. The attention row carries
+The person's home shows each ask's effective deadline and default. The attention row carries
 `deadline_at` and, when the ask names one, `default_answer` (`{id, label}`). The web app, the
 terminal interface and the phone word it the same way, for example `answer within 3h, or
 “Keep it open” applies` or `answer within 2d, or it times out`. The member keeps its

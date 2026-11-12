@@ -487,6 +487,41 @@ assert_eq!(policy_folds(), folded, "an unchanged policy folds nothing");
 assert!(!revisions.has_changed().unwrap());
 }
 
+/// The asked person's deadline clock moves an ask's deadline, and each change is a claim, so it
+/// folds the published list: the home serves no deadline while the clock is held, and the
+/// stored deadline plus the time held once it runs again.
+#[test]
+fn the_published_list_follows_the_asked_persons_deadline_clock() {
+use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock};
+let (store, _, mut request) = fixture();
+store.start_attention_list_refresher().unwrap();
+store.set_ask_deadlines(true);
+request.deadline_ms = Some(2 * 3_600_000);
+let ask = store.ask_person(&request).unwrap();
+store.reconcile_person_asks_at(now_ms()).unwrap();
+let deadline = u128::from(store.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0]
+    .body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+let served = |publication: &AttentionPublication| {
+    publication.rows.iter().find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"].clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+let clock_folds = || store.attention_list_folds().get("person.deadline-clock-set").copied().unwrap_or(0);
+assert_eq!(served(&refresh_and_check(&store)), at(deadline));
+let mut set = |clock: DeadlineClock| {
+    let folded = clock_folds();
+    store.set_person_availability("person/avery", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
+    let published = refresh_and_check(&store);
+    assert_eq!(clock_folds(), folded + 1, "{clock:?} folds the list");
+    served(&published)
+};
+assert_eq!(set(DeadlineClock::HoldAll), Value::Null, "no deadline while held");
+let served_after_run = set(DeadlineClock::Run);
+let changes = store.claims_for("person/avery", Some("person.deadline-clock-set")).unwrap();
+let held = changes[1].accepted_at_unix_ms - changes[0].accepted_at_unix_ms;
+assert_eq!(served_after_run, at(deadline + held));
+}
+
 #[test]
 fn delta_reads_only_claims_since_the_cut() {
 let (store, _, request) = fixture();
