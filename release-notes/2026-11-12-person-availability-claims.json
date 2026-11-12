@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Record person availability: status override, interruptions, deadline clock and client presence reports",
+  "replay": {
+    "status": "changed",
+    "detail": "Four new durable or current claim kinds on person/NAME replay through the generic claim log. Reads fold them at read time; no projection table is added, so replay rebuilds nothing new."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds person.status-set (status available|away|null, optional until_unix_ms), person.interruptions-set (all|urgent|none), person.deadline-clock-set (run|hold-routine|hold-all) and person.presence-observed (present|idle|locked, source, observed_at_unix_ms). The claim-registry digest changes and the convergence corpus moves to claims-v23.json."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Only the subject person may write these kinds, on every admission path including replication; the ordinary claim surface refuses them. Without an override, status is available only while some source's newest report is fresh (15 minutes) and present. Presence reports are recorded on change and at most every five minutes when unchanged. Availability informs and never grants authority."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Adding the claim kinds changes the claim-registry digest; existing mismatched-registry guards apply until every member runs a build that recognizes them. Older members retain the claims as retryable unknown-kind records and replay them after upgrading."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action. Nothing writes these claims until the client operations that follow are deployed."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The claims are authoritative and append-only; a person corrects availability by writing a newer value."
+  }
+}
