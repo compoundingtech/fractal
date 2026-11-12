@@ -81,7 +81,7 @@ fn durable_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 impl PtyRuntime {
-    fn producer_directory(&self, id: &str, operation: &str) -> PathBuf {
+    pub(super) fn producer_directory(&self, id: &str, operation: &str) -> PathBuf {
         let digest = Sha256::digest(operation.as_bytes());
         self.spawn_state_path(id, "producers").join(format!("{digest:x}"))
     }

@@ -517,6 +517,28 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // The lane is the scope's, never the harness's environment.
+        let mut env = env.clone();
+        let capacity = crate::lane::Capacity::take(&mut env);
+        let env = &env;
+        let _spawn_lock = self.acquire_spawn_lock(id)?;
+        let fence = self.spawn_state_path(id, "pending");
+        let prior_pending = fence.try_exists()?;
+        let mut before = self
+            .snapshot()?
+            .into_iter()
+            .find(|observation| observation.name == id);
+        let prior_ownership = match env.get("ST3_START_OPERATION") {
+            Some(operation) => self.producer_directory(id, operation).try_exists()?,
+            None => false,
+        };
+        // A pending fence is not operation-bound: even after its recovery window,
+        // it cannot prove an earlier producer closed. A same-operation row also
+        // disproves a claim that this operation never launched.
+        *producer_entered = prior_pending || prior_ownership
+            || env.get("ST3_START_OPERATION").is_some_and(|operation| {
+                before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(operation)
+            });
         // Resolve on the launching host, before any producer can persist or
         // forward a relative directory. Untagged relative workspaces retain
         // their daemon-relative meaning, but not their relative representation.
@@ -533,23 +555,6 @@ impl PtyRuntime {
         let cwd = cwd.canonicalize()
             .with_context(|| format!("resolve PTY working directory {}", cwd.display()))?;
         anyhow::ensure!(cwd.is_dir(), "PTY working directory is not a directory");
-        // The lane is the scope's, never the harness's environment.
-        let mut env = env.clone();
-        let capacity = crate::lane::Capacity::take(&mut env);
-        let env = &env;
-        let _spawn_lock = self.acquire_spawn_lock(id)?;
-        let fence = self.spawn_state_path(id, "pending");
-        let prior_pending = fence.try_exists()?;
-        let mut before = self
-            .snapshot()?
-            .into_iter()
-            .find(|observation| observation.name == id);
-        // A pending fence is not operation-bound: even after its recovery window,
-        // it cannot prove an earlier producer closed. A same-operation row also
-        // disproves a claim that this operation never launched.
-        *producer_entered = prior_pending || env.get("ST3_START_OPERATION").is_some_and(|operation| {
-            before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(operation)
-        });
         if prior_pending {
             let previous = std::fs::read_to_string(&fence)
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
@@ -2315,7 +2320,7 @@ exit 0
         let runtime = PtyRuntime::new(root.path().join("registry"));
         let error = spawn_work(&runtime, &file, &BTreeMap::new()).unwrap_err();
         assert!(error.to_string().contains("PTY working directory is not a directory"));
-        assert!(!runtime.spawn_state_directory().exists());
+        assert!(!runtime.spawn_state_path("work", "producers").exists());
     }
 
     #[test]

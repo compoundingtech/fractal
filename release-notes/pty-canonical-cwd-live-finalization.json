@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "A working directory must resolve to an existing directory before producer creation. Default personal terminals require an available host home directory; no relative fallback is forwarded."
+    "detail": "A working directory must resolve to an existing directory before producer creation. Default personal terminals require an available host home directory; no relative fallback is forwarded. The spawn lock and prior-producer evidence are established before cwd validation, so a never-entered operation receives its exact-operation rejection witness and releases the seat for retry without closing an ambiguous earlier producer."
   },
   "compatibility": {
     "status": "changed",
