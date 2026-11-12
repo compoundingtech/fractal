@@ -313,19 +313,28 @@ impl Sample {
             None => Some(accepted),
         };
         let kind = claim.kind.as_str();
-        let at = if kind == interval.start.kind {
-            let at = time(&interval.start.at)?;
-            if self.start.as_ref().is_none_or(|(start, _)| at < *start) {
+        let starts = kind == interval.start.kind;
+        let expects = interval.expect.as_ref().filter(|(event, _)| event.kind == kind);
+        let at = if starts || expects.is_some() {
+            // One kind may both start and set the expected members; read every role before
+            // changing the sample, so an unreadable claim changes nothing.
+            let start = if starts { Some(time(&interval.start.at)?) } else { None };
+            let expect = match expects {
+                Some((event, set)) => Some((time(&event.at)?, fields.and_then(|fields| fields.get(set)).and_then(string_list)?)),
+                None => None,
+            };
+            if let Some(at) = start
+                && self.start.as_ref().is_none_or(|(start, _)| at < *start)
+            {
                 self.start = Some((at, kept_fields(interval, fields)));
             }
-            at
-        } else if let Some((event, set)) = interval.expect.as_ref().filter(|(event, _)| event.kind == kind) {
-            let at = time(&event.at)?;
-            let set = fields.and_then(|fields| fields.get(set)).and_then(string_list)?;
-            if self.expect.as_ref().is_none_or(|expect| (at, claim.id.as_str()) > (expect.at, expect.id.as_str())) {
+            let latest = start.into_iter().chain(expect.as_ref().map(|(at, _)| *at)).max().unwrap_or_default();
+            if let Some((at, set)) = expect
+                && self.expect.as_ref().is_none_or(|expect| (at, claim.id.as_str()) > (expect.at, expect.id.as_str()))
+            {
                 self.expect = Some(Expect { at, id: claim.id.clone(), set, fields: kept_fields(interval, fields) });
             }
-            at
+            latest
         } else if kind == interval.stop.0.kind {
             let at = time(&interval.stop.0.at)?;
             let member = match &interval.stop.1 {

@@ -155,6 +155,9 @@
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
 "publication.operation" = { class = "durable" }
+# Only each person's largest position per conversation matters, but a newest-per-slot rule could
+# drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.
+"read-position.advanced" = { class = "current", pending = "needs a keep-largest at_ms rule; newest-per-slot could drop a larger concurrent advance" }
 "reconcile.fault" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "record.repaired" = { class = "durable" }
 # Only the node that made them reads render receipts and the readiness deadline, whose attention
@@ -198,6 +201,7 @@
 "source.audited" = { class = "durable" }
 "source.debt.closed" = { class = "durable" }
 "source.debt.recorded" = { class = "durable" }
+"source.mapped" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }

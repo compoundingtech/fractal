@@ -36,6 +36,9 @@ Use these documents for implementation details:
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
 - [Portable rename proofs](rename-proof.md) explains signed agent/mission naming history, offline verification and explicit fleet-anchor trust.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
+- [Live-receive performance design](receive-replay-design.md) records FPL's accepted direction for
+  owned-set incremental projection, the replay fence, whole-route continuation, observation
+  writer work and status attribution; it does not describe shipped behavior.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.

@@ -11,6 +11,7 @@ fn state(root: &std::path::Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0u64).0,
         node: "summary-target".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused"),
@@ -47,17 +48,22 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
         .with_writer(logs.clone())
         .finish();
     async {
-        for (index, correlation) in [None, Some("exchange-test"), Some("exchange-error")].into_iter().enumerate() {
+        for (index, correlation) in [
+            None,
+            Some("b9e24197-5a4d-4bfa-9c84-cd7f7c70ab81"),
+            Some("not-an-exchange-id"),
+            Some("6e942dd4-b965-488d-a4ca-eed3bdb113ef"),
+        ].into_iter().enumerate() {
             let mut headers = axum::http::HeaderMap::new();
             if let Some(correlation) = correlation {
                 headers.insert("x-fractal-exchange-id", correlation.parse().unwrap());
             }
             let mut request = request.clone();
-            if index == 2 {
+            if index == 3 {
                 request.exchange.peer = "mismatched-label".into();
             }
             let result = replication_receive(State(state.clone()), headers, Json(request)).await;
-            if index == 2 {
+            if index == 3 {
                 assert_eq!(result.unwrap_err().code, "peer-label-mismatch");
             } else {
                 assert!(result.is_ok(), "{result:?}");
@@ -74,14 +80,27 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
                 "correlation_id", "peer", "envelopes_offered", "envelopes_admitted",
                 "admit_ms", "project_ms", "projection_chunks", "rebuild_part_count",
                 "rebuild_part_ms", "commits", "total_ms", "outcome", "projection_stage",
+                "receipt_ingest", "admission_prelude", "admission", "repairs",
+                "projection", "response_postcommit", "phase_costs_additive",
+                "shared_finalizations", "shared_event_join",
             ] {
                 assert!(summary.contains(&format!("{field}=")), "missing {field}: {summary}");
             }
-            assert!(summary.contains(&format!("correlation_id={}", correlation.unwrap_or("-"))), "{summary}");
+            let logged_id = summary.split("correlation_id=").nth(1).unwrap()
+                .split_whitespace().next().unwrap();
+            let parsed_id = uuid::Uuid::parse_str(logged_id).unwrap();
+            if let Some(expected) = correlation.and_then(|id| uuid::Uuid::parse_str(id).ok()) {
+                assert_eq!(parsed_id, expected, "{summary}");
+            } else {
+                assert!(!parsed_id.is_nil(), "{summary}");
+                assert!(!summary.contains("not-an-exchange-id"), "{summary}");
+            }
+            assert!(summary.contains(&format!("shared_event_join={logged_id}")), "{summary}");
+            assert!(summary.contains("phase_costs_additive=false"), "{summary}");
             assert!(summary.contains("peer=summary-source"), "{summary}");
             assert!(summary.contains("envelopes_offered=0"), "{summary}");
             assert!(summary.contains("envelopes_admitted=0"), "{summary}");
-            assert!(summary.contains(if index == 2 { "outcome=peer-label-mismatch" } else { "outcome=ok" }), "{summary}");
+            assert!(summary.contains(if index == 3 { "outcome=peer-label-mismatch" } else { "outcome=ok" }), "{summary}");
         }
     }.with_subscriber(subscriber).await;
 }

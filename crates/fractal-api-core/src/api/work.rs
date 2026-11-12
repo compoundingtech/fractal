@@ -41,11 +41,23 @@ fn bind_work_incarnation(
     Ok(current)
 }
 
+/// Only the daemon's program engine asks, or cancels an ask, as the program asker.
+fn refuse_program_asker(actor: &str) -> Result<(), ApiError> {
+    if actor == crate::model::PROGRAM_ASKER {
+        return Err(ApiError::bad(FractalError::new(
+            "reserved-actor",
+            format!("`{actor}` is the daemon's program engine; a request cannot act as it"),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn ask_person(
     State(state): State<AppState>,
     bound: Option<Extension<BoundAgent>>,
     Json(mut request): Json<PersonAskRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    refuse_program_asker(&request.actor)?;
     let expected = bind_work_incarnation(
         &state,
         bound.as_ref(),
@@ -114,6 +126,7 @@ pub async fn cancel_person_ask(
     State(state): State<AppState>,
     Json(request): Json<PersonStepResponse>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    refuse_program_asker(&request.actor)?;
     let result = state
         .store
         .finish_person_step(&request, true)

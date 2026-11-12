@@ -162,6 +162,25 @@ describe('program missions', () => {
   )
 
   it.effect(
+    'bundle the same bytes from any build directory, as for a tree checked out elsewhere',
+    () =>
+      Effect.gen(function* () {
+        // Dependencies outside the tree (a loader's linked node_modules) sit at another relative
+        // path from every checkout; the bytes must not record that path.
+        const module = join(programs, 'factory/land-program/mission.ts')
+        const near = yield* bundleProgram({ module, cwd: programs, bundleDir: scratch(), bun: 'bun' })
+        const deeper = yield* bundleProgram({
+          module,
+          cwd: join(programs, 'factory/land-program'),
+          bundleDir: scratch(),
+          bun: 'bun',
+        })
+        expect(deeper.sha256).toBe(near.sha256)
+      }).pipe(Effect.provide(NodeFileSystem.layer)),
+    120_000,
+  )
+
+  it.effect(
     'render the same through programMission for a loader that walks its own tree',
     () =>
       Effect.gen(function* () {

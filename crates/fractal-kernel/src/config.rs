@@ -50,6 +50,8 @@ pub struct Config {
     /// Inactive host-envelope declaration; absent uses CONFIG/host-envelope.json if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_envelope_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_hub: Option<UsageHubConfig>,
     pub node: String,
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,6 +242,15 @@ pub struct QuotaSourceConfig {
     pub refresh_seconds: u64,
 }
 fn quota_refresh_seconds() -> u64 { 30 }
+
+/// `[usage_hub]`: the base URL of the usage hub whose quota `GET /v1/client/usage/quota` relays.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageHubConfig {
+    pub url: String,
+    #[serde(default = "quota_refresh_seconds")]
+    pub refresh_seconds: u64,
+}
 
 /// `[github]`: an explicit token file, or gateway-authorized requests with a sekrets profile.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -518,6 +529,9 @@ pub struct ReconcileConfig {
     /// How long a watched thread may stay still and its watch still count as something that will
     /// wake the seat.
     pub idle_nudge_quiet_watch: String,
+    /// Whether a run that names no `report-to` reports its stalls to its requesting agent or to
+    /// an agent its stuck agent is `under`. On by default.
+    pub default_stall_reports: bool,
 }
 
 impl Default for ReconcileConfig {
@@ -526,6 +540,7 @@ impl Default for ReconcileConfig {
             max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
+            default_stall_reports: true,
         }
     }
 }
@@ -637,6 +652,12 @@ pub fn set_daemon_config(path: Option<&Path>) {
 pub fn reload_daemon_quota() -> Result<Option<QuotaSourceConfig>> {
     let Some(path) = DAEMON_CONFIG.get() else { return Ok(None) };
     Ok(Config::load_unvalidated(path.as_deref())?.quota_source)
+}
+
+/// The daemon's `[usage_hub]` as the config file says now, so an edit applies without a restart.
+pub fn reload_daemon_usage_hub() -> Result<Option<UsageHubConfig>> {
+    let Some(path) = DAEMON_CONFIG.get() else { return Ok(None) };
+    Ok(Config::load_unvalidated(path.as_deref())?.usage_hub)
 }
 
 /// The daemon's `[limits]` as the config file says now, so an edit applies without a restart.
@@ -792,6 +813,7 @@ impl Default for Config {
             quota_source: None,
             usage_limits: None,
             host_envelope_file: None,
+            usage_hub: None,
             node: host_name(),
             access_mode: None,
             claude_primary_ownership: None,
@@ -2035,6 +2057,9 @@ sekrets_profile = "nathan/daemon-gh"
 
         let off: Config = toml::from_str("[reconcile]\nidle_nudge_after = \"off\"\n").unwrap();
         assert_eq!(off.reconcile.idle_nudge().unwrap().after_ms, None);
+        assert!(config.reconcile.default_stall_reports);
+        let quiet: Config = toml::from_str("[reconcile]\ndefault_stall_reports = false\n").unwrap();
+        assert!(!quiet.reconcile.default_stall_reports);
 
         for (field, value) in [
             ("idle_nudge_after", "30s"),

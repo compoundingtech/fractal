@@ -42,6 +42,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `person` | `person/IDENTITY` | no | A human actor. |
 | `planning-session` | `planning-session/ID` | no | A durable planning session. |
 | `pty` | `pty/RUN/LOCAL_ID` | no | A mission-run terminal runtime. |
+| `read-position` | `read-position/person/NAME` | no | One person's forward-only read positions across conversations. |
 | `repair` | `repair/ID` | yes | An immutable receipt for a bounded graph or replication repair. |
 | `resource` | `resource/NAME` | yes | An observed external or durable fact bag. |
 | `revision-proposal` | `revision-proposal/ID` | no | A mission revision proposal. |
@@ -186,6 +187,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `principal.key-revoked` | `person`, `agent` | `system-only` | `append` | `durable` | `key!:string`, `reason:string` |  |
 | `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `child:string`, `error:any`, `key!:string`, `ms:integer`, `program!:string`, `status!:string`, `value:any` | `step`, `program` |
 | `publication.operation` | `*` | `system-only` | `append` | `durable` | `action:string`, `operation:string`, `status!:string` | `revision`, `reset`, `cancellation`, `refresh`, `feedback` |
+| `read-position.advanced` | `read-position` | `ordinary-client` | `append` | `durable` | `at_ms!:integer`, `conversation!:string`, `owner!:subject-reference(person)` |  |
 | `reconcile.fault` | `daemon`, `mission-run`, `observer`, `schedule`, `step-run`, `subscription` | `system-only` | `append` | `durable` | `reason:string`, `scope!:string`, `status!:string` |  |
 | `record.repaired` | `repair` | `ordinary-client` | `once` | `durable` | `reason!:string`, `record!:string`, `replacement!:string` | `repair` |
 | `render.applied` | `agent`, `exec`, `pty` | `system-only` | `append` | `local` | `warnings:array`, `writes:array` |  |
@@ -223,6 +225,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `source.audited` | `agent`, `schedule`, `subscription`, `mission`, `exec`, `pty` | `system-only` | `append` | `durable` | `refusal!:string`, `set!:string`, `set_revision!:string`, `verb!:string` |  |
 | `source.debt.closed` | `agent`, `schedule`, `subscription`, `mission`, `exec`, `pty` | `system-only` | `append` | `durable` | `debt!:string`, `outcome!:string`, `publisher:any`, `set!:string`, `set_revision!:string` |  |
 | `source.debt.recorded` | `agent`, `schedule`, `subscription`, `mission`, `exec`, `pty` | `system-only` | `append` | `durable` | `after:any`, `before:any`, `claim:string`, `pointers:array`, `reason!:string`, `ref!:string`, `repository!:string`, `request:string`, `revision:string`, `set!:string`, `set_revision!:string`, `sha!:string`, `verb!:string` |  |
+| `source.mapped` | `agent`, `mission` | `system-only` | `once` | `durable` | `declaration!:integer`, `files!:array`, `inputs!:array`, `nodes!:array`, `ref!:string`, `repository!:string`, `revision!:string`, `sequence!:integer`, `set_revision!:string`, `sha!:string`, `subject!:subject-reference(agent|mission)` |  |
 | `step-run.carried` | `step-run` | `system-only` | `once` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `definition_hash:string`, `source:subject-reference`, `source_generation:subject-reference`, `source_step_run:subject-reference`, `status:string`, `worker_reported:boolean` | `step` |
 | `step-run.retried` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `goals:array`, `not_before_unix_ms:integer`, `reason:string`, `status:string` | `step` |
 | `step-run.state` | `step-run` | `system-only` | `state-transition` | `durable` | `attempt:integer`, `readiness_epoch:integer`, `reason:string`, `status:string` | `step` |

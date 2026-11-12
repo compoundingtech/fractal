@@ -201,6 +201,32 @@ public actor FractalClient {
             }
         }
     }
+    /// Follow the person's read positions; frames are invalidations, so re-list `readPositionsList` on each.
+    public func readPositionsStream(person: String, subscriptionID: String = "read-positions", limit: Int = 100) -> AsyncThrowingStream<ReadPositionCollectionFrame, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        applyTraceContext(to: &request)
+        let task = session.webSocketTask(with: request)
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
+            task.resume()
+            Task {
+                do {
+                    let subscription: [String: Any] = ["kind":"subscribe", "id":subscriptionID, "collection":"read-positions", "person":person, "limit":limit]
+                    let command = try JSONSerialization.data(withJSONObject: subscription)
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        let frame = try JSONDecoder().decode(ReadPositionCollectionFrame.self, from: data)
+                        if frame.kind == "error" { throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: frame.message ?? "Read position subscription failed"]) }
+                        if frame.kind == "resync" { try await task.send(.string(String(decoding: command, as: UTF8.self))); continue }
+                        continuation.yield(frame)
+                    }
+                } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
     /// Advertised in capabilities when an agents subscription may select one exact agent; an older
     /// daemon ignores the selector and answers with the fleet.
     public static let exactAgentSelectorCapability = "collection.agents.exact-selector"
@@ -300,6 +326,14 @@ public actor FractalClient {
     public func sloList() async throws -> Envelope<SloList> { try await get("v1/client/slo") }
     public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> { var query: [URLQueryItem] = [.init(name: "id", value: id)]; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; if let steps { query.append(.init(name: "steps", value: String(steps))) }; return try await get("v1/client/slo/history", query: query) }
     public func usagePeriod(sinceMS: UInt64? = nil, untilMS: UInt64? = nil) async throws -> Envelope<UsagePeriod> { var query: [URLQueryItem] = []; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; return try await get("v1/client/usage", query: query) }
+    public func usageHubQuota() async throws -> Envelope<UsageHubQuota> { try await get("v1/client/usage/quota") }
+    public func githubPluginPullRequest(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)") }
+    public func githubPluginIssue(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/issues/\(number)") }
+    public func githubPluginConversation(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/conversation") }
+    public func githubPluginChecks(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/checks") }
+    public func githubPluginFiles(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/files") }
+    public func githubPluginComment(owner: String, repo: String, commentID: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/comments/\(commentID)") }
+    public func githubPluginRun(owner: String, repo: String, runID: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/runs/\(runID)") }
     public func clientsList() async throws -> Envelope<ClientConnections> { try await get("v1/client/clients") }
     public func nowList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("now", cursor: cursor, limit: limit, history: history) }
     public func machinesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("machines", cursor: cursor, limit: limit, history: history) }
@@ -351,6 +385,7 @@ public actor FractalClient {
     public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> { var query: [URLQueryItem] = [.init(name: "person", value: person)]; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/arrangements", query: query) }
     public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> { try await get("v1/client/arrangements/\(Self.routedSessionID(personName))/\(Self.routedSessionID(uuid))") }
     public func arrangementsMemberships(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> { var query: [URLQueryItem] = [.init(name: "person", value: person)]; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/arrangements/\(Self.routedSessionID(personName))/\(Self.routedSessionID(uuid))/memberships", query: query) }
+    public func readPositionsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ReadPositionPage> { var query: [URLQueryItem] = [.init(name: "person", value: person)]; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/read-positions", query: query) }
     public func glassesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("glasses", cursor: cursor, limit: limit, history: history) }
     public func glassesGet(id: String) async throws -> Envelope<Resource> { try await resource("glasses", id: id) }
     public func assistantSummary(_ params: AssistantSummaryRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantSummary> { try await assistantRead("summary", params, proof: proof) }
@@ -396,6 +431,7 @@ public actor FractalClient {
     public func pairingRevoke(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .pairingRevoke(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func privateNotesWrite(id: String, idempotencyKey: String, fence: Fence, parameters: PrivateNotesWriteParameters) async throws -> Envelope<ActionResult> { try await submit(try .privateNotesWrite(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func promptRespond(id: String, idempotencyKey: String, fence: Fence, parameters: PromptRespondParameters) async throws -> Envelope<ActionResult> { try await submit(try .promptRespond(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func readPositionAdvance(id: String, idempotencyKey: String, fence: Fence, parameters: ReadPositionAdvanceParameters) async throws -> Envelope<ActionResult> { try await submit(try .readPositionAdvance(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewApprove(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewApprove(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewReject(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewReject(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewRequestChanges(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewRequestChanges(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }

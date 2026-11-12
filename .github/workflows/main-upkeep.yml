@@ -5896,6 +5896,7 @@ jobs:
               "apps/fractal-web/src/monitor/usageFixtures.ts",
               "apps/fractal-web/src/monitor/usageModel.ts",
               "apps/fractal-web/src/monitor/UsageSection.tsx",
+              "apps/fractal-web/src/monitor/usageSectionState.ts",
               "apps/fractal-web/src/monitor/usageSectionView.ts",
               "apps/fractal-web/src/monitor/wire.ts",
               "apps/fractal-web/src/resources/agent/model.ts",

@@ -39,6 +39,43 @@ fractal terminals peek agent/garden/worker
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
+## Planned graph replay
+
+Run `fractal replication replay` locally for the claim count, last measured replay
+duration (if known), and writer-lock warning. It is an estimate only: no replay runs
+without `fractal replication replay --confirm`. Schedule a planned window because the
+daemon holds its writer for the entire replay, delaying other writes. The daemon logs
+start and completion and keeps the operator, start time, duration and result in
+`replication-replay-audit.jsonl` in its state directory. A concurrent replay is refused,
+not queued. Do not restart the daemon to “fix” a replay; let the running replay finish.
+The estimate names any blocked owned sets. Canonical replay removes their retained
+physical `desired` and `mission_definitions` rows and cannot rebuild them while the
+sets remain blocked; authoritative claims and set receipts are not deleted. Resolve
+the blockers first if those retained rows must remain available. `--confirm` prints
+the same warning before starting; it does not add another confirmation flag.
+
+## Writer queue waits
+
+When an interactive request is slow during replication, distinguish time queued
+for the store writer from time holding it. Request-parented `st.db.writer` spans
+report `writer_wait_ms`, `writer_hold_ms`, the `queue` class (`foreground` or
+`background`), and the static `code.file.path`/`code.line.number` caller site.
+These children require a sampled trace context, not `ST3_STORAGE_PHASE_SPANS`.
+Caller sites are trace attributes, not metric dimensions.
+
+Foreground batched writes and foreground loans retain arrival order. Background
+loans yield to pending foreground work, with one background turn after at most
+eight foreground turns to prevent starvation. This bounds dispatch turns, not
+wall time: an active envelope, transaction commit, and its finalization are not
+preemptible. A long background hold can therefore still delay an interactive
+request even when scheduling priority is correct.
+
+Replication verdict pages use background loans and revalidate trust roots after
+each acquisition, including the transaction that activates the authority fold.
+
+Compare the caller site and hold stages before attributing a slow request to
+queue priority or changing admission chunk sizes.
+
 ## Raw terminal setup stalls
 
 Raw terminal setup logs bounded DEBUG phase events, not terminal contents or

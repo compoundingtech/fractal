@@ -51,6 +51,27 @@ preference and enabled transports unchanged.
 
 ## Local adapter membership and leave authority
 
+The worker serves live leave authority on a private Unix socket beside the configured
+daemon API socket. Its name preserves the full API basename and appends
+`.leave-state.sock`: `/run/user/1000/fractal.sock` uses
+`/run/user/1000/fractal.sock.leave-state.sock`, with the persistent
+`fractal.sock.leave-state.sock.lock` reservation beside it. Different API basenames
+in one runtime directory therefore have distinct worker listeners and reservations,
+including basenames that differ only in extension. A worker refuses an equal API
+and leave-state path with `InvalidInput` before reserving or removing either socket.
+Long durable state directories do not affect this path; configured runtime paths
+still need to fit the platform socket limit. Bind errors include the full path,
+its byte length, and the usable limit (Linux 107 bytes, macOS 103 bytes).
+
+The daemon and replication worker are separately supervised. For the one-release
+upgrade bridge, upgrade the daemon first, then restart the worker: daemon requests
+try the new socket and fall back to `STATE/fleet/leave-state.sock` only on
+not-found or connection-refused, logging attempted paths at debug level. HTTP
+errors, timeouts and other connection failures do not use the legacy path.
+The worker binds only the new path. Restarting the daemon alone does not move an
+old worker's listener; the legacy client fallback is removed after one release.
+
+
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
 socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
 replication worker, its adapters and its operator's CLI. They refuse seat callers, meaning a

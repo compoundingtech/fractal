@@ -558,6 +558,7 @@ impl Daemon {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: node.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.into(),
             pty_root: root.join("pty"),
             pty_binary: "pty".into(),
@@ -869,6 +870,7 @@ async fn dispatch(
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
         "mission.start" => mission_start, "pairing.revoke" => pairing_revoke,
+        "read-position.advance" => read_position_advance,
         "private-notes.write" => private_notes_write,
         "review.approve" => review_approve, "review.reject" => review_reject, "review.request-changes" => review_request_changes,
         "runtime.context-clear" => runtime_context_clear, "runtime.reset" => runtime_reset,
@@ -925,6 +927,37 @@ async fn arrangement_membership_edits_survive_stale_fences_and_restarts() {
     assert_eq!(memberships[0]["member"], WORKER);
     assert_eq!(memberships[0]["position"], json!({"bucket": null, "key": "a0"}));
     assert_eq!(memberships[0]["revision"], claims[0].id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_position_advances_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let fence = daemon.fence(PERSON).await;
+    let accepted = daemon
+        .exercise(
+            PERSON,
+            "read-position.advance",
+            json!({"owner": PERSON, "conversation": WORKER, "at": "2026-11-08T10:00:02.000Z"}),
+            fence,
+        )
+        .await;
+    assert_eq!(accepted["read_position_at"], "2026-11-08T10:00:02.000Z");
+    let subject = "read-position/person/avery";
+    let claims = daemon.store().claims_for(subject, Some("read-position.advanced")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(PERSON));
+    // An older advance completes without a claim and names the stored, larger position.
+    let fence = daemon.fence(PERSON).await;
+    let older = dispatch(&daemon.client(PERSON), "read-position.advance", "coverage:read-position-older", fence,
+        json!({"owner": PERSON, "conversation": WORKER, "at": "2026-11-08T10:00:01.000Z"}))
+        .await
+        .unwrap();
+    let older = serde_json::to_value(older.value).unwrap();
+    assert_eq!(older["read_position_at"], "2026-11-08T10:00:02.000Z");
+    assert_eq!(daemon.store().claims_for(subject, Some("read-position.advanced")).unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

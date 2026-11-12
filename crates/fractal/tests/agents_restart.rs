@@ -289,6 +289,7 @@ impl Fixture {
             notify,
             event_notify: watch::channel(0).0,
             node: "restart-test".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),

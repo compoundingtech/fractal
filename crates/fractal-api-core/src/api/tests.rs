@@ -15,6 +15,64 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[test]
+fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
+    assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
+    assert!(wire_names::api_version("st3.client.v0"));
+    assert!(wire_names::api_version(CLIENT_API_VERSION));
+    let error = client_error_envelope(StatusCode::BAD_REQUEST, &json!({}), "request/test");
+    assert_eq!(error["api_version"], "fractal.client.v0");
+    assert_eq!(error["error_version"], "fractal.client.error.v0");
+}
+
+#[test]
+fn launch_hash_inputs_keep_base_golden_bytes() {
+    assert_eq!(launch_preview_token_values("fixed", "default", 7, Some("generation/fixed"),
+        &json!({"title":"Versions","steps":[]}), &[]).unwrap(),
+        "lpv0:b7b6e7a32a9fb0a0fed198d3b6f3deadae46a5200abeb3f92c4df7d19afff357");
+    let old = json!({"visualization":{"version":"st3.visualization.v0"}});
+    let new = json!({"visualization":{"version":"fractal.visualization.v0"}});
+    for collection in ["launches", "launches/fixed/variants"] {
+        assert_eq!(client_items_digest(collection, std::slice::from_ref(&new)).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&vec![old.clone()]).unwrap())));
+    }
+    assert_eq!(new["visualization"]["version"], "fractal.visualization.v0");
+}
+
+#[test]
+fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let kdl = "version 2\nmission \"example/versions\" state=\"ready\" { goal \"Check versions\"; }";
+    let intent = crate::graph::parse_test_intent(kdl, &state.node).unwrap();
+    let mut session: PlanningSessionView = serde_json::from_value(json!({
+        "subject": "planning/versions", "id": "versions", "mission": "example/versions",
+        "request": "Check versions", "workspace": root.path(), "requester": "person/ada",
+        "planner": "agent/planner", "status": "draft", "created_at_unix_ms": 0,
+        "updated_at_unix_ms": 0, "variants": [{
+            "name": "default", "candidate": {
+                "variant": "default", "revision": 1, "markdown": "", "kdl": kdl,
+                "mission": "example/versions", "mission_revision": "", "submitted_at_unix_ms": 0
+            }
+        }]
+    })).unwrap();
+    let drafts = client_launch_variant_resources(&state, &session).unwrap();
+    assert_eq!(drafts[0]["visualization"]["version"], "fractal.visualization.v0");
+    let mission = state.store.mission(&intent, crate::model::IntentInput {
+        kdl: kdl.into(), source_name: None,
+    }).unwrap();
+    let preview = crate::model::PlanningPreviewView {
+        variant: "default".into(), hash: "preview".into(), candidate_revision: 1,
+        store_index: 0, graph: String::new(), diff: String::new(), mission,
+        created_at_unix_ms: 0,
+    };
+    session.variants[0].preview = Some(preview.clone());
+    let visualization = launch_visualization(
+        &intent.missions["example/versions"], &session, &preview, &[],
+    );
+    assert_eq!(visualization["version"], "fractal.visualization.v0");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn incomplete_linux_environment_is_unavailable() {
@@ -62,11 +120,22 @@ fn a_program_effects_descendant_binds_its_run() {
     let mut line = String::new();
     std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
     let pid: u32 = line.trim().parse().unwrap();
+    // `$!` is printed before the child has exec'd. Until then /proc shows the forked shell's
+    // environment, which would not exercise a cleared descendant; mid-exec it shows none, which
+    // the walk refuses as Unavailable. `comm` changes first, so read it before `environ`.
+    let proc = |file: &str| std::fs::read(format!("/proc/{pid}/{file}")).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut cleared = false;
+    while !cleared && std::time::Instant::now() < deadline {
+        cleared = proc("comm") == b"sleep\n" && proc("environ") == b"MARKER=1\0";
+        if !cleared { std::thread::sleep(std::time::Duration::from_millis(5)); }
+    }
     let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
     let ancestry = harness_ancestor(pid, Some(&peer));
     effect.kill().unwrap();
     let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
     effect.wait().unwrap();
+    assert!(cleared, "the effect's descendant never ran `sleep` with a cleared environment");
     assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
 }
 
@@ -111,6 +180,48 @@ async fn a_run_credential_binds_requests_to_its_run() {
     let ended = post("custom/example/run-ended", None).await.unwrap();
     assert_eq!(ended.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(state.store.index().unwrap(), before);
+}
+
+/// A program effect's `fractal apply` publishes a mission as its run, and as no other actor; its
+/// mission's `authority { publish ... }` decides which missions it may publish.
+#[tokio::test]
+async fn a_run_bound_request_publishes_as_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let apply = |mission: &str, actor: &str| {
+        let source = format!("version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Take notes.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = serde_json::to_string(&apply_request(&state, &source, actor, &format!("{mission}:{actor}"))).unwrap();
+        let request = Request::builder().method("POST").uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body)).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    for actor in ["person/operator", "agent/example/worker"] {
+        let (status, refused) = apply("example/notes", actor).await;
+        assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("foreign-agent-actor")), "{actor} {refused}");
+    }
+    assert!(state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().is_none());
+    // Outside its mission's `publish "example/*"`: refused, and nothing is written.
+    let before = state.store.index().unwrap();
+    let (status, refused) = apply("x/notes", &step.run).await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("run-authority-denied")), "{refused}");
+    assert_eq!(state.store.index().unwrap(), before);
+    assert!(state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().is_none());
+    // Inside it: published as the run.
+    let (status, published) = apply("example/notes", &step.run).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let claim = state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some(step.run.as_str()));
 }
 
 /// A program effect's CLI names its run on the trusted Unix client; only a request its run
@@ -569,7 +680,7 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     ).unwrap();
     let app = Router::new().route("/v1/internal/fleet/leave-state", get(move || {
         let fleet = fleet.clone();
@@ -599,7 +710,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     )
     .unwrap();
     let expected_public = public.clone();
@@ -11860,6 +11971,8 @@ mission "agent-health" state="ready" {
     let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
+    // Readiness and a queued step are not words from the agent.
+    assert!(resources[0]["last_prose_at"].is_null(), "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {

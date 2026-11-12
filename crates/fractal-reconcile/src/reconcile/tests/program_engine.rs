@@ -21,6 +21,9 @@ const step = async (ctx, key, effect) => {
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
     const first = await step(ctx, 'first', async () => ({ attempt: ctx.attempt }))
+    if (ctx.payload.mode === 'credential') {
+      await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
+    }
     if (ctx.payload.mode === 'busy') for (;;) {}
     const waited = await step(ctx, 'wait', async () => {
       const script = 'sleep 1000 & echo $$ $! > "$PIDS.tmp"; mv "$PIDS.tmp" "$PIDS"; while [ ! -e "$GATE" ]; do sleep 0.05; done; echo opened'
@@ -183,6 +186,28 @@ fn a_program_resumes_from_its_journal_after_its_host_is_killed() {
     assert_eq!(result.body["fields"]["value"], json!({"first": {"attempt": 1}, "waited": "opened"}));
 }
 
+/// A program run that `missions start` just created journals its first inner step from the
+/// change feed alone (R14): the follower evaluates the new run, which readies and dispatches its
+/// program step, with no pass, which would first wait out `StartSpacing`.
+#[test]
+fn a_new_program_run_starts_its_first_step_without_a_pass() {
+    let fixture = fixture(Liveness::default());
+    // A running daemon's passes, and so its follower, have read the feed up to here.
+    fixture.reconciler.reconcile_once().unwrap();
+    let started = fixture.start("first", "wait");
+    // The follower's chain after the run's creation, as `follow_mission_reads` runs it: an
+    // evaluation that wrote is followed at once by another.
+    for _ in 0..=MISSION_READS_CONTINUATIONS {
+        if !fixture.reconciler.evaluate_changed_mission_runs().unwrap().1 {
+            break;
+        }
+    }
+    fixture.without_passes("the first inner step starts", || !fixture.journal(&started.step).is_empty());
+    assert_eq!(fixture.journal(&started.step)[0], ("first".to_owned(), "started".to_owned()));
+    std::fs::write(&started.gate, "").unwrap();
+    fixture.until("the program completes", || fixture.status(&started.step) == "completed");
+}
+
 #[test]
 fn a_step_that_leaves_its_attempt_stops_its_program_and_effects_at_once() {
     let fixture = fixture(Liveness::default());
@@ -220,4 +245,33 @@ fn an_unresponsive_worker_fails_only_its_own_step() {
     fixture.until("the other program completes", || fixture.status(&waiting.step) == "completed");
     // The host itself stayed up: only the busy worker was terminated.
     assert_eq!(fixture.engine.host_pid(), host);
+}
+
+/// An effect carries a credential that binds its run while the attempt runs and no longer once
+/// it ends, and the journal is written as the run (docs/st3/program-engine.md §3).
+#[test]
+fn a_programs_effects_and_journal_act_as_its_run() {
+    let fixture = fixture(Liveness::default());
+    let started = fixture.start("credential", "credential");
+    fixture.until("the effect reports its credential", || pids(&started.pids).is_some());
+    let who = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .find(|claim| claim.body["fields"]["key"] == "who" && claim.body["fields"]["status"] == "completed")
+        .unwrap();
+    let credential = who.body["fields"]["value"].as_str().unwrap().to_owned();
+    let binding = fixture.store.run_binding(&credential).unwrap();
+    assert_eq!((binding.run.as_str(), binding.step_run.as_str(), binding.attempt), (started.run.as_str(), started.step.as_str(), 1));
+    // Passes over a running attempt mint nothing more, and the credential has no expiry of its own.
+    for _ in 0..5 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.run_credentials_issued_for_tests(&started.step), 1);
+    let capability = fixture.store.capability(&credential, crate::store::run_credentials::RUN_CREDENTIAL_KIND).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    assert!(capability.expires_at_unix_ms > now + 100 * 365 * 24 * 60 * 60 * 1000);
+    std::fs::write(&started.gate, "").unwrap();
+    fixture.until("the program completes", || fixture.status(&started.step) == "completed");
+    assert_eq!(fixture.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
+    let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
+    assert!(!claims.is_empty());
+    assert!(claims.iter().all(|claim| claim.actor.as_deref() == Some(started.run.as_str())), "{claims:#?}");
 }

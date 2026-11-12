@@ -942,6 +942,7 @@ pub struct WriterWait {
     holder: Option<Arc<str>>,
     // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
     trace: Option<Box<WriterTrace>>,
+    writer_operation: Option<crate::sqlite::telemetry::WriterOperation>,
 }
 
 struct WriterTrace {
@@ -959,6 +960,7 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
         trace: None,
+        writer_operation: None,
     })
 }
 
@@ -968,13 +970,35 @@ pub(crate) fn writer_waiting_for(
     trace_origin: crate::sqlite::telemetry::Origin,
 ) -> WriterWait {
     let mut wait = wait.unwrap_or_else(|| WriterWait {
-        started: Instant::now(), holder: None, trace: None,
+        started: Instant::now(), holder: None, trace: None, writer_operation: None,
     });
     wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
     wait
 }
 
 impl WriterWait {
+    pub(crate) fn writer_operation_acquired(&mut self, waited: Duration) {
+        if let Some(operation) = &mut self.writer_operation {
+            operation.acquired(waited);
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn with_writer_operation(wait: Option<Self>) -> Option<Self> {
+        if wait.as_ref().is_some_and(|wait| wait.writer_operation.is_some()) { return wait; }
+        let operation = crate::sqlite::telemetry::WriterOperation::start("foreground", "write.batched");
+        if wait.is_none() && operation.is_none() { return None; }
+        let mut wait = wait.unwrap_or_else(|| Self {
+            started: Instant::now(), holder: None, trace: None, writer_operation: None,
+        });
+        wait.writer_operation = operation;
+        Some(wait)
+    }
+
+    pub(crate) fn take_writer_operation(&mut self) -> Option<crate::sqlite::telemetry::WriterOperation> {
+        self.writer_operation.take()
+    }
+
     pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
         self.trace.as_ref().and_then(|trace| trace.holder.clone())
     }

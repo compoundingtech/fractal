@@ -161,14 +161,32 @@ impl FleetContext {
 }
 
 /// Private process boundary: the daemon proxies reads to the live worker, not its journal.
-pub fn leave_state_socket(state_dir: &Path) -> PathBuf {
-    state_dir.join("fleet/leave-state.sock")
+pub fn leave_state_socket(api_socket: &Path) -> std::io::Result<PathBuf> {
+    let mut name = api_socket.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "API socket has no basename")
+    })?.to_os_string();
+    // Retain the entire basename: endpoints differing only in extension also
+    // need distinct worker listeners and reservations.
+    name.push(".leave-state.sock");
+    Ok(api_socket.with_file_name(name))
 }
 
-fn bind_leave_state_socket(state_dir: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
+fn bind_leave_state_socket(api_socket: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
+    bind_leave_state_socket_path(api_socket, &leave_state_socket(api_socket)?)
+}
+
+fn bind_leave_state_socket_path(
+    api_socket: &Path,
+    path: &Path,
+) -> Result<(std::fs::File, tokio::net::UnixListener)> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let path = leave_state_socket(state_dir);
+    if path == api_socket {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("leave-state socket would replace API socket {}", api_socket.display()),
+        ).into());
+    }
     std::fs::create_dir_all(path.parent().context("leave socket parent")?)?;
     let reservation = std::fs::OpenOptions::new()
         .read(true)
@@ -185,12 +203,23 @@ fn bind_leave_state_socket(state_dir: &Path) -> Result<(std::fs::File, tokio::ne
             std::io::Error::last_os_error()
         );
     }
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = tokio::net::UnixListener::bind(&path)?;
+    let listener = tokio::net::UnixListener::bind(path).with_context(|| {
+        use std::os::unix::ffi::OsStrExt as _;
+        #[cfg(target_os = "macos")]
+        const LIMIT: usize = 103;
+        #[cfg(not(target_os = "macos"))]
+        const LIMIT: usize = 107;
+        format!(
+            "bind leave-state Unix socket {} ({} bytes; platform limit {LIMIT} bytes)",
+            path.display(),
+            path.as_os_str().as_bytes().len()
+        )
+    })?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok((reservation, listener))
 }
@@ -591,6 +620,8 @@ pub struct WorkerConfig {
     pub secret_file: PathBuf,
     /// Holds `fleet/`; a member that learns it was removed records it there.
     pub state_dir: PathBuf,
+    /// The configured daemon API socket, including its instance-specific basename.
+    pub api_socket: PathBuf,
     pub peers: Vec<PeerConfig>,
     /// The replication listener, such as `127.0.0.1:31313`. A dial-out member ignores it.
     pub peer_listen: Option<String>,
@@ -600,7 +631,7 @@ pub struct WorkerConfig {
 impl WorkerConfig {
     /// A member's worker as its `STATE/fleet/fleet.toml` describes it: the name it joined
     /// under (else `node`), its secret, and a loopback listener on its port.
-    pub fn from_fleet_file(state_dir: &Path, node: &str) -> Result<Self> {
+    pub fn from_fleet_file(state_dir: &Path, api_socket: &Path, node: &str) -> Result<Self> {
         let file = FleetFile::load(state_dir)?
             .with_context(|| format!("{} is missing", FleetFile::path(state_dir).display()))?;
         let peer_listen = match (file.mode, file.port) {
@@ -612,6 +643,7 @@ impl WorkerConfig {
             fleet_id: file.fleet_id.clone(),
             secret_file: file.secret_path(state_dir),
             state_dir: state_dir.to_path_buf(),
+            api_socket: api_socket.to_path_buf(),
             peers: Vec::new(),
             peer_listen,
             fleet: Some(file),
@@ -652,7 +684,7 @@ pub async fn run_with_shards<B: Backend>(
     routes: Router<PeerState<B>>,
     shards: Vec<ShardSync<B>>,
 ) -> Result<()> {
-    let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.state_dir)?;
+    let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.api_socket)?;
     let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
     let secret_file = config.secret_file.as_path();

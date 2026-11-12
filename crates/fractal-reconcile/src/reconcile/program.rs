@@ -28,17 +28,19 @@ use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 
-use crate::MissionsStore;
-use crate::model::{ClaimInput, ClaimRecord, FractalError, MissionRunView, ProgramSpec};
+use crate::model::{
+    ClaimInput, ClaimRecord, FractalError, MissionRunView, PROGRAM_ASKER, PersonAskRequest, PersonStepResponse, ProgramSpec,
+};
 use crate::store::Store;
+use crate::{MissionsStore, PersonWorkStore};
 
-/// The claim kind of a program journal entry, on the program's `step-run` subject.
-pub const JOURNAL_KIND: &str = "program.step";
-/// The journal key of a program's own encoded success value, written when it ends.
-pub const RESULT_KEY: &str = "$result";
+pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
+/// A run credential has no expiry of its own: it binds only while its attempt is its step run's
+/// current, live attempt, however long that attempt waits on an ask or a child run.
+const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
 const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
@@ -109,6 +111,44 @@ struct Running {
     dispatch: Dispatch,
     /// The host generation running it; a host that exits takes exactly its own programs with it.
     generation: u64,
+    /// By journal key: the child runs and asks the program waits on.
+    requests: BTreeMap<String, Request>,
+}
+
+/// A child run or person ask a program waits on (§6). The run's evaluation starts it and, once it
+/// ends, journals its result under `key` and resolves it ([`ProgramEngine::resolve`]).
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub step: String,
+    pub attempt: u32,
+    pub key: String,
+    pub wait: Wait,
+    /// The child run or ask subject once it exists.
+    pub child: Option<String>,
+    /// The bundle hash of the program that asked, which journals the key's entries.
+    program: String,
+    seq: Value,
+    since: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub enum Wait {
+    /// A linked child run of `mission` with these inputs.
+    Run { mission: String, input: BTreeMap<String, String> },
+    /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
+    Ask(Box<PersonAskRequest>),
+}
+
+impl Request {
+    /// The idempotency key of the child run or ask: one per key and attempt, so a resumed attempt
+    /// adopts it and a retried attempt starts a new one.
+    pub fn idempotency_key(&self) -> String {
+        idempotency_key(&self.step, self.attempt, &self.key)
+    }
+}
+
+fn idempotency_key(step: &str, attempt: u32, key: &str) -> String {
+    format!("program:{step}:{attempt}:{key}")
 }
 
 #[derive(Default)]
@@ -173,6 +213,15 @@ impl ProgramEngine {
             }
         };
         inner.faults.remove(&dispatch.step);
+        // The attempt's effects act as its run (docs/st3/program-engine.md §3). The credential is
+        // minted only here, once the host runs and this attempt is about to start, so a refused,
+        // already running or host-down dispatch leaves no row; each start or resume mints one, and
+        // it never enters the journal or a log.
+        let mut env = dispatch.env.clone();
+        env.insert(
+            crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
+            self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
+        );
         eprintln!(
             "fractal: program {} attempt {} started with {} journaled steps",
             dispatch.step,
@@ -187,11 +236,11 @@ impl ProgramEngine {
             "module": module,
             "sha256": dispatch.program.bundle_hash,
             "payload": dispatch.payload,
-            "env": dispatch.env,
+            "env": env,
             "cwd": dispatch.cwd,
             "journal": journal,
         });
-        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation });
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new() });
         send(&inner, &message);
         Ok(Dispatched::Started)
     }
@@ -223,31 +272,199 @@ impl ProgramEngine {
 
     /// Eager cancellation (§6), called from every evaluation of a run: each program attempt of
     /// `run` this engine runs whose step left it (ended, failed, timed out, retried, cancelled with
-    /// its run or replaced by a new generation) is stopped now, with its effects.
-    pub fn release_left(&self, run: &MissionRunView) {
+    /// its run or replaced by a new generation) is stopped now, with its effects, and the child
+    /// runs and asks it still waits on are cancelled.
+    pub fn release_left(&self, run: &MissionRunView) -> Result<()> {
         let terminal = matches!(run.status.as_str(), "completed" | "failed" | "cancelled");
-        let mut inner = self.lock();
-        let left = inner
-            .running
-            .iter()
-            .filter(|(_, running)| running.dispatch.run == run.subject)
-            .filter_map(|(step, running)| {
-                let attempt = running.dispatch.attempt;
-                let reason = match run.steps.iter().find(|view| view.subject == *step) {
-                    None => Some("the run moved to another generation".to_owned()),
-                    Some(_) if terminal => Some(format!("the run is {}", run.status)),
-                    Some(view) if view.attempt != attempt => Some(format!("the step moved to attempt {}", view.attempt)),
-                    Some(view) if !RUNNING_STATES.contains(&view.status.as_str()) => Some(format!("the step is {}", view.status)),
-                    Some(_) => None,
-                };
-                reason.map(|reason| (step.clone(), attempt, reason))
-            })
-            .collect::<Vec<_>>();
-        for (step, attempt, reason) in left {
-            inner.running.remove(&step);
-            eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
-            send(&inner, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+        let left = {
+            let mut inner = self.lock();
+            let left = inner
+                .running
+                .iter()
+                .filter(|(_, running)| running.dispatch.run == run.subject)
+                .filter_map(|(step, running)| {
+                    let attempt = running.dispatch.attempt;
+                    let reason = match run.steps.iter().find(|view| view.subject == *step) {
+                        None => Some("the run moved to another generation".to_owned()),
+                        Some(_) if terminal => Some(format!("the run is {}", run.status)),
+                        Some(view) if view.attempt != attempt => Some(format!("the step moved to attempt {}", view.attempt)),
+                        Some(view) if !RUNNING_STATES.contains(&view.status.as_str()) => Some(format!("the step is {}", view.status)),
+                        Some(_) => None,
+                    };
+                    reason.map(|reason| (step.clone(), attempt, running.generation, reason))
+                })
+                .collect::<Vec<_>>();
+            for (step, attempt, generation, reason) in &left {
+                inner.running.remove(step);
+                eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
+                send_to(&inner, *generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            }
+            left
+        };
+        for (step, attempt, _, reason) in left {
+            self.cancel_waits(&step, attempt, &reason)?;
         }
+        Ok(())
+    }
+
+    /// What the programs of `run` wait on, for its evaluation to start and resolve.
+    pub fn requests(&self, run: &str) -> Vec<Request> {
+        let inner = self.lock();
+        inner
+            .running
+            .values()
+            .filter(|running| running.dispatch.run == run)
+            .flat_map(|running| running.requests.values().cloned())
+            .collect()
+    }
+
+    /// The child run or ask `request` waits on now exists: journal it as the key's `child`, even
+    /// when the program stopped waiting meanwhile, so nothing it started goes unrecorded. When its
+    /// step has left the attempt by then, the step's cancellation (which may have read the journal
+    /// before this entry) did not see it: cancel it here.
+    pub fn waiting(&self, request: &Request, child: &str) -> Result<()> {
+        self.write_journal(&request.step, request.attempt, &request.program, &request.key, "started", &Value::Null, Some(child))?;
+        let running = self
+            .program_of(request, |running| {
+                if let Some(pending) = running.requests.get_mut(&request.key) {
+                    pending.child = Some(child.to_owned());
+                }
+            })
+            .is_some();
+        // A program removed by its host's exit is resumed and adopts the child; one that ended or
+        // left its attempt (each sets the step's state before it cancels) does not.
+        if !running && let Some(reason) = self.left(&request.step, request.attempt)? {
+            self.cancel_waits(&request.step, request.attempt, &reason)?;
+        }
+        Ok(())
+    }
+
+    /// The child run or ask `child` that `request` waited on ended with `exit` (`{_tag, value}` or
+    /// `{_tag, error}`): journal it under the key, then hand it to the program (`resolved`). A key
+    /// that already holds a result keeps it, and the program gets that one.
+    pub fn resolve(&self, request: &Request, child: &str, exit: Value) -> Result<()> {
+        let Some(program) = self.program_of(request, |_| {}) else { return Ok(()) };
+        let (status, mut result) = match exit["_tag"].as_str() {
+            Some("Success") => ("completed", json!({"value": exit["value"]})),
+            _ => ("failed", json!({"error": exit["error"]})),
+        };
+        result["ms"] = Value::from(u64::try_from(request.since.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let exit = match self.write_journal(&request.step, request.attempt, &program, &request.key, status, &result, Some(child)) {
+            Ok(_) => exit,
+            Err(error) => {
+                let mut journaled = self
+                    .journal(&request.step, request.attempt)?
+                    .into_iter()
+                    .find(|entry| entry["key"] == request.key.as_str())
+                    .ok_or_else(|| anyhow!("journaling `{}` of {}: {error}", request.key, request.step))?;
+                if let Some(entry) = journaled.as_object_mut() {
+                    entry.remove("key");
+                }
+                journaled
+            }
+        };
+        let mut inner = self.lock();
+        let Some((generation, pending)) = inner
+            .running
+            .get_mut(&request.step)
+            .filter(|running| running.dispatch.attempt == request.attempt)
+            .and_then(|running| Some((running.generation, running.requests.remove(&request.key)?)))
+        else {
+            return Ok(());
+        };
+        send_to(
+            &inner,
+            generation,
+            &json!({"t": "resolved", "step": request.step, "attempt": request.attempt, "seq": pending.seq, "key": request.key, "exit": exit}),
+        );
+        Ok(())
+    }
+
+    /// The program asked for something the daemon refuses (a defect of the bundle): its step fails
+    /// and the program stops, with what it already waits on.
+    pub fn fail(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
+        let generation = {
+            let inner = self.lock();
+            inner.running.get(step).filter(|running| running.dispatch.attempt == attempt).map(|running| running.generation)
+        };
+        // Held as ended until its failure is written: a pass with a view read before then must
+        // not start the attempt again.
+        if let Some(generation) = generation.filter(|&generation| self.end(step, attempt, generation, None)) {
+            send_to(&self.lock(), generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+        }
+        eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
+        // The step's state first: a child started concurrently then sees it left (`waiting`).
+        self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(reason)))?;
+        self.cancel_waits(step, attempt, reason)?;
+        (self.wake)(step);
+        Ok(())
+    }
+
+    /// The bundle hash of the program that made `request`, while this engine still runs that
+    /// attempt, after `update` saw its entry.
+    fn program_of(&self, request: &Request, update: impl FnOnce(&mut Running)) -> Option<String> {
+        let mut inner = self.lock();
+        let running = inner.running.get_mut(&request.step).filter(|running| running.dispatch.attempt == request.attempt)?;
+        update(running);
+        Some(running.dispatch.program.bundle_hash.clone())
+    }
+
+    /// Cancel the child runs and asks this attempt journaled as waits and has no result for, once
+    /// nothing waits on them: the program ended or its step left the attempt. A run that ends
+    /// cancels its children itself, and its asks end with it.
+    fn cancel_waits(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
+        let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
+        for child in self.open_waits(step, attempt)? {
+            if child.starts_with("mission-run/") {
+                if !matches!(self.store.mission_run_status(&child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
+                    self.store.request_mission_run_cancellation(&child, &reason)?;
+                }
+                continue;
+            }
+            if !self.store.step_run(&child)?.is_some_and(|ask| matches!(ask.status.as_str(), "ready" | "pending")) {
+                continue;
+            }
+            let cancelled = self.store.finish_person_step(
+                &PersonStepResponse {
+                    delegation: None,
+                    subject: child.clone(),
+                    actor: PROGRAM_ASKER.to_owned(),
+                    summary: reason.clone(),
+                    evidence: Vec::new(),
+                    episode: None,
+                    answer: None,
+                    idempotency_key: format!("program-cancel:{child}"),
+                },
+                true,
+            );
+            match cancelled {
+                // `stale-fence`: the ask no longer waits (answered, or its run or generation ended).
+                Err(error) if error.code != "stale-fence" => return Err(error.into()),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The child runs and asks this attempt journaled under a key that has no result yet.
+    fn open_waits(&self, step: &str, attempt: u32) -> Result<Vec<String>> {
+        let mut waits = BTreeMap::new();
+        for claim in self.journal_claims(step)? {
+            let fields = &claim.body["fields"];
+            let Some(key) = fields["key"].as_str().filter(|_| fields["attempt"].as_u64() == Some(u64::from(attempt))) else {
+                continue;
+            };
+            match (fields["status"].as_str(), fields["child"].as_str()) {
+                (Some("started"), Some(child)) => {
+                    waits.insert(key.to_owned(), child.to_owned());
+                }
+                (Some("completed" | "failed"), _) => {
+                    waits.remove(key);
+                }
+                _ => {}
+            }
+        }
+        Ok(waits.into_values().collect())
     }
 
     /// The bundle as this revision pinned it, read from the store's blob of its hash (never from
@@ -275,6 +492,23 @@ impl ProgramEngine {
     /// store order. A retried attempt starts from the top, because an earlier attempt's
     /// compensation may have undone what its completed steps did.
     fn journal(&self, step: &str, attempt: u32) -> Result<Vec<Value>> {
+        let mut entries = Vec::new();
+        for claim in self.journal_claims(step)? {
+            let fields = &claim.body["fields"];
+            if fields["attempt"].as_u64() != Some(u64::from(attempt)) || fields["key"] == RESULT_KEY {
+                continue;
+            }
+            match fields["status"].as_str() {
+                Some("completed") => entries.push(json!({"key": fields["key"], "_tag": "Success", "value": fields["value"]})),
+                Some("failed") => entries.push(json!({"key": fields["key"], "_tag": "Failure", "error": fields["error"]})),
+                _ => {}
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Every journal entry of `step`, in store order.
+    fn journal_claims(&self, step: &str) -> Result<Vec<ClaimRecord>> {
         let mut claims = Vec::new();
         let mut before = None;
         loop {
@@ -287,19 +521,7 @@ impl ProgramEngine {
             }
         }
         claims.sort_by_key(|claim| claim.store_index);
-        let mut entries = Vec::new();
-        for claim in claims {
-            let fields = &claim.body["fields"];
-            if fields["attempt"].as_u64() != Some(u64::from(attempt)) || fields["key"] == RESULT_KEY {
-                continue;
-            }
-            match fields["status"].as_str() {
-                Some("completed") => entries.push(json!({"key": fields["key"], "_tag": "Success", "value": fields["value"]})),
-                Some("failed") => entries.push(json!({"key": fields["key"], "_tag": "Failure", "error": fields["error"]})),
-                _ => {}
-            }
-        }
-        Ok(entries)
+        Ok(claims)
     }
 
     /// The live host's generation, starting one when there is none or the last one exited.
@@ -450,10 +672,52 @@ impl ProgramEngine {
         let attempt = u32::try_from(attempt)?;
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
+            Some("run" | "ask") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
             Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
         }
+    }
+
+    /// A program waits on a child run or a person ask (§6). Registered here, it is started and
+    /// resolved by its run's evaluation. The `started` entry, written before the request is
+    /// registered, is the change that evaluates the run; a request the daemon cannot accept fails
+    /// the step.
+    fn request(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
+        if self.stop_if_left(step, attempt, generation)? {
+            return Ok(());
+        }
+        let Some(key) = message["key"].as_str().filter(|key| !key.is_empty() && *key != RESULT_KEY) else {
+            return self.fail(step, attempt, &format!("the program made a request without a key or with the reserved key {RESULT_KEY}"));
+        };
+        let wait = match wait(step, attempt, key, message) {
+            Ok(wait) => wait,
+            Err(reason) => return self.fail(step, attempt, &format!("the program made an invalid request for `{key}`: {reason}")),
+        };
+        self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
+        {
+            let mut inner = self.lock();
+            let Some(running) = inner
+                .running
+                .get_mut(step)
+                .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
+            else {
+                return Ok(());
+            };
+            let request = Request {
+                step: step.to_owned(),
+                attempt,
+                key: key.to_owned(),
+                wait,
+                child: None,
+                program: program.to_owned(),
+                seq: message["seq"].clone(),
+                since: Instant::now(),
+            };
+            running.requests.insert(key.to_owned(), request);
+        }
+        (self.wake)(step);
+        Ok(())
     }
 
     /// Why the step no longer runs this attempt, if it does not.
@@ -469,10 +733,13 @@ impl ProgramEngine {
     /// True when it was stopped.
     fn stop_if_left(&self, step: &str, attempt: u32, generation: u64) -> Result<bool> {
         let Some(reason) = self.left(step, attempt)? else { return Ok(false) };
-        let mut inner = self.lock();
-        if forget(&mut inner, step, attempt, generation) {
-            send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+        {
+            let mut inner = self.lock();
+            if forget(&mut inner, step, attempt, generation) {
+                send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            }
         }
+        self.cancel_waits(step, attempt, &reason)?;
         Ok(true)
     }
 
@@ -503,10 +770,12 @@ impl ProgramEngine {
         if let Some(child) = child {
             fields.insert("child".to_owned(), Value::from(child));
         }
+        // The run writes its own journal, as the actor its effects act as.
+        let run = self.store.step_run(step).map_err(smallclaims::error::typed)?.map(|view| view.run);
         self.store.append_claim(&ClaimInput {
             subject: step.to_owned(),
             kind: JOURNAL_KIND.to_owned(),
-            actor: None,
+            actor: run,
             fields,
             evidence: Vec::new(),
             expected_subject: None,
@@ -564,10 +833,18 @@ impl ProgramEngine {
             self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
             Ok(status)
         })?;
-        if let Some(status) = written {
-            eprintln!("fractal: program {step} {status}");
-            (self.wake)(step);
-        }
+        let Some(status) = written else {
+            if let Some(reason) = self.left(step, attempt)? {
+                self.cancel_waits(step, attempt, &reason)?;
+            }
+            return Ok(());
+        };
+        // A program can end while a child run or ask it started is still open (a lost race):
+        // nothing waits on it any more. The step's state comes first, so a child started
+        // concurrently sees it left (`waiting`).
+        self.cancel_waits(step, attempt, "the program ended")?;
+        eprintln!("fractal: program {step} {status}");
+        (self.wake)(step);
         Ok(())
     }
 
@@ -581,6 +858,7 @@ impl ProgramEngine {
         }
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
         self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(&reason)))?;
+        self.cancel_waits(step, attempt, &reason)?;
         (self.wake)(step);
         Ok(())
     }
@@ -739,6 +1017,50 @@ fn write_host(mut stdin: ChildStdin, queue: mpsc::Receiver<Vec<u8>>) {
             return;
         }
     }
+}
+
+/// What a `run` or `ask` message asks the daemon to wait on, or why it cannot.
+fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Result<Wait, String> {
+    let text = |name: &str| {
+        message[name]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("`{name}` must be a non-empty string"))
+    };
+    if message["t"] == "run" {
+        let mission = text("mission")?;
+        let input = serde_json::from_value::<BTreeMap<String, String>>(message["input"].clone())
+            .map_err(|_| "`input` must map each mission input to a string".to_owned())?;
+        let mission = mission.strip_prefix("mission/").unwrap_or(&mission).to_owned();
+        return Ok(Wait::Run { mission, input });
+    }
+    let deadline_ms = match &message["deadline"] {
+        Value::Null => None,
+        Value::String(deadline) => Some(crate::declaration_syntax::parse_duration(deadline, true).map_err(|error| error.message)?),
+        _ => return Err("`deadline` must be a duration such as `10m`".into()),
+    };
+    let default_answer = match &message["default"] {
+        Value::Null => None,
+        Value::String(answer) => Some(answer.clone()),
+        _ => return Err("`default` must name an answer of the request".into()),
+    };
+    let title = text("title")?;
+    Ok(Wait::Ask(Box::new(PersonAskRequest {
+        legacy_request: None,
+        person: text("for")?,
+        reason: title.clone(),
+        title,
+        actor: PROGRAM_ASKER.to_owned(),
+        step: Some(step.to_owned()),
+        new_run: None,
+        // A program step has no claim: its attempt fences the ask.
+        incarnation: Some(attempt.to_string()),
+        request: Some(message["request"].clone()).filter(|request| !request.is_null()),
+        deadline_ms,
+        default_answer,
+        idempotency_key: idempotency_key(step, attempt, key),
+    })))
 }
 
 /// A typed failure keeps its tag and fields, so `fractal missions show` says which error ended

@@ -141,6 +141,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
                 notify: Arc::new(Notify::new()),
                 event_notify: watch::channel(0_u64).0,
                 node: NODE.into(),
+                api_socket: root.join("api.sock"),
                 state_dir: root.clone(),
                 pty_root: root.join("pty"),
                 pty_binary: PathBuf::from("pty"),

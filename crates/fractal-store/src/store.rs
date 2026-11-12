@@ -62,6 +62,7 @@ mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod read_positions;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -133,6 +134,7 @@ mod resource_references;
 pub mod operation_audit;
 pub mod push_registrations;
 pub mod mission_provenance;
+pub mod source_maps;
 pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
@@ -815,7 +817,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6088551c41aa owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -865,6 +867,12 @@ CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
 ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
 WHERE kind='harness.timeline'
   AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result');
+-- Prose lookups must not walk newer tool traffic or user prompts, including an empty result.
+CREATE INDEX IF NOT EXISTS claims_timeline_prose_time_index
+ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
@@ -1421,6 +1429,11 @@ ON local_observations(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS local_observations_timeline_index
 ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id)
 WHERE kind='harness.timeline';
+CREATE INDEX IF NOT EXISTS local_observations_timeline_prose_index
+ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id, after_store_index, observed_at_unix_ms)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 -- The roster cache's local frontier: the newest agent timeline row a graph cut can see. Only
 -- an agent's timeline rows can change a roster card, so this partial covering index bounds the
 -- frontier lookup by newer agent timeline rows alone; heartbeats, telemetry and every other
@@ -3364,6 +3377,7 @@ impl Store {
                 owned: None,
                 guard: Some(guard),
                 force: None,
+                source_map: None,
             },
         )
     }
@@ -3388,6 +3402,7 @@ impl Store {
                 owned: None,
                 guard: None,
                 force: Some(reason),
+                source_map: None,
             },
         )
     }
@@ -3424,7 +3439,10 @@ impl Store {
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
-        let publication::CommitChecks { owned, guard, force } = checks;
+        let publication::CommitChecks { owned, guard, force, source_map } = checks;
+        if source_map.is_some() && owned.is_none() {
+            return Err(FractalError::new("invalid-source-map", "a source map needs an owned-set publication"));
+        }
         let apply = |transaction: &Transaction<'_>| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
                 agent_charter::validate_publication(transaction, &self.origin, intent)?;
@@ -3447,6 +3465,8 @@ impl Store {
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
                 validate_standing_observer_stop(intent, actor)?;
                 if let Some(options) = owned {
+                    // The source map stays out of the digest: a retry answers the first response
+                    // and records nothing from a different map (docs/st3/owned-sets.md).
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
                     let prior: Option<String> = transaction.query_row("SELECT response FROM idempotency WHERE operation_id=?1", [&cache_key], |row|row.get(0)).optional().map_err(internal)?;
@@ -3472,12 +3492,15 @@ impl Store {
                 if let (Some(plan), Some(options)) = (&owned_plan, owned) {
                     owned_sets::check_publisher(plan, actor)?;
                     owned_sets::validate_apply(plan, options)?;
+                    if let Some(map) = source_map {
+                        source_maps::validate_tx(map, plan)?;
+                    }
                     if plan.preview.noop {
                         return cache_local_apply_receipt_tx(transaction,ApplyResponse {
                             changed: false, store_index: current_index_tx(transaction).map_err(internal)?,
                             batch_id: None, claim_ids: Vec::new(), subject_tokens: BTreeMap::new(),
                             reconcile_subjects: Vec::new(), resolved_kdl: String::new(), operations: Vec::new(),
-                            source_debts_recorded: Vec::new(), source_debts_reverted: Vec::new(),
+                            source_debts_recorded: Vec::new(), source_debts_reverted: Vec::new(), source_maps: None,
                         },local_receipt,idempotency_key);
                     }
                 } else {
@@ -3643,6 +3666,8 @@ impl Store {
                     }
                 }
                 for declaration in intent.mission_runs.values() {
+                    // A run declares only on itself and the runs it started.
+                    run_authority::admit_reach_tx(transaction, actor, &declaration.subject, "declare")?;
                     let actual = latest_claim_id_tx(transaction, &declaration.subject)
                         .map_err(internal)?
                         .into_iter()
@@ -3888,6 +3913,7 @@ impl Store {
                         operations: Vec::new(),
                         source_debts_recorded: Vec::new(),
                         source_debts_reverted: Vec::new(),
+                        source_maps: None,
                     };
                     transaction
                         .execute(
@@ -3938,6 +3964,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run declares only what its authority grants, as it writes any claim.
+                    run_authority::admit_tx(transaction, &self.origin, actor, "intent.desired", subject, &BTreeMap::new())?;
                     let predecessors = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let mut body = serde_json::to_value(desired).map_err(internal)?;
                     if let Some(plan) = &owned_plan
@@ -4021,6 +4049,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run publishes only the missions its authority grants (`publish ID`).
+                    run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
                     let mut body = serde_json::to_value(mission).map_err(internal)?;
@@ -4360,9 +4390,15 @@ impl Store {
                         actor, refused, Some(&batch_id))?;
                     claim_ids.push(record.id);
                 }
+                let mut source_map_counts = None;
                 if let Some(plan) = &owned_plan {
                     let receipt = owned_sets::commit_tx(transaction, &self.origin, plan, actor, &batch_id)?;
                     tokens.insert(plan.preview.set.clone(), vec![receipt.id.clone()]);
+                    if let Some(map) = source_map {
+                        let (counts, ids) = source_maps::record_tx(transaction, &self.origin, map, &receipt, actor, &batch_id)?;
+                        claim_ids.extend(ids);
+                        source_map_counts = Some(counts);
+                    }
                     claim_ids.push(receipt.id);
                 }
                 if receipt_attached { repair_operations_tx(transaction,&[opaque_cache_key(idempotency_key)]).map_err(internal)?; }
@@ -4382,6 +4418,7 @@ impl Store {
                     source_debts_recorded,
                     source_debts_reverted: owned_plan.as_ref()
                         .map(|plan| plan.preview.reverted_debts.clone()).unwrap_or_default(),
+                    source_maps: source_map_counts,
                 };
                 transaction
                     .execute(
@@ -7564,6 +7601,7 @@ impl Store {
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
+                | "read-position.advanced"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -11728,6 +11766,7 @@ fn replicated_work_validation_fields<'a>(
         .map_err(anyhow::Error::new)?;
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
@@ -16386,6 +16425,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::glasses::validate_owner(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
@@ -24094,6 +24135,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::glasses::validate_owner(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

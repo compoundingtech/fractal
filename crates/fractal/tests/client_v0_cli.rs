@@ -25,6 +25,7 @@ fn test_state(root: &Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "client-v0-cli".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -2683,7 +2684,7 @@ mission "cli/child" state="ready" {
     assert!(socket.exists(), "client-v0 test socket did not appear");
 
     let now = value(&run_cli(&socket, &["now", "--as", "person/alex"]).await);
-    assert_eq!(now["api_version"], "st3.client.v0");
+    assert_eq!(now["api_version"], "fractal.client.v0");
     assert_eq!(now["value"]["collection"], "now");
     assert_eq!(now["value"]["filters"]["person"], "person/alex");
 
@@ -2696,7 +2697,7 @@ mission "cli/child" state="ready" {
         vec!["terminals", "ls"],
     ] {
         let page = value(&run_cli(&socket, &arguments).await);
-        assert_eq!(page["api_version"], "st3.client.v0", "{arguments:?}");
+        assert_eq!(page["api_version"], "fractal.client.v0", "{arguments:?}");
         assert_eq!(page["value"]["kind"], "page", "{arguments:?}");
         assert!(page["value"]["items"].is_array(), "{arguments:?}");
         assert!(page["value"]["filters"].is_object(), "{arguments:?}");
@@ -2736,7 +2737,7 @@ mission "cli/child" state="ready" {
     assert!(first_agent["value"]["page"]["next_cursor"].is_string());
 
     let machines = value(&run_cli(&socket, &["machines"]).await);
-    assert_eq!(machines["api_version"], "st3.client.v0");
+    assert_eq!(machines["api_version"], "fractal.client.v0");
     assert_eq!(machines["value"]["items"][0]["id"], "machine/client-v0-cli");
     assert_eq!(machines["value"]["items"][0]["kind"], "machine");
     assert_eq!(
@@ -2829,7 +2830,7 @@ mission "cli/child" state="ready" {
     );
 
     let activity = value(&run_cli(&socket, &["activity", "--limit", "10"]).await);
-    assert_eq!(activity["api_version"], "st3.client.v0");
+    assert_eq!(activity["api_version"], "fractal.client.v0");
     assert_eq!(activity["value"]["kind"], "event-page");
 
     let devices = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2843,7 +2844,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(pairing["api_version"], "st3.client.v0");
+    assert_eq!(pairing["api_version"], "fractal.client.v0");
     assert_eq!(pairing["value"]["kind"], "pairing-challenge");
 
     let revoked = value(
@@ -2853,7 +2854,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(revoked["api_version"], "st3.client.v0");
+    assert_eq!(revoked["api_version"], "fractal.client.v0");
     assert_eq!(revoked["value"]["status"], "completed");
 
     let current = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2991,7 +2992,7 @@ mission "queued-work" state="ready" {
 
     let queue =
         value(&run_queue_cli(&socket, &config_home, true, &["agents", "queue", &seat]).await);
-    assert_eq!(queue["api_version"], "st3.client.v0");
+    assert_eq!(queue["api_version"], "fractal.client.v0");
     assert_eq!(queue["value"]["kind"], "agent-queue");
     assert_eq!(queue["value"]["next_work_id"], step(0));
 

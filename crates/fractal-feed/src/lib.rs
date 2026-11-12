@@ -1,6 +1,6 @@
-//! One socket to st for live collection windows, conversations and a terminal.
+//! A primary socket for live windows, conversations and a terminal, plus read invalidations.
 //!
-//! The feed holds one collection socket with the attention, missions and agents windows, the
+//! The feed holds a primary collection socket with the attention, missions and agents windows, the
 //! open conversations, and, while a terminal is open, that terminal. st joins each row and each
 //! conversation, so callers never join lists themselves or read item by item. When the socket drops,
 //! the feed opens a new one, subscribes again, and attaches the open terminal again. Nothing
@@ -13,7 +13,10 @@ pub mod cache;
 pub mod model;
 mod inventory;
 mod terminal;
+mod read_positions;
 pub mod tree;
+#[cfg(test)]
+mod read_positions_tests;
 #[cfg(test)]
 mod revisioned_agents_tests;
 
@@ -107,6 +110,9 @@ pub enum Window {
     Summary,
     /// The selected person’s sidebar organization, when supported.
     Arrangements,
+    /// The person's read positions, when supported, on a dedicated invalidation socket.
+    /// Its frames say that positions changed, and the UI reads their list again.
+    ReadPositions,
     Inventory(Inventory),
 }
 
@@ -121,6 +127,7 @@ impl Window {
             Self::Glasses => "glasses",
             Self::Summary => "summary",
             Self::Arrangements => "arrangements",
+            Self::ReadPositions => "read-positions",
             Self::Inventory(inventory) => inventory.collection(),
         }
     }
@@ -128,7 +135,7 @@ impl Window {
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([Self::Glasses, Self::Summary, Self::Arrangements])
+            .chain([Self::Glasses, Self::Summary, Self::Arrangements, Self::ReadPositions])
             .find(|window| window.id() == id)
             .or_else(|| Inventory::from_id(id).map(Self::Inventory))
     }
@@ -136,7 +143,7 @@ impl Window {
     /// How many items to follow: every glass a person may keep, a page of anything else.
     fn limit(self) -> usize {
         match self {
-            Self::Glasses | Self::Arrangements => GLASSES,
+            Self::Glasses | Self::Arrangements | Self::ReadPositions => GLASSES,
             _ => WINDOW,
         }
     }
@@ -256,7 +263,7 @@ pub enum Command {
 }
 
 /// Three conversations remain live alongside collection windows, glasses and a terminal.
-/// Optional arrangements require the advertised sixteen-subscription socket capacity.
+/// Read-position invalidations use a separate socket, preserving all six inventory slots.
 pub const MAX_CONVERSATIONS: usize = 3;
 
 /// A conversation being shown, on its own subscription.
@@ -585,6 +592,16 @@ async fn connected(
     let sidebar_person = person.filter(|person| {
         person.starts_with("person/") && supports("arrangements") && supports("collections")
     });
+    let positions_person = person.filter(|person| {
+        person.starts_with("person/") && supports("read-positions") && supports("collections")
+    });
+    let positions = async {
+        if let Some(person) = positions_person {
+            read_positions::run(client, person, updates).await;
+        }
+    };
+    tokio::pin!(positions);
+    let mut positions_running = positions_person.is_some();
     // From version 2 a glass's splits keep their sizes in st.
     if let Some(version) = version
         && updates.send(Update::GlassesVersion(version)).is_err()
@@ -611,6 +628,7 @@ async fn connected(
         && let Err(error) = stream.subscribe_arrangements("arrangements", person, GLASSES, None).await {
         return Ended::Dropped(error.to_string());
     }
+    // The main socket never subscribes to read positions.
     if inventory_granted {
         for inventory in inventories.windows() {
             if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
@@ -645,6 +663,9 @@ async fn connected(
         let window_at = window_retries.next();
         let report_at = pending_reports.next();
         tokio::select! {
+            () = &mut positions, if positions_running => {
+                positions_running = false;
+            }
             _ = probe.tick() => {
                 let quiet = heard.quiet_for();
                 if quiet < timer(QUIET_BEFORE_PING) {
@@ -896,16 +917,18 @@ async fn connected(
                 Some(Command::Inventories(wanted)) => {
                     let previous = *inventories;
                     *inventories = wanted;
-                    if !inventory_granted { continue; }
-                    for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
-                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
-                        let window = Window::Inventory(inventory);
-                        windows.remove(&window); window_retries.loaded(window);
-                        pending_reports.cancel(window);
-                        if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
-                    }
-                    for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
-                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
+                    // Inventories never compete with the dedicated read-position socket.
+                    if inventory_granted {
+                        for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
+                            if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
+                            let window = Window::Inventory(inventory);
+                            windows.remove(&window); window_retries.loaded(window);
+                            pending_reports.cancel(window);
+                            if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
+                        }
+                        for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
+                            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
+                        }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -984,6 +1007,7 @@ async fn connected(
                             Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
                             None => continue,
                         },
+                        Window::ReadPositions => continue,
                         Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
                         Window::Inventory(inventory) => inventory.subscribe(stream).await,
                         Window::Agents if revisioned_agents => {
@@ -1010,12 +1034,16 @@ async fn connected(
     }
 }
 
-/// Whether a frame for `window` is one already on its way when the window was left: the missions
-/// window is followed only on request, and a snapshot, change, resync or error that arrives after
-/// the unsubscribe must not bring back the rows, the followed state or an error the UI dropped.
+/// Ignore late frames for missions after leaving them. Read positions belong exclusively to
+/// their dedicated socket and cannot be delivered through the main socket.
 fn left(window: Window, missions_followed: bool) -> bool {
-    window == Window::Missions && !missions_followed
+    match window {
+        Window::Missions => !missions_followed,
+        Window::ReadPositions => true,
+        _ => false,
+    }
 }
+
 
 /// Up to half of `wait` more, so many clients told to ask again at once do not all ask together.
 fn jitter(wait: Duration) -> Duration {
@@ -1889,15 +1917,16 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_for_the_missions_window_after_it_was_left_is_ignored() {
-        // The other windows are never left; missions are ignored only while not followed.
-        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary] {
+    fn a_frame_for_a_window_after_it_was_left_is_ignored() {
+        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary, Window::Arrangements] {
             assert!(!left(window, false), "{window:?} is always followed");
             assert!(!left(window, true));
         }
         assert!(left(Window::Missions, false), "a late missions frame is dropped");
         assert!(!left(Window::Missions, true), "followed missions are kept");
+        assert!(left(Window::ReadPositions, true), "read positions use their own socket");
     }
+
 
 }
 

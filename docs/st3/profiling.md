@@ -51,6 +51,45 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Replication receive costs
+
+Each completed graph receive handler emits one `replication receive summary` INFO record,
+including errors. `correlation_id` is the canonical UUID from `x-fractal-exchange-id`, or a
+generated UUID when that header is missing or invalid. The receive's slow-request and
+independent writer-hold diagnostics use the same ID. IDs are log fields, never metric labels;
+request bodies and invalid header values are not logged.
+
+The summary has six named phase records, each with `elapsed`, `writer_wait` and `writer_hold`
+durations: `receipt_ingest` (initial state inspection, exchange receipt and transport observation),
+`admission_prelude` (local sealing and judging), `admission` (backlog validation, including its
+admission mutex), `repairs`, `projection`, and `response_postcommit` (response construction and
+notifications after projection). Unreached phases remain zero. `admit_ms` describes admission
+only, excluding the separately reported prelude and repairs. `project_ms` retains projection
+wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
+include response-envelope serialization or network delivery.
+
+Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
+loans measure borrower ownership through transaction finalization and postcommit observer
+cleanup, before connection return. Batched callbacks measure their queue wait and exclusive
+savepoint execution on the writer thread. Captured request and phase scopes restore the
+previous thread context after callback return or unwind. Phase wall time contains writer
+wait/hold and nested rebuild/final-drain work: these costs are **non-additive**.
+
+A group commit emits one `replication receive shared finalization` event if any receive
+participated. It reports a process-local `batch_id`, `prepare_ms`, `finalization_ms` (finalizers,
+COMMIT or rollback, and postcommit observers), and the participating `(correlation_id, phase)`
+pairs. It is explicitly `shared=true`, `additive=false`: no request owns that shared duration.
+Its participant set is bounded by the existing writer batch limit, including distinct phases
+of the same request. Shared hold diagnostics carry `shared_batch_id`, not one receive ID.
+Non-receive writer diagnostics retain their existing attribution.
+
+The summary's `shared_event_join` equals its `correlation_id`: join that ID against **all**
+shared events' participant pairs for the authoritative links. `shared_finalizations` counts
+distinct participating batches; optional `first_shared_batch` and `last_shared_batch` are
+only bounded index hints, **not an exhaustive list**. Summaries retain no growing batch-ID
+list. Shared event timing and links finish before batched acknowledgements, so a completed
+request cannot snapshot before its shared accounting arrives.
+
 ## Conversation relay reads
 
 `st.conversation.relay_read.duration` is one histogram in seconds, recorded for successful

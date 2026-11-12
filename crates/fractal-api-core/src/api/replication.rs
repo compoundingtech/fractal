@@ -302,8 +302,15 @@ pub async fn replication_checkpoint_adopt(
     Ok(Json(actions))
 }
 
+pub(super) fn receive_correlation(headers: &axum::http::HeaderMap) -> uuid::Uuid {
+    headers.get("x-fractal-exchange-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
 /// One INFO event describes all work charged to this receive, including failed requests.
-/// Admission time covers validation and repairs; projection time includes its lock waits.
+/// Phase wall times contain nested writer work and are non-additive with writer/shared costs.
 /// Counts include backlog work done by this request, not only envelopes it offered.
 /// Commits count successful managed transactions, not savepoints or implicit autocommit.
 /// `projection_stage` identifies failed final drains or other projection failure boundaries.
@@ -313,14 +320,11 @@ pub async fn replication_receive(
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let started = std::time::Instant::now();
-    let correlation_id = headers
-        .get("x-fractal-exchange-id")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("-");
-    let correlation = uuid::Uuid::parse_str(correlation_id).ok();
+    let correlation = receive_correlation(&headers);
+    let correlation_id = correlation.to_string();
     let peer = request.peer.clone();
     let envelopes_offered = request.exchange.envelopes.len();
-    let metrics = smallclaims::receive_metrics::RequestMetrics::default();
+    let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
     let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
     let counters = metrics.snapshot();
     let outcome = match &result {
@@ -336,6 +340,17 @@ pub async fn replication_receive(
         envelopes_admitted = counters.envelopes_admitted,
         admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
         project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],
+        admission_prelude = ?counters.phases[smallclaims::receive_metrics::Stage::AdmissionPrelude as usize],
+        admission = ?counters.phases[smallclaims::receive_metrics::Stage::Admission as usize],
+        repairs = ?counters.phases[smallclaims::receive_metrics::Stage::Repairs as usize],
+        projection = ?counters.phases[smallclaims::receive_metrics::Stage::Projection as usize],
+        response_postcommit = ?counters.phases[smallclaims::receive_metrics::Stage::ResponsePostcommit as usize],
+        phase_costs_additive = false,
+        shared_finalizations = counters.shared_finalizations,
+        first_shared_batch = counters.first_shared_batch,
+        last_shared_batch = counters.last_shared_batch,
+        shared_event_join = %correlation_id,
         projection_chunks = counters.projection_chunks,
         rebuild_part_count = counters.rebuild_part_count,
         rebuild_part_ms = counters.rebuild_part_time.as_secs_f64() * 1000.0,
@@ -352,11 +367,15 @@ async fn replication_receive_inner(
     state: AppState,
     request: ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
-    correlation: Option<uuid::Uuid>,
+    correlation: uuid::Uuid,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
+    let response_metrics = metrics.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let _metrics = metrics.enter();
+        let receipt_timer = smallclaims::receive_metrics::Timer::start(
+            smallclaims::receive_metrics::Stage::ReceiptIngest,
+        );
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -383,14 +402,15 @@ async fn replication_receive_inner(
                 .record_transport_observation(&request.peer, "up", None, None)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
+        drop(receipt_timer);
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
-            let _admission = smallclaims::receive_metrics::Timer::start(
-                smallclaims::receive_metrics::Stage::Admission,
-            );
             let admission = store
                 .validate_replication_backlog()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            let _repairs = smallclaims::receive_metrics::Timer::start(
+                smallclaims::receive_metrics::Stage::Repairs,
+            );
             let repairs = store
                 .apply_replication_repairs()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -441,6 +461,9 @@ async fn replication_receive_inner(
         } else {
             Some(true)
         };
+        let _response = smallclaims::receive_metrics::Timer::start(
+            smallclaims::receive_metrics::Stage::ResponsePostcommit,
+        );
         if projection.is_none() {
             smallclaims::receive_metrics::deferred();
         }
@@ -474,11 +497,15 @@ async fn replication_receive_inner(
             smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
             || format!(
                 "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
-                correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+                correlation,
                 error.code,
             ),
         );
     })?;
+    let _metrics = response_metrics.enter();
+    let _response = smallclaims::receive_metrics::Timer::start(
+        smallclaims::receive_metrics::Stage::ResponsePostcommit,
+    );
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,

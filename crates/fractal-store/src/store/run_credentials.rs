@@ -68,13 +68,13 @@ impl Store {
         ).unwrap()
     }
 
-    /// Publish a one-step mission that may write `custom/example/*` and `doc/runs/*`, start a run
-    /// of it and put its step at attempt 1, working.
+    /// Publish a one-step mission that may write `custom/example/*` and `doc/runs/*` and publish
+    /// `example/*`, start a run of it and put its step at attempt 1, working.
     pub fn start_program_step_for_tests(&self) -> StepRunView {
         crate::store::tests_shared_seats::publish_mission(self, r#"version 2
 mission "land" state="ready" {
   goal "Land one change."
-  authority { write "custom/example/*"; write "doc/runs/*"; }
+  authority { write "custom/example/*"; write "doc/runs/*"; publish "example/*"; }
   step "program" { agentless }
 }"#, "declare-land");
         let run = self.create_mission_run_inner(&crate::model::MissionRunRequest {

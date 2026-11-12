@@ -7,6 +7,7 @@ use crate::ConversationReadsStore;
 use crate::CustomStore;
 use crate::GlassesStore;
 use crate::ArrangementsStore;
+use crate::ReadPositionsStore;
 use crate::DeclarationsStore;
 use crate::LanesStore;
 use crate::MissionListStore;
@@ -46,6 +47,7 @@ pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
@@ -53,6 +55,8 @@ pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
+mod usage_hub;
+pub mod read_positions;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -75,6 +79,8 @@ mod conversation_follow_tests;
 mod launch_detail_tests;
 #[cfg(test)]
 mod mission_history_tests;
+#[cfg(test)]
+mod run_reach_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -107,6 +113,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/arrangements/{person_name}/{uuid}/memberships",
             get(arrangements::memberships),
         )
+        .route("/v1/client/read-positions", get(read_positions::list))
         .route("/v1/client/glasses", get(glasses_list))
         .route(
             "/v1/client/glasses/{id}",
@@ -121,6 +128,14 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
+        .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -352,11 +367,11 @@ fn record_subscription_page(value: &Value, bytes: usize) {
     span.record("span.label", format!("{collection} {rows}"));
 }
 
-const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
-const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
+const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 
-const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
+const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
@@ -548,8 +563,8 @@ async fn collection_items_with_windows(
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
-            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships"
+            | "read-positions" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -578,13 +593,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
-        return Err(validation("arrangements select an explicit person, not an actor"));
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions") && request.actor.is_some() {
+        return Err(validation("arrangements and read positions select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -624,6 +639,8 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
+    } else if request.collection == "read-positions" {
+        Some(read_positions::person(current, request.person.as_deref(), false)?)
     } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
@@ -700,6 +717,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
+                        "read-positions" => Some(read_positions::person(&current, request.person.as_deref(), false)?),
                         "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
@@ -878,6 +896,10 @@ async fn collection_items_with_windows(
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
                     Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
                         person.as_deref().expect("explicit arrangement owner"))?))
+                } else if collection == "read-positions" {
+                    // Any change to the person's positions, inside the window's rows or not.
+                    Some(CollectionRevision::Owner(store.read_position_revision(
+                        person.as_deref().expect("explicit read-position owner"))?))
                 } else {
                     None
                 };
@@ -932,6 +954,10 @@ async fn collection_items_with_windows(
                             index,
                             None,
                             limit.saturating_add(1),
+                        )?,
+                        "read-positions" => store.read_positions(
+                            person.as_deref().expect("explicit read-position owner"),
+                            index,
                         )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
@@ -1107,6 +1133,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "ordered-memberships" => "stream collection/ordered-memberships",
+        "read-positions" => "stream collection/read-positions",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -2477,10 +2504,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
+                    let read_positions_changed = subscriptions.values().any(|s| s.request.collection == "read-positions") && state.store.read_positions_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
+                        || (read_positions_changed && s.request.collection == "read-positions")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -3059,7 +3088,7 @@ fn mission_visualization(
         decisions.extend(super::client_launch_decision_resources(store, &session)?);
     }
     Ok(Some(json!({
-        "version":"st3.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
+        "version":"fractal.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
         "mission":mission_id, "nodes":nodes, "edges":edges, "groups":[],
         "timeline":{"entries":timeline}, "swimlanes":[], "goals":mission.goals,
         "constraints":mission.constraints, "gates":mission.gates, "resources":mission.products,
@@ -7243,7 +7272,7 @@ fn terminal_stream_envelope(state: &AppState, value: Value) -> Value {
 fn terminal_stream_error(error: &ApiError) -> Value {
     json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": format!("request/{}", new_request_id()),
         "code": client_error_code(Some(&error.code)),
         "message": error.message,
@@ -8762,6 +8791,7 @@ async fn dispatch_action(
                     &current.subject,
                     reason,
                     Some(expected_generation),
+                    Some(authority_actor.as_str()),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
@@ -9805,6 +9835,11 @@ async fn action_inner(
         "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
         _ => None,
     };
+    let read_position = if request.action_type == "read-position.advance" {
+        Some(read_positions::advance(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9817,6 +9852,8 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
+    } else if let Some(advanced) = &read_position {
+        vec![advanced.id.clone()]
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9827,6 +9864,10 @@ async fn action_inner(
     }
     if let Some(claim) = arrangement_claim {
         result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
+    }
+    if let Some(advanced) = &read_position {
+        // The stored position after the merge, whether or not this advance appended a claim.
+        result["read_position_at"] = json!(advanced.at);
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -10249,6 +10290,39 @@ mod tests {
             "an unchanged store index does not rebuild the list");
     }
 
+    #[test]
+    fn server_subprotocols_use_fractal_and_negotiate_legacy_offers() {
+        for (canonical, expected, legacy) in [
+            (TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0", "st3.client.terminal.v0"),
+            (CONVERSATION_SUBPROTOCOL, "fractal.client.conversation.v0", "st3.client.conversation.v0"),
+            (COLLECTION_SUBPROTOCOL, "fractal.client.collections.v0", "st3.client.collections.v0"),
+        ] {
+            assert_eq!(canonical, expected);
+            assert_eq!(super::super::wire_names::selected_protocol(&[legacy], canonical), Some(legacy));
+            assert_eq!(super::super::wire_names::selected_protocol(&[canonical], canonical), Some(canonical));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_pairing_accepts_legacy_requests_and_emits_fractal() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let response = super::super::router(state).oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": version, "device_name": "Old client", "person_id": "person/ada"
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["api_version"], "fractal.client.v0");
+            assert_eq!(response["value"]["kind"], "pairing-challenge");
+        }
+    }
+
     #[tokio::test]
     async fn published_runtimes_readiness_errors_survive_http_encoding() {
         for ended in [false, true] {
@@ -10272,7 +10346,7 @@ mod tests {
             let envelope: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
             assert_eq!(envelope["retryable"], !ended);
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert_eq!(envelope["details"], json!({}));
         }
     }
@@ -13981,6 +14055,7 @@ mission "differential" state="ready" {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: node.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: root.join("unused-pty"),
@@ -17570,6 +17645,7 @@ mission "example/zero-run" state="ready" {
         )
         .unwrap();
         assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["visualization"]["version"], "fractal.visualization.v0");
         assert_eq!(
             details[0]["visualization"]["mission"],
             "mission/example/zero-run"

@@ -53,6 +53,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: name.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.clone(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),
@@ -150,6 +151,7 @@ async fn request(daemon: &Daemon, sequence: u64, kdl: String) -> Request {
         actor: "person/operator".into(),
         idempotency_key: format!("publish-{sequence}"),
         program_bundles: Default::default(),
+        source_map: None,
     }
 }
 
@@ -2049,7 +2051,7 @@ async fn terminal_retire_of_a_live_member_is_refused_through_client_v0() {
 }
 
 /// An `audit` set refuses nothing beyond `off`: each write `enforce` would refuse proceeds and
-/// records `source.audited` with that refusal.
+/// records `source.audited` with that refusal. Only the terminal retirement also opens debt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_audit_set_records_what_enforce_would_refuse() {
     let root = tempfile::tempdir().unwrap();
@@ -2071,7 +2073,8 @@ async fn an_audit_set_records_what_enforce_would_refuse() {
     let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
     d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
     let status = source_status(&d, true).await;
-    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    let open: Vec<_> = status["open"].as_array().unwrap().iter().map(|debt| (&debt["subject"], &debt["verb"])).collect();
+    assert_eq!(open, [(&json!(orchard), &json!("retire"))], "{status}");
     let audited: Vec<(String, String)> = status["audited"]
         .as_array()
         .unwrap()
@@ -2086,6 +2089,95 @@ async fn an_audit_set_records_what_enforce_would_refuse() {
     assert_eq!(status["audited"][0]["actor"], "person/operator");
     assert_contains(status["audited"][0]["refusal"].as_str().unwrap(), &["retirement is terminal"]);
     assert!(source_status(&d, false).await.get("audited").is_none());
+}
+
+/// An ad hoc terminal retirement cannot be reverted, so it never wedges the set: a publication
+/// still declaring the member keeps it retired and says so. An `audit` set also records the
+/// retirement as source debt, open until the source drops the member and then adopted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ad_hoc_retirement_keeps_the_member_retired_until_the_source_drops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, enforced_bundle(""), Some(enforce(Enforce::Audit))).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
+    let status = source_status(&d, false).await;
+    assert_eq!(status["open"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(status["open"][0]["subject"], orchard);
+    assert_eq!(status["open"][0]["verb"], "retire");
+    assert_eq!(status["open"][0]["reason"], "done");
+
+    // Every publication still declaring the member succeeds, keeps it retired and reports it.
+    for sequence in [11, 12] {
+        let (planned, published) = publish_set(&d, sequence, enforced_bundle(LILY), None).await;
+        assert!(planned.blockers.is_empty(), "{:?}", planned.blockers);
+        assert!(!planned.mass_retirement);
+        assert_eq!(planned.changes[orchard], "retired");
+        assert_eq!(planned.effects[orchard], "keep terminally retired by person/operator: done; drop it from the source");
+        assert!(!planned.declaration_diffs.contains_key(orchard));
+        assert!(planned.reverted_debts.is_empty(), "{:?}", planned.reverted_debts);
+        assert!(published["publication"]["source_debts_reverted"].as_array().is_none_or(Vec::is_empty), "{published}");
+        let set = d.store.owned_sets().unwrap().remove(0);
+        assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+        assert!(set.receipt.retired.contains_key(orchard) && !set.receipt.members.contains_key(orchard));
+        assert!(set.receipt.members.contains_key("agent/garden/lily"));
+        assert!(d.store.agent_retirement(orchard).unwrap().is_some());
+        assert_eq!(source_status(&d, false).await["open"][0]["verb"], "retire");
+    }
+
+    // Dropping the member from the source adopts the retirement and closes its debt.
+    let (planned, _) = publish_set(&d, 13, format!("version 2\n{ROSE}{LILY}{HARVEST}"), None).await;
+    assert!(!planned.changes.contains_key(orchard), "{:?}", planned.changes);
+    assert_eq!(planned.reverted_debts.len(), 1, "{:?}", planned.reverted_debts);
+    assert_eq!(planned.reverted_debts[0].outcome.as_deref(), Some("adopted"));
+    let status = source_status(&d, false).await;
+    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(status["closed"][0]["verb"], "retire", "{status}");
+    assert_eq!(status["closed"][0]["outcome"], "adopted", "{status}");
+}
+
+/// A set without a policy records no debt, but its publication still keeps an ad hoc retired
+/// member retired instead of failing with `recipient-retired`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_off_set_publication_keeps_an_ad_hoc_retired_member_retired() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, enforced_bundle(""), None).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "off-retire", &[]).unwrap();
+    let (planned, _) = publish_set(&d, 11, enforced_bundle(LILY), None).await;
+    assert!(planned.blockers.is_empty(), "{:?}", planned.blockers);
+    assert_eq!(planned.changes[orchard], "retired");
+    assert!(d.store.owned_sets().unwrap().remove(0).receipt.retired.contains_key(orchard));
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
+}
+
+/// Dropping an agent retired ad hoc from the source is not a retirement by that publication, so
+/// it needs no mass-retirement confirmation, and it adopts the retire debt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_ad_hoc_retired_member_needs_no_retirement_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, format!("{}{ROSE}", bundle("source", false)), Some(enforce(Enforce::Audit))).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "dropped-retire", &[]).unwrap();
+    // Half of the previous membership is omitted, which would otherwise need confirmation.
+    let (planned, _) = publish_set(&d, 11, format!("version 2\n{ROSE}"), None).await;
+    assert!(!planned.mass_retirement);
+    assert_eq!(planned.changes[orchard], "retired");
+    assert_eq!(planned.effects[orchard], "keep terminally retired by person/operator: done");
+    assert_eq!(planned.reverted_debts.len(), 1, "{:?}", planned.reverted_debts);
+    assert_eq!(planned.reverted_debts[0].outcome.as_deref(), Some("adopted"));
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+    assert!(set.receipt.retired.contains_key(orchard) && !set.receipt.members.contains_key(orchard));
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
 }
 
 /// A policy needs every active member to advertise `source_enforcement`; a set naming its
@@ -2188,4 +2280,161 @@ async fn an_omitted_subscription_member_is_retired_by_its_stopped_form() {
     let stopped = d.store.desired_subject_with_writer("subscription/garden/alerts").unwrap().unwrap().0;
     assert_eq!(stopped.kind, "subscription");
     assert!(fractal_daemon::graph::subscription_spec(&stopped.desired).unwrap().stopped);
+}
+
+fn map_file(path: &str, text: Option<&str>, sha256: Option<String>) -> Value {
+    json!({"repository": "acme/garden", "path": path, "blob": "b".repeat(40), "text": text, "sha256": sha256})
+}
+
+/// One node of `kdl` at `line` of `file`, declared there.
+fn map_node(kdl: &str, file: usize, line: u32) -> Value {
+    json!({"kdl": kdl, "kdlLines": [2, 2],
+        "span": {"file": file, "start": {"line": line, "column": 1}, "end": {"line": line, "column": 9}},
+        "frames": [{"file": file, "start": {"line": line, "column": 3}, "end": {"line": line, "column": 3},
+            "role": "declaration", "precision": "exact"}]})
+}
+
+/// A map of both garden agents: orchard reads `agent.ts` and `shared.ts`, meadow `meadow.ts`
+/// and `shared.ts`; `unused.ts` is named by no subject. `line` places every node.
+fn garden_map(files: [Value; 4], line: u32, extra: Option<&str>) -> fractal_schema::source_map::SourceMap {
+    let mut subjects = json!({
+        "agent/garden/orchard": {"declaration": 0, "inputs": [0, 1],
+            "nodes": [map_node("agent[garden/orchard]/description[0]", 0, line)]},
+        "agent/garden/meadow": {"declaration": 2, "inputs": [2, 1],
+            "nodes": [map_node("agent[garden/meadow]", 2, line)]},
+    });
+    if let Some(subject) = extra {
+        subjects[subject] = json!({"declaration": 0});
+    }
+    serde_json::from_value(json!({"schema": "fractal.source-map/v1", "files": files, "subjects": subjects})).unwrap()
+}
+
+async fn apply_mapped(
+    d: &Daemon,
+    sequence: u64,
+    note: &str,
+    map: fractal_schema::source_map::SourceMap,
+) -> anyhow::Result<Value> {
+    let mut publication = request(d, sequence, bundle(note, true)).await;
+    preview(d, &mut publication).await;
+    publication.source_map = Some(map);
+    d.client.post("/v1/sets/apply", &publication).await
+}
+
+fn member_revision(d: &Daemon, subject: &str) -> String {
+    d.store.owned_sets().unwrap().remove(0).receipt.members[subject].revision.clone()
+}
+
+/// A set publication's map records one `source.mapped` claim per new member revision, keeps the
+/// first map of a revision, stores each named text once, refuses a map naming a non-member or an
+/// unknown text without applying anything, and replicates claims together with their texts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_maps_record_once_per_revision_with_deduplicated_texts() {
+    use fractal_schema::source_map::sha256_hex;
+    let root = tempfile::tempdir().unwrap();
+    let keys = (0..2).map(|_| Arc::new(MemberKey::generate().unwrap().0)).collect::<Vec<_>>();
+    let amber = daemon(root.path(), "amber", keys[0].clone(), &keys[0]).await;
+    let cobalt = daemon(root.path(), "cobalt", keys[1].clone(), &keys[0]).await;
+    for (i, name) in ["amber", "cobalt"].into_iter().enumerate() {
+        let mut fields = json!({"fleet_id": FLEET, "member_key": keys[i].public(),
+            "via": if i == 0 { "anchor" } else { "invite" }, "mode": "listening"});
+        if i != 0 {
+            fields["sponsor"] = json!("host/amber");
+        }
+        append(&amber.store, &format!("host/{name}"), "fleet.member-admitted", fields);
+    }
+    share(&amber.store, &cobalt.store, "amber");
+    share(&cobalt.store, &amber.store, "cobalt");
+
+    let (agent, shared, meadow, unused) = ("agent v1\n", "shared\n", "meadow\n", "unused\n");
+    let files = |agent: &str| {
+        [
+            map_file("graph/agent.ts", Some(agent), None),
+            map_file("lib/shared.ts", Some(shared), None),
+            map_file("graph/meadow.ts", Some(meadow), None),
+            map_file("graph/unused.ts", Some(unused), None),
+        ]
+    };
+    let first = apply_mapped(&amber, 10, "initial", garden_map(files(agent), 4, None)).await.unwrap();
+    assert_eq!(
+        first["publication"]["source_maps"],
+        json!({"recorded": 2, "kept": 0, "blobs_new": 3, "blobs_deduped": 0}),
+        "{first}"
+    );
+    let orchard = member_revision(&amber, "agent/garden/orchard");
+    let read: Value = amber
+        .client
+        .get("/v1/source-maps?subject=agent%2Fgarden%2Forchard&texts=true")
+        .await
+        .unwrap();
+    assert_eq!(read["revision"], orchard);
+    let map = &read["map"];
+    assert_eq!(map["subject"], "agent/garden/orchard");
+    assert_eq!(map["revision"], orchard);
+    assert_eq!(map["sha"], format!("{:040x}", 10));
+    assert_eq!(map["sequence"], 10);
+    assert_eq!(map["set_revision"], format!("owned-set/garden@{}", amber.store.owned_sets().unwrap()[0].revision));
+    // Only the files this subject names, re-indexed; texts by their sha256.
+    assert_eq!(map["files"].as_array().unwrap().iter().map(|f| f["path"].clone()).collect::<Vec<_>>(),
+        [json!("graph/agent.ts"), json!("lib/shared.ts")]);
+    assert_eq!(map["files"][1]["blob_hash"], sha256_hex(shared));
+    assert_eq!(read["texts"][sha256_hex(agent)], agent);
+    assert_eq!(read["texts"][sha256_hex(shared)], shared);
+    assert_eq!(amber.store.source_blob(&sha256_hex(meadow)).unwrap().as_deref(), Some(meadow.as_bytes()));
+    // A file no recorded map names is not stored.
+    assert_eq!(amber.store.source_blob(&sha256_hex(unused)).unwrap(), None);
+    let missing = amber.client.get::<Value>(&format!("/v1/source-blobs/{}", sha256_hex(unused))).await.unwrap_err();
+    assert!(format!("{missing:#}").contains("not-found"), "{missing:#}");
+
+    // The next commit republishes both revisions with drifted spans: the first maps are kept.
+    let kept = apply_mapped(&amber, 11, "initial", garden_map(files(agent), 9, None)).await.unwrap();
+    assert_eq!(kept["publication"]["source_maps"], json!({"recorded": 0, "kept": 2, "blobs_new": 0, "blobs_deduped": 0}));
+    assert_eq!(member_revision(&amber, "agent/garden/orchard"), orchard);
+    let read: Value = amber.client.get("/v1/source-maps?subject=agent%2Fgarden%2Forchard").await.unwrap();
+    assert_eq!(read["map"]["sha"], format!("{:040x}", 10));
+    assert_eq!(read["map"]["nodes"][0]["span"]["start"]["line"], 4);
+    assert!(read.get("texts").is_none());
+
+    // A changed orchard gets a new map; meadow sends only the sha256 of its stored text.
+    let mut changed = files("agent v2\n");
+    changed[2] = map_file("graph/meadow.ts", None, Some(sha256_hex(meadow)));
+    let second = apply_mapped(&amber, 12, "changed", garden_map(changed, 5, None)).await.unwrap();
+    assert_eq!(second["publication"]["source_maps"], json!({"recorded": 1, "kept": 1, "blobs_new": 1, "blobs_deduped": 1}));
+    let orchard_v2 = member_revision(&amber, "agent/garden/orchard");
+    assert_ne!(orchard_v2, orchard);
+    let read: Value = amber.client.get("/v1/source-maps?subject=agent%2Fgarden%2Forchard&texts=true").await.unwrap();
+    assert_eq!((read["map"]["sha"].clone(), read["texts"][sha256_hex("agent v2\n")].clone()),
+        (json!(format!("{:040x}", 12)), json!("agent v2\n")));
+    let old: Value = amber
+        .client
+        .get(&format!("/v1/source-maps?subject=agent%2Fgarden%2Forchard&revision={orchard}"))
+        .await
+        .unwrap();
+    assert_eq!(old["map"]["sha"], format!("{:040x}", 10));
+    let unmapped = amber.client.get::<Value>("/v1/source-maps?subject=agent%2Fgarden%2Forchard&revision=0000").await.unwrap_err();
+    assert!(format!("{unmapped:#}").contains("source-map-missing"), "{unmapped:#}");
+
+    // A map naming a non-member, or a text the daemon does not hold, refuses the whole publication.
+    let selected = amber.store.owned_sets().unwrap()[0].revision.clone();
+    let refused = apply_mapped(&amber, 13, "refused", garden_map(files("agent v3\n"), 5, Some("agent/garden/elsewhere")))
+        .await
+        .unwrap_err();
+    assert_contains(&format!("{refused:#}"), &["invalid-source-map", "agent/garden/elsewhere", "not a member"]);
+    let mut unknown = files("agent v3\n");
+    unknown[1] = map_file("lib/shared.ts", None, Some(sha256_hex("never stored\n")));
+    let refused = apply_mapped(&amber, 13, "refused", garden_map(unknown, 5, None)).await.unwrap_err();
+    assert_contains(&format!("{refused:#}"), &["source-blob-missing"]);
+    assert_eq!(amber.store.owned_sets().unwrap()[0].revision, selected);
+    assert_eq!(member_revision(&amber, "agent/garden/orchard"), orchard_v2);
+
+    // Claims replicate with the texts they name.
+    share(&amber.store, &cobalt.store, "amber");
+    for revision in [&orchard, &orchard_v2] {
+        let (_, map) = cobalt.store.source_map("agent/garden/orchard", Some(revision)).unwrap();
+        let map = map.unwrap();
+        for file in map["files"].as_array().unwrap() {
+            let hash = file["blob_hash"].as_str().unwrap();
+            assert!(cobalt.store.source_blob(hash).unwrap().is_some(), "{hash} replicated");
+        }
+    }
 }

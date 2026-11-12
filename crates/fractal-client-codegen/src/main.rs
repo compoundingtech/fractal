@@ -191,6 +191,21 @@ fn action_method(action: &str) -> String {
     action.replace(['.', '-'], "_")
 }
 
+/// The client GitHub plugin reads, `github-plugin.*`: `(method suffix, id parameter, path)`. Their
+/// answers are typed in TypeScript only; Rust and Swift return the raw `GithubRead` JSON.
+fn github_plugin_read(read: &Value) -> Result<Option<(String, &'static str, String)>> {
+    let id = read["id"].as_str().context("read id")?;
+    let Some(name) = id.strip_prefix("github-plugin.") else {
+        return Ok(None);
+    };
+    let path = read["path"].as_str().context("read path")?;
+    let parameter = ["number", "comment_id", "run_id"]
+        .into_iter()
+        .find(|parameter| path.ends_with(&format!("{{{parameter}}}")) || path.contains(&format!("{{{parameter}}}/")))
+        .context("GitHub plugin read id parameter")?;
+    Ok(Some((name.to_owned(), parameter, path.to_owned())))
+}
+
 /// Assistant read operations: `(projection route suffix, query model, response model)`.
 /// Each one is a single proof-carrying GET; no generic page/list renderer may claim it.
 fn assistant_read(read: &Value) -> Result<Option<(&str, &str, &str)>> {
@@ -248,12 +263,22 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn attention_budget(&self, mission: &str, person: Option<&str>, at: Option<u128>) -> Result<Envelope<AttentionBudgetReport>, ClientError> {{ let mut path = format!(\"/v1/client/attention-budget?mission={{}}\", percent_encode(mission)); if let Some(person) = person {{ path.push_str(&format!(\"&person={{}}\", percent_encode(person))); }} if let Some(at) = at {{ path.push_str(&format!(\"&at={{at}}\")); }} self.get(&path).await }}")?;
             continue;
         }
+        if let Some((name, parameter, path)) = github_plugin_read(read)? {
+            let route = path.replace("{owner}", "{}").replace("{repo}", "{}");
+            let name = name.replace('-', "_");
+            writeln!(out, "    pub async fn github_plugin_{name}(&self, owner: &str, repo: &str, {parameter}: u64) -> Result<Envelope<serde_json::Value>, ClientError> {{ self.get(&format!(\"{route}\", percent_encode(owner), percent_encode(repo))).await }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
         if id == "arrangements.list" {
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
+        if id == "read-positions.list" {
+            writeln!(out, "    pub async fn read_positions_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ReadPositionPage>, ClientError> {{ let mut path = format!(\"/v1/client/read-positions?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
         if id == "arrangements.get" {
@@ -310,6 +335,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    pub async fn usage_hub_quota(&self) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {{ self.get(\"/v1/client/usage/quota\").await }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -463,12 +490,26 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
+        if let Some((_, parameter, path)) = github_plugin_read(read)? {
+            let swift_parameter = match parameter { "comment_id" => "commentID", "run_id" => "runID", other => other };
+            let route = path
+                .trim_start_matches('/')
+                .replace("{owner}", "\\(Self.routedSessionID(owner))")
+                .replace("{repo}", "\\(Self.routedSessionID(repo))")
+                .replace(&format!("{{{parameter}}}"), &format!("\\({swift_parameter})"));
+            writeln!(out, "    public func {method}(owner: String, repo: String, {swift_parameter}: UInt64) async throws -> Envelope<JSONValue> {{ try await get(\"{route}\") }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    public func arrangementsMemberships(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))/memberships\", query: query) }}")?;
             continue;
         }
         if id == "arrangements.list" {
             writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
+            continue;
+        }
+        if id == "read-positions.list" {
+            writeln!(out, "    public func readPositionsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ReadPositionPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/read-positions\", query: query) }}")?;
             continue;
         }
         if id == "arrangements.get" {
@@ -530,6 +571,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    public func usageHubQuota() async throws -> Envelope<UsageHubQuota> {{ try await get(\"v1/client/usage/quota\") }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -975,6 +1018,9 @@ fn validate_surfaces(
         "OrderedMembership",
         "OrderedMembershipPage",
         "OrderedMembershipState",
+        "ReadPosition",
+        "ReadPositionPage",
+        "ReadPositionAdvanceParameters",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
@@ -1652,6 +1698,15 @@ fn typescript_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let response = read["response"].as_str().context("read response")?;
         let method = lower_camel(&pascal(id));
+        if let Some((_, parameter, path)) = github_plugin_read(read)? {
+            let ts_parameter = lower_camel(&pascal(parameter));
+            let route = path
+                .replace("{owner}", "${encodeURIComponent(owner)}")
+                .replace("{repo}", "${encodeURIComponent(repo)}")
+                .replace(&format!("{{{parameter}}}"), &format!("${{{ts_parameter}}}"));
+            writeln!(out, "    async {method}(owner: string, repo: string, {ts_parameter}: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`, undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "capabilities.get" {
             continue;
         }
@@ -1675,6 +1730,10 @@ fn typescript_operation_methods(
         }
         if id == "arrangements.list" {
             writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "read-positions.list" {
+            writeln!(out, "    async readPositionsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ReadPositionPage>> {{ return this.get('/v1/client/read-positions' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.get" {
@@ -1715,6 +1774,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    async usageHubQuota(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<UsageHubQuota>> {{ return this.get('/v1/client/usage/quota', undefined, requestOptions) }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,

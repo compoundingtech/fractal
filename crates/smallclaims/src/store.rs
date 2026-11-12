@@ -8352,12 +8352,19 @@ impl Store {
         &self,
         authority: AdmissionAuthority,
     ) -> Result<ReplicationAdmission> {
+        let prelude = crate::receive_metrics::Timer::start(
+            crate::receive_metrics::Stage::AdmissionPrelude,
+        );
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it, and
         // neither waits for the recovery search.
         self.seal_local_batches_after_frontier()?;
         self.judge_claims_slice(false)?;
+        drop(prelude);
+        let _admission = crate::receive_metrics::Timer::start(
+            crate::receive_metrics::Stage::Admission,
+        );
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self

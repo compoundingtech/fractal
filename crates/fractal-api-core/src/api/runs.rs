@@ -21,13 +21,16 @@ pub async fn start_gate_check(
     };
     let initial = parse_intent(&source, &state.node).map_err(ApiError::bad)?;
     // Check the commands a publication would store: document names pinned to their versions.
-    let intent = state
+    let mut intent = state
         .store
         .document_bindings_at(&initial.document_refs, None)
         .ok()
         .and_then(|bindings| resolve_document_references(&source, &bindings).ok())
         .and_then(|resolved| parse_intent(&resolved, &state.node).ok())
         .unwrap_or(initial);
+    if let Some(only) = &request.missions {
+        intent.missions.retain(|_, mission| only.contains(&mission.subject));
+    }
     let workspace = std::path::Path::new(&request.workspace);
     if !workspace.is_absolute() {
         return Err(ApiError::bad(FractalError::new(
