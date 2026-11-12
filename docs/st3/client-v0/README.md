@@ -2053,8 +2053,8 @@ This narrows output pagination, not native publication scanning, and adds no rea
 
 `availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
 It returns `{kind: "person-availability", availability, directive_note}`: the grant
-issuer's own full `PersonAvailability` (raw presence included, because the person is the
-reader) and their current `DirectiveNote` or null, from one snapshot. No query selects
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
 another person. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
