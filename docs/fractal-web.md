@@ -833,3 +833,12 @@ chosen end as its expiry; **Clear note** removes it. Each write (`PUT /v1/client
 `PUT /v1/client/notes`) shows the state Fractal answers with, never a local guess, and drops any
 read still in flight. A refused write keeps the summary and explains itself: a pairing without
 the `write.availability` or `write.notes` scope must be paired again.
+
+The page reports the person's presence for as long as it lives (`POST /v1/client/presence`;
+the daemon assigns the pairing as the source). A visible page with input in the last five
+minutes is `present`; a hidden page, or a visible one without input for five minutes, is
+`idle`. A browser cannot see a locked screen, so it never reports `locked`. It reports each
+change and a page becoming visible, and repeats `present` every ten minutes while present: above
+the daemon's five-minute window for an unchanged report and below its fifteen-minute staleness.
+A refused report (no `write.presence` grant, or no person) stops reporting for the page; a
+replay reports nothing. Tabs of one pairing share a source, so the latest tab's report wins.
