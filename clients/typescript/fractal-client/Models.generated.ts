@@ -284,7 +284,7 @@ export type AgentPresentation = {
 };
 
 export type AgentPresentationNow = AgentPresentationWork & {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   since: Timestamp;
 };
@@ -2604,7 +2604,7 @@ export type LaunchApproval = ResourceHeader & {
 
 export type LaunchDecision = ResourceHeader & {
   decision_type: "boolean" | "single-choice" | "multiple-choice" | "rank";
-  explanation?: string | null;
+  explanation?: MarkdownBlock | null;
   kind: "launch-decision";
   launch_id: Id;
   options: Array<DecisionOption>;
@@ -2791,7 +2791,7 @@ export type MissionId = string;
 export type MissionPresentation = {
   actions: Array<MissionActionOffer>;
   card: ("what-you-can-do" | "nothing-to-do" | null);
-  last_progress: string | null;
+  last_progress: MarkdownInline | null;
   progress: {
   done: number;
   total: number;
@@ -2867,7 +2867,7 @@ export type MissionRunSummary = {
 });
   generation_id?: RunGenerationId;
   id: MissionRunId;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   must_act: MustAct;
   outcome?: (MissionRunOutcome | null);
   phase: string;
@@ -2909,7 +2909,7 @@ export type MissionStep = {
   history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
   loop_round?: number | null;
@@ -3816,7 +3816,9 @@ export type Runtime = ResourceHeader & {
   | "unreachable"
 ;
   terminal_access?: {
-
+  input: "granted" | "ungranted" | "unavailable";
+  read: "granted" | "ungranted" | "unavailable";
+  resize: "granted" | "ungranted" | "unavailable";
 } | null;
   terminal_id?: (Id | null);
   terminal_sequence?: number | null;
@@ -4918,7 +4920,7 @@ export type Work = ResourceHeader & {
   generation_id: Id;
   goals: Array<MarkdownInline>;
   kind: "work";
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
   nudged_at_unix_ms?: number | null;
@@ -4935,7 +4937,7 @@ export type Work = ResourceHeader & {
 };
 
 export type WorkLabel = {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
