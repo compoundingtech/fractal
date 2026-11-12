@@ -66,8 +66,9 @@ fn start(tag: &Tag) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text]`, `["c", code]`, `["h", html]`,
-/// `["sb"]` soft break, `["hb"]` hard break, `["r"]` rule, `["fr", label]`, `["tk", "x" | ""]`.
+/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text, byte_start, byte_end]`,
+/// `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break, `["r"]` rule, `["fr", label]`,
+/// `["tk", "x" | ""]`. Text offsets are decimal strings, with an exclusive end, in the original UTF-8 source.
 pub fn events(source: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
     let mut json = Json(String::with_capacity(source.len() * 2 + 16));
@@ -75,7 +76,7 @@ pub fn events(source: &str) -> String {
     // Whether each open container was emitted, so a dropped start drops its end too.
     let mut open: Vec<bool> = Vec::new();
     let mut depth = 0usize;
-    for event in Parser::new_ext(source, options) {
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 let emit = depth < MAX_DEPTH;
@@ -97,7 +98,9 @@ pub fn events(source: &str) -> String {
                     json.event("t", &[" "]);
                 }
             }
-            Event::Text(text) => json.event("t", &[&text]),
+            // Byte offsets let the host recognize literal URLs in the original source, before inline delimiters
+            // have been consumed. Only text events are eligible; code, HTML, links and images remain opaque.
+            Event::Text(text) => json.event("t", &[&text, &range.start.to_string(), &range.end.to_string()]),
             Event::Code(code) => json.event("c", &[&code]),
             Event::Html(html) | Event::InlineHtml(html) => json.event("h", &[&html]),
             Event::SoftBreak => json.event("sb", &[]),

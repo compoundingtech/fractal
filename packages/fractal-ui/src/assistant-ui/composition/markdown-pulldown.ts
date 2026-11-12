@@ -88,7 +88,7 @@ export function pulldownTree(source: string): MdastNode {
   }
   // Inside an image everything is its alt text: nested emphasis, code and breaks add words, not nodes.
   let inImage = 0
-  for (const [kind, ...fields] of events(source)) {
+  for (const [kind, ...fields] of literalEvents(source)) {
     if (inImage > 0) {
       if (kind === 's') inImage += 1
       else if (kind === 'e') { inImage -= 1; if (inImage === 0) stack.pop() }
@@ -144,34 +144,137 @@ export function pulldownTree(source: string): MdastNode {
   return root
 }
 
-const LITERAL = /\b(?:https?:\/\/|www\.)[^\s<]+/g
-/** GFM's autolink literals (`https://…`, `www.…`), which pulldown-cmark leaves as text. */
+interface LiteralUrl { readonly index: number; readonly value: string }
+
+/**
+ * GFM's protocol/www boundaries, without restarting the trailing-punctuation scan at every punctuation character.
+ * Each candidate is scanned forward once and its trail backward once. Email is deliberately a separate scan.
+ */
+function* literalUrls(source: string): Generator<LiteralUrl> {
+  const prefix = /https?:\/\/|www\./gi
+  let tokenEnd = 0
+  let trailStart = 0
+  let trail = new Uint8Array(0)
+  let domainEnd = 0
+  let domainAt = 0
+  let lastUnderscore = -1
+  for (let match = prefix.exec(source); match !== null; match = prefix.exec(source)) {
+    const previous = source[match.index - 1] ?? ''
+    const www = /^www/i.test(match[0])
+    if (www ? previous !== '' && !/[\t\n\r (*_[\]~]/.test(previous) : /[a-z]/i.test(previous)) continue
+    const domainStart = match.index + (www ? 0 : match[0].length)
+    if (!www && /[\s\p{P}\p{S}\p{Cc}]/u.test(String.fromCodePoint(source.codePointAt(domainStart) ?? 0))) continue
+    const freshDomain = domainStart >= domainEnd
+    if (freshDomain) {
+      domainEnd = domainStart
+      while (domainEnd < source.length && /[-._]|[^\s\p{P}\p{S}]/u.test(String.fromCodePoint(source.codePointAt(domainEnd)!))) {
+        domainEnd += source.codePointAt(domainEnd)! > 0xffff ? 2 : 1
+      }
+    }
+    if (match.index >= tokenEnd) {
+      trailStart = match.index
+      tokenEnd = domainEnd
+      while (tokenEnd < source.length && !/[\s<]/u.test(source[tokenEnd]!)) tokenEnd++
+      // Dynamic suffix recognition is equivalent to GFM's speculative `trail` tokenizer, but never rescans a suffix.
+      // Cache the whole whitespace-delimited run, including when a `](` ends one link before another starts.
+      trail = new Uint8Array(tokenEnd - trailStart + 1)
+      trail[tokenEnd - trailStart] = 1
+      for (let index = tokenEnd - 1; index >= trailStart; index--) {
+        const character = source[index]!
+        if (/[!"')*,.:;?_~]/.test(character)) trail[index - trailStart] = trail[index + 1 - trailStart]!
+        else if (character === ']') trail[index - trailStart] = /[([]/.test(source[index + 1] ?? '') ? 1 : trail[index + 1 - trailStart]!
+        else if (character === '&') {
+          let after = index + 1
+          while (after < tokenEnd && /[a-z]/i.test(source[after]!)) after++
+          if (after > index + 1 && source[after] === ';') trail[index - trailStart] = trail[after + 1 - trailStart]!
+        }
+      }
+    }
+    if (freshDomain) {
+      domainAt = domainStart
+      while (domainAt < domainEnd) {
+        if ((source[domainAt] === '.' || source[domainAt] === '_') && trail[domainAt - trailStart]) break
+        domainAt++
+      }
+      // Only underscores in the last two domain segments invalidate a URL. Cache their last position so a failed
+      // `www._www._…` candidate cannot rescan the same domain at every later prefix.
+      lastUnderscore = -1
+      let dots = 0
+      for (let index = domainAt - 1; index >= domainStart && dots < 2; index--) {
+        if (source[index] === '.') dots++
+        else if (source[index] === '_' && lastUnderscore < 0) lastUnderscore = index
+      }
+    }
+    if (domainAt <= domainStart || lastUnderscore >= domainStart || (www && match.index + match[0].length === source.length)) continue
+    let at = domainAt
+    let opens = 0
+    let closes = 0
+    while (at < tokenEnd) {
+      const character = source[at]!
+      if (character === '(') opens++
+      else if (character === ')' && closes < opens) closes++
+      else {
+        if (trail[at - trailStart]) break
+        if (character === ')') closes++
+      }
+      at++
+    }
+    yield { index: match.index, value: source.slice(match.index, at) }
+    prefix.lastIndex = at
+  }
+}
+
+/**
+ * The first event pass supplies source offsets and opaque contexts, not the already-parsed URL text. Turn eligible
+ * raw URL extents into escaped explicit links and parse once more: emphasis/code/delete can no longer consume their
+ * delimiters, and surrounding emphasis is parsed with the same precedence as GFM. Code, HTML, existing links and
+ * image alt text are never rewritten. Documents without literal URLs need only the original pass.
+ */
+function literalEvents(source: string): readonly Event[] {
+  const candidates = [...literalUrls(source)]
+  const original = events(source)
+  if (candidates.length === 0) return original
+  const ranges: { start: number; end: number }[] = []
+  const stack: string[] = []
+  let opaque = 0
+  for (const [kind, first, start, end] of original) {
+    if (kind === 's') { stack.push(first!); if (['code', 'html', 'link', 'image'].includes(first!)) opaque++ }
+    else if (kind === 'e') { if (['code', 'html', 'link', 'image'].includes(stack.pop()!)) opaque-- }
+    else if (kind === 't' && opaque === 0 && start !== undefined) ranges.push({ start: Number(start), end: Number(end) })
+  }
+  const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, '\\$&')
+  const parts: string[] = []
+  let byte = 0
+  let cursor = 0
+  let range = 0
+  let at = 0
+  for (const candidate of candidates) {
+    byte += encoder.encode(source.slice(cursor, candidate.index)).length
+    cursor = candidate.index
+    while (range < ranges.length && ranges[range]!.end <= byte) range++
+    if (range === ranges.length || ranges[range]!.start > byte) continue
+    let before = source.slice(at, candidate.index)
+    // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
+    const marker = source[candidate.index - 1]
+    let slash = candidate.index - (marker === '!' ? 1 : 0)
+    while (slash > at && source[slash - 1] === '\\') slash--
+    const slashCount = candidate.index - (marker === '!' ? 1 : 0) - slash
+    if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
+    else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
+    parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
+    at = candidate.index + candidate.value.length
+  }
+  if (parts.length === 0) return original
+  parts.push(source.slice(at))
+  return events(parts.join(''))
+}
+
+/** Email is the only literal syntax absent from both parsers; protocol/www links are recognized before emphasis. */
 function linkLiterals(parent: MdastNode): void {
   if (parent.children === undefined || parent.type === 'link' || parent.type === 'linkReference') return
   parent.children = parent.children.flatMap((child): MdastNode[] => {
     if (child.type !== 'text') { linkLiterals(child); return [child] }
-    const parts: MdastNode[] = []
-    let at = 0
-    for (const match of child.value!.matchAll(LITERAL)) {
-      const candidate = match[0]
-      let balance = 0
-      for (const character of candidate) { if (character === '(') balance++; else if (character === ')') balance-- }
-      let end = candidate.length
-      while (end > 0) {
-        const last = candidate[end - 1]!
-        if (last === ')' && balance < 0) { balance++; end--; continue }
-        if (/[?!.,:;*_~'"\]]/.test(last)) { end--; continue }
-        break
-      }
-      const url = candidate.slice(0, end)
-      if (url.length <= (candidate.startsWith('www.') ? 4 : candidate.startsWith('https://') ? 8 : 7)) continue
-      if (match.index > at) parts.push({ type: 'text', value: child.value!.slice(at, match.index) })
-      parts.push({ type: 'link', url: url.startsWith('www.') ? `http://${url}` : url, title: null, children: [{ type: 'text', value: url }] })
-      at = match.index + url.length
-    }
-    if (parts.length === 0) return emailLiterals(child)
-    if (at < child.value!.length) parts.push({ type: 'text', value: child.value!.slice(at) })
-    return parts.flatMap(part => part.type === 'text' ? emailLiterals(part) : [part])
+    return emailLiterals(child)
   })
 }
 
@@ -195,13 +298,13 @@ function emailLiterals(node: MdastNode): MdastNode[] {
 }
 
 /**
- * Replace GFM's restarting literal-autolink tokenizer and postparse regex with the same bounded tree scan used by
- * pulldown. Keep the other GFM constructs and the CommonMark angle autolinks; email policy is applied afterward.
+ * Replace only GFM's restarting email tokenizer and postparse regex with a bounded tree scan. Retain GFM's protocol
+ * and www tokenizers: their precedence over inline delimiters is part of the syntax, not a postparse link policy.
  */
 export function remarkLinearAutolinks(this: { data(): object }) {
   const data = this.data()
   const extensions = 'micromarkExtensions' in data ? data.micromarkExtensions : undefined
-  const disabled = { disable: { null: ['emailAutolink', 'protocolAutolink', 'wwwAutolink'] } }
+  const disabled = { disable: { null: ['emailAutolink'] } }
   if (Array.isArray(extensions)) extensions.push(disabled)
   else Object.assign(data, { micromarkExtensions: [disabled] })
   const replaceTransform = (extension: unknown): void => {

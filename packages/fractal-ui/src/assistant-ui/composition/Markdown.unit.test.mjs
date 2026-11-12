@@ -475,6 +475,51 @@ test('the WebAssembly parser builds the tree remark builds without changing the 
   assertParser(block('**x**'))
 })
 
+test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    for (const prefix of ['https://example.test/', 'http://example.test/', 'www.example.test/']) {
+      for (const suffix of ['a*b*c', 'a**b**c', 'a_b_c', 'a__b__c', 'a~b~c', 'a~~b~~c', 'a`b`c', 'a[b]c', 'a(b)', 'a(b)).', 'a((b))', 'a(b', 'a?!.,:;', 'a&amp;', 'a&b;c']) {
+        const literal = prefix + suffix
+        const expected = parse(literal, [remarkGfm])
+        for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+          const actual = parse(literal, plugins)
+          assert.deepEqual(actual, expected, literal)
+        }
+        if (/^a(?:\*|_|~|`|\[)/.test(suffix)) {
+          const link = expected.tree.children[0].children[0]
+          assert.equal(link.url, prefix.startsWith('www') ? `http://${literal}` : literal)
+          assert.deepEqual(link.children, [{ type: 'text', value: literal }])
+        }
+      }
+    }
+    for (const source of [
+      '*https://example.test/a*b*c*', '**www.example.test/a_b_c**', '~~https://example.test/a~b~c~~',
+      '😀 https://example.test/a*b*c', '`https://example.test/a*b*c`',
+      '[https://example.test/a*b*c](https://target.test/)', '![https://example.test/a*b*c](https://image.test/)',
+      '<https://example.test/a*b*c>', 'https://example.test/a*b*c **after**',
+      '!https://example.test/a*b*c', '\\https://example.test/a*b*c', '\\!https://example.test/a*b*c',
+      'HTTPS://example.test/a*b*c', '(WWW.example.test/a*b*c)', 'https://example.test/a&amp;.',
+      'https://example_.test/a*b*c', 'https://example.test_/a*b*c', 'www._www.example.test/a*b*c',
+      'https://example.test/a)b(c', 'www.example.test/a) b', 'https://example.test/a>b',
+      'Contact me@example.test or a.b+c@example.test.', 'a.'.repeat(128) + 'x', '.'.repeat(256) + 'x',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, source)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
 test('the suite runs on the parser it names after parity', () => {
   assert.equal(pulldown.pulldownReady(), usePulldown)
   assert.match(block('**x**'), /<strong/)
@@ -528,10 +573,11 @@ test('short references remain actionable inside long prose, with bounded path sc
   }
 })
 
-test('both parser paths scan email-like dot runs linearly without changing literal links', () => {
-  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x']) {
+test('both parser paths scan email-like dot runs linearly without changing literal links', t => {
+  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x', 'https://example.test/' + 'a*b*'.repeat(16000) + 'c']) {
     const { milliseconds } = cpuMilliseconds(() => block(source))
     assert.ok(milliseconds < 1000, `literal autolinks took ${milliseconds}ms`)
+    t.diagnostic(`literal autolinks ${source.slice(0, 20)}: ${milliseconds}ms CPU; unchanged budget 1000ms`)
   }
   const html = block('Contact me@example.test or https://example.test/a(b).')
   assert.match(html, /me@example.test/)

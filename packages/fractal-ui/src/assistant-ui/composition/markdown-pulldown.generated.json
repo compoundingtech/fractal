@@ -1,6 +1,6 @@
 {
-  "sha256": "379fc05c2b257c7de01604cea1f44f6cfd19fc9da88b346193d4170f1df3b0d0",
-  "bytes": 225331,
+  "sha256": "e6a2ea7c94cd1818b27942aa224fa95ee4090c2141a16b8a0cc55ca4eb2559de",
+  "bytes": 225932,
   "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07) (built from a source tarball)",
   "crates": [
     {
