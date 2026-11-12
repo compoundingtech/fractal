@@ -169,10 +169,49 @@ function linkLiterals(parent: MdastNode): void {
       parts.push({ type: 'link', url: url.startsWith('www.') ? `http://${url}` : url, title: null, children: [{ type: 'text', value: url }] })
       at = match.index + url.length
     }
-    if (parts.length === 0) return [child]
+    if (parts.length === 0) return emailLiterals(child)
     if (at < child.value!.length) parts.push({ type: 'text', value: child.value!.slice(at) })
-    return parts
+    return parts.flatMap(part => part.type === 'text' ? emailLiterals(part) : [part])
   })
+}
+
+/** A maximal email-shaped token is validated once, never retried at each dot when no '@' follows. */
+function emailLiterals(node: MdastNode): MdastNode[] {
+  const source = node.value!
+  const parts: MdastNode[] = []
+  let at = 0
+  for (const match of source.matchAll(/[-.\w+@]+/g)) {
+    let end = match[0].length
+    while (match[0][end - 1] === '.') end--
+    const candidate = match[0].slice(0, end)
+    if (!/^[-.\w+]+@[-\w]+(?:\.[-\w]+)+$/.test(candidate) || !/[A-Za-z]$/.test(candidate) || /[\w/]/.test(source[match.index - 1] ?? '')) continue
+    if (match.index > at) parts.push({ type: 'text', value: source.slice(at, match.index) })
+    parts.push({ type: 'link', url: `mailto:${candidate}`, title: null, children: [{ type: 'text', value: candidate }] })
+    at = match.index + candidate.length
+  }
+  if (parts.length === 0) return [node]
+  if (at < source.length) parts.push({ type: 'text', value: source.slice(at) })
+  return parts
+}
+
+/**
+ * Replace GFM's restarting literal-autolink tokenizer and postparse regex with the same bounded tree scan used by
+ * pulldown. Keep the other GFM constructs and the CommonMark angle autolinks; email policy is applied afterward.
+ */
+export function remarkLinearAutolinks(this: { data(): Record<string, unknown> }) {
+  const data = this.data()
+  const extensions = data.micromarkExtensions
+  const disabled = { disable: { null: ['emailAutolink', 'protocolAutolink', 'wwwAutolink'] } }
+  if (Array.isArray(extensions)) extensions.push(disabled)
+  else data.micromarkExtensions = [disabled]
+  const replaceTransform = (extension: unknown): void => {
+    if (Array.isArray(extension)) { for (const item of extension) replaceTransform(item); return }
+    if (typeof extension !== 'object' || extension === null || !('enter' in extension)) return
+    const enter = extension.enter
+    if (typeof enter === 'object' && enter !== null && 'literalAutolink' in enter && 'transforms' in extension) extension.transforms = []
+  }
+  replaceTransform(data.fromMarkdownExtensions)
+  return (tree: MdastNode) => linkLiterals(tree)
 }
 
 /** A remark step that makes pulldown-cmark the parser of the processor it joins. */

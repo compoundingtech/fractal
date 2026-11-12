@@ -18,7 +18,7 @@ import { codeFenceLabel, diffStats, isDiffLanguage } from './markdown-code'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
 import { filteredMarkdownText, remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
-import { loadPulldown, pulldownReady, remarkPulldown } from './markdown-pulldown'
+import { loadPulldown, pulldownReady, remarkLinearAutolinks, remarkPulldown } from './markdown-pulldown'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
@@ -42,8 +42,8 @@ export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_
  */
 export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
-const REMARK_PLUGINS = [remarkGfm, remarkHtmlPolicy]
-const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkHtmlPolicy, remarkHardBreaks]
+const REMARK_PLUGINS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy]
+const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy, remarkHardBreaks]
 // pulldown-cmark replaces only the parse step; GFM tables, task lists, strikethrough and footnotes are its own options.
 type RemarkPlugins = NonNullable<MarkdownOptions['remarkPlugins']>
 const PULLDOWN_PLUGINS = [remarkPulldown, remarkHtmlPolicy] as RemarkPlugins

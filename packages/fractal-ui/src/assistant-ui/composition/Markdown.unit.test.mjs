@@ -492,6 +492,17 @@ test('short references remain actionable inside long prose, with bounded path sc
   }
 })
 
+test('both parser paths scan email-like dot runs linearly without changing literal links', () => {
+  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x']) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 1000, `literal autolinks took ${milliseconds}ms`)
+  }
+  const html = block('Contact me@example.test or https://example.test/a(b).')
+  assert.match(html, /me@example.test/)
+  assert.doesNotMatch(html, /mailto:/)
+  assert.match(html, /href="https:\/\/example.test\/a\(b\)"/)
+})
+
 // fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
 test('shared client fixtures: the policy matches and every case renders as specified', async () => {
   const shared = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-cases.json', import.meta.url), 'utf8'))
