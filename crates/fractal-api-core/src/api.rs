@@ -5107,13 +5107,29 @@ fn client_attention_resources_from_items(
     Ok(resources)
 }
 
+/// The attention row shapes a client negotiated (`x-st3-features`): each newer kind has its
+/// own feature, since a client that has one may predate the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionCompatibility {
+    /// `custom-subjects.v1`: registered `custom.*` kinds and their reply forms.
+    pub custom_forms: bool,
+    /// `model-drift-attention.v1`: the `model-drift` kind.
+    pub model_drift: bool,
+}
+
 // Older client-v0 models use closed enums for attention kinds and action names.
-pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
-    if custom_forms {
-        return;
-    }
+pub fn client_attention_compatibility(items: &mut [Value], compatibility: AttentionCompatibility) {
     for item in items {
-        if item["kind"] == "attention" && item["source_kind"] == "custom" {
+        // A model-drift item asks nothing; a client that cannot read the kind shows it as a
+        // request it can read.
+        if !compatibility.model_drift
+            && item["kind"] == "attention" && item["attention_kind"] == "model-drift" {
+            item["attention_kind"] = json!("agent-request");
+            item["actions"] = json!([]);
+            continue;
+        }
+        if !compatibility.custom_forms
+            && item["kind"] == "attention" && item["source_kind"] == "custom" {
             item["custom_attention_kind"] = item["attention_kind"].clone();
             item["attention_kind"] = json!("agent-request");
             item["actions"] = json!([]);
