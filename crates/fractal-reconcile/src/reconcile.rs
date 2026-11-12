@@ -4777,10 +4777,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(true);
         }
+        self.prepare_restart(subject, trigger, reason, false)
+    }
+
+    /// Fresh sessions wait for acknowledgement without a restart-anyway deadline, even
+    /// when the incumbent harness cannot answer. The document and ready-claim reads
+    /// below invalidate the waiting pass when the seat acknowledges.
+    fn prepare_restart(
+        &self,
+        subject: &str,
+        trigger: &str,
+        reason: &str,
+        require_handoff: bool,
+    ) -> Result<bool> {
         let key = format!("restart-prepare:{subject}:{trigger}");
         let now = now_ms();
         let Some(prepare) = self.store.operation_claim(&key)? else {
-            let deadline = now.saturating_add(self.restart_prepare_deadline_ms);
+            let deadline = (!require_handoff)
+                .then(|| now.saturating_add(self.restart_prepare_deadline_ms));
             let prepare = self.store.append_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "runtime.reconcile-decision".into(),
@@ -4789,11 +4803,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ("key".into(), Value::String("restart-prepare".into())),
                     ("decision".into(), Value::String("prepare".into())),
                     ("reason".into(), Value::String(reason.into())),
-                    (
-                        "restart_at_unix_ms".into(),
-                        Value::String(deadline.to_string()),
-                    ),
-                ]),
+                ])
+                .into_iter()
+                .chain(deadline.map(|deadline| (
+                    "restart_at_unix_ms".into(),
+                    Value::String(deadline.to_string()),
+                )))
+                .collect(),
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(key.clone()),
@@ -4826,7 +4842,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(format!("{key}:message")),
             })?;
-            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            if let Some(deadline) = deadline {
+                self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            }
+            // Track both acknowledgement sources on the first waiting pass too.
+            crate::handoff::acknowledged_since(
+                &self.store,
+                subject,
+                prepare.accepted_at_unix_ms,
+            )?;
             self.signal_changed();
             return Ok(false);
         };
@@ -4834,15 +4858,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             .body
             .pointer("/fields/restart_at_unix_ms")
             .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u128>().ok())
-            .unwrap_or(0);
-        let ready = crate::handoff::acknowledged_since(
-            &self.store,
-            subject,
-            prepare.accepted_at_unix_ms,
-        )?;
-        if !ready && now < deadline {
-            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            .and_then(|value| value.parse::<u128>().ok());
+        let acknowledged = if require_handoff {
+            crate::handoff::acknowledged_handoff_since
+        } else {
+            crate::handoff::acknowledged_since
+        };
+        let ready = acknowledged(&self.store, subject, prepare.accepted_at_unix_ms)?;
+        if !ready && (require_handoff || deadline.is_some_and(|deadline| now < deadline)) {
+            if !require_handoff && let Some(deadline) = deadline {
+                self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            }
             return Ok(false);
         }
         self.record_once(
@@ -9162,6 +9188,53 @@ impl<R: RuntimeControl> Reconciler<R> {
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
+        // A fresh restart cannot discard the incumbent conversation before its handoff.
+        // This gate also covers absent/unready harnesses and --now. A previously ready
+        // handoff or the explicit person override carries restart-now and needs no prepare.
+        if attempted.is_none()
+            && request.body["fields"]["fresh_session"] == true
+            && request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+        {
+            let reason = format!(
+                "a fresh session was requested by {}",
+                request.actor.as_deref().unwrap_or("the operator"),
+            );
+            if !self.prepare_restart(&subject.subject, &request.id, &reason, true)? {
+                let deadline = request.accepted_at_unix_ms
+                    .saturating_add(crate::restart::ATTENTION_AFTER_MS);
+                if now_ms() < deadline {
+                    self.arm_restart(&format!("restart-handoff:{}", request.id), deadline);
+                } else {
+                    self.store.record_runtime_failure(
+                        &format!("agent-restart-handoff:{}", request.id),
+                        &AttentionRequest {
+                            reviewer: self.store.agent_person(&subject.subject)?
+                                .unwrap_or_else(|| "person/operator".into()),
+                            title: "A fresh-session restart is waiting for its handoff".into(),
+                            reason: format!(
+                                "{} has pending fresh restart {} and has not acknowledged its prepare-for-restart message for 30 minutes. It is never restarted without acknowledgement. Have the seat write its handoff or mark it ready; a person can explicitly recover a wedged seat with `st agents restart {} --fresh-session --from-stale-handoff --as person/operator`.",
+                                subject.subject, request.id, subject.subject,
+                            ),
+                            severity: "warning".into(),
+                            targets: vec![subject.subject.clone()],
+                            actor: RECONCILER_ACTOR.into(),
+                            idempotency_key: format!("agent-restart-handoff-attention:{}", request.id),
+                        },
+                        "restart-fresh-session",
+                    )?;
+                }
+                // Keep ordinary observations and prepare-mail delivery running while waiting.
+                return Ok(false);
+            }
+            let episode = format!("agent-restart-handoff:{}", request.id);
+            if self.store.operational_failure(&episode)?.is_some_and(|item| item.status == "pending") {
+                self.store.recover_operational_failure(
+                    &episode,
+                    "the seat acknowledged its fresh-session handoff",
+                    &format!("agent-restart-handoff-recovered:{}", request.id),
+                )?;
+            }
+        }
         if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
             && attempted.is_none()
             && self
@@ -9237,6 +9310,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // cannot complete a new request that has not admitted any start yet.
         if let Some(observation) = observation
             && (attempted.is_some() || !previous.is_empty())
+            // Crash recovery may replace the incumbent while a fresh request waits.
+            // Only this request's launch attempt proves that its fresh session was started.
+            && (request.body["fields"]["fresh_session"] != true || attempted.is_some())
             && observation.status != "unknown"
             && observation
                 .incarnation_id
@@ -9356,6 +9432,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .operation_claim(&crate::restart::release_key(&request))?
                 .is_some();
             if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && request.body["fields"]["fresh_session"] != true
                 && !quiesced
                 && !self.restart_may_proceed(
                     &subject.subject,
