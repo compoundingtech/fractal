@@ -7761,6 +7761,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
@@ -20840,6 +20841,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                reconciler.set_default_stall_reports(reconcile.default_stall_reports);
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
