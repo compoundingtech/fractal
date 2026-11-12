@@ -1067,38 +1067,36 @@ async fn resolve_start_workspace(
             .get(&path)
             .await
     };
-    match answer {
-        Ok(answer) => {
-            let workspace = answer
-                .get("workspace")
-                .and_then(Value::as_str)
-                .with_context(|| format!("{placement} returned no workspace"))?;
-            return Ok(StartWorkspace::Set(workspace.to_owned(), true));
-        }
-        Err(error) => {
-            // A placement no member can reach (the single-node test fixture, or a fleet
-            // member that vanished) cannot name a directory: this daemon's own default
-            // keeps the start local instead of failing the call. Any other error — a
-            // missing person, a bad identity, a real outage — still fails loudly.
-            anyhow::ensure!(
-                fractal_daemon::client::api_error_code(&error) == Some("remote-unavailable"),
-                "{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})",
-            );
-            let local_path = format!(
-                "/v1/hosts/{}/agent-workspace?identity={}",
-                urlencoding::encode(local),
-                urlencoding::encode(subject)
-            );
-            let local_answer: Value = client.get(&local_path).await.with_context(|| {
-                format!("{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})")
-            })?;
-            let workspace = local_answer
-                .get("workspace")
-                .and_then(Value::as_str)
-                .with_context(|| format!("{placement} returned no workspace"))?;
-            return Ok(StartWorkspace::Set(workspace.to_owned(), true));
-        }
+    if let Ok(answer) = answer {
+        let workspace = answer
+            .get("workspace")
+            .and_then(Value::as_str)
+            .with_context(|| format!("{placement} returned no workspace"))?;
+        return Ok(StartWorkspace::Set(workspace.to_owned(), true));
     }
+    let error = answer.err();
+    let error = error.as_ref().expect("answer is the error case");
+    // A placement no member can reach (the single-node test fixture, or a fleet
+    // member that vanished) cannot name a directory: this daemon's own default
+    // keeps the start local instead of failing the call. Any other error — a
+    // missing person, a bad identity, a real outage — still fails loudly.
+    anyhow::ensure!(
+        fractal_daemon::client::api_error_code(error) == Some("remote-unavailable"),
+        "{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})",
+    );
+    let local_path = format!(
+        "/v1/hosts/{}/agent-workspace?identity={}",
+        urlencoding::encode(local),
+        urlencoding::encode(subject)
+    );
+    let local_answer: Value = client.get(&local_path).await.with_context(|| {
+        format!("{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})")
+    })?;
+    let workspace = local_answer
+        .get("workspace")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{placement} returned no workspace"))?;
+    Ok(StartWorkspace::Set(workspace.to_owned(), true))
 }
 
 async fn run_agent_new(
