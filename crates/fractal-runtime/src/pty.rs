@@ -237,6 +237,16 @@ pub enum PtyLookup {
     Indeterminate(KeyedSessionError),
 }
 
+/// Retained child wait status and publication-safe terminal output for one incarnation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyExitEvidence {
+    pub incarnation: String,
+    pub exit_code: Option<i64>,
+    pub signal: Option<i32>,
+    pub output_tail: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyStats {
@@ -349,6 +359,28 @@ impl PtyRuntime {
             KeyedSession::Missing => Ok(PtyLookup::Missing),
             KeyedSession::Indeterminate(error) => Ok(PtyLookup::Indeterminate(error)),
         }
+    }
+
+    /// Read a bounded retained exit receipt even after the live registry was reaped.
+    /// A missing/evicted receipt never authorizes borrowing another incarnation's output.
+    pub fn exit_evidence(&self, id: &str, incarnation: &str) -> Result<Option<PtyExitEvidence>> {
+        let Some((pid, created_at)) = incarnation.split_once(':') else {
+            return Ok(None);
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            return Ok(None);
+        };
+        let Some(receipt) = pty_core::registry::retained_session_exit_in(
+            &self.root, id, pid, created_at,
+        ).context("read retained PTY exit evidence")? else {
+            return Ok(None);
+        };
+        Ok(Some(PtyExitEvidence {
+            incarnation: incarnation.to_owned(),
+            exit_code: receipt.exit_code.map(i64::from),
+            signal: receipt.signal,
+            output_tail: crate::transcript::exit_output_tail(&receipt.output_tail),
+        }))
     }
 
     /// One bounded read of the registry. `pty_client` lists an unreadable root as empty, but the
@@ -3167,6 +3199,58 @@ exit 0
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }
+        }
+    }
+
+    #[test]
+    fn failed_harness_evidence_survives_registry_reaping_and_runtime_recreation() {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap_or_default())]);
+        let Ok(pty) = crate::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"),
+                "hosted CI must install the real pty binary for exit evidence");
+            eprintln!("skipped: no pty binary outside hosted CI");
+            return;
+        };
+        for (print, expected) in [
+            ("printf 'fatal: fixture launch failed\\n' >&2", "fatal: fixture launch failed"),
+            ("printf '%78s' ''; printf 'sk-fixture-secret\\n'", "[REDACTED: sensitive terminal output]"),
+            ("printf 'sk-'; printf '%09000d' 0; printf '\\nfatal: safe footer\\n'", "fatal: safe footer"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let gate = root.path().join("release");
+            let session = Started {
+                runtime: PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy()),
+                id: "failed-harness-evidence".into(), root, harness: 0, orphan: 0,
+            };
+            session.runtime.spawn(
+                &session.id,
+                &Launch::Argv(vec![
+                    "sh".into(), "-c".into(),
+                    format!("while [ ! -f '{}' ]; do sleep 0.01; done; {print}; exit 23", gate.display()),
+                ]),
+                session.root.path(), &environment, None, &BTreeMap::new(),
+                Some(TerminalSize { rows: 24, columns: 80 }),
+            ).unwrap();
+            let incarnation = session.incarnation();
+            fs::write(gate, "").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let observed = session.runtime.keyed_observation(&session.id).unwrap();
+                if matches!(observed, PtyLookup::Missing) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "PTY registry was not reaped: {observed:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let recreated = PtyRuntime::new(session.runtime.root().to_owned());
+            let evidence = recreated.exit_evidence(&session.id, &incarnation).unwrap().unwrap();
+            assert_eq!(evidence.incarnation, incarnation);
+            assert_eq!(evidence.exit_code, Some(23));
+            assert_eq!(evidence.signal, None);
+            let tail = evidence.output_tail.unwrap();
+            assert!(tail.contains(expected), "{tail:?}");
+            assert!(!tail.contains("fixture-secret"), "terminal wrapping must not bypass redaction");
+            assert!(recreated.exit_evidence(&session.id, "42:another-generation").unwrap().is_none());
         }
     }
 
