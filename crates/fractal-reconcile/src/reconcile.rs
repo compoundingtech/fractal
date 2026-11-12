@@ -11787,6 +11787,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 break;
                             }
                             GateOutcome::Fail(reason) => {
+                                let gate_name = crate::gate_parse::gate_name(gate);
+                                let reason = match self.store.source_declared_at(&view.subject, Some(gate_name))? {
+                                    Some(declared) => format!("{reason} (gate `{gate_name}` is declared at {declared})"),
+                                    None => reason,
+                                };
                                 changed |= self.store.set_step_state(
                                     &view.subject,
                                     "failed",
@@ -16156,14 +16161,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             "step-timeout:{step_id}:{}:{}",
             view.attempt, view.timeout_extension_ms
         );
+        let mut reason = format!(
+            "`{step_id}` used its execution budget of {budget}ms. Nothing failed: the mission goes on and the step stays yours. If its goals are met, `st work complete {step_id} --as {owner} --summary TEXT`. If it needs more time, `st work extend {step_id} --as {owner} --by 2h --reason TEXT`. If it cannot finish, `st work fail {step_id} --as {owner} --reason TEXT`."
+        );
+        if let Some(declared) = self.store.source_declared_at(step_id, None)? {
+            reason.push_str(&format!(
+                " The step and its timeout are declared at {declared}; if the budget is too short for this work, change it there."
+            ));
+        }
         self.store.record_operational_failure(
             &episode,
             &AttentionRequest {
                 reviewer: "person/operator".into(),
                 title: "A step ran out of time".into(),
-                reason: format!(
-                    "`{step_id}` used its execution budget of {budget}ms. Nothing failed: the mission goes on and the step stays yours. If its goals are met, `st work complete {step_id} --as {owner} --summary TEXT`. If it needs more time, `st work extend {step_id} --as {owner} --by 2h --reason TEXT`. If it cannot finish, `st work fail {step_id} --as {owner} --reason TEXT`."
-                ),
+                reason,
                 severity: "error".into(),
                 targets: vec![view.subject.clone()],
                 actor: RECONCILER_ACTOR.into(),
@@ -19075,6 +19086,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             "\n\nThe work waits; st does not fail it for a broken gate. Revise the mission with a gate that answers (exit 0 to pass, 1 for not yet): `st work revise {} FILE --as ACTOR --reason TEXT`. A revision that changes only gates keeps the work already submitted and checks the revised gates.",
             stage.run
         ));
+        if let Some(declared) = self.store.source_declared_at(&stage.subject, Some(name))? {
+            detail.push_str(&format!(
+                "\n\nThe gate is declared at {declared}. Fix it there too, or the mission's next run has the same broken gate."
+            ));
+        }
         let mut targets = vec![
             stage.run.clone(),
             stage.generation.clone(),

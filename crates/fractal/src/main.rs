@@ -108,6 +108,7 @@ mod uninstall_cli;
 mod program_bundles;
 mod validate_cli;
 mod work_cli;
+mod source_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
@@ -318,7 +319,7 @@ enum Command {
         #[command(subcommand)]
         command: OwnedSetsCommand,
     },
-    /// Inspect source enforcement: each owned set's policy and open ad hoc source debt.
+    /// Inspect source: owned sets' policy and debt, and where declarations come from in source.
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -1269,7 +1270,7 @@ enum MissionViewCommand {
     /// List current missions; use --all for historical terminal missions.
     Ls {
         /// Follow current collection changes.
-        #[arg(long, conflicts_with_all = ["all", "cursor", "since", "until", "status"])]
+        #[arg(long, conflicts_with_all = ["all", "cursor", "since", "until", "status", "mission"])]
         watch: bool,
         #[arg(long)]
         all: bool,
@@ -1286,6 +1287,11 @@ enum MissionViewCommand {
         /// Terminal state: failed, cancelled, timed-out, or completed. Includes reasons.
         #[arg(long, value_parser = ["failed", "cancelled", "timed-out", "completed"])]
         status: Option<String>,
+        /// Only this mission's terminal transitions (history across missions otherwise).
+        /// Reaches every run of the mission with paging; running and waiting runs
+        /// stay on `/v1/mission-runs?mission=`.
+        #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: Option<String>,
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
@@ -2439,6 +2445,16 @@ struct SubjectShowArgs {
     /// Include literal environment values in the KDL output.
     #[arg(long, requires = "kdl")]
     show_env_values: bool,
+    /// Where this agent or mission revision was authored, from its recorded source map. A
+    /// `step-run/…` subject resolves through the revision its run pinned.
+    #[arg(long, conflicts_with_all = ["kdl", "references"])]
+    source: bool,
+    /// The revision to show the source of; defaults to the current one.
+    #[arg(long, requires = "source")]
+    revision: Option<String>,
+    /// One node and its frames: a KDL node path or `step:ID[/gate:NAME|/goal]`.
+    #[arg(long, requires = "source")]
+    node: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3474,6 +3490,10 @@ enum SourceCommand {
         #[arg(long)]
         audit: bool,
     },
+    /// Which live agents and missions a file, or one line of it, declares or feeds.
+    Where(source_cli::SourceWhereArgs),
+    /// What changed between two mapped revisions of a subject: source files, KDL, and why.
+    Diff(source_cli::SourceDiffArgs),
 }
 
 /// Bundle each versioned file into one intent so references may cross file boundaries.
@@ -3719,7 +3739,9 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the workspace; new agents default to the current directory.
+    /// Override the declaration's workspace with an absolute path on its member. A kept
+    /// declaration without it stays on its own workspace; starting a new agent here
+    /// defaults to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
     /// Set the typed-harness model; refused for existing command/argv agents.
@@ -6164,6 +6186,8 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             print_value(&status, cli.json)
         }
+        Command::Source { command: SourceCommand::Where(args) } => source_cli::run_where(&client, args, cli.json).await,
+        Command::Source { command: SourceCommand::Diff(args) } => source_cli::run_diff(&client, args, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
         Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
@@ -10887,6 +10911,8 @@ fn render_product_page_headed(
                     render_declared_admission(&mut output, admission);
                 }
                 if item.runs_truncated {
+                    let _ = writeln!(output, "  preview: {} of {} runs shown", item.runs.len(), item.total_runs.unwrap_or(item.runs.len()));
+                    let _ = writeln!(output, "  history: fractal missions ls --all --mission {}", item.header.id);
                     let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
                     let _ = writeln!(output, "  inspect: fractal missions show {run}");
@@ -12035,6 +12061,9 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.source {
+                return source_cli::show(client, &args.subject, args.revision.as_deref(), args.node.as_deref(), json_output).await;
+            }
             if args.references {
                 let references: Vec<Value> = client
                     .get(&format!("/v1/resource-references/{}", args.subject))
@@ -12360,10 +12389,12 @@ struct OutcomeCursor {
     until: u128,
     status: Option<String>,
     actor: Option<String>,
+    mission: Option<String>,
     before: u64,
     limit: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_outcomes(
     client: &Client,
     collection: &str,
@@ -12371,6 +12402,7 @@ async fn list_outcomes(
     until: Option<String>,
     status: Option<String>,
     actor: Option<String>,
+    mission: Option<String>,
     cursor: Option<String>,
     limit: usize,
     json_output: bool,
@@ -12386,6 +12418,7 @@ async fn list_outcomes(
             saved.collection == collection
                 && saved.limit == limit
                 && saved.actor == actor
+                && saved.mission == mission
                 && status
                     .as_deref()
                     .is_none_or(|s| saved.status.as_deref() == Some(s)),
@@ -12411,6 +12444,7 @@ async fn list_outcomes(
                 .unwrap_or(now),
             status,
             actor,
+            mission,
             before: i64::MAX as u64,
             limit,
         }
@@ -12429,7 +12463,11 @@ async fn list_outcomes(
     if let Some(actor) = &filter.actor {
         path.push_str(&format!("&actor={}", urlencoding::encode(actor)));
     }
+    if let Some(mission) = &filter.mission {
+        path.push_str(&format!("&mission={}", urlencoding::encode(mission)));
+    }
     let mut page: Value = client.get(&path).await?;
+    require_mission_echo(&page, filter.mission.as_deref())?;
     if let Some(before) = page["next_before"].as_u64() {
         filter.before = before;
         let next = format!(
@@ -12448,7 +12486,13 @@ async fn list_outcomes(
         return Ok(());
     }
     let items = page["items"].as_array().context("invalid outcome page")?;
-    println!("{} OUTCOMES  {}", collection.to_uppercase(), items.len());
+    let scope = filter
+        .mission
+        .as_deref()
+        .map(|m| format!("  mission {m}"))
+        .unwrap_or_default();
+    println!("{} OUTCOMES  {}{scope}", collection.to_uppercase(), items.len());
+    println!("Terminal transitions only; running and waiting runs stay on `/v1/mission-runs?mission=`.");
     for item in items {
         println!(
             "{}  {}  {}",
@@ -12469,11 +12513,26 @@ async fn list_outcomes(
             .as_deref()
             .map(|a| format!(" --as {a}"))
             .unwrap_or_default();
-        println!("Next: fractal {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
+        let mission = filter
+            .mission
+            .as_deref()
+            .map(|m| format!(" --mission {m}"))
+            .unwrap_or_default();
+        println!("Next: fractal {collection} ls{actor}{mission} --limit {limit} --cursor '{cursor}'");
     }
     if partial {
         fractal_daemon::gate_report::note_partial_listing(shown);
     }
+    Ok(())
+}
+
+/// Daemons that predate `--mission` ignore the parameter and answer the fleet-wide page, so a
+/// mission-filtered request is trusted only when the page echoes the mission back.
+fn require_mission_echo(page: &Value, mission: Option<&str>) -> Result<()> {
+    anyhow::ensure!(
+        mission.is_none() || page["mission"].is_string(),
+        "this daemon does not support --mission; upgrade the daemon"
+    );
     Ok(())
 }
 
@@ -14093,10 +14152,23 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     }
 }
 
+/// How `agents start` resolves the agent's workspace. A declared agent started without
+/// `--workspace` keeps its declaration's workspace, resolved on the placement host when the
+/// declaration was published. Anything else is an exact path for the placement host: the caller
+/// never canonicalizes it, so a path that only exists on another member stays valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartWorkspace {
+    /// Keep the declaration's workspace child untouched.
+    Keep,
+    /// Publish this exact path, asking the placement host to create it when it is missing.
+    Set(String, bool),
+}
+
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
     uris: &BTreeMap<String, String>,
+    workspace: &StartWorkspace,
 ) -> Result<String> {
     let mut agent = match existing {
         Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
@@ -14121,13 +14193,24 @@ fn agent_start_document(
     }) {
         replace_declaration_child(&mut body, kdl_node("host", [host]));
     }
-    if args.workspace.is_some() || existing.is_none() {
-        let path = args.workspace.as_deref().unwrap_or_else(|| Path::new("."));
-        let workspace = fs::canonicalize(path)
-            .with_context(|| format!("resolve workspace {}", path.display()))?
-            .display()
-            .to_string();
-        replace_declaration_child(&mut body, kdl_node("workspace", [workspace.as_str()]));
+    match workspace {
+        StartWorkspace::Keep => {}
+        StartWorkspace::Set(path, create) => {
+            let mut node = kdl_node("workspace", [path.as_str()]);
+            // An override swaps the path but keeps the declaration's own create policy: a
+            // declared `create` still applies to the new path, and callers never add one.
+            let create = *create
+                || body.get("workspace").is_some_and(|current| {
+                    current.entries().iter().any(|entry| {
+                        entry.name().is_some_and(|name| name.value() == "create")
+                            && matches!(entry.value(), kdl::KdlValue::Bool(true))
+                    })
+                });
+            if create {
+                node.entries_mut().push(KdlEntry::new_prop("create", true));
+            }
+            replace_declaration_child(&mut body, node);
+        }
     }
     if existing.is_none() {
         body.nodes_mut().push(kdl_node("restart", ["always"]));

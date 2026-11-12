@@ -138,6 +138,7 @@ pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 mod source_maps;
+mod source_index;
 pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
@@ -751,6 +752,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/source/status", get(owned_sets::source_status))
         .route("/v1/source-maps", get(source_maps::get))
+        .route("/v1/source-maps/revisions", get(source_index::revisions))
+        .route("/v1/source-maps/where", get(source_index::where_used))
+        .route("/v1/source-maps/declaration", get(source_index::declaration))
         .route("/v1/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
