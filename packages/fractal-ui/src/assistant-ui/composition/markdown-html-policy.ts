@@ -88,7 +88,7 @@ export function tagEnd(html: string, at: number): number {
   return -1
 }
 /** One tag, matched against its candidate text only. */
-const TAG = /^<(\/?)([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>$/
+const TAG = /^<(\/?)([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>]+))?)*)\s*(\/?)>$/
 function tokenize(html: string): Token[] {
   const tokens: Token[] = []
   let text = 0
@@ -122,7 +122,7 @@ function tokenize(html: string): Token[] {
 function properties(name: string, raw: string): Record<string, string | boolean> {
   const allowed = HTML_POLICY.elements[name] ?? []
   const kept: Record<string, string | boolean> = {}
-  for (const match of raw.matchAll(/([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+  for (const match of raw.matchAll(/([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+)))?/g)) {
     const attribute = match[1]!.toLowerCase()
     if (!allowed.includes(attribute)) continue
     const value = decodeEntities(match[2] ?? match[3] ?? match[4] ?? '')
@@ -271,6 +271,12 @@ export function filteredMarkdownText(source: string): string {
       const end = source.indexOf('-->', at + 4)
       at = end === -1 ? source.length : end + 3
       continue
+    }
+    // A tag's attributes are HTML, not Markdown: their backticks (even unquoted ones, as browsers accept) and
+    // multiline fence markers must never split an opener away from the content the policy needs to drop.
+    if (source[at] === '<') {
+      const end = tagEnd(source, at)
+      if (end !== -1 && TAG.test(source.slice(at, end + 1))) { at = end + 1; continue }
     }
     if (source[at] === '\\' && (source[at + 1] === '`' || source[at + 1] === '\\')) { at += 2; continue }
     if (source[at] === '`') {

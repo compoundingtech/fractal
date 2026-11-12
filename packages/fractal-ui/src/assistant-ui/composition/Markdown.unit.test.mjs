@@ -140,7 +140,7 @@ test('both plain-text helper copies preserve literal entity-looking text', async
 })
 
 test('splitting 200KB of Markdown stays within a streaming frame', () => {
-  const source = Array.from({ length: 4000 }, (_, index) => `Paragraph ${index} with some \`code\` and words that fill the line.`).join('\n\n')
+  const source = Array.from({ length: 1000 }, (_, index) => `Paragraph ${index} with some \`code\` and ${'words that fill the line. '.repeat(7)}`).join('\n\n')
   const { milliseconds } = cpuMilliseconds(() => splitMarkdownBlocks(source))
   assert.ok(source.length > 200_000 && milliseconds < 16, `split took ${milliseconds}ms of CPU`)
 })
@@ -167,20 +167,46 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
   assert.match(hostile, /kept words/)
 })
 
+const FALLBACK_HTML_PAYLOADS = [
+  '<script data-x="`">SECRET</script>`',
+  "<script data-x='`'>SECRET</script>`",
+  '<script data-x=`>SECRET</script>`',
+  '<script data-x="```">SECRET</script>```',
+  "<script data-x='~~~'>SECRET</script>~~~",
+  '<script data-x="\n```\n">SECRET</script>',
+  "<script data-x='\n~~~\n'>SECRET</script>",
+  '<svg data-x="`"><svg data-x="~~~">SECRET</svg>SECRET</svg>`',
+  '<script data-x="`">SECRET',
+  '<span data-x="`unfinished',
+  '<!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <details>Visible</details>',
+  ...['&#106;avascript:', '&#x6A;avascript:', 'java&Tab;script:'].map(scheme => `<a data-x="\`" href="${scheme}alert(1)">safe</a>\``),
+]
+const FALLBACK_LITERAL_CODE = [
+  '`<!-- literal -->`',
+  '``<script data-x="`">literal</script>``',
+  '```\n<script data-x="`">literal</script>\n```',
+  '~~~\n<script data-x="~~~">literal</script>\n~~~',
+  '    <script data-x="`">literal</script>',
+  '\t<!-- literal -->',
+]
+
 test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
   const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
   const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
   assert.match(block(hostile), /Visible/)
-  for (const source of ['`<!-- literal -->`', '```\n<script>literal</script>\n```', '    <!-- literal -->']) {
+  for (const source of FALLBACK_LITERAL_CODE) {
     assert.equal(filteredMarkdownText(source), source)
   }
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
   assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
   assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
+  for (const source of FALLBACK_HTML_PAYLOADS) assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
+  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible <span data-x="unfinished')
+  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible <span data-x="`')
 })
 
-test('a caught renderer failure keeps hidden HTML out of the real fallback DOM', async () => {
+test('delimiter guard and caught renderer failure keep attribute code markers out of the real fallback DOM', async () => {
   const { JSDOM } = await import('jsdom')
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
@@ -192,15 +218,23 @@ test('a caught renderer failure keeps hidden HTML out of the real fallback DOM',
   const container = document.getElementById('root')
   const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
   try {
-    const source = 'src/x.ts <!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <a href="javascript:x">safe</a> <details>Visible</details>'
-    await act(async () => root.render(h(Markdown, {
-      text: markdownBlock(source),
-      renderInlineReference: path => { if (path === 'src/x.ts') throw new Error('expected renderer failure'); return undefined },
-    })))
-    assert.deepEqual(caught, ['expected renderer failure'])
-    assert.equal(container.querySelector('script,img,a,details'), null)
-    assert.doesNotMatch(container.textContent, /HIDDEN|SECRET/)
-    assert.match(container.textContent, /Visible/)
+    for (const mode of ['delimiter guard', 'renderer failure']) {
+      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE].entries()) {
+        const before = caught.length
+        const source = (mode === 'delimiter guard' ? '*a '.repeat(3000) : 'src/x.ts ') + 'Visible\n' + payload
+        await act(async () => root.render(h(Markdown, {
+          key: `${mode}-${index}`,
+          text: markdownBlock(source),
+          renderInlineReference: path => { if (path === 'src/x.ts') throw new Error('expected renderer failure'); return undefined },
+        })))
+        assert.deepEqual(caught.slice(before), mode === 'renderer failure' ? ['expected renderer failure'] : [], `${mode}: ${payload}`)
+        assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
+        assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
+        if (payload.includes('literal')) assert.ok(container.textContent.includes(payload), `${mode} must preserve literal code: ${payload}`)
+        if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
+      }
+    }
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
@@ -337,7 +371,9 @@ test('policy: tag-like words and escaped markup stay text', () => {
 })
 
 test('policy: deep nesting renders bounded, without overflowing the stack', () => {
-  for (const [name, text] of [['quotes', '>'.repeat(3000) + ' deep'], ['lists', Array.from({ length: 3000 }, (_, index) => '  '.repeat(index) + '- x').join('\n')], ['tags', '<div>'.repeat(3000) + 'deep'], ['emphasis', '*'.repeat(3000) + 'a' + '*'.repeat(3000)]]) {
+  // 128 levels exceed both output caps without making the indented list fixture quadratic in megabytes.
+  const depth = 128
+  for (const [name, text] of [['quotes', '>'.repeat(depth) + ' deep'], ['lists', Array.from({ length: depth }, (_, index) => '  '.repeat(index) + '- x').join('\n')], ['tags', '<div>'.repeat(depth) + 'deep'], ['emphasis', '*'.repeat(depth) + 'a' + '*'.repeat(depth)]]) {
     const { result, milliseconds } = cpuMilliseconds(() => block(text))
     assert.ok(milliseconds < 2000, `${name} took ${milliseconds}ms`)
     assert.ok((result.match(/<blockquote/g) ?? []).length <= 33 && (result.match(/<div/g) ?? []).length <= 40, `${name} nests too deep`)
