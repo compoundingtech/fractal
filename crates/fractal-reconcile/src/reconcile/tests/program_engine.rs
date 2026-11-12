@@ -21,6 +21,7 @@ const step = async (ctx, key, effect) => {
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
     const first = await step(ctx, 'first', async () => ({ attempt: ctx.attempt }))
+    if (ctx.payload.mode === 'retry-failure') return { _tag: 'Failure', error: { _tag: 'Broken' } }
     if (ctx.payload.mode === 'credential') {
       await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
     }
@@ -274,4 +275,52 @@ fn a_programs_effects_and_journal_act_as_its_run() {
     let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
     assert!(!claims.is_empty());
     assert!(claims.iter().all(|claim| claim.actor.as_deref() == Some(started.run.as_str())), "{claims:#?}");
+}
+
+#[test]
+fn run_retry_program_starts_from_top_with_a_fresh_journal_and_selected_bundle() {
+    let fixture = fixture(Liveness::default());
+    let source = fixture.start("retry", "retry-failure");
+    fixture.until("the source run fails after journaling first", || {
+        fixture.store.mission_run(&source.run).unwrap().unwrap().status == "failed"
+    });
+    let failed = fixture.store.mission_run(&source.run).unwrap().unwrap();
+    assert!(fixture.journal(&source.step).contains(&("first".into(), "completed".into())));
+    let old_journal = fixture.store.claims_for(&source.step, Some(JOURNAL_KIND)).unwrap();
+    let fixed = BUNDLE.replace(
+        "if (ctx.payload.mode === 'retry-failure') return { _tag: 'Failure', error: { _tag: 'Broken' } }",
+        "",
+    );
+    let bundle = fixture.dir.path().join("fixed.mjs");
+    std::fs::write(&bundle, &fixed).unwrap();
+    let hash = fixture.store.put_blob(fixed.as_bytes()).unwrap();
+    apply_source(&fixture.store, &format!(r#"version 2
+mission "program-test" state="ready" {{
+  goal "Run a program."
+  concurrent-runs max=4
+  input "mode" kind="text"
+  input "pids" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, bundle.display()), "fixed-program");
+    std::fs::write(&source.gate, "").unwrap();
+    let options = crate::model::MissionRunRetryRequest {
+        actor: "person/operator".into(), same_revision: false, reason: None,
+        idempotency_key: "retry-latest-program".into(),
+    };
+    let retried = fixture.store.retry_mission_run(&source.run, &options).unwrap();
+    let step = &retried.steps[0].subject;
+    assert!(fixture.journal(step).is_empty());
+    fixture.until("latest retry completes", || fixture.status(step) == "completed");
+    assert!(fixture.journal(step).contains(&("first".into(), "completed".into())));
+    assert_ne!(retried.revision, failed.revision);
+    assert_eq!(retried.inputs, failed.inputs);
+    assert_eq!(fixture.store.claims_for(&source.step, Some(JOURNAL_KIND)).unwrap().len(), old_journal.len());
+    let original = fixture.store.retry_mission_run(&source.run, &crate::model::MissionRunRetryRequest {
+        same_revision: true, idempotency_key: "retry-original-program".into(), ..options
+    }).unwrap();
+    fixture.until("same revision retries the original failure", || fixture.status(&original.steps[0].subject) == "failed");
+    assert_eq!(original.revision, failed.revision);
+    assert!(fixture.journal(&original.steps[0].subject).contains(&("first".into(), "completed".into())));
+    assert_eq!(fixture.store.mission_run(&source.run).unwrap().unwrap().generation, failed.generation);
 }

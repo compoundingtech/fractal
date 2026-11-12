@@ -12588,6 +12588,80 @@ mission "revision" state="ready" {
 }
 
 #[tokio::test]
+async fn mission_run_retry_preserves_typed_refusals_and_returns_the_new_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "native-retry" state="ready" {
+  goal "Retry a failed run."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "native-retry-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "native-retry".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "native-retry-source".into(),
+    }).unwrap();
+    let path = format!("/v1/mission-runs/{}/retry", urlencoding::encode(&run.subject));
+    let request = json!({
+        "actor":"person/operator", "reason":"the failure is resolved",
+        "idempotency_key":"native-retry-new"
+    });
+    let before = state.store.index().unwrap();
+    let (status, refused) = json_request(router(state.clone()), &path, request.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "mission-run-not-retryable");
+    assert_eq!(state.store.index().unwrap(), before);
+
+    state.store.set_mission_run_state(&run.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    let (status, retried) = json_request(router(state.clone()), &path, request).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_ne!(retried["subject"], run.subject);
+    assert_eq!(retried["retry_of"], run.subject);
+    assert_eq!(retried["workspace"], run.workspace);
+    assert_eq!(retried["revision"], run.revision);
+    assert_eq!(retried["requester"], "person/operator");
+    let new_subject = retried["subject"].as_str().unwrap();
+    let stored = state.store.mission_run(new_subject).unwrap().unwrap();
+    assert_eq!(stored.subject, new_subject);
+    assert_eq!(stored.retry_of.as_deref(), Some(run.subject.as_str()));
+}
+
+#[tokio::test]
+async fn mission_run_retry_binds_the_actor_without_special_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (actor, code) in [
+        ("person/operator", "foreign-agent-actor"),
+        ("agent/other", "foreign-agent-actor"),
+        ("agent/helper", "missing-mission-run"),
+    ] {
+        let before = state.store.index().unwrap();
+        let response = app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mission-runs/absent/retry")
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/helper".into()))
+                .body(Body::from(json!({
+                    "actor":actor, "idempotency_key":"native-retry-authority"
+                }).to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let refused: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refused["code"], code, "{refused}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn any_agent_retries_failed_work_as_itself() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
