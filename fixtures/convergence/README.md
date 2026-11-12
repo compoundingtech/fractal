@@ -301,3 +301,5 @@ through 22 stay frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v23.json`;
 do not hand-edit it. The simulation selects v23. Draws use the generic append path: only the
 subject person's own claims are admitted, as on every admission path.
+With v23 every fixed seed converges; seed 21 is the exact never-trim set and seed 34 trims, observed
+by burst nextest run 43215860112.
