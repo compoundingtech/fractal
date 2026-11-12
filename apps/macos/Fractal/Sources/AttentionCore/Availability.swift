@@ -240,3 +240,49 @@ public protocol AvailabilityAdapter: Sendable {
   /// Returns the note in force after the write; nil once cleared.
   func setNote(_ request: NoteRequest) async throws -> DirectiveNoteState?
 }
+
+// MARK: Panel words
+
+extension Availability.Status {
+  public var label: String {
+    switch self {
+    case .available: "Available"
+    case .away: "Away"
+    case .unknown(let word): word
+    }
+  }
+}
+
+extension Availability.Interruptions {
+  public var label: String {
+    switch self {
+    case .all: "All"
+    case .urgent: "Urgent only"
+    case .none: "None"
+    case .unknown(let word): word
+    }
+  }
+}
+
+extension Availability.DeadlineClock {
+  public var label: String {
+    switch self {
+    case .run: "Running"
+    case .holdRoutine: "Holding routine asks"
+    case .holdAll: "Holding all asks"
+    case .unknown(let word): word
+    }
+  }
+}
+
+extension Availability {
+  /// Where a status not set by hand comes from; nil for an override.
+  public var statusSourceLabel: String? {
+    switch statusSource {
+    case .override: nil
+    case .presence: "from device presence"
+    case .unreported: "no device reporting"
+    case .unknown(let word): "from \(word)"
+    }
+  }
+}

@@ -25,6 +25,7 @@ struct TrayPanel: View {
           VStack(alignment: .leading, spacing: 18) {
             AsksSection(model: model)
             if !model.updates.isEmpty { UpdatesSection(model: model) }
+            AvailabilitySection(model: model)
             SloSection(model: model)
           }
           .padding(.horizontal, 14)
@@ -521,7 +522,7 @@ private struct SloRowView: View {
 // MARK: - Shared
 
 /// Relative time that stays current, with the absolute time on hover.
-private struct RelativeTime: View {
+struct RelativeTime: View {
   let date: Date
   var prefix: String?
 
@@ -543,7 +544,7 @@ private enum Absolute {
 }
 
 /// A section's own failure: it keeps showing its last data, and never blanks the others.
-private struct SectionFailure: View {
+struct SectionFailure: View {
   let state: ConnectionState
 
   var body: some View {
@@ -576,7 +577,7 @@ private struct Note: View {
   }
 }
 
-private struct SectionTitle: View {
+struct SectionTitle: View {
   let title: String
   var aside: String?
 
@@ -595,7 +596,7 @@ private struct SectionTitle: View {
   }
 }
 
-private extension View {
+extension View {
   func card(subtle: Bool = false) -> some View {
     padding(10)
       .frame(maxWidth: .infinity, alignment: .leading)
