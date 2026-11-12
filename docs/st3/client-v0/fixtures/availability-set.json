@@ -1,0 +1,12 @@
+{
+  "status": {
+    "value": "away",
+    "until": "2026-11-12T12:00:00Z"
+  },
+  "interruptions": {
+    "value": "urgent"
+  },
+  "deadline_clock": {
+    "value": "run"
+  }
+}

@@ -270,6 +270,39 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testDirectiveNoteSetFixturesDecodeAndEncodeAClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let set = try JSONDecoder().decode(DirectiveNoteSet.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set.json")))
+        XCTAssertEqual(set.expiresAt, "2026-11-16T09:00:00Z")
+        let result = try JSONDecoder().decode(Envelope<DirectiveNoteSetResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set-result.json")))
+        XCTAssertEqual(result.value.note?.text, set.text)
+        let cleared = try JSONDecoder().decode(DirectiveNoteSetResult.self, from: Data(#"{"note":null}"#.utf8))
+        XCTAssertNil(cleared.note)
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DirectiveNoteSet(text: nil))) as? NSDictionary
+        XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
+    }
+
+    func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery"])
+        XCTAssertEqual(read.value.people[0].statusSource, "override")
+        XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
+        XCTAssertEqual(own.value.presence, "present")
+        let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
+        XCTAssertEqual(set.deadlineClock?.value, "run")
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
+        XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(presence: "idle", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, ["presence": "idle", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

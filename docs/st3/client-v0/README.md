@@ -207,16 +207,64 @@ even when its immutable claim row remains retained. Incremental reads and full
 replay both select the latest unrepaired revision.
 The text is advisory only: no approval, gate, ask or assignment reads it as evidence.
 
-The trusted local CLI writes with `PUT /v1/notes`, using a concrete person identity
-and a body containing that same `person` and `actor`, nullable `text`, and optional
-`expires_at`. Agents and paired-client delegated writes are refused. Text is
-nonblank and bounded to 4096 UTF-8 bytes. The replicated claim
+A person writes their own note with `PUT /v1/client/notes` (`notes.set`, scope
+`write.notes`), from the local CLI or from a paired device granted `write.notes`. The
+`DirectiveNoteSet` body holds a required nullable `text`, where `null` clears the note, and
+an optional `expires_at`; it never names the person, which is always the session's own.
+Agent sessions are refused with `403` even though a local agent session holds every scope.
+The response `DirectiveNoteSetResult` holds the current `note`, or `null` once cleared or
+already expired. Text is nonblank and bounded to 4096 UTF-8 bytes; invalid input is
+`validation-failed`. The generated Rust `notes_set` and Swift and TypeScript `notesSet`
+methods use this route; see the [write fixture](fixtures/directive-note-set.json). The replicated claim
 `person.directive-note-set` is admitted only with its person as author. Publication
 requires anchored fleet membership and `person_directive_note` version 1
 advertisement from every active member. Pending unsigned local membership changes
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 
+### Person availability
+
+A person's availability informs agents; it never grants authority. It has three axes and a
+derived status, all folded when read from claims on `person/NAME`, so expiry needs no writes:
+
+- `status`: an `available` or `away` override with optional `until`. With no override in
+  force, status is `available` only while presence is `present`, otherwise `away`.
+- `interruptions`: `all`, `urgent` or `none`, with optional `until`; `all` when unset.
+- `deadline_clock`: `run`, `hold-routine` or `hold-all`, with optional `until`; `run` when
+  unset. A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask
+  (`hold-all`); an ask is urgent when its asker named an explicit deadline of at most one hour.
+- `presence`: each source's newest report counts until it is 15 minutes old, measured from
+  the earlier of its `observed_at` and acceptance. A fresh `present` anywhere wins, then
+  `idle`, then `locked`; with no fresh report presence is `unknown`.
+
+`GET /v1/client/availability` (`availability.list`) requires `read.projections` and a person
+or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` it reads that
+person. Without it, a person reads themselves and an agent reads the people whose directive
+notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
+gets them as `null` and sees only the effective status with `status_until`, the interruptions
+and the deadline clock.
+
+Writes act as the session's own person, which the body never names; agent sessions are refused
+with `403` even though a local agent session holds every scope. `PUT /v1/client/availability`
+(`availability.set`, scope `write.availability`) takes an `AvailabilitySet`: each present axis
+names its `value` and optional future `until`, and an absent axis is unchanged. A status
+`value` of `null` clears the override and takes no `until`. `POST /v1/client/presence`
+(`presence.report`, scope `write.presence`) takes a `PresenceReport` of `present`, `idle` or
+`locked` and its `observed_at`, which must be within the last 15 minutes and not ahead of
+this member's clock. The client decides idleness with its own threshold. The daemon assigns
+the source: the exact pairing grant for a paired device, otherwise `host/<member>`. An
+unchanged report from one source is recorded at most once every 5 minutes; a change is
+recorded at once. Both writes answer the person's full `PersonAvailability`; invalid input is
+`validation-failed`. The generated Rust `availability_list`, `availability_set` and
+`presence_report`, and Swift and TypeScript `availabilityList`, `availabilitySet` and
+`presenceReport` methods use these routes. See the
+[read fixture](fixtures/person-availability.json) and
+[write fixture](fixtures/availability-set.json).
+
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
 
 ### Phone observations
 
@@ -1875,10 +1923,11 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-client diagnostics writes, glasses reads and control, terminal reads, attention control,
+client diagnostics writes, availability, presence and note writes for the paired person, glasses
+reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`read.glasses`, `control.glasses`, `terminal.read`,
+`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
@@ -2001,6 +2050,12 @@ filtering before offset selection and byte packing. Continuations bind the exact
 grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
+
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note}`: the grant
+issuer's own full `PersonAvailability` (raw presence included, because the person is the
+reader) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,

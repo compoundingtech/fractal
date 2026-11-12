@@ -537,6 +537,42 @@ test('directive notes decode metadata and expiry without becoming gate evidence'
     assert.throws(() => decode(invalid));
 });
 
+test('availability decodes the coarse view, the full view and a status clear', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const people = Rich.decodeUnknownSync(Rich.PersonAvailabilities, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-availability.json').value;
+    const result = Schema.encodeSync(Rich.PersonAvailabilities)(people(wire));
+    assert.equal(result.people[0].presence, null);
+    assert.equal(result.people[0].status_until, '2026-11-12T12:00:00.000Z');
+    assert.equal(result.people[1].deadline_clock, 'hold-routine');
+    const own = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json').value;
+    const full = Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict');
+    assert.equal(Schema.encodeSync(Rich.PersonAvailability)(full(own)).presence, 'present');
+    const set = Rich.decodeUnknownSync(Rich.AvailabilitySet, 'strict');
+    assert.equal(Schema.encodeSync(Rich.AvailabilitySet)(set({ status: { value: null } })).status.value, null);
+    for (const invalid of [{ interruptions: { value: 'focus' } }, { status: { value: 'away' }, person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const report = Rich.decodeUnknownSync(Rich.PresenceReport, 'strict');
+    assert.throws(() => report({ presence: 'unknown', observed_at: '2026-11-12T09:58:00Z' }));
+});
+
+test('a note write requires text, clears with null and never names the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set(wire)).expires_at, '2026-11-16T09:00:00.000Z');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set({ text: null })).text, null);
+    for (const invalid of [{}, { text: '' }, { text: 'Approved', person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const result = Rich.decodeUnknownSync(Rich.DirectiveNoteSetResult, 'strict');
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json').value;
+    const encode = Schema.encodeSync(Rich.DirectiveNoteSetResult);
+    assert.equal(encode(result(written)).note.person, 'person/ada');
+    assert.equal(encode(result({ note: null })).note, null);
+});
+
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');

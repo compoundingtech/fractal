@@ -15,6 +15,33 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+#[test]
+fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
+    let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
+    let [ada, avery] = &read.value.people[..] else { panic!("two people") };
+    assert_eq!((ada.status.as_str(), ada.status_source.as_str(), ada.interruptions.as_str()), ("away", "override", "urgent"));
+    assert!(ada.presence.is_none() && ada.presence_observed_at.is_none());
+    assert_eq!((avery.deadline_clock.as_str(), avery.deadline_clock_until.as_deref()), ("hold-routine", Some("2026-11-12T17:00:00Z")));
+    let own: Envelope<PersonAvailability> = decode("availability-set-result.json");
+    assert_eq!(own.value.presence.as_deref(), Some("present"));
+    let set: AvailabilitySet = decode("availability-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("availability-set.json")).unwrap());
+    let clear = AvailabilitySet { status: Some(AvailabilityStatusChange { value: None, until: None }), ..AvailabilitySet::default() };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"status": {"value": null}}));
+    let report: PresenceReport = decode("presence-report.json");
+    assert_eq!((report.presence.as_str(), report.observed_at.as_str()), ("present", "2026-11-12T09:58:00Z"));
+}
+
+#[test]
+fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
+    let set: DirectiveNoteSet = decode("directive-note-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());
+    let written: Envelope<DirectiveNoteSetResult> = decode("directive-note-set-result.json");
+    assert_eq!(written.value.note.as_ref().map(|note| note.text.as_str()), set.text.as_deref());
+    let clear = DirectiveNoteSet { text: None, expires_at: None };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
+}
+
 
 #[test]
 fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {

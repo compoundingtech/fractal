@@ -26,3 +26,21 @@ Answered or superseded requests no longer need the person's attention. Opening a
 Use planned human gates for known review points. For a decision discovered during work, an agent uses `fractal work ask` to save the question and its eventual answer in the graph.
 
 This makes the human's role explicit: set direction, supply missing judgment, and review meaningful results rather than continuously reading terminal output.
+
+## Availability
+
+A person tells agents whether to expect an answer soon. Availability informs; it never grants authority or changes who may act.
+
+```sh
+fractal availability
+fractal availability set --status away --interruptions urgent --deadline-clock hold-all --for 2h
+fractal availability clear status
+```
+
+- **Status** is `available` or `away`. Without an override it follows your devices: `available` only while one of them reports you present.
+- **Interruptions** are `all`, `urgent` or `none`.
+- **Deadline clock** is `run`, `hold-routine` or `hold-all`. A hold pauses the deadlines of asks to you: routine asks only, or every ask.
+
+`set` needs at least one of `--status`, `--interruptions` and `--deadline-clock`; `--for DURATION` or `--until RFC3339` applies to each one it names. `clear` with no axis clears all three: status follows presence again, interruptions return to `all` and the deadline clock to `run`. `fractal availability presence present|idle|locked` reports a device's presence the way a paired client does. `--json` prints the client API response.
+
+Only you can change your availability; an agent may only read it. You see your own device presence. An agent sees the people it works for, and `--person person/NAME` shows one person, without their presence.

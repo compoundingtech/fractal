@@ -1120,3 +1120,52 @@ async fn assistant_other_read_deadline_errors_keep_the_denial_audit() {
         && claim.body["fields"]["denial_code"]=="read-deadline"));
     fixture.state.assistant_receipts.flush().await.unwrap();
 }
+
+#[tokio::test]
+async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant_person() {
+    use fractal_api_core::DirectiveNotesStore as _;
+    use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore as _, Interruptions, Presence, Status};
+    let granted = fixture(SCOPES, true).await;
+    let store = &granted.state.store;
+    // Directive notes need an anchored fleet member; the shared fixture enables one.
+    fractal_store::store::directive_notes::tests_shared_seats::enable(store);
+    let now = client_now_ms();
+    store.set_person_availability(OWNER, &[AvailabilityChange::Status(Some(Status::Away), Some(now + 3_600_000)),
+        AvailabilityChange::Interruptions(Interruptions::None, None)], now).unwrap();
+    store.report_person_presence(OWNER, "host/example", Presence::Locked, now, now).unwrap();
+    store.set_directive_note(OWNER, OWNER, Some("Hold routine asks until the review lands"), None).unwrap();
+    store.set_person_availability("person/ada", &[AvailabilityChange::Status(Some(Status::Available), None)], now).unwrap();
+    store.set_directive_note("person/ada", "person/ada", Some("Another person's note"), None).unwrap();
+
+    let payload = granted.payload("availability", "");
+    let (status, value, _) = granted.request("/v1/client/assistant/availability",
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let read = &value["value"];
+    assert_eq!(read["kind"], "person-availability");
+    let availability: fractal_store::store::availability::PersonAvailability =
+        serde_json::from_value(read["availability"].clone()).unwrap();
+    assert_eq!((availability.person.as_str(), availability.status, availability.interruptions),
+        (OWNER, Status::Away, Interruptions::None));
+    assert!(availability.status_until.is_some());
+    // The grant person is the reader, so raw presence is part of the view.
+    assert_eq!(availability.presence, Some(Presence::Locked));
+    assert_eq!(read["directive_note"]["person"], OWNER);
+    assert_eq!(read["directive_note"]["text"], "Hold routine asks until the review lands");
+    assert!(!value.to_string().contains("person/ada"), "{value}");
+
+    for query in ["?person=person%2Fada", "?actor=person%2Fada"] {
+        let payload = granted.payload("availability", query);
+        let (status, value, _) = granted.request(&format!("/v1/client/assistant/availability{query}"),
+            Some(&granted.header(&payload, &granted.attestor))).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{query}: {status} {value}");
+        assert!(value.get("value").is_none());
+    }
+
+    let without = fixture(&SCOPES[..4], true).await;
+    let payload = without.payload("availability", "");
+    let (status, value, _) = without.request("/v1/client/assistant/availability",
+        Some(&without.header(&payload, &without.attestor))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert!(value.get("value").is_none());
+}
