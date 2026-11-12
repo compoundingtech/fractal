@@ -4434,7 +4434,7 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         let member = intent.subjects[subject].member.as_ref().unwrap();
         assert_eq!(member.host.as_str(), "placement");
         assert!(
-            member.workspace.ends_with(&format!("agents/{subject}")),
+            member.workspace.ends_with(&format!("agents/{}", subject.replace('/', "."))),
             "{kdl}",
         );
     }
