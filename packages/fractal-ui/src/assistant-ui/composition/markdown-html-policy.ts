@@ -269,6 +269,7 @@ export function filteredMarkdownText(source: string): string {
       at = end === -1 ? source.length : end + 3
       continue
     }
+    if (source[at] === '\\' && (source[at + 1] === '`' || source[at + 1] === '\\')) { at += 2; continue }
     if (source[at] === '`') {
       const end = closing.get(at)
       if (end !== undefined) {

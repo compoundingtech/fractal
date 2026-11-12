@@ -147,6 +147,7 @@ test('delimiter and error fallback text applies HTML policy without stripping co
   }
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
   assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
 })
 
 test('a caught renderer failure keeps hidden HTML out of the real fallback DOM', async () => {
