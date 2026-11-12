@@ -2014,7 +2014,7 @@ priorities, planning conversations, or additional disclosure authority.
 
 The adapter uses `attention-rich`, `missions-rich`, `agents-rich`, `attention-content`, `slo`
 and `slo-history` under `/v1/client/assistant/`. `slo` and `slo-history` need
-`read.assistant.slo` and return allowlisted objective/budget rows and one row's history.
+`read.assistant.slo` and return pages of allowlisted objective/budget rows and one row's history.
 Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
 closed typed actions. `work.done` requires `write.assistant.answers` and immediately answers

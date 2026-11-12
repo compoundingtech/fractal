@@ -195,8 +195,8 @@ async fn assistant_slo_reads_need_their_scope_and_return_allowlisted_rows() {
     let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo{query}"),
         Some(&granted.header(&payload, &granted.attestor))).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    assert_eq!(value["value"]["kind"], "slo-list");
-    assert!(value["value"]["as_of_unix_ms"].is_u64());
+    assert_eq!(value["value"]["kind"], "page");
+    assert_eq!(value["value"]["collection"], "assistant.slo");
     for item in value["value"]["items"].as_array().unwrap() {
         assert!(item["id"].is_string(), "{item}");
         assert!(item.as_object().unwrap().keys().all(|key| [

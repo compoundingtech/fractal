@@ -226,7 +226,8 @@ fn validation_rejects_unknown_tools_nonobjects_extra_missing_and_wrong_types() {
         (ALERT_ANSWER, json!({"action_id":"a"})),
         (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":-1,"end":3})),
         (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":0,"end":"3"})),
-        (SLO_LIST, json!({"limit":1})),
+        (SLO_LIST, json!({"limit":0})),
+        (SLO_LIST, json!({"cursor":7})),
         (SLO_HISTORY, json!({})),
         (SLO_HISTORY, json!({"id":7})),
         (SLO_HISTORY, json!({"id":"cpu","steps":0})),
@@ -265,7 +266,7 @@ fn bounded_read_cases() -> Vec<(&'static str, &'static str, Value)> {
         (CONVERSATION_TIMELINE, "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_SEARCH, "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/example-reader","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_READ, "conversation-content", json!({"agent_id":"agent/example-reader","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
-        (SLO_LIST, "slo", json!({"max_response_bytes":16384})),
+        (SLO_LIST, "slo", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (SLO_HISTORY, "slo-history", json!({"id":"merge-latency/p95","since_ms":1,"until_ms":2,"steps":120,"max_response_bytes":16384})),
     ]
 }
@@ -690,7 +691,7 @@ fn all_thirteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
         (CONVERSATION_SEARCH, Some("conversation-search"), vec!["kind","items","page"]),
         (CONVERSATION_READ, Some("assistant-conversation-content"), vec!["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]),
         (MESSAGE_SEND, Some("action-result"), vec!["kind","action_id","status"]),
-        (SLO_LIST, Some("slo-list"), vec!["kind","as_of_unix_ms","items"]),
+        (SLO_LIST, Some("page"), vec!["kind","items","page"]),
         (SLO_HISTORY, Some("slo-history"), vec!["kind","id","since_ms","until_ms","samples","steps"]),
     ];
     let tools = tool_definitions(Profile::Mcp);
@@ -899,25 +900,33 @@ async fn mcp_reads_a_fixture_slo_list_and_history_through_the_assistant_projecti
     let socket = dir.path().join("fractal-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let snapshot = json!({"id":"snapshot/example","host_id":"host/example","store_index":7});
-    let list = json!({"api_version":"st3.client.v0","request_id":"request/example","snapshot":snapshot,
-        "value":{"kind":"slo-list","as_of_unix_ms":1_762_905_600_000_u64,"items":[
-            {"id":"merge-latency/p95","kind":"objective","about":"Pull requests from ready to merged",
-             "target":"p95 <= 4h","current":"p95 2h 10m over 31 merges","window":"7d",
-             "remaining_percent":61.5,"status":"met","tone":"green","measured_at_unix_ms":1_762_905_000_000_u64},
-            {"id":"codex/b122122b509719b7/weekly","kind":"budget","account":"codex/b122122b509719b7",
-             "about":"Codex weekly allowance","target":"100% per week","current":"72% used","window":"weekly",
-             "remaining_percent":28.0,"status":"at-risk","tone":"yellow","resets_at_unix_ms":1_763_000_000_000_u64,
-             "forecast_used_percent":96.0,"forecast_basis_minutes":360}
-        ]}});
+    let page = |items: Value, next_cursor: Value| json!({"api_version":"st3.client.v0",
+        "request_id":"request/example","snapshot":snapshot,
+        "value":{"kind":"page","collection":"assistant.slo","items":items,
+            "page":{"limit":50,"has_more":!next_cursor.is_null(),"next_cursor":next_cursor}}});
+    let first = page(json!([
+        {"id":"merge-latency/p95","kind":"objective","about":"Pull requests from ready to merged",
+         "target":"p95 <= 4h","current":"p95 2h 10m over 31 merges","window":"7d",
+         "remaining_percent":61.5,"status":"met","tone":"green","measured_at_unix_ms":1_762_905_000_000_u64}
+    ]), json!("cursor/slo-2"));
+    let second = page(json!([
+        {"id":"codex/b122122b509719b7/weekly","kind":"budget","account":"codex/b122122b509719b7",
+         "about":"Codex weekly allowance","target":"100% per week","current":"72% used","window":"weekly",
+         "remaining_percent":28.0,"status":"at-risk","tone":"yellow","resets_at_unix_ms":1_763_000_000_000_u64,
+         "forecast_used_percent":96.0,"forecast_basis_minutes":360}
+    ]), Value::Null);
     let history = json!({"api_version":"st3.client.v0","request_id":"request/example","snapshot":snapshot,
         "value":{"kind":"slo-history","id":"merge-latency/p95","since_ms":1_762_819_200_000_u64,
             "until_ms":1_762_905_600_000_u64,"samples":3,"steps":[70.0,null,61.5]}});
-    let (list_body, history_body) = (list.clone(), history.clone());
+    let (pages, history_body) = ((first.clone(), second.clone()), history.clone());
     let (sent, mut received) = tokio::sync::mpsc::channel(2);
     let gateway = Router::new()
         .route("/v1/client/assistant/slo", get(move |uri: axum::http::Uri| {
-            let (sent, body) = (sent.clone(), list_body.clone());
-            async move { sent.send(uri.to_string()).await.unwrap(); axum::Json(body) }
+            let (sent, (first, second)) = (sent.clone(), pages.clone());
+            async move {
+                sent.send(uri.to_string()).await.unwrap();
+                axum::Json(if uri.query().is_some_and(|query| query.contains("cursor=")) { second } else { first })
+            }
         }))
         .route("/v1/client/assistant/slo-history", get(move |uri: axum::http::Uri| {
             let body = history_body.clone();
@@ -927,20 +936,25 @@ async fn mcp_reads_a_fixture_slo_list_and_history_through_the_assistant_projecti
     let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer: "test-only-mcp-credential".into(), profile: Profile::Mcp };
 
-    let result = call(&adapter, SLO_LIST, &json!({"max_response_bytes":16384})).await.unwrap();
-    assert_eq!(received.recv().await.unwrap(), "/v1/client/assistant/slo?max_response_bytes=16384");
-    assert_eq!(result, list);
-    let published = serde_json::to_value(tool_result(Profile::Mcp, result, false)).unwrap();
-    assert_eq!(published["structuredContent"], list);
-    let rows = published["structuredContent"]["value"]["items"].as_array().unwrap();
+    // A default call reads the first page; its cursor continues until next_cursor is null.
+    let mut args = json!({});
+    let mut rows = Vec::new();
+    let mut results = Vec::new();
+    loop {
+        let result = call(&adapter, SLO_LIST, &args).await.unwrap();
+        let published = serde_json::to_value(tool_result(Profile::Mcp, result.clone(), false)).unwrap();
+        assert_eq!(published["structuredContent"], result);
+        rows.extend(result["value"]["items"].as_array().unwrap().iter().cloned());
+        let next = result["value"]["page"]["next_cursor"].clone();
+        results.push(result);
+        let Some(cursor) = next.as_str() else { break };
+        args = json!({"cursor":cursor});
+    }
+    assert_eq!(results, [first, second]);
+    assert_eq!(received.recv().await.unwrap(), "/v1/client/assistant/slo");
+    assert_eq!(received.recv().await.unwrap(), "/v1/client/assistant/slo?cursor=cursor%2Fslo-2");
     assert_eq!(rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(),
         ["merge-latency/p95", "codex/b122122b509719b7/weekly"]);
-    let contract = &output_schema(SLO_LIST)["oneOf"][0]["properties"]["value"];
-    for row in rows {
-        for field in contract["properties"]["items"]["items"]["required"].as_array().unwrap() {
-            assert!(row.get(field.as_str().unwrap()).is_some(), "{field}: {row}");
-        }
-    }
 
     let result = call(&adapter, SLO_HISTORY, &json!({"id":"merge-latency/p95","steps":3})).await.unwrap();
     assert_eq!(result, history);

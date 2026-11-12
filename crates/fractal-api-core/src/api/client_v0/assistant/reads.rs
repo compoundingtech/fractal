@@ -83,10 +83,7 @@ pub async fn project_with_context(
         },
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
-        "slo" => {
-            allow(parameters, SUMMARY_FIELDS, max_bytes)?;
-            Ok((snapshot.clone(), slo_list(state).await?))
-        }
+        "slo" => page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
         "slo-history" => {
             allow(parameters, SLO_HISTORY_FIELDS, max_bytes)?;
             Ok((snapshot.clone(), slo_history(state, parameters).await?))
@@ -95,15 +92,11 @@ pub async fn project_with_context(
     }
 }
 
-/// Every objective and budget row the daemon reports, with only the allowlisted fields.
-async fn slo_list(state: &AppState) -> Result<Value, ApiError> {
-    let axum::Json(body) = crate::api::operations::get_slo(axum::extract::State(state.clone())).await?;
-    let items = body["rows"].as_array().map(|rows| rows.iter().map(|row| {
-        Value::Object(SLO_ROW_FIELDS.iter()
-            .filter_map(|field| row.get(*field).map(|value| ((*field).to_owned(), value.clone())))
-            .collect())
-    }).collect::<Vec<_>>()).unwrap_or_default();
-    Ok(json!({"kind": "slo-list", "as_of_unix_ms": body["as_of_unix_ms"], "items": items}))
+/// One objective or budget row with only the allowlisted fields.
+fn slo_item(row: &Value) -> Value {
+    Value::Object(SLO_ROW_FIELDS.iter()
+        .filter_map(|field| row.get(*field).map(|value| ((*field).to_owned(), value.clone())))
+        .collect())
 }
 
 /// What was left of one exactly named objective or budget across a period.
