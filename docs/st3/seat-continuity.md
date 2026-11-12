@@ -46,22 +46,47 @@ sends it a "Prepare for restart" message from `daemon/runtime` with a deadline (
 waits. The message carries the reserved tag `st3-restart-prepare:REQUEST`, so it wakes the seat.
 
 The seat writes its handoff, which acknowledges the request, or runs `fractal agents handoff ready` when
-the handoff it has is already current. St stops the seat at the acknowledgement or at the deadline,
-whichever comes first, and records which: `runtime.reconcile-decision` claims with key
-`restart-prepare` say `prepare`, then `ready` or `deadline-passed`. A handoff written before the
+the handoff it has is already current. For a restart that continues the last session, Fractal stops
+the seat at the acknowledgement or at the deadline, whichever comes first, and records which:
+`runtime.reconcile-decision` claims with key `restart-prepare` say `prepare`, then `ready` or
+`deadline-passed`. Fresh-session requests wait for acknowledgement instead. A handoff written before the
 request does not acknowledge it. A readiness claim counts only when its recorded actor is the seat; as
 with other claims the actor is what the caller asserted, so this keeps out accidents and other seats,
 not a determined local caller. The handoff document is the stronger acknowledgement: the daemon
 lets only the seat itself write it.
 
-`fractal agents restart AGENT --now` skips the wait, for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that restart stub seats use it.
+`fractal agents restart AGENT --now` skips the wait for a restart that continues the last session,
+for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that
+restart stub seats use it. With `--fresh-session`, `--now` does not bypass handoff acknowledgement.
 
-`fractal agents restart AGENT --fresh-session` starts a new native session instead of continuing the last one. It is refused unless the seat has a handoff that it wrote or marked ready (`fractal agents handoff ready`) since its last turn began, so the new session always starts from a handoff the seat vouched for; the restart does not ask for one again. The daemon records the request as `fresh_session: true` and, before it launches the replacement, a `runtime.action.requested` claim with `action: fresh-session` newer than the last session binding, so every relaunch before the new session binds also starts a new one. The seat keeps its declaration, watches and work; only its conversation ends. Without the flag a restart continues the last session, as before.
+`fractal agents restart AGENT --fresh-session` starts a new native session instead of continuing
+the last one. If the seat has written or marked its handoff ready (`fractal agents handoff ready`)
+since its last turn began, it restarts without asking for one again. Otherwise the API accepts
+the request, even with `--now`, and the CLI returns a pending message (or the request claim with
+`--json`) rather than waiting for a new incarnation. Fractal asks the seat to prepare and waits
+for a handoff write or readiness acknowledgement after the request. A missing handoff is accepted
+too. The two-minute deadline never forces this fresh-session restart: an unacknowledged request
+stays pending, including when the seat cannot answer.
 
-A seat that is not up and ready, such as one that has exited, is blocked at a prompt or is logged
-out, has nobody to ask, so its restart goes ahead at once. A seat that stops answering (a pool seat
-at its limit, for example) costs the deadline, not more. Crashes, `agents stop`, suspend and
-mission `fresh-context` resets are not planned restarts and send nothing.
+A person may explicitly accept the existing handoff, even if stale or absent, with
+`fractal agents restart AGENT --fresh-session --from-stale-handoff --as person/operator`.
+`--from-stale-handoff` requires `--fresh-session`; agents cannot use it. The API field is
+`from_stale_handoff`, and the accepted request records `from_stale_handoff: true` with its actor.
+This override bypasses the handoff wait; `--now` alone never does for a fresh session.
+
+The daemon records the request as `fresh_session: true`, adding `operation: restart-now` only
+when the handoff is already current or the person explicitly accepts it without waiting.
+Before it launches the replacement, it records a `runtime.action.requested` claim with
+`action: fresh-session` newer than the last session binding, so every relaunch before the new
+session binds also starts a new one. The new session is given the handoff first. The seat keeps
+its declaration, watches and work; only its conversation ends. Without `--fresh-session` a
+restart continues the last session, as before.
+
+For restarts that continue the last session, a seat that is not up and ready, such as one that
+has exited, is blocked at a prompt or is logged out, has nobody to ask, so its restart goes ahead
+at once. A seat that stops answering (a pool seat at its limit, for example) costs the deadline,
+not more. Crashes, `agents stop`, suspend and mission `fresh-context` resets are not planned
+restarts and send nothing.
 
 ## What a new incarnation is sent
 
