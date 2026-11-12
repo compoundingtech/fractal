@@ -335,11 +335,13 @@ fn render_node(out: &mut String, read: &MapRead, node: &Node, inherited_from: Op
     let map = &read.map;
     let _ = writeln!(out);
     match inherited_from {
-        Some(requested) => {
+        // A short-form selector (`step:review/goal`) is just another name for the listed node;
+        // only a KDL path that names something the map does not list keeps its own label.
+        Some(requested) if requested.contains('[') => {
             let _ = writeln!(out, "NODE      {requested}");
             let _ = writeln!(out, "          not listed; its nearest listed ancestor is {}", node.kdl);
         }
-        None => {
+        _ => {
             let _ = writeln!(out, "NODE      {}", node.kdl);
         }
     }
@@ -916,16 +918,26 @@ mod tests {
     #[test]
     fn node_rendering_labels_the_selector_the_caller_passed() {
         let read = read();
+        // A short form that resolves to a listed node renders that node bare: it is just
+        // another name for it, matching the owned_sets integration test (`--node goal`).
         let selected = select_node(&read.map, "step:code-review/goal").unwrap();
-        // The step run's own path is not the request when the caller passed `--node`.
-        assert_eq!(read.node.as_deref().unwrap(), "mission[dotfiles/demo]/step[code-review]");
+        assert_eq!(selected.kdl, "mission[dotfiles/demo]/step[code-review]/goal[0]");
         let selector = Some("step:code-review/goal");
         let inherited = selector.filter(|requested| *requested != selected.kdl);
-        assert_eq!(inherited, Some("step:code-review/goal"));
         let mut rendered = String::new();
         render_node(&mut rendered, &read, selected, inherited);
-        assert!(rendered.contains("NODE      step:code-review/goal\n"), "{rendered}");
-        assert!(rendered.contains("not listed; its nearest listed ancestor is mission[dotfiles/demo]/step[code-review]/goal[0]"), "{rendered}");
+        assert!(rendered.contains("NODE      mission[dotfiles/demo]/step[code-review]/goal[0]\n"), "{rendered}");
+        assert!(!rendered.contains("not listed"), "{rendered}");
+        // An unlisted KDL path keeps its own label plus the nearest listed ancestor, and the
+        // used selector is what the text and JSON reports name.
+        let unlisted = "mission[dotfiles/demo]/step[code-review]/gate[other]";
+        let ancestor = select_node(&read.map, unlisted).unwrap();
+        assert_eq!(ancestor.kdl, "mission[dotfiles/demo]/step[code-review]");
+        let inherited_unlisted = Some(unlisted).filter(|requested| *requested != ancestor.kdl);
+        let mut unlisted_rendered = String::new();
+        render_node(&mut unlisted_rendered, &read, ancestor, inherited_unlisted);
+        assert!(unlisted_rendered.contains("NODE      mission[dotfiles/demo]/step[code-review]/gate[other]\n"), "{unlisted_rendered}");
+        assert!(unlisted_rendered.contains("not listed; its nearest listed ancestor is mission[dotfiles/demo]/step[code-review]"), "{unlisted_rendered}");
         // Without `--node` the step run resolves to its own listed node, which prints bare.
         let selected_step = select_node(&read.map, read.node.as_deref().unwrap()).unwrap();
         assert_eq!(selected_step.kdl, "mission[dotfiles/demo]/step[code-review]");
