@@ -145,7 +145,7 @@ objective "factory/work-throughput" {
 |---|---|
 | `subject-prefix "P"` | The event subjects, as for an interval. |
 | `event KIND at=FIELD` | A subject's event is at its earliest such claim, its time read from `FIELD` as an interval's `at`. `at` is required: the event's own time, which every retry and every producer of the subject repeats, so a retry inside the window is the same event and one after it is before the window and ignored. Retries and a second producer never count twice. |
-| `label "FIELD"` | Also one row per value of `FIELD` on the event claim: `factory/work-throughput{repository=fractal}`. |
+| `label "FIELD"` | Also one row per value of `FIELD` on the event claims the revision has read: `factory/work-throughput{repository=fractal}`. A label row is a part of the count, shown without a verdict (below). |
 | `exclude "FIELD" "A" "B"` | An event whose claim has one of these values is excluded: counted apart, never in the rate. |
 
 The objective takes one target, `per-hour` with `max=N` (at most N an hour, N ≥ 0) or `min=N` (at
@@ -162,14 +162,27 @@ factory/work-throughput  met  ≥ 10 an hour  312 in the last 24h (13.00 an hour
   share of the rate above the minimum, as a `share`'s budget is the share of its allowed remainder:
   0% at the minimum or below, nearing 100% as the rate grows.
 
-The row is `no-data` until the objective has read one event claim for its revision; from then on an
-empty window is a real 0, so a producer that stopped shows as a missed minimum rather than hiding.
+Only the row `NAME` is judged. The bound is the whole count's, so a label row is a part of it: it
+reports its events and rate with the target `part of NAME`, is `no-data` with no budget, and never
+opens a fault. With `min=10` over five repositories, 13 an hour in all is met though no repository
+alone reaches 10. A label value keeps its row once the revision has read it, reading 0 when its
+events have left the window, so a repository that stopped merging still shows; the values are kept
+per revision, at most the distinct values the event claims carry.
+
+```
+factory/work-throughput{repository=fractal}  no-data  part of factory/work-throughput  0 in the last 24h (0.00 an hour)  24h
+```
+
+The row `NAME` is `no-data` until the objective has read one event claim for its revision; from
+then on an empty window is a real 0, so a producer that stopped shows as a missed minimum rather
+than hiding.
 A claim whose time cannot be read is counted as unreadable and changes nothing. `fractal slo explain`
 says the events counted and excluded in the window, the rate, the unreadable claims, and the
 subject and revision.
 
 Each evaluation reads only the event claims newer than the last it read, and keeps only the events
-in the window: an event before it is dropped from memory, and a claim timed before it is not kept.
+in the window and the label values read: an event before it is dropped from memory, and a claim
+timed before it is not kept, though its label value is.
 
 ### Ratio over Prometheus metrics
 
@@ -186,9 +199,12 @@ on-breach "fault" owner="agent/NS/NAME" backup="agent/NS/OTHER" condition="NAME-
 
 A missed row opens one `operational.failure` on `daemon/MEMBER` addressed to `owner`, with the
 `condition`. It stays one episode until the row is met again, when `operational.recovered` ends it.
-A row with no data neither opens nor ends one. The member that delivers it is the one the owner
-agent is declared on: every member evaluates the objective from the same replicated claims, and one
-delivers. An owner that is not a live declaration gets nothing, and the explanation says so.
+A row with no data neither opens nor ends one. A row the objective no longer judges ends its fault:
+an interval's label row whose samples have all left the window, a row a new revision no longer
+has, or a count's label row, which is never met or missed. The member that delivers it is the one
+the owner agent is declared on: every member evaluates the objective from the same replicated
+claims, and one delivers. An owner that is not a live declaration gets nothing, and the
+explanation says so.
 
 `backup` is held: it is recorded and shown, and never becomes the fault's reviewer. It differs from
 the owner.

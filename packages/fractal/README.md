@@ -68,7 +68,7 @@ export default Fractal.objective({
 })
 ```
 
-A count takes one `per-hour` target with `min` or `max`: `Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' }, labels: ['repository'] })` with `window: { span: '24h' }` and `targets: [{ stat: 'per-hour', min: 10 }]`.
+A count takes one `per-hour` target with `min` or `max`: `Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' }, labels: ['repository'] })` with `window: { span: '24h' }` and `targets: [{ stat: 'per-hour', min: 10 }]`. Only the count's own row is judged against the target; each label row is a part of it, shown without a verdict.
 
 `Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`, `ciDuration`, `ciCount`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
 
