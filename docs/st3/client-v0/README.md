@@ -217,6 +217,44 @@ advertisement from every active member. Pending unsigned local membership change
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 
+### Person availability
+
+A person's availability informs agents; it never grants authority. It has three axes and a
+derived status, all folded when read from claims on `person/NAME`, so expiry needs no writes:
+
+- `status`: an `available` or `away` override with optional `until`. With no override in
+  force, status is `available` only while presence is `present`, otherwise `away`.
+- `interruptions`: `all`, `urgent` or `none`, with optional `until`; `all` when unset.
+- `deadline_clock`: `run`, `hold-routine` or `hold-all`, with optional `until`; `run` when
+  unset. A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask
+  (`hold-all`); an ask is urgent when its asker named an explicit deadline of at most one hour.
+- `presence`: each source's newest report counts until it is 15 minutes old, measured from
+  the earlier of its `observed_at` and acceptance. A fresh `present` anywhere wins, then
+  `idle`, then `locked`; with no fresh report presence is `unknown`.
+
+`GET /v1/client/availability` (`availability.list`) requires `read.projections` and a person
+or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` it reads that
+person. Without it, a person reads themselves and an agent reads the people whose directive
+notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
+gets them as `null` and sees only the effective status with `status_until`, the interruptions
+and the deadline clock.
+
+Writes act as the session's own person, which the body never names; agent sessions are refused
+with `403` even though a local agent session holds every scope. `PUT /v1/client/availability`
+(`availability.set`, scope `write.availability`) takes an `AvailabilitySet`: each present axis
+names its `value` and optional future `until`, and an absent axis is unchanged. A status
+`value` of `null` clears the override and takes no `until`. `POST /v1/client/presence`
+(`presence.report`, scope `write.presence`) takes a `PresenceReport` of `present`, `idle` or
+`locked` and its `observed_at`, which must be within the last 15 minutes and at most 2 minutes
+ahead of this member's clock. The client decides idleness with its own threshold. The daemon assigns
+the source: the exact pairing grant for a paired device, otherwise `host/<member>`. An
+unchanged report from one source is recorded at most once every 5 minutes; a change is
+recorded at once. Both writes answer the person's full `PersonAvailability`; invalid input is
+`validation-failed`. The generated Rust `availability_list`, `availability_set` and
+`presence_report`, and Swift and TypeScript `availabilityList`, `availabilitySet` and
+`presenceReport` methods use these routes. See the
+[read fixture](fixtures/person-availability.json) and
+[write fixture](fixtures/availability-set.json).
 
 ### Phone observations
 
@@ -1889,10 +1927,11 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-client diagnostics writes, glasses reads and control, terminal reads, attention control,
+client diagnostics writes, availability and presence writes for the paired person, glasses
+reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`read.glasses`, `control.glasses`, `terminal.read`,
+`write.availability`, `write.presence`, `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so

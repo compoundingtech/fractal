@@ -321,6 +321,8 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
     "read.declarations",
     "read.glasses",
     "control.glasses",

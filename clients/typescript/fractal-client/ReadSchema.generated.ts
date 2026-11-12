@@ -4305,6 +4305,32 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+/** A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person. */
+export const PersonAvailability = /*#__PURE__*/ (() => Schema.Struct({
+  /** A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask (`hold-all`). */
+  "deadline_clock": Schema.Literals(["run","hold-routine","hold-all"]).annotate({ description: "A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask (`hold-all`)." }),
+  "deadline_clock_since": Schema.OptionFromNullOr(Timestamp),
+  "deadline_clock_until": Schema.OptionFromNullOr(Timestamp),
+  "interruptions": Schema.Literals(["all","urgent","none"]),
+  "interruptions_until": Schema.OptionFromNullOr(Timestamp),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  /** The person's fresh device reports folded: `present` anywhere wins, then `idle`, then `locked`; `unknown` without a fresh report. */
+  "presence": Schema.OptionFromNullOr(Schema.Literals(["present","idle","locked","unknown"])).annotate({ description: "The person's fresh device reports folded: `present` anywhere wins, then `idle`, then `locked`; `unknown` without a fresh report." }),
+  "presence_observed_at": Schema.OptionFromNullOr(Timestamp),
+  /** The override while one is in force; otherwise `available` only while presence is `present`. */
+  "status": Schema.Literals(["available","away"]).annotate({ description: "The override while one is in force; otherwise `available` only while presence is `present`." }),
+  "status_source": Schema.Literals(["override","presence"]),
+  "status_until": Schema.OptionFromNullOr(Timestamp)
+}).annotate({ identifier: "PersonAvailability", description: "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person." }))()
+export type PersonAvailability = typeof PersonAvailability.Type
+export type PersonAvailabilityEncoded = typeof PersonAvailability.Encoded
+
+export const PersonAvailabilities = /*#__PURE__*/ (() => Schema.Struct({
+  "people": Schema.Array(PersonAvailability)
+}).annotate({ identifier: "PersonAvailabilities" }))()
+export type PersonAvailabilities = typeof PersonAvailabilities.Type
+export type PersonAvailabilitiesEncoded = typeof PersonAvailabilities.Encoded
+
 export const PrivateNotesAction = /*#__PURE__*/ (() => Schema.Struct({
   /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
   "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }),

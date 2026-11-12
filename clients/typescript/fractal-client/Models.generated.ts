@@ -1203,6 +1203,27 @@ export type AttentionWaiting = {
   step: StepRunId;
 };
 
+export type AvailabilityDeadlineClockChange = {
+  until?: (Timestamp | null);
+  value: "run" | "hold-routine" | "hold-all";
+};
+
+export type AvailabilityInterruptionsChange = {
+  until?: (Timestamp | null);
+  value: "all" | "urgent" | "none";
+};
+
+export type AvailabilitySet = {
+  deadline_clock?: AvailabilityDeadlineClockChange;
+  interruptions?: AvailabilityInterruptionsChange;
+  status?: AvailabilityStatusChange;
+};
+
+export type AvailabilityStatusChange = {
+  until?: (Timestamp | null);
+  value: ("available" | "away" | null);
+};
+
 export type BlobChunk = {
   data: string;
   offset: number;
@@ -1852,7 +1873,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | PersonAvailabilities | PersonAvailability | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -3440,6 +3461,24 @@ export type PersonAskParameters = {
   title: string;
 };
 
+export type PersonAvailabilities = {
+  people: Array<PersonAvailability>;
+};
+
+export type PersonAvailability = {
+  deadline_clock: "run" | "hold-routine" | "hold-all";
+  deadline_clock_since: (Timestamp | null);
+  deadline_clock_until: (Timestamp | null);
+  interruptions: "all" | "urgent" | "none";
+  interruptions_until: (Timestamp | null);
+  person: string;
+  presence: ("present" | "idle" | "locked" | "unknown" | null);
+  presence_observed_at: (Timestamp | null);
+  status: "available" | "away";
+  status_source: "override" | "presence";
+  status_until: (Timestamp | null);
+};
+
 export type PersonId = string;
 
 export type PersonOptionNote = {
@@ -3471,7 +3510,17 @@ export type PersonPairingBegin = {
   fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<
+  "read.projections"
+  | "write.client-diagnostics"
+  | "write.availability"
+  | "write.presence"
+  | "read.glasses"
+  | "control.glasses"
+  | "terminal.read"
+  | "control.attention"
+  | "control.launches"
+>;
 };
 
 export type PersonStepParameters = {
@@ -3533,6 +3582,11 @@ export type PlannerConfig = {
   effort?: string;
   model?: string;
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
+};
+
+export type PresenceReport = {
+  observed_at: Timestamp;
+  presence: "present" | "idle" | "locked";
 };
 
 export type PresentationActor = {
