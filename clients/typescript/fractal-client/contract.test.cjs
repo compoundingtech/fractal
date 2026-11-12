@@ -334,7 +334,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'resources.list': return [{}, {}, options];
             case 'agent-declaration.get': return ['agent/example', undefined, false, options];
             case 'publication.definition': return ['mission/example', options];
-            case 'mission-declaration.get': return ['mission/example', undefined, options];
+            case 'mission-declaration.get': case 'source-map.get': return ['mission/example', undefined, options];
+            case 'source-blob.get': return ['ab'.repeat(32), 'mission/example', 'revision', options];
             case 'subject.definition': return ['mission/example', false, options];
             case 'conversation-content.chunk': return ['session/example', 'reference', 0, options];
             case 'conversation.changes': case 'timeline.list': return ['session/example', {}, options];
@@ -426,8 +427,8 @@ for (const messagesPaging of [undefined, false, true]) {
         }
         assert.equal(headers.length, 8);
         const expected = messagesPaging === true
-            ? 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2'
-            : 'custom-subjects.v1, conversation-blocks.v1';
+            ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1, messages-paging.v2'
+            : 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1';
         for (const values of headers) assert.equal(values['x-st3-features'], expected);
     });
 }
@@ -709,7 +710,7 @@ test('follows terminal screens until the server ends the stream with its error',
     assert.deepEqual(opened, [{
         url: 'wss://example.test/v1/client/terminals/terminal%2Frelease-shell/stream?incarnation=pty-4%3A2026-09-20T11%3A10%3A00Z',
         protocols: ['fractal.client.terminal.v0', 'fractal.cap.capability-proof'],
-        headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' },
+        headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1' },
     }]);
     socket.onmessage({ data: JSON.stringify(screenFixture) });
     socket.onmessage({ data: JSON.stringify(changedFixture) });
@@ -742,7 +743,7 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
         onChange: change => received.push(change.value),
         socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; },
     });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['fractal.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['fractal.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1' } }]);
     const change = { kind: 'conversation-changes', session_id: 'session/example', items: [{ id: 'timeline-entry/example', sequence: 4, revision: 1, timestamp: snapshot.created_at, role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text: 'reply' } }], next_cursor: 'conversation-cursor/owner/example/1.3.3' };
     socket.onmessage({ data: JSON.stringify(envelope(change)) });
     assert.deepEqual(received, [change]);
@@ -779,7 +780,7 @@ test('collection stream holds commands until the socket opens and passes frames 
     const ends = [];
     const client = new FractalClient({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: error => ends.push(error), onOpen: () => lifecycle.push(['open']), onCommandSent: command => lifecycle.push([command.kind, command.id]), socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; } });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['fractal.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['fractal.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1' } }]);
     stream.subscribe('missions', 'missions', 200);
     stream.subscribe('mine', 'attention', 50, { person: 'person/example' });
     assert.deepEqual(socket.sent, []);
@@ -1192,6 +1193,21 @@ test('mission declaration read encodes exact revisions and preserves served text
     assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
 });
 
+test('source map reads take the subject and revision as a query; a blob is read by its sha256 within one mapped revision', async () => {
+    const calls = [];
+    const hash = 'ab'.repeat(32);
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : url.includes('/source-blobs/') ? { hash, text: 'export {}\n' } : { subject: 'mission/example' }));
+    } });
+    await client.sourceMapGet('mission/example/readback', 'revision/one&two');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/source-maps?subject=' + encodeURIComponent('mission/example/readback') + '&revision=' + encodeURIComponent('revision/one&two'));
+    await client.sourceMapGet('agent/example');
+    assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+    assert.deepEqual((await client.sourceBlobGet(hash, 'mission/example/readback', 'revision/one&two')).value, { hash, text: 'export {}\n' });
+    assert.equal(calls.at(-1), `https://example.test/v1/client/source-blobs/${hash}?subject=` + encodeURIComponent('mission/example/readback') + '&revision=' + encodeURIComponent('revision/one&two'));
+});
+
 test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
     const calls = [];
     const mission = 'mission/example/readback';
@@ -1232,7 +1248,7 @@ test('owner content chunk route encodes session identities and retains continuat
     } });
     const result = await client.conversationContentChunk('session/native/one', chunk.ref, chunk.offset);
     assert.equal(calls.at(-1).url, `https://example.test/v1/client/conversations/session%2Fnative%2Fone/content/${chunk.ref}/chunk?offset=262144`);
-    assert.equal(calls.at(-1).init.headers['x-st3-features'], 'custom-subjects.v1, conversation-blocks.v1');
+    assert.equal(calls.at(-1).init.headers['x-st3-features'], 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1');
     assert.deepEqual(result.value, chunk);
 });
 
