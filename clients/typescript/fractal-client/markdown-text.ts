@@ -51,7 +51,8 @@ export const excerptMarkdown = (markdown: MarkdownBlock, max: number): MarkdownB
   const points = Array.from(markdownSource(markdown));
   if (points.length <= max) return markdown;
   const cut = points.slice(0, max).join('');
-  const open = (cut.match(/^\s*(`{3,}|~{3,})/gm) ?? []).length % 2 === 1;
-  const fence = cut.match(/^\s*(`{3,}|~{3,})/gm)?.at(-1)?.trim();
+  const fences = cut.match(/^\s*(`{3,}|~{3,})/gm) ?? [];
+  const open = fences.length % 2 === 1;
+  const fence = fences[fences.length - 1]?.trim();
   return markdownBlock(open && fence !== undefined ? `${cut}…\n${fence}` : `${cut}…`);
 };
