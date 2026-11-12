@@ -174,6 +174,8 @@ const FALLBACK_LITERAL_CODE = [
   '> item\n>\n>     <!-- literal -->',
   '- item\n  ~~~html\n  <script>literal</script>\n  ~~~',
   '>\t~~~html\n> <!-- literal -->\n> ~~~',
+  '- item\n\nOutside the list\n\n    <script>literal</script>',
+  '> quote\n\nOutside the quote\n\n\t<!-- literal -->',
 ]
 
 test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {

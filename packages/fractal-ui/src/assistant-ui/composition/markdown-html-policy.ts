@@ -222,7 +222,7 @@ type MarkdownContainer = 'quote' | number
 type MarkdownCursor = { at: number; column: number; pending: number }
 
 /** Like the excerpt scanner: a tab can straddle a container boundary without changing source offsets. */
-function containerLine(line: string, state: { containers: MarkdownContainer[]; quotes: number }, fenced: boolean) {
+function containerLine(line: string, state: { containers: MarkdownContainer[]; quotes: number; paragraph: boolean }, fenced: boolean) {
   const cursor: MarkdownCursor = { at: 0, column: 0, pending: 0 }
   const byte = () => cursor.pending > 0 ? ' ' : line[cursor.at]
   const space = () => {
@@ -268,7 +268,7 @@ function containerLine(line: string, state: { containers: MarkdownContainer[]; q
   // A paragraph may lazily continue a container without repeating its prefix. Keep that context for the next
   // indented line, but never extend a fence or classify the lazy line's own indentation relative to it.
   const tail = line.slice(cursor.at)
-  const lazy = ended && !fenced && /^\S/.test(tail) && !/^(?:[<>`~#]|[-+*](?:\s|$)|\d{1,9}[.)](?:\s|$))/.test(tail)
+  const lazy = ended && state.paragraph && !fenced && /^\S/.test(tail) && !/^(?:[<>`~#]|[-+*](?:\s|$)|\d{1,9}[.)](?:\s|$))/.test(tail)
   if (ended && !lazy) {
     for (let index = matched; index < state.containers.length; index++) if (state.containers[index] === 'quote') state.quotes--
     state.containers.length = matched
@@ -301,7 +301,10 @@ function containerLine(line: string, state: { containers: MarkdownContainer[]; q
   }
   const contentColumn = cursor.column
   indent(Infinity)
-  return { ended, indent: cursor.column - contentColumn, body: line.slice(cursor.at) }
+  const indentation = cursor.column - contentColumn
+  const body = line.slice(cursor.at)
+  state.paragraph = !fenced && indentation < 4 && /\S/.test(body) && !/^(?:[<>`~#]|(?:[-*_]\s*){3,}$)/.test(body)
+  return { ended, indent: indentation, body }
 }
 
 /**
@@ -322,7 +325,7 @@ export function filteredMarkdownText(source: string): string {
   let at = 0
   let plainStart = 0
   let fence: { marker: string; start: number } | undefined
-  const containers = { containers: [] as MarkdownContainer[], quotes: 0 }
+  const containers = { containers: [] as MarkdownContainer[], quotes: 0, paragraph: false }
   while (at < source.length) {
     if (at === 0 || source[at - 1] === '\n') {
       const newline = source.indexOf('\n', at)
