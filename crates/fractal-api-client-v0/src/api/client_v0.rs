@@ -3035,6 +3035,7 @@ const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "write.client-diagnostics",
     "write.availability",
     "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -13575,7 +13576,7 @@ mission "differential" state="ready" {
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
             let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
-            for scope in ["write.client-diagnostics", "write.availability", "write.presence"] {
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
                 assert!(scopes.contains(&json!(scope)), "{scope}");
             }
         }
