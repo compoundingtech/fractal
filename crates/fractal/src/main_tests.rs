@@ -187,6 +187,16 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 }
 
 #[test]
+fn mission_outcomes_refuse_an_old_daemon_unfiltered_page() {
+    let old = json!({"collection": "missions", "items": [], "has_more": false});
+    let new = json!({"collection": "missions", "mission": "mission/example", "items": []});
+    assert!(require_mission_echo(&old, None).is_ok());
+    let refusal = require_mission_echo(&old, Some("mission/example")).unwrap_err();
+    assert_eq!(refusal.to_string(), "this daemon does not support --mission; upgrade the daemon");
+    assert!(require_mission_echo(&new, Some("mission/example")).is_ok());
+}
+
+#[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
         "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
