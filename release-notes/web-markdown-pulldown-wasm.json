@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Markdown parses with pulldown-cmark compiled to WebAssembly (committed module with sha256 manifest and licenses), loaded lazily after the first Markdown mounts; a failed load keeps the JavaScript parser, and policy, highlighting and components are shared",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web UI only; no wire, protocol, runtime or client changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous rendering."
+  }
+}
