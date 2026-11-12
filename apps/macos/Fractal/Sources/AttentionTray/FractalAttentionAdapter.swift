@@ -77,7 +77,7 @@ extension ErrorCode {
 
 actor FractalAttentionAdapter: AttentionAdapter {
   static let pageLimit = 100
-  private let client: FractalClient
+  let client: FractalClient
   private let fractalURL: URL
 
   init(configuration: TrayConfiguration, clientName: String) {
@@ -226,7 +226,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
     ms == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
   }
 
-  private static func date(iso value: String) -> Date? {
+  static func date(iso value: String) -> Date? {
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
