@@ -137,6 +137,46 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
   assert.match(hostile, /kept words/)
 })
 
+test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
+  const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
+  assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
+  assert.match(block(hostile), /Visible/)
+  for (const source of ['`<!-- literal -->`', '```\n<script>literal</script>\n```', '    <!-- literal -->']) {
+    assert.equal(filteredMarkdownText(source), source)
+  }
+  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
+})
+
+test('raw pre with explicit code has one code holder and keeps its text', () => {
+  for (const source of ['<pre><code>x</code></pre>', '<pre><code>x &lt; y\nsecond</code></pre>']) {
+    const html = block(source)
+    assert.match(html, /markdown-code-block/)
+    assert.match(html, /<code[^>]*>x/)
+    assert.doesNotMatch(html, /<code[^>]*>\s*<code/)
+    if (source.includes('second')) assert.match(html, /x &lt; y\nsecond/)
+  }
+})
+
+test('security payloads cannot create executable elements, attributes or URL schemes', async () => {
+  const { safeLinkHref } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  for (const source of [
+    '<noscript>SECRET</noscript><template>SECRET</template>Visible',
+    '<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(1)>',
+    '<![CDATA[<img src=x onerror=alert(1)>]]>',
+    '<div title="before <img src=x onerror=alert(1)> after" name="x" formaction="javascript:x" xlink:href="javascript:x">Visible</div>',
+  ]) {
+    const html = block(source)
+    assert.doesNotMatch(html, /<(?:script|style|img|math|noscript|template)\b|<[^>]+(?:onerror|formaction|xlink:href|name)=|SECRET/)
+  }
+  for (const raw of ['java\u0000script:x', 'java\r\nscript:x', 'java\u0085script:x']) {
+    assert.equal(safeLinkHref(raw), undefined)
+  }
+  const html = block('<a href="HTTPS://example.test">safe</a>')
+  assert.match(html, /href="HTTPS:\/\/example.test"/)
+  assert.match(html, /rel="noopener noreferrer"/)
+})
+
 test('prompts load no remote image and drop unsafe link protocols', () => {
   const html = prompt('![pixel](https://example.test/p.png)\n\n[bad](javascript:alert(1)) [good](https://example.test)')
   assert.doesNotMatch(html, /<img/)

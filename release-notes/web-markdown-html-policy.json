@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Markdown applies a GitHub-like HTML policy: allowed elements render, other raw HTML becomes text or is dropped, comments are hidden, details/summary disclose, links are limited to http(s) and document references, raw images wait for consent, and nesting is capped at 32",
+  "summary": "Markdown applies a GitHub-like HTML policy on parsed and plain fallback paths: hidden content stays hidden, raw pre/code retains its words, allowed elements render, details disclose, links allow http(s) and document references, images wait for consent, and nesting is capped at 32",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."
