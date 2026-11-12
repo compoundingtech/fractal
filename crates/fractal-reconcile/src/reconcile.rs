@@ -142,6 +142,13 @@ const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
+/// Condition of the per-seat `operational.failure` raised while its current incarnation's
+/// latest `harness.usage` names a different model than its declaration. `record_failure`
+/// fences it by source revision and runtime incarnation; the reason carries
+/// `[drift-since-ms]` so later passes keep the first-detected time without rescanning.
+/// Non-blocking: the seat keeps running, and the failure recovers when usage returns to
+/// the declared model or the declaration changes.
+pub const MODEL_DRIFT_CONDITION: &str = "harness-model-drift";
 
 /// While a seat has reached Claude's trust prompt more than [`CLAUDE_TRUST_RECOVERY_ATTEMPTS`]
 /// times within [`CLAUDE_TRUST_RECOVERY_WINDOW_MS`], recovery holds back; this is when enough of
@@ -4527,6 +4534,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .current_harness(&subject.subject)?
             .is_some_and(|harness| harness.incarnation_id == incarnation && harness.is_ready());
+        self.reconcile_model_drift(subject, incarnation)?;
         if harness_ready {
             self.resolve_superseded_harness_auth_attention(&subject.subject, incarnation)?;
             self.resolve_recovered_seat_attention(&subject.subject, incarnation)?;
@@ -4639,6 +4647,95 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.signal_changed();
         }
         Ok(())
+    }
+    /// Compare the current incarnation's latest `harness.usage` model against the declared
+    /// harness model. A silent provider fallback (omp falling down its model ladder on a 429)
+    /// otherwise runs undeclared for hours with zero faults. This raises a non-blocking
+    /// operational failure (`harness/model-drift`) on the seat naming declared vs live model
+    /// and since when: it never stops, parks, or crash-loops the seat. The item's owner is
+    /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees it
+    /// in `fractal now` and `agents show` faults, never as a personal inbox item. It resolves
+    /// when usage returns to the declared model or the declaration changes (which retires the
+    /// episode via its source revision). The Codex resume model check
+    /// (`resume_permission_overrides_applied`) only guards a resume handshake; this is the
+    /// durable observable signal for the same underlying concept, kept as a fault rather
+    /// than a crash loop so the seat keeps working.
+    fn reconcile_model_drift(&self, subject: &DesiredSubject, incarnation: &str) -> Result<()> {
+        let episode = format!("model-drift/{}", subject.subject);
+        let Some(declared) = Self::declared_harness_model(&subject.desired) else {
+            return self.recover_model_drift(&episode, "the seat declares no harness model");
+        };
+        // Bounded reads only: one indexed newest-first `harness.usage` lookup for this
+        // incarnation, never a full usage fold.
+        let Some(live) = self.store.latest_usage_model(&subject.subject, incarnation)? else {
+            return self.recover_model_drift(&episode, "the seat has reported no usage model yet");
+        };
+        if fractal_kernel::pricing::canonical_model(&live) == fractal_kernel::pricing::canonical_model(&declared) {
+            return self.recover_model_drift(&episode, "usage returned to the declared model");
+        }
+        let open = self.store.operational_failure(&episode)?;
+        let since = open
+            .as_ref()
+            .and_then(|failure| Self::drift_since_ms(&failure.reason))
+            .unwrap_or_else(now_ms);
+        let mut reason = format!("declared {declared} but running on {live}");
+        let at = Utc.timestamp_millis_opt(since.min(i64::MAX as u128) as i64).single();
+        reason.push_str(&format!(" since {}", at.map_or_else(|| format!("{since}ms"), |time| time.format("%H:%MZ").to_string())));
+        reason.push_str(&format!(" [drift-since-ms:{since}]"));
+        if open.as_ref().is_some_and(|failure| failure.reason == reason) {
+            return Ok(());
+        }
+        self.store.record_runtime_failure(&episode, &AttentionRequest {
+            reviewer: subject.subject.clone(),
+            title: "Seat runs on a fallback model".into(),
+            reason,
+            severity: "error".into(),
+            targets: vec![subject.subject.clone()],
+            actor: RECONCILER_ACTOR.into(),
+            idempotency_key: format!("{episode}:attention"),
+        }, MODEL_DRIFT_CONDITION)?;
+        self.signal_changed();
+        Ok(())
+    }
+
+    fn recover_model_drift(&self, episode: &str, reason: &str) -> Result<()> {
+        if self.store.operational_failure(episode)?.is_some_and(|failure| failure.status == "pending") {
+            self.store.recover_operational_failure(episode, reason, &format!("{episode}:resolved"))?;
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
+    /// The declared harness model of a canonical agent body (`harness` child carrying a
+    /// `model` child with one argument). Mirrors `desired_harness_driver` in
+    /// fractal-api-core without depending on it.
+    fn declared_harness_model(desired: &Value) -> Option<String> {
+        desired
+            .get("children")?
+            .as_array()?
+            .iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some("harness"))?
+            .get("children")?
+            .as_array()?
+            .iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some("model"))?
+            .get("arguments")?
+            .as_array()?
+            .first()?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// The `since` the open drift fault stored when first raised, carried in its reason as
+    /// `[drift-since-ms:<millis>]` so later passes reuse it without scanning history.
+    fn drift_since_ms(reason: &str) -> Option<u128> {
+        reason
+            .rsplit("[drift-since-ms:")
+            .next()?
+            .split(']')
+            .next()?
+            .parse()
+            .ok()
     }
 
     /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
@@ -49002,6 +49099,94 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .unwrap();
 
         assert_eq!(parked_faults(&store), 0);
+    }
+
+    #[test]
+    fn usage_model_drift_raises_a_non_blocking_fault_and_clears_when_usage_returns() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; harness \"omp\" {{ model \"anthropic/claude-opus-5-5\" }} }}\n",
+                workspace.path().display().to_string()
+            ),
+            "drift-declared",
+        );
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let member = desired.member.as_ref().unwrap().clone();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let report = |model: &str, idempotency_key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.worker".into(),
+                    kind: "harness.usage".into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: BTreeMap::from([
+                        ("driver".into(), Value::String("omp".into())),
+                        ("model".into(), Value::String(model.into())),
+                        ("semantics".into(), Value::String("context_occupancy".into())),
+                        ("incarnation_id".into(), Value::String("worker-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(idempotency_key.into()),
+                })
+                .unwrap();
+        };
+        let drift = || {
+            store
+                .fault_items(None)
+                .unwrap()
+                .into_iter()
+                .find(|item| {
+                    item.subject == "agent/node.worker"
+                        && item.title == "Seat runs on a fallback model"
+                })
+        };
+        // Usage on the declared model: no fault.
+        report("claude-opus-5-5", "drift-usage-declared");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        assert!(drift().is_none());
+        // A decoration the canonicalization strips (provider prefix, date snapshot) is not drift.
+        report("anthropic/claude-opus-5-5-20260901", "drift-usage-decorated");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        assert!(drift().is_none());
+        // The fallback model lands: the fault names declared vs live and since when.
+        report("gpt-6.1-sol", "drift-usage-fallback");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        let item = drift().expect("drift fault raised");
+        assert!(item.detail.contains("anthropic/claude-opus-5-5"), "{}", item.detail);
+        assert!(item.detail.contains("gpt-6.1-sol"), "{}", item.detail);
+        assert!(item.detail.contains("[drift-since-ms:"), "{}", item.detail);
+        // A second pass keeps the first-detected `since` without rescanning history.
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        let again = drift().expect("drift fault still raised");
+        assert_eq!(again.detail, item.detail);
+        // The seat is not parked, stopped, or crash-looped: parked faults name the seat.
+        assert!(
+            store
+                .fault_items(None)
+                .unwrap()
+                .iter()
+                .filter(|item| item.subject == "agent/node.worker")
+                .all(|item| item.title == "Seat runs on a fallback model")
+        );
+        // Usage returns to the declared model: the fault resolves without a declaration change.
+        report("claude-opus-5-5", "drift-usage-recovered");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        assert!(drift().is_none());
+        drop(member);
     }
 
     #[test]

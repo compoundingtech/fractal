@@ -106,7 +106,10 @@ pub fn rates(model: &str) -> Option<&'static Rates> {
         .map(|(_, rates)| rates)
 }
 
-fn canonical_model(model: &str) -> String {
+/// The decorations harnesses add to an API ID, removed: a `provider/` prefix, a bracketed
+/// variant such as `[1m]`, and a trailing date snapshot. Lowercased and trimmed, so a declared
+/// `anthropic/claude-opus-5-5` matches usage that reports `claude-opus-5-5-20260901`.
+pub fn canonical_model(model: &str) -> String {
     let mut model = model.trim().to_ascii_lowercase();
     if let Some(index) = model.rfind('/') {
         model = model[index + 1..].to_owned();
