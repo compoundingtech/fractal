@@ -242,6 +242,39 @@ name. The CLI defaults its actor to the run when the credential is present and n
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
 same run. The same-UID boundary is cooperative, as for agents.
 
+**Private integration instances.** A test running inside a mission exec is not a person,
+even when it creates a private daemon. Socket or state-directory ownership does not grant
+person attribution. A run credential belongs to the issuing store: a scratch store cannot
+resolve the enclosing fleet run's credential. Clearing a leaf client's environment alone
+does not erase that credential from its ancestors.
+
+Use the existing explicit agent caller contract for isolated integration tests:
+
+1. Create a fresh private directory (mode `0700`), config, state, runtime paths and Unix
+   sockets. Do not join a fleet, configure peers, or select an ambient daemon endpoint.
+   Start the daemon outside an agent harness tree (for example a separate user service),
+   without `ST_AGENT`, `FRACTAL_AGENT` or `ST_RUN_CREDENTIAL` in its startup environment.
+   Keep it in the caller's user namespace so native peer/process inspection remains possible.
+2. For **each scratch client exec**, supply `ST_AGENT=agent/fixture/scratch`, omit
+   `FRACTAL_AGENT` and `ST_RUN_CREDENTIAL`, and pass the explicit scratch endpoint.
+   Use `--as agent/fixture/scratch` on `apply` and `missions start`. A test helper should
+   expose that actor directly rather than infer a person from an absent ambient agent marker.
+   This identity is a test author, not a configured seat that the daemon must launch.
+3. Keep default free-mode authorization on that isolated store, or explicitly grant the
+   fixture agent the required publish/start authority when testing enforced rules. This
+   does not grant it authority on another daemon. Never change fleet rules for a test.
+4. Stop the private daemon and remove only its test-owned directory when the test ends.
+
+The closest verified exec-time agent marker binds the scratch request before the walk
+reaches the enclosing mission credential. Publication claims and run requesters remain
+attributed to `agent/fixture/scratch`, never a person. A process carrying both agent and
+run markers is invalid; a scratch agent naming a person or another agent is refused.
+This is the ordinary cooperative same-UID agent boundary, not a new instance-owner
+credential or a private-instance bypass: peer generation checks, ancestry failures,
+foreign-actor checks and enforced authorization remain identical on every daemon.
+Environment isolation and explicit endpoints are requirements of the test harness, not
+capabilities that authenticate it to a fleet.
+
 **Publication.** A run publishes with `fractal apply` like any other author: `apply` and
 `fractal missions publish` take `--as mission-run/RUN`, and `apply` without `--as` publishes as
 the harness's own seat, else as the run whose credential it holds. Its `publish` rules decide
