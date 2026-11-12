@@ -48,6 +48,7 @@
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
     "@effect/atom-react": "4.1.0",
+    "@pierre/diffs": "1.6.1",
     "@pierre/highlights": "0.3.0",
     "@stylexjs/stylex": "0.19.0",
     "effect": "4.1.0",
