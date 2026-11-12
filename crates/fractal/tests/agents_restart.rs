@@ -3646,7 +3646,7 @@ async fn ready_acknowledges_a_handoff_that_is_already_current() {
     assert_eq!(prepare_decisions(&fixture, &subject), ["prepare", "ready"]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -3656,6 +3656,10 @@ async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
     mark_ready(&fixture, &subject, "fixture:1");
     let elsewhere = fixture.root.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
+    let _clock = RestartClock;
+    let at = smallclaims::store::now_ms();
+    smallclaims::store::set_thread_clock(Some(at));
+    fixture.store.set_write_clock_at(at).unwrap();
     succeeded(
         &st(
             &socket,
@@ -3679,7 +3683,8 @@ async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
     let messages = prepare_messages(&fixture, &subject);
     assert_eq!(messages.len(), 1);
     assert!(messages[0].content.contains("workspace"), "{}", messages[0].content);
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    smallclaims::store::set_thread_clock(Some(at + 450));
+    fixture.store.set_write_clock_at(at + 450).unwrap();
     pass(&fixture, 4);
     assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
     let starts = fixture.runtime.starts.lock().unwrap().clone();
