@@ -360,6 +360,11 @@ impl Store {
     }
 
     /// Terminal transitions in a stable claim-index window. A retry does not erase a failure.
+    /// `mission` selects one mission's runs (identity- or canonical-named); `None` keeps the
+    /// fleet-wide page. Non-terminal runs never appear here: read `/v1/mission-runs?mission=`
+    /// for the running and waiting runs. The `mission_runs_mission_index` bounds the
+    /// mission predicate to that mission's runs.
+    #[allow(clippy::too_many_arguments)]
     pub fn outcome_history(
         &self,
         collection: &str,
@@ -367,6 +372,7 @@ impl Store {
         until: u128,
         status: Option<&str>,
         actor: Option<&str>,
+        mission: Option<&str>,
         before: u64,
         limit: usize,
     ) -> Result<Value> {
@@ -379,6 +385,9 @@ impl Store {
             "status must be failed, cancelled, timed-out, or completed"
         );
         let connection = self.readers.get();
+        let storage_mission = mission
+            .map(|id| missions::mission_storage_id(&connection, id))
+            .transpose()?;
         let kinds = if collection == "missions" {
             "c.kind='mission-run.state'"
         } else {
@@ -394,6 +403,8 @@ impl Store {
                     OR json_extract(p.body,'$.fields.phase') LIKE '%-' || json_extract(c.body,'$.fields.status'))
              ORDER BY {reason_order} LIMIT 1))");
         // The kind index bounds this to lifecycle claims even on graphs dominated by heartbeats.
+        // The mission projection join stays NULL for step-run subjects only when "work" is
+        // unfiltered; a mission filter needs r.mission_id, so mission-run subjects join first.
         let sql = format!(
             "SELECT c.store_index, c.id, c.subject, c.actor, c.body, c.accepted_at_unix_ms,
                     COALESCE(r.mission_id,sr.mission_id), s.run_id, {reason}
@@ -410,7 +421,8 @@ impl Store {
                         AND (lower(COALESCE({reason},'')) LIKE '%timeout%'
                           OR lower(COALESCE({reason},'')) LIKE '%timed out%')))
                AND (?5 IS NULL OR c.actor=?5 OR s.assignee=?5 OR s.lease_owner=?5)
-             ORDER BY c.store_index DESC LIMIT ?6"
+               AND (?6 IS NULL OR COALESCE(r.mission_id,sr.mission_id)=?6)
+             ORDER BY c.store_index DESC LIMIT ?7"
         );
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hae8b134e214e owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &sql)?;
         let rows = statement.query_map(
@@ -420,6 +432,7 @@ impl Store {
                 until.min(i64::MAX as u128) as i64,
                 status,
                 actor,
+                storage_mission.as_deref(),
                 limit.clamp(1, 200) + 1
             ],
             |row| {
@@ -452,7 +465,7 @@ impl Store {
         items.truncate(limit.clamp(1, 200));
         Ok(
             json!({"collection":collection, "since_unix_ms":since, "until_unix_ms":until,
-            "status":status, "items":items, "has_more":has_more,
+            "status":status, "mission":mission, "items":items, "has_more":has_more,
             "next_before":if has_more { items.last().and_then(|v| v["index"].as_u64()) } else {None}}),
         )
     }
@@ -479,7 +492,7 @@ mod tests {
             }
         }
         let history = store
-            .outcome_history("missions", 0, 100, None, None, u64::MAX, 10)
+            .outcome_history("missions", 0, 100, None, None, None, u64::MAX, 10)
             .unwrap();
         let cleanup = history["items"]
             .as_array()
@@ -489,7 +502,7 @@ mod tests {
             .unwrap();
         assert_eq!(cleanup["reason"], "newer timeout reason");
         let timed = store
-            .outcome_history("missions", 0, 100, Some("timed-out"), None, u64::MAX, 10)
+            .outcome_history("missions", 0, 100, Some("timed-out"), None, None, u64::MAX, 10)
             .unwrap();
         assert!(
             timed["items"]
@@ -498,6 +511,52 @@ mod tests {
                 .iter()
                 .any(|item| item["id"] == "cleanup")
         );
+    }
+
+    #[test]
+    fn outcome_history_mission_filter_pages_one_mission_only() {
+        let store = Store::open_memory("fixture").unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('mission-batch','fixture',1,'mission-hash','1')", []).unwrap();
+            let run = |id: &str| {
+                connection.execute(
+                    "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms) VALUES (?1, ?2, 'rev', 'gen', 'rev', ?1, '/tmp', 'person/example', '{}', 'normal', 'failed', 'terminal', '10', '10')",
+                    params![id, if id.starts_with("target") { "target" } else { "other" }],
+                ).unwrap();
+            };
+            for i in 0..5 {
+                let id = format!("target-{i:02}");
+                run(&id);
+                connection.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,'mission-batch',?2,'mission-run.state','fixture',?3,'[]',?4)",
+                    params![format!("claim-{id}"), format!("mission-run/{id}"), json!({"fields":{"status":"failed","phase":"terminal","reason":"target failed"}}).to_string(), format!("{}", 10 + i)]).unwrap();
+                let other = format!("other-{i:02}");
+                run(&other);
+                connection.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,'mission-batch',?2,'mission-run.state','fixture',?3,'[]',?4)",
+                    params![format!("claim-{other}"), format!("mission-run/{other}"), json!({"fields":{"status":"failed","phase":"terminal","reason":"other failed"}}).to_string(), format!("{}", 20 + i)]).unwrap();
+            }
+        }
+        let first = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/target"), u64::MAX, 3)
+            .unwrap();
+        assert_eq!(first["mission"], "mission/target");
+        assert_eq!(first["items"].as_array().unwrap().len(), 3);
+        assert!(first["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/target"));
+        assert_eq!(first["has_more"], true);
+        let second = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/target"), first["next_before"].as_u64().unwrap(), 3)
+            .unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+        assert!(second["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/target"));
+        assert_eq!(second["has_more"], false);
+        let bare = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("target"), u64::MAX, 10)
+            .unwrap();
+        assert_eq!(bare["items"].as_array().unwrap().len(), 5);
+        let missing = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/absent"), u64::MAX, 10)
+            .unwrap();
+        assert!(missing["items"].as_array().unwrap().is_empty());
     }
     #[test]
     fn mission_overview_missing_mission_is_not_found() {
