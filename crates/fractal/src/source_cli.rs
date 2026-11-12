@@ -153,6 +153,12 @@ fn select_node<'a>(map: &'a Claim, selector: &str) -> Option<&'a Node> {
     if let Some(node) = map.nodes.iter().find(|node| node.kdl == selector) {
         return Some(node);
     }
+    // A KDL node path carries its own structure (`mission[a/b]` keeps the `/` inside the key);
+    // the short-form parser below would split that `/` and rebuild a garbled path, so resolve
+    // KDL paths directly: the listed node, else its nearest listed ancestor.
+    if selector.contains('[') {
+        return map.node_at(selector);
+    }
     let wanted: Vec<(&str, Option<&str>)> = selector
         .split('/')
         .filter(|part| !part.is_empty())
@@ -218,7 +224,8 @@ pub(crate) async fn show(
         }
     };
     let map = &read.map;
-    let selected = match node.or(read.node.as_deref()) {
+    let selector = node.or(read.node.as_deref());
+    let selected = match selector {
         Some(selector) => Some(select_node(map, selector).with_context(|| {
             format!("no node of {}@{} matches `{selector}`", read.subject, short_sha(&read.revision))
         })?),
@@ -252,7 +259,7 @@ pub(crate) async fn show(
         }
         if let Some(node) = selected {
             let mut detail = node_json(map, node);
-            detail["requested"] = json!(node_selector(&read, node).unwrap_or(&node.kdl));
+            detail["requested"] = json!(selector.filter(|requested| *requested != node.kdl).unwrap_or(&node.kdl));
             detail["snippet"] = json!(snippet(file_text(&read, node.span.file), node.span.start.line, node.span.end.line, SNIPPET_LINES)
                 .into_iter().map(|(_, line)| line).collect::<Vec<_>>().join("\n"));
             value["node"] = detail;
@@ -271,7 +278,7 @@ pub(crate) async fn show(
     let _ = writeln!(out, "SOURCE    {}@{}  {}", map.repository, short_sha(&map.sha), root_location.lines());
     let _ = writeln!(out, "          {}", root_location.github_url(&map.sha));
     if let Some(node) = selected {
-        render_node(&mut out, &read, node, node_selector(&read, node));
+        render_node(&mut out, &read, node, selector.filter(|requested| *requested != node.kdl));
     } else {
         let _ = writeln!(out);
         let _ = writeln!(out, "DECLARES");
@@ -322,11 +329,6 @@ pub(crate) async fn show(
     }
     print!("{out}");
     Ok(())
-}
-
-/// What the caller asked for when it differs from the listed node that answers it.
-fn node_selector<'a>(read: &'a MapRead, node: &Node) -> Option<&'a str> {
-    read.node.as_deref().filter(|requested| *requested != node.kdl)
 }
 
 fn render_node(out: &mut String, read: &MapRead, node: &Node, inherited_from: Option<&str>) {
@@ -384,6 +386,11 @@ pub(crate) async fn step_source(client: &Client, step: &str) -> Option<String> {
     let read = match read_map(client, step, None, false).await {
         Ok(Ok(read)) => read,
         Ok(Err(_)) => return None,
+        // A daemon from before `step-run/…` subjects answers them the way it answers any
+        // unknown subject; that is no map, not a failure worth printing on every claim.
+        Err(error) if matches!(fractal_daemon::client::api_error_code(&error), Some("source-map-missing" | "unknown-subject")) => {
+            return None;
+        }
         Err(error) => {
             eprintln!("fractal: the step's source could not be read: {error:#}");
             return None;
@@ -898,6 +905,33 @@ mod tests {
         assert_eq!(select_node(map, "step:code-review/gate:review passes").unwrap().kdl, "mission[dotfiles/demo]/step[code-review]/gate[review passes]");
         assert_eq!(select_node(map, "step:implement/timeout").unwrap().kdl, "mission[dotfiles/demo]/step[implement]");
         assert_eq!(select_node(map, "mission[dotfiles/demo]/step[implement]").unwrap().kdl, "mission[dotfiles/demo]/step[implement]");
+        // An unlisted KDL path under a listed step resolves to its nearest listed ancestor,
+        // not to the mission root the short-form fallback would rebuild.
+        assert_eq!(
+            select_node(map, "mission[dotfiles/demo]/step[code-review]/gate[other]").unwrap().kdl,
+            "mission[dotfiles/demo]/step[code-review]"
+        );
+    }
+
+    #[test]
+    fn node_rendering_labels_the_selector_the_caller_passed() {
+        let read = read();
+        let selected = select_node(&read.map, "step:code-review/goal").unwrap();
+        // The step run's own path is not the request when the caller passed `--node`.
+        assert_eq!(read.node.as_deref().unwrap(), "mission[dotfiles/demo]/step[code-review]");
+        let selector = Some("step:code-review/goal");
+        let inherited = selector.filter(|requested| *requested != selected.kdl);
+        assert_eq!(inherited, Some("step:code-review/goal"));
+        let mut rendered = String::new();
+        render_node(&mut rendered, &read, selected, inherited);
+        assert!(rendered.contains("NODE      step:code-review/goal\n"), "{rendered}");
+        assert!(rendered.contains("not listed; its nearest listed ancestor is mission[dotfiles/demo]/step[code-review]/goal[0]"), "{rendered}");
+        // Without `--node` the step run resolves to its own listed node, which prints bare.
+        let selected_step = select_node(&read.map, read.node.as_deref().unwrap()).unwrap();
+        assert_eq!(selected_step.kdl, "mission[dotfiles/demo]/step[code-review]");
+        let mut same = String::new();
+        render_node(&mut same, &read, selected_step, read.node.as_deref().filter(|requested| *requested != selected_step.kdl));
+        assert!(same.contains("NODE      mission[dotfiles/demo]/step[code-review]\n"), "{same}");
     }
 
     #[test]
