@@ -178,7 +178,7 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
       const plain = <PlainDiff file={file} wrap={wrap} />
       return <div key={`${file.path}:${index}`} data-diff-file={file.path} {...stylex.props(styles.file)}>
-        {Pierre ? <PierreBoundary fallback={plain}><SwapWhenPainted fallback={plain}><Pierre file={file} layout={layout} wrap={wrap} header={header} lineNumbers={lineNumbers ?? (density !== 'compact' && !file.excerpt)} scheme={scheme} collapsed={collapsed} /></SwapWhenPainted></PierreBoundary> : plain}
+        {Pierre ? <PierreBoundary fallback={plain}><SwapWhenPainted fallback={plain}><Pierre file={file} layout={layout} wrap={wrap} focusable={density !== 'compact'} header={header} lineNumbers={lineNumbers ?? (density !== 'compact' && !file.excerpt)} scheme={scheme} collapsed={collapsed} /></SwapWhenPainted></PierreBoundary> : plain}
       </div>
     })}
     {prepared.hidden > 0 ? <p data-diff-more {...stylex.props(styles.more)}>{prepared.hidden} more {prepared.hidden === 1 ? 'line' : 'lines'}</p> : null}
