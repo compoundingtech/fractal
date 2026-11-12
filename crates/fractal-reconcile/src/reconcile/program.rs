@@ -416,6 +416,7 @@ impl ProgramEngine {
         let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
         for child in self.open_waits(step, attempt)? {
             if child.starts_with("mission-run/") {
+                let child = self.store.mission_run_supersession_successor(&child)?;
                 if !matches!(self.store.mission_run_status(&child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
                     self.store.request_mission_run_cancellation(&child, &reason)?;
                 }

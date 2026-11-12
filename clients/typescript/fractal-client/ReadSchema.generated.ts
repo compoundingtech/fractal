@@ -2637,7 +2637,13 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "state_since": Timestamp,
   "status": Schema.String,
   /** The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read. */
-  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." })
+  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." }),
+  /** Fresh replacement created after a newer revision was published; omitted when absent. */
+  "superseded_by": optionalKey(MissionRunId),
+  /** Predecessor replaced by this fresh run after publication; omitted when absent. */
+  "supersedes": optionalKey(MissionRunId),
+  /** Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent. */
+  "supersession_fault": optionalKey(Schema.String).annotate({ description: "Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent." })
 }).annotate({ identifier: "MissionRunSummary" }))()
 export type MissionRunSummary = typeof MissionRunSummary.Type
 export type MissionRunSummaryEncoded = typeof MissionRunSummary.Encoded

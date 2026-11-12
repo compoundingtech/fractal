@@ -6,7 +6,7 @@ See [Configuration and KDL](../site/reference/configuration.md) for complete day
 
 Every Fractal KDL document starts with `version 2`. Declarations follow the version directly.
 
-A mission is an immutable definition in the claims graph. Publishing a mission does not start it.
+A mission is an immutable definition in the claims graph. Initial publication does not start it; publishing a new revision automatically supersedes eligible active runs as described below.
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
@@ -19,6 +19,23 @@ By default the new run selects the latest published revision of the source missi
 All steps and the program start from the top under new run and generation identities. No successful work or program journal is carried from the source. Steps must be idempotent with respect to effects already present in the workspace or external systems; retry does not roll them back.
 
 The source's status, generation, and execution history are immutable. Append-only `mission-run.retry-linked` claims link source and retry on both subjects, with `source`, `retry`, and optional `reason`; they do not rewrite source state. Run views and `missions show` expose `retry_of` on the new run and `retried_by` on the source. Ordinary starts omit `retry_of`; an empty `retried_by` may be omitted from JSON.
+
+## Automatic publication supersession
+
+Publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
+
+A different publication receipt for an unchanged definition revision does not by itself expire a post-publication pin or reopen the same refusal episode. A genuinely different target can be preflighted again; after an intervening incompatible revision, restoring compatible code can recover the run.
+
+An owner also recovers pending selected-head work at startup. If a newer head was already selected after a run was admitted, recovery applies this same cutover instead of resuming stale code; upgrading an owner can therefore supersede an already-stale active run without another publication.
+
+Preflight the replacement before cancelling its source: exact resolved input declarations and kinds, capacity, original starter authority, workspace, and interpolation must admit an ordinary start against the target revision. A refusal leaves the source active, without a replacement or cancellation, and records a durable visible `supersession_fault` naming the source revision, target revision, and incompatibility. Other candidates remain independent.
+
+On success, append bidirectional `supersedes` / `superseded_by` lineage and ordinarily cancel the source atomically with creating a fresh replacement in `supersession-waiting`. The source uses ordinary finalization and cleanup. The replacement does no work until its predecessor actually reaches terminal. It retains exact inputs and workspace and original starter attribution and authority; a root replacement is a new root, while a child replacement preserves its parent, root, and default-selector relationship. Runtime dependencies and child results follow the supersession-successor chain, rather than failing a parent because the historical source was cancelled.
+
+Repeated publications form a chain: a replacement awaits terminal cleanup of every superseded predecessor, including an earlier run behind an intermediate replacement that never started. Cancelling a waiting replacement does not let its finally steps execute before its source reaches terminal. Existing run-level `after` dependencies remain in force and follow their own supersession chains. Neither cleanup nor dependency waiting spends the replacement's execution timeout; its admission claim starts the clock, or the existing `after-run` admission step does when a dependency is present. Replaying those claims preserves the same deadline.
+
+Every step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. Explicit run generations still pin exact code and journal, and explicit run revision remains a separate operation. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or opt-in supersession control is introduced.
+
 
 ## First readiness under load
 

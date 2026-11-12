@@ -10636,6 +10636,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.store.supersede_mission_publications()?;
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
         self.incremental.observe_execs(|runtime_id| {
@@ -10654,6 +10655,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.store.supersede_mission_publications()?;
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -10934,6 +10936,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let superseded = self.store.supersede_mission_publications()?;
         let mut cursor = self
             .mission_reads_cursor
             .lock()
@@ -10953,7 +10956,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
-        let mut changed = false;
+        let mut changed = superseded;
         for subject in &changed_runs {
             let Some(id) = subject.strip_prefix("mission-run/") else {
                 continue;
@@ -11088,6 +11091,32 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         mission: Option<MissionSpec>,
     ) -> Result<bool> {
+        if run.phase != "normal"
+            && run.phase != "supersession-waiting"
+            && !run.phase.starts_with("cleanup-")
+            && run.supersedes.is_some()
+            && !self.store.mission_run_supersession_predecessors_terminal(run)?
+        {
+            // Cancellation changes the phase before ordinary finally/cleanup runs.
+            // A replacement that never admitted still cannot overlap its source.
+            return Ok(false);
+        }
+        if run.phase == "supersession-waiting" {
+            // The predecessor may have reached terminal since its last evaluation. Release its
+            // program host before promoting the replacement: the host processes cancellation
+            // (including killing effect groups) before any later replacement dispatch.
+            if let Some(engine) = self.program_engine.get() {
+                let mut predecessor = run.supersedes.clone();
+                let mut seen = BTreeSet::new();
+                while let Some(subject) = predecessor {
+                    anyhow::ensure!(seen.insert(subject.clone()), "mission supersession ancestry contains a cycle at {subject}");
+                    let Some(view) = self.store.mission_run(&subject)? else { break };
+                    engine.release_left(&view)?;
+                    predecessor = view.supersedes;
+                }
+            }
+            return self.store.resume_superseding_mission_run(&run.id).map_err(Into::into);
+        }
         if run.phase == "normal"
             && let Some(reason) = self.store.stale_subscription_pull_request_run(run)?
         {
@@ -11170,6 +11199,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_run(&self, run: &MissionRunView, mission: &MissionSpec) -> Result<bool> {
+        if run.phase == "supersession-waiting" {
+            return self.evaluate_active_mission_run(run, None);
+        }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
         }
@@ -11764,6 +11796,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     if let Some(after) = awaited_run(run, &step, view)? {
+                        let after = self.store.mission_run_supersession_successor(&after)?;
                         match self.store.mission_run_status(&after)?.as_deref() {
                             Some("completed") => {}
                             Some(status @ ("failed" | "cancelled")) => {
@@ -12386,7 +12419,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 (child, true)
             };
-        if child.mission != format!("mission/{mission}") || child.revision != revision {
+        if child.mission != format!("mission/{mission}")
+            || (child.revision != revision && child.supersedes.is_none())
+        {
             return Ok((
                 changed,
                 UsedMissionOutcome::Failed(
@@ -12394,6 +12429,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ),
             ));
         }
+        let successor = self.store.mission_run_supersession_successor(&child.subject)?;
+        let child = if successor == child.subject {
+            child
+        } else {
+            self.store.mission_run(&successor)?.context("the superseding used mission disappeared")?
+        };
         let outcome = match child.status.as_str() {
             "completed" => UsedMissionOutcome::Completed,
             "failed" | "cancelled" => UsedMissionOutcome::Failed(format!(
@@ -12485,6 +12526,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{base_key}:dispatch-{dispatch}")
         };
         let expected = self.store.mission_run_subject_for_idempotency_key(&key);
+        let expected = self.store.mission_run_supersession_successor(&expected)?;
         let existed = self.store.mission_run_status(&expected)?.is_some();
         let mut inputs: BTreeMap<String, String> = run
             .inputs
@@ -13176,6 +13218,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             candidate.map_or_else(|| "round".into(), |value| format!("candidate-{value}"))
         );
         let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+        let subject = self.store.mission_run_supersession_successor(&subject)?;
         if let Some(status) = self.store.mission_run_status(&subject)? {
             return Ok(match status.as_str() {
                 "completed" => LoopBranchOutcome::Completed,
@@ -13392,6 +13435,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+            let subject = self.store.mission_run_supersession_successor(&subject)?;
             if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
@@ -13571,6 +13615,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+            let subject = self.store.mission_run_supersession_successor(&subject)?;
             if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
@@ -14677,6 +14722,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<bool> {
         let idempotency_key = request.idempotency_key();
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
             // The runs holding the mission's capacity are read before the start and again after a
             // refusal, so the end of any holder, even one that ends in between, evaluates this run.
@@ -21659,6 +21705,7 @@ pub mod tests {
     mod slo_breach_flow_tests;
     mod final_cancel_gate_exit;
     mod final_cancel_missing_assignee;
+    mod mission_supersession;
     mod gate_on_demand;
     mod github_watch_selection;
     mod stream_dirty_marking;
