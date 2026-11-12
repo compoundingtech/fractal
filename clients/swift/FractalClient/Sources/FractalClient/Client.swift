@@ -471,6 +471,8 @@ public actor FractalClient {
     public func availabilitySet(_ request: AvailabilitySet) async throws -> Envelope<PersonAvailability> { try await self.request("v1/client/availability", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
     /// Report one device's presence for the session person; the daemon assigns the source. Requires write.presence.
     public func presenceReport(_ report: PresenceReport) async throws -> Envelope<PersonAvailability> { try await post("v1/client/presence", report) }
+    /// Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused.
+    public func notesSet(_ request: DirectiveNoteSet) async throws -> Envelope<DirectiveNoteSetResult> { try await self.request("v1/client/notes", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
 
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }

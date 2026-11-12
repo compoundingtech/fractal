@@ -15,8 +15,8 @@ remain independent. There is no global blocking-thread cap.
 
 ## POST and PUT audit
 
-The router is in `crates/fractal-api-core/src/api.rs`. Both PUT routes are `/v1/notes` and
-`/v1/client/glasses/{id}`. Every JSON POST/PUT, and the Bytes extractor on
+The router is in `crates/fractal-api-core/src/api.rs`. The PUT routes are `/v1/client/notes`,
+`/v1/client/availability` and `/v1/client/glasses/{id}`. Every JSON POST/PUT, and the Bytes extractor on
 `POST /v1/client/blobs`, can await a slow request body before doing any write. These
 extractors now return pending polls without retaining writer capacity or a blocking
 parent. This applies to all routes, without a list of body exemptions or a new timeout.
