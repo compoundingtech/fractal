@@ -66,8 +66,9 @@ fn start(tag: &Tag) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text]`, `["c", code]`, `["h", html]`,
-/// `["sb"]` soft break, `["hb"]` hard break, `["r"]` rule, `["fr", label]`, `["tk", "x" | ""]`.
+/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text, byte_start, byte_end]`,
+/// `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break, `["r"]` rule, `["fr", label]`,
+/// `["tk", "x" | ""]`. Text offsets are decimal strings, with an exclusive end, in the original UTF-8 source.
 pub fn events(source: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
     let mut json = Json(String::with_capacity(source.len() * 2 + 16));
