@@ -174,9 +174,9 @@ test('Home and detail opt into grouped system presentation without a glyph legen
 test('grouped rows expose readable wrapping button labels and shared buttons expose disabled state', () => {
   const row = namedFunction(uiSource, 'GroupedRow');
   const pressable = elements(row, 'Pressable')[0];
-  assert.equal(prop(pressable, 'accessibilityRole').text, 'button');
+  assert.equal(prop(pressable, 'accessibilityRole').expression.getText(), "onPress ? 'button' : 'text'", 'a row without a destination only reads');
   assert.equal(prop(pressable, 'accessibilityLabel').expression.getText(), '`${title}. ${context}`');
-  assert.equal(prop(pressable, 'accessibilityHint').text, 'Opens alert details');
+  assert.equal(prop(pressable, 'accessibilityHint').expression.getText(), "onPress ? 'Opens alert details' : undefined");
   assert.equal(prop(pressable, 'onPress').expression.getText(), 'onPress', 'taps retain the detail destination');
   assert.equal(prop(pressable, 'onLongPress').expression.getText(), 'onLongPress', 'ContextMenu can inject the existing action sheet');
   assert.ok(elements(row, 'T').every(element => !prop(element, 'numberOfLines')), 'titles and context wrap rather than truncate');
