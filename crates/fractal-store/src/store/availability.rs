@@ -291,12 +291,18 @@ impl AvailabilityStore for Store {
             return Err(FractalError::new("invalid-presence", "report present, idle or locked"));
         }
         if observed_at > now + PRESENCE_FUTURE_SKEW_MS || now.saturating_sub(observed_at) >= PRESENCE_STALE_MS {
-            return Err(FractalError::new("invalid-presence", "observed_at must be within the last 15 minutes and not in the future"));
+            return Err(FractalError::new("invalid-presence", "observed_at must be within the last 15 minutes and at most 2 minutes ahead of this member's clock"));
         }
+        // Unchanged only when the recorded report is still fresh by the fold's own measure,
+        // min(observed_at, accepted_at); an old-observed report must not swallow a fresh one.
         let unchanged = self.recent_presence(person, PRESENCE_REFRESH_MS, now).map_err(internal)?
             .into_iter()
             .find(|claim| claim.body["fields"]["source"] == source)
-            .is_some_and(|claim| claim.body["fields"]["presence"] == word(presence));
+            .is_some_and(|claim| {
+                let fields = &claim.body["fields"];
+                let recorded = fields["observed_at_unix_ms"].as_u64().map_or(0, u128::from).min(claim.accepted_at_unix_ms);
+                fields["presence"] == word(presence) && now.saturating_sub(recorded) < PRESENCE_REFRESH_MS
+            });
         if !unchanged {
             self.append_claim(&ClaimInput {
                 subject: person.into(),

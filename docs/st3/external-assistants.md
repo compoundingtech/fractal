@@ -308,7 +308,7 @@ The attention, missions, and agents pages retain the optional native `sync` noti
 | GET route under `/v1/client/assistant/` | Scope | Allowed fields, in addition to snapshot/page metadata |
 | --- | --- | --- |
 | `summary` | `read.assistant.summary` | Counts of the configured owner's attention, agent states, mission states; `as_of` |
-| `availability` | `read.assistant.availability` | `kind: "person-availability"`, the configured owner's own `PersonAvailability` (effective status and source, override expiry, device presence and its observation time, interruptions, deadline clock with since/until), and their current `DirectiveNote` or null; no other person's availability or note |
+| `availability` | `read.assistant.availability` | `kind: "person-availability"`, the configured owner's own `PersonAvailability` (effective status and source, override expiry, interruptions, deadline clock with since/until; `presence` and `presence_observed_at` are null because raw device presence is person-only), and their current `DirectiveNote` or null; no other person's availability or note |
 | `attention` | `read.assistant.attention` | ID, attention-kind enum, person fixed to the configured owner, agent/mission references, revision/episode, waiting-since; no title, body, options |
 | `missions` | `read.assistant.missions` | Mission/run/agent IDs, phase, step counts, blocked count, revision, updated-at; no authored goal or status prose |
 | `agents` | `read.assistant.agents` | Agent ID, lifecycle/runtime-state enums, current mission/run IDs, updated-at; no paths, environment, conversation previews |
@@ -356,7 +356,7 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | Route | Query | Response value |
 | --- | --- | --- |
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
-| `availability` | `max_response_bytes` | `kind: "person-availability"`, `availability` (`PersonAvailability`, full view because the owner is the reader) and `directive_note` (`DirectiveNote` or null) |
+| `availability` | `max_response_bytes` | `kind: "person-availability"`, `availability` (`PersonAvailability` without raw presence; an assistant is not the person) and `directive_note` (`DirectiveNote` or null) |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
 | `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |

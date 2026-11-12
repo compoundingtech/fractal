@@ -175,18 +175,21 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
     block
 }
 
-/// One line for someone about to wait on the person: the status always, the rest only when it
-/// differs from the default.
 /// Whether `fractal now` should name this availability: only when something departs from the
-/// default. Presence-derived away with unknown presence says nothing a reader can act on.
+/// default. Non-self readers (agents) never see raw presence (`presence` is `None`), so a
+/// presence-derived away always shows for them: the person is effectively away and the agent
+/// should park. Only the person's own view can tell an unknown presence (no fresh device
+/// report) apart, and that says nothing they can act on.
 pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
     availability.status_source == "override"
         || (availability.status == "away"
-            && matches!(availability.presence.as_deref(), Some("idle" | "locked")))
+            && matches!(availability.presence.as_deref(), None | Some("idle" | "locked")))
         || availability.deadline_clock != "run"
         || availability.interruptions != "all"
 }
 
+/// One line for someone about to wait on the person: the status always, the rest only when it
+/// differs from the default.
 pub(super) fn summary_line(availability: &PersonAvailability) -> String {
     let at = |label: &str, time: &Option<String>| {
         time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
@@ -430,7 +433,11 @@ mod tests {
         };
         assert!(!worth_showing(&unknown_away), "unknown presence alone says nothing");
         assert!(worth_showing(&PersonAvailability { presence: Some("idle".into()), ..unknown_away.clone() }));
-        assert!(worth_showing(&PersonAvailability { presence: Some("locked".into()), ..unknown_away }));
+        assert!(worth_showing(&PersonAvailability { presence: Some("locked".into()), ..unknown_away.clone() }));
+        assert!(
+            worth_showing(&PersonAvailability { presence: None, ..unknown_away }),
+            "a non-self reader sees no raw presence, so presence-derived away must still show"
+        );
         assert!(worth_showing(&PersonAvailability { status_source: "override".into(), ..available.clone() }));
         assert!(worth_showing(&PersonAvailability { interruptions: "urgent".into(), ..available.clone() }));
         assert!(worth_showing(&PersonAvailability { deadline_clock: "hold-routine".into(), ..available.clone() }));
