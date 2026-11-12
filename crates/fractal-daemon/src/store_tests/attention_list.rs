@@ -508,7 +508,7 @@ let served = |publication: &AttentionPublication| {
 let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
 let clock_folds = || store.attention_list_folds().get("person.deadline-clock-set").copied().unwrap_or(0);
 assert_eq!(served(&refresh_and_check(&store)), at(deadline));
-let mut set = |clock: DeadlineClock| {
+let set = |clock: DeadlineClock| {
     let folded = clock_folds();
     store.set_person_availability("person/avery", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
     let published = refresh_and_check(&store);
