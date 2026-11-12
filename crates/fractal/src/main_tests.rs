@@ -6675,16 +6675,16 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
 
 #[test]
 fn agents_start_keeps_a_declared_remote_workspace_and_passes_overrides_through() {
-    let declared = "/home/schickling/.megarepo/github.com/schickling/dotfiles/refs/heads/main";
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
     let source = format!(
-        "version 2\nhost \"dev3\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"claude\" {{}}\n  restart always\n }}\n}}\n"
+        "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"claude\" {{}}\n  restart always\n }}\n}}\n"
     );
     let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
     let subject = "agent/dotfiles/build-capacity";
     let existing = &intent.subjects[subject];
     assert_eq!(
         existing.member.as_ref().map(|member| member.host.as_str()),
-        Some("dev3")
+        Some("distant")
     );
     let start_args = |extra: &[&str]| {
         let cli = Cli::try_parse_from(
@@ -6708,14 +6708,14 @@ fn agents_start_keeps_a_declared_remote_workspace_and_passes_overrides_through()
             .as_ref()
             .map(|member| member.workspace.clone())
     };
-    // A declared seat started from another member keeps its declaration's workspace, which
-    // only exists on the placement host: the document never consults this machine's files.
+    // A declared agent started from another member keeps its declaration's workspace, which
+    // only exists on the agent's member: the document never consults this machine's files.
     let args = start_args(&[]);
     let kdl = agent_start_document(&args, Some(existing), &Default::default(), &StartWorkspace::Keep)
         .unwrap();
     assert_eq!(workspace_of(&kdl).as_deref(), Some(declared));
-    assert!(kdl.contains("host dev3"), "{kdl}");
-    // An override for the placement host is published as written, even when no such path
+    assert!(kdl.contains("host distant"), "{kdl}");
+    // An override for the agent's member is published as written, even when no such path
     // exists on the caller's machine.
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("not-created-on-the-caller");

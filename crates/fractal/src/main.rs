@@ -3719,9 +3719,9 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the declaration's workspace with an absolute path on the placement host. A
-    /// declared seat started without it keeps its declaration's workspace; a new seat started
-    /// on this host defaults to the current directory.
+    /// Override the declaration's workspace with an absolute path on its member. A kept
+    /// declaration without it stays on its own workspace; starting a new agent here
+    /// defaults to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
     /// Set the typed-harness model; refused for existing command/argv agents.
@@ -14095,7 +14095,7 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     }
 }
 
-/// How `agents start` resolves the seat's workspace. A declared seat started without
+/// How `agents start` resolves the agent's workspace. A declared agent started without
 /// `--workspace` keeps its declaration's workspace, resolved on the placement host when the
 /// declaration was published. Anything else is an exact path for the placement host: the caller
 /// never canonicalizes it, so a path that only exists on another member stays valid.

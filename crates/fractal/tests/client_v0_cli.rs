@@ -4228,16 +4228,16 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_start_uses_the_declared_workspace_on_a_remote_placement() {
-    // A declared seat placed on another member keeps its declaration's workspace when a
-    // different member starts it: the caller's own directory must not leak into the seat.
+    // A declared agent placed on another member keeps its declaration's workspace when a
+    // different member starts it: the caller's own directory must not leak into the agent.
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
-    let declared = "/home/schickling/.megarepo/github.com/schickling/dotfiles/refs/heads/main";
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
     let source = root.path().join("remote.kdl");
     std::fs::write(
         &source,
         format!(
-            "version 2\nhost \"dev3\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"omp\" {{}}\n  restart always\n }}\n}}\n"
+            "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"omp\" {{}}\n  restart always\n }}\n}}\n"
         ),
     )
     .unwrap();
@@ -4254,7 +4254,7 @@ async fn agents_start_uses_the_declared_workspace_on_a_remote_placement() {
     let original = agent_declaration(&socket, subject).await;
     assert_eq!(
         original.member.as_ref().map(|member| member.host.as_str()),
-        Some("dev3")
+        Some("distant")
     );
     // The fixture daemon answers as another member, so the declared placement is remote and
     // the declared workspace does not exist on this machine.

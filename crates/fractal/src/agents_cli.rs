@@ -992,10 +992,10 @@ async fn agent_start_declaration(
     }
 }
 
-/// The workspace `agents start` publishes: the declaration's own when a declared seat starts
+/// The workspace `agents start` publishes: the declaration's own when a declared agent starts
 /// without `--workspace`, otherwise a path resolved for the placement host. The caller only
 /// canonicalizes paths on its own host; a path for another member is taken as written, and a
-/// new seat on another member without `--workspace` gets the directory that host names.
+/// new agent on another member without `--workspace` gets the directory that host names.
 async fn resolve_start_workspace(
     client: &Client,
     endpoint: &Endpoint,
@@ -1036,15 +1036,15 @@ async fn resolve_start_workspace(
         let workspace = fs::canonicalize(Path::new(".")).context("resolve workspace .")?;
         return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
     }
-    // Another host's home is only known there, so it names the new seat's directory itself,
-    // like `agents new`: the placement host creates it when the seat starts.
+    // Another host's home is only known there, so it names the new agent's directory itself,
+    // like `agents new`: the placement host creates it when the agent starts.
     let person = Some(args.actor.as_str())
         .filter(|actor| actor.starts_with("person/"))
         .or(configured_person);
     let path = format!(
         "/v1/hosts/{}/agent-workspace?identity={}",
-        urlencoding::encode(&placement),
-        urlencoding::encode(&subject)
+        urlencoding::encode(placement),
+        urlencoding::encode(subject)
     );
     let answer: Result<Value> = if placement == local {
         client.get(&path).await
