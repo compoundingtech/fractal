@@ -93,6 +93,16 @@ fractal missions show mission-run/garden/first-note/one
 
 Publication stores an immutable definition; starting creates one execution pinned to it. The complete run path is `garden/first-note/one`, not just `one`.
 
+The run workspace is a path on its execution members, not necessarily the computer
+where you type the command. For missions whose declared runtimes or executable
+gates run on another member, or which invoke referenced missions whose placement
+is not known before starting, pass an absolute `--workspace` on those members;
+the CLI publishes it as written without checking the caller's filesystem.
+Omitting it or passing a relative path is refused rather than publishing the
+caller's current directory. Local-only execution still defaults to the current
+directory and canonicalizes local paths. The same rule applies to `launch run`
+and `launch approve-and-launch`; `launch start` creates a local planning agent.
+
 ## Check the result
 
 ```sh
