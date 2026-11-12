@@ -6,6 +6,8 @@ import { surfaceVars as surface, textVars as text, typeVars as type, spaceVars a
 import { lightTheme } from './assistant-ui/composition-theme'
 import { DiffView } from './assistant-ui/composition/DiffView'
 import { samplePatch } from './assistant-ui/composition/diff-fixtures'
+import { EmbraceDiffPreview } from './assistant-ui/EmbraceToolPreview'
+import { toolDiffs } from './assistant-ui/embrace-tool-preview'
 
 
 
@@ -112,6 +114,26 @@ export const Streaming: Story = {
     await expect(shrank).toBe(false)
   },
 }
+
+/** Transcript Edit/Write results: one DiffView per file under a caption with path and +N −M. */
+export const TranscriptToolDiff: Story = {
+  render: ({ scheme, width }) => <Canvas scheme={scheme} width={width}><EmbraceDiffPreview diffs={[
+    ...toolDiffs({ file_path: 'src/rows.ts', old_string: 'export const rows = [\n  [PREVIOUS, 1]\n]', new_string: 'export const rows = [\n  [RETAINED, 2],\n  [ADDED, 3]\n]' }, undefined),
+    ...toolDiffs({ patch: samplePatch }, undefined),
+  ]} /></Canvas>,
+  play: async ({ canvasElement }) => {
+    const figures = [...canvasElement.querySelectorAll('figure')]
+    await expect(figures.length).toBe(2)
+    for (const figure of figures) {
+      const view = figure.querySelector<HTMLElement>('[data-testid="diff-view"]')!
+      await expect(view).not.toBeNull()
+      await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+      await expect(figure.querySelector('figcaption')?.textContent).toContain(`+${view.dataset.added} −${view.dataset.removed}`)
+    }
+    await expect(figures[0]!.querySelector('figcaption')?.textContent).toContain('excerpt')
+  },
+}
+export const TranscriptToolDiffLightNarrow: Story = { args: { scheme: 'light', width: 440 }, render: TranscriptToolDiff.render, play: TranscriptToolDiff.play }
 
 const styles = stylex.create({
   canvas: { minHeight: '100vh', backgroundColor: surface.canvas, color: text.fg, fontFamily: type.fontSans, padding: space.xl, boxSizing: 'border-box' },
