@@ -319,7 +319,9 @@ const AgentSchemaFields = Schema.Struct({
   name: Schema.optionalKey(Text),
   description: Schema.optionalKey(Text),
   principal: Schema.optionalKey(PersonReferenceSchema),
-  lifecycle: Schema.optionalKey(Schema.Literal('standing', 'owner', 'bounded')),
+  lifecycle: Schema.optionalKey(
+    Schema.Union([Schema.Literal('standing'), Schema.Literal('owner'), Schema.Literal('bounded')]),
+  ),
   ...DeclaredAdmissionFields,
   host: Schema.optionalKey(Text),
   workspace: Schema.optionalKey(Text),

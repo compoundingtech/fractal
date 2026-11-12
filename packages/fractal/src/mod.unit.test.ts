@@ -363,7 +363,9 @@ agent "example/worker" {
   })
 
   it('rejects an unknown lifecycle value', () => {
-    expect(() => agent({ id: 'example/worker', lifecycle: 'project' })).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(AgentSchema)({ id: 'example/worker', lifecycle: 'project' }),
+    ).toThrow()
   })
 })
 
