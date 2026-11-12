@@ -45,6 +45,20 @@ reconciler is not running, or never writes the row, the card keeps `running`/`wo
 `silent_since` is the only signal; `down` covers only seats whose row never reached `running`.
 A `down` card also reports `harness_state: indeterminate`, so the two fields never disagree.
 
+## A seat running on a fallback model
+
+The card carries `live_model`: the latest `harness.usage` model for the card's incarnation,
+or null when the seat reported none. The declaration still names the wanted model; the two
+differ while the harness silently fell back (omp down its ladder on a 429). The reconciler
+raises a non-blocking per-seat fault (`Seat runs on a fallback model`, condition
+`harness-model-drift`) naming declared vs live model and since when: it never stops, parks,
+or crash-loops the seat, and recovers when usage returns to the declared model or the
+declaration changes. The fault is owned by the seat's declaring agent, so it shows in
+`fractal now` and the agent's faults rather than any person's inbox. `fractal agents show`
+prints `LIVE MODEL`, and a step script reads `.live_model` from `agents show --json` to flag
+what a one-shot reviewer actually ran on. Model names compare after the pricing table's
+canonicalization (provider prefix, bracketed variant, date snapshot stripped).
+
 ## Example
 
 At audit time a seat `example/builder` showed `desired` with a `working` step and fresh-looking

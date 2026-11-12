@@ -12221,6 +12221,63 @@ mission "agent-human" state="ready" {
 }
 
 #[test]
+fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"live-model\" state=\"ready\" {\n  goal \"Exercise live model projection.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "live-model-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "live-model".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "live-model-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    let append = |kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "one"}));
+    let card = || {
+        checked_agent_cache(&store, true, store.index().unwrap())
+            .into_iter()
+            .find(|agent| agent["id"] == subject.as_str())
+            .unwrap()
+    };
+    // No usage yet: null, and the typed client still decodes.
+    assert!(card()["live_model"].is_null());
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert!(typed.live_model.is_none());
+    // Usage on another incarnation does not leak into this card.
+    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "total_tokens": 1}));
+    assert!(card()["live_model"].is_null());
+    // Usage on this incarnation reports live, and survives a typed decode.
+    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "total_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // A stale incarnation keeps its own live model after the seat moves on.
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));
+    assert!(card()["live_model"].is_null());
+}
+
+#[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
     // This unpolled seat is assessed during the daemon's startup grace.
     let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));

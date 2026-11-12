@@ -6651,6 +6651,37 @@ impl Store {
         Ok(claim.into_iter().chain(local).max_by_key(claim_log_order))
     }
 
+    /// The latest `harness.usage` `model` reported for `incarnation`, or `None` when it
+    /// reported none. One indexed newest-first lookup through
+    /// `claims_subject_kind_accepted_index`; never a full usage fold. Includes held local
+    /// readings, so a seat whose latest reading has not replicated yet still reports live.
+    pub fn latest_usage_model(&self, subject: &str, incarnation: &str) -> Result<Option<String>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index WHERE subject=?1 AND kind='harness.usage' AND json_extract(body, '$.fields.incarnation_id')=?2 AND json_extract(body, '$.fields.model') IS NOT NULL ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, batch_id DESC, id DESC LIMIT 1",
+        )?;
+        let replicated: Option<String> = statement
+            .query_row(params![subject, incarnation], |row| {
+                let body: String = row.get(0)?;
+                Ok(serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|body| body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned)))
+            })
+            .optional()?
+            .flatten();
+        if replicated.is_some() {
+            return Ok(replicated);
+        }
+        Ok(crate::store::pending_usage(&connection, Some(subject), false)?
+            .into_iter()
+            .rev()
+            .filter_map(|(_, body, _)| serde_json::from_str::<Value>(&body).ok())
+            .filter(|body| body.pointer("/fields/incarnation_id").and_then(Value::as_str) == Some(incarnation))
+            .filter_map(|body| body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned))
+            .next())
+    }
+
     /// The current faults raised for `person` under the reviewer each one names, owners aside.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fault_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
