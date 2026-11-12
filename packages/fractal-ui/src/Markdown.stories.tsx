@@ -105,6 +105,16 @@ export const Languages: Story = { ...contractFixture, tags: ['critical'],
           const [language, code] = languages[index]!
           const fence = fences[index]!
           if (fence.dataset.language !== (language || 'text')) throw new Error(`Fence ${index} lost its language label`)
+          if (language === 'diff') {
+            // A diff fence is the kit DiffView, a keyboard-reachable region in place of the <pre>; Pierre draws its lines in a shadow root.
+            const view = requireElement<HTMLElement>(fence, '[data-testid="diff-view"]')
+            await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+            await waitFor(() => expect([...view.querySelectorAll('[data-diff-file] *')].map(node => node.shadowRoot?.textContent ?? '').join('')).toMatch(/old[\s\S]*new/), { timeout: 10_000 })
+            if (view.dataset.added !== '1' || view.dataset.removed !== '1') throw new Error('The diff fence lost its line counts')
+            if (view.getAttribute('role') !== 'region' || view.tabIndex !== 0) throw new Error('The diff lost its keyboard-accessible region')
+            if (fence.querySelector('pre[data-testid="markdown-code"]') !== null) throw new Error('A diff fence also rendered a plain code block')
+            continue
+          }
           if (index < languages.length - 2) {
             await waitFor(() => expect(fence.querySelector('[data-syntax-token]')).not.toBeNull())
           } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
