@@ -841,4 +841,9 @@ minutes is `present`; a hidden page, or a visible one without input for five min
 change and a page becoming visible, and repeats `present` every ten minutes while present: above
 the daemon's five-minute window for an unchanged report and below its fifteen-minute staleness.
 A refused report (no `write.presence` grant, or no person) stops reporting for the page; a
-replay reports nothing. Tabs of one pairing share a source, so the latest tab's report wins.
+replay reports nothing. Tabs of one pairing share a source, where the newest report wins, so
+only one tab reports: the one that last had input or was last shown claims the source over a
+`BroadcastChannel`, and the others fall quiet. An untouched window therefore never calls the
+person idle while they work in another, and a reporting tab that is hidden waits a second before
+saying `idle` so the tab being shown can claim first. A tab opened in the background reports
+nothing until it is shown.
