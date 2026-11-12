@@ -250,8 +250,8 @@ with `403` even though a local agent session holds every scope. `PUT /v1/client/
 names its `value` and optional future `until`, and an absent axis is unchanged. A status
 `value` of `null` clears the override and takes no `until`. `POST /v1/client/presence`
 (`presence.report`, scope `write.presence`) takes a `PresenceReport` of `present`, `idle` or
-`locked` and its `observed_at`, which must be within the last 15 minutes and not ahead of
-this member's clock. The client decides idleness with its own threshold. The daemon assigns
+`locked` and its `observed_at`, which must be within the last 15 minutes and at most 2 minutes
+ahead of this member's clock. The client decides idleness with its own threshold. The daemon assigns
 the source: the exact pairing grant for a paired device, otherwise `host/<member>`. An
 unchanged report from one source is recorded at most once every 5 minutes; a change is
 recorded at once. Both writes answer the person's full `PersonAvailability`; invalid input is
