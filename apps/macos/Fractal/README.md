@@ -123,7 +123,9 @@ activation does not restart the process.
 `ATTENTION_SPEECH_SOCKET`. Point it at the speech service's socket only where that
 service admits `~/Applications/AttentionTray.app/Contents/MacOS/AttentionTray` as
 its one caller; any other executable, including a development build, is closed
-unanswered and logged as `speech service unreachable`.
+unanswered and logged as `speech service unreachable`. On review-host it follows
+`services.speechService.socketPath` whenever `services.speechService.enable` is
+set, whose `authorizedCaller` is that installed executable.
 
 Activation verification checks only installed build/configuration facts
 (signature and registered launchd job). Runtime credentials and web availability
