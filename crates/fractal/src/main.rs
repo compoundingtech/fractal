@@ -14940,6 +14940,9 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
+    if let Some(live) = agent.live_model.as_deref() {
+        let _ = writeln!(output, "LIVE MODEL   {live}");
+    }
     if agent.blocked_on.as_deref() == Some("human")
         && agent.ask.as_deref() == Some("permission")
     {
