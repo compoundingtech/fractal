@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v22.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v23.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1854,6 +1854,25 @@ fn generated_source_maps_are_admitted_and_replicate_with_their_texts() {
 }
 
 #[test]
+fn generated_retry_links_are_admitted_and_replicate() {
+    let mut world = World::new(1, Sabotage::None);
+    let kind = "mission-run.retry-linked";
+    let input = world.claim_of(&corpus()[kind], 0).unwrap();
+    assert_eq!(input.kind, kind);
+    assert!(input.subject.starts_with("mission-run/"));
+    for field in ["source", "retry"] {
+        assert!(input.fields[field].as_str().unwrap().starts_with("mission-run/"));
+    }
+    fractal_schema::registry()
+        .validate_claim(&input.subject, kind, &input.fields)
+        .unwrap();
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
+#[test]
 fn generated_mission_publications_replicate_as_canonical_missions() {
     let mut world = World::new(1, Sabotage::None);
     let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
@@ -2207,7 +2226,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v22.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v23.json"
         }))
         .unwrap(),
     )
