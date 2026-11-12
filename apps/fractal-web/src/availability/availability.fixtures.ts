@@ -56,5 +56,6 @@ export const fixtureAvailabilityPort = (state: AvailabilityFixture, { refuse = f
       current = { ...current, note: text === null ? undefined : { author: person, person, revision: `note/r${++revision}`, text, time: at, expires_at: expires_at ?? null } }
       return { _tag: 'Sent', value: current.note }
     },
+    reportPresence: async () => refuse ? 'refused' : 'sent',
   }
 }

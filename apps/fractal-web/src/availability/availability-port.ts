@@ -1,4 +1,4 @@
-import { ClientError, plainError, type AvailabilitySet, type DirectiveNote, type DirectiveNoteSet, type FractalClient, type PersonAvailability } from '@fractal/client'
+import { ClientError, plainError, type AvailabilitySet, type DirectiveNote, type DirectiveNoteSet, type FractalClient, type PersonAvailability, type PresenceReport } from '@fractal/client'
 import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 
 /** The session person's own availability and directive note, as Fractal folds them when read. */
@@ -21,6 +21,8 @@ export interface AvailabilityPort {
   readonly set: (change: AvailabilitySet) => Promise<AvailabilityWrite<PersonAvailability>>
   /** `PUT /v1/client/notes`: null text clears the note; the answer is the note now in force, if any. */
   readonly setNote: (change: DirectiveNoteSet) => Promise<AvailabilityWrite<DirectiveNote | undefined>>
+  /** `POST /v1/client/presence`; the daemon assigns the source. `refused`: this session may not report (no `write.presence` grant, or no person). */
+  readonly reportPresence: (report: PresenceReport) => Promise<'sent' | 'refused' | 'failed'>
 }
 
 const unavailable = (detail: string): AvailabilityRead => ({ _tag: 'Unavailable', detail })
@@ -63,6 +65,14 @@ export const gatewayAvailability = (client: FractalClient): AvailabilityPort => 
       return { _tag: 'Sent', value: (await client.notesSet(change)).value.note ?? undefined }
     } catch (error) {
       return refused(error, 'note')
+    }
+  },
+  reportPresence: async (report) => {
+    try {
+      await client.presenceReport(report)
+      return 'sent'
+    } catch (error) {
+      return error instanceof ClientError && error.status === 403 ? 'refused' : 'failed'
     }
   },
 })
