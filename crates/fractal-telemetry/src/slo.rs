@@ -267,8 +267,8 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
                 max_per_hour: whole(max("per-hour")?, "per-hour maximum")?,
                 path: series.clone(),
             }),
-            Indicator::Interval(_) => {
-                bail!("objective {name} is an interval: Fractal ships none; a fleet declares one with `fractal apply`")
+            Indicator::Interval(_) | Indicator::Count(_) => {
+                bail!("objective {name} is an interval or count over claims: Fractal ships none; a fleet declares one with `fractal apply`")
             }
         }
     }
