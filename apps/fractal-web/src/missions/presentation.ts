@@ -27,6 +27,8 @@ export type PresentedStep = {
   readonly attempts: number
   readonly blockers: readonly string[]
   readonly keep_open: boolean
+  /** The mission revision the step's run is pinned to; older daemons do not serve it. */
+  readonly revision: string | null
 }
 
 export type MissionPresentation = {
@@ -40,7 +42,7 @@ export type MissionPresentation = {
   readonly settled_at: number | null
 }
 
-type Step = Fractal.MissionStep & { readonly keep_open?: boolean }
+type Step = Fractal.MissionStep & { readonly keep_open?: boolean; readonly run_revision?: string }
 type Row = Fractal.Mission & { readonly system?: boolean }
 
 const ACTIVE = new Set(['claimed', 'working', 'running', 'verifying'])
@@ -51,7 +53,7 @@ const missionSteps = (mission: Row): readonly Step[] => {
   const runs = mission.run_details ?? []
   const open = runs.filter((run) => !FINISHED.has(run.status))
   const shown = open.length > 0 ? open : runs.slice(-1)
-  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly Fractal.MissionStep[]))
+  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly Fractal.MissionStep[]).map((step): Step => run.revision === undefined ? step : { ...step, run_revision: run.revision }))
 }
 
 /** The served ETA of the latest open run, never a finished run's: a terminal status or `completed_at` hides it. */
@@ -142,6 +144,7 @@ export const presentMission = ({
         attempts: step.attempt,
         blockers: step.blockers ?? [],
         keep_open: step.keep_open === true,
+        revision: step.run_revision ?? null,
       }
     })
     .map((step, index) => ({ step, index }))

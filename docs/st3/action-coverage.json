@@ -2435,12 +2435,28 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st source diff",
+      "description": "Compare two mapped revisions of an agent or mission: source file diffs, KDL diff, and why it changed",
+      "tests": [
+        "crates/fractal/tests/owned_sets.rs::source_cli_shows_finds_and_diffs_mapped_revisions"
+      ],
+      "verification": "real CLI over an isolated disk-backed Unix daemon; two mapped publications, dependency-only change"
+    },
+    {
       "command": "st source status",
       "description": "Show each set's source policy, open and closed source debt and, with --audit, audit records",
       "tests": [
         "crates/fractal/tests/owned_sets.rs::forced_writes_record_debt_until_the_next_publication_closes_it"
       ],
       "verification": "the command's daemon route over isolated disk-backed Unix daemons; forced debt, convergence and closure"
+    },
+    {
+      "command": "st source where",
+      "description": "List the live agents and missions a file, a line of it, or a GitHub URL declares or feeds",
+      "tests": [
+        "crates/fractal/tests/owned_sets.rs::source_cli_shows_finds_and_diffs_mapped_revisions"
+      ],
+      "verification": "real CLI over an isolated disk-backed Unix daemon; spans carried across file versions, GitHub URL and JSON"
     },
     {
       "command": "st store prepare-indexes",
@@ -2743,7 +2759,7 @@
     },
     {
       "command": "st work cancel-ask",
-      "description": "Cancel your own ask and resume its live origin",
+      "description": "Cancel your own ask; fail its waiting native origin or propagate typed AskCancelled to its program",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],
