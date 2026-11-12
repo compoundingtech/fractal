@@ -48,10 +48,12 @@ async fn launch_run_workspace(
     let bytes = document_bytes(client, name, hash).await?;
     let source = std::str::from_utf8(&bytes).context("the launch candidate KDL is not UTF-8")?;
     let intent = fractal_daemon::parse_intent(source, local)?;
-    // Candidate admission requires exactly one top-level mission. Its immutable document
-    // keeps the authored name even when the session now presents a renamed public label.
-    anyhow::ensure!(intent.missions.len() == 1, "the launch candidate must declare exactly one mission");
-    let mission = intent.missions.values().next().context("the launch candidate declares no mission")?;
+    // The immutable candidate's root identity survives public-name changes. Implicit
+    // loop-round and branch graphs share the map but are not top-level candidates.
+    let roots = fractal_daemon::mission::top_level_mission_ids(&intent.missions);
+    anyhow::ensure!(roots.len() == 1, "the launch candidate must declare exactly one top-level mission");
+    let root = roots.first().context("the launch candidate declares no top-level mission")?;
+    let mission = intent.missions.get(root).context("the launch candidate root is missing")?;
     resolve_mission_workspace(
         mission,
         workspace,

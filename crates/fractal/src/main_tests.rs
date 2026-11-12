@@ -8996,7 +8996,10 @@ async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
             "idempotency_key": "remote-launch-plan"
         })).await.unwrap();
         let path = format!("/v1/launches/{}", urlencoding::encode(&session.id));
-        let candidate = b"version 2\nmission \"remote-launch\" state=\"ready\" {\n goal \"Run remotely\"\n step \"work\" {\n agentless\n host \"executor\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\"; restart \"never\" }\n }\n }\n}\n";
+        let candidate = b"version 2\nmission \"remote-launch\" state=\"ready\" {\n goal \"Run remotely\"\n loop \"improve\" {\n max-rounds 2\n round { completion { when \"all-steps-exhausted\" } }\n }\n step \"work\" {\n agentless\n host \"executor\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\"; restart \"never\" }\n }\n }\n}\n";
+        let parsed = fractal_daemon::parse_intent(std::str::from_utf8(candidate).unwrap(), "publisher").unwrap();
+        assert_eq!(parsed.missions.len(), 2, "the valid candidate includes an implicit loop graph");
+        assert_eq!(fractal_daemon::mission::top_level_mission_ids(&parsed.missions).len(), 1);
         let _: PlanningSessionView = client.post(&format!("{path}/submit"), &PlanningCandidateSubmitRequest {
             actor: session.planner, markdown: b"# Remote task".to_vec(),
             kdl: candidate.to_vec(), idempotency_key: "remote-launch-submit".into(),
