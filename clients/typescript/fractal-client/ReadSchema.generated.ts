@@ -1123,6 +1123,7 @@ export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
   "fault",
   "harness-login",
   "harness-prompt",
+  "model-drift",
   "custom",
   "unknown"
 ]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
@@ -1523,7 +1524,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "agent-request",
   "fault",
   "harness-login",
-  "harness-prompt"
+  "harness-prompt",
+  "model-drift"
 ]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
   "because": optionalKey(Schema.String),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
