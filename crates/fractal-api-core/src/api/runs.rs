@@ -583,6 +583,34 @@ pub async fn revise_mission_run(
             planned.blockers.join("; "),
         )));
     }
+    if matches!(current.status.as_str(), "running" | "standing" | "blocked")
+        && current.phase == "normal"
+    {
+        state.store.apply_run_revision(
+            publication,
+            &planned.subject_tokens,
+            &format!("{}:publish", request.idempotency_key),
+            &actor,
+            &current.subject,
+            &crate::model::MissionRevisionOperation {
+                id: request.idempotency_key.clone(),
+                mission: replacement.id.clone(),
+                revision: replacement.revision.clone(),
+                from_generation: current.generation.clone(),
+                reason: request.reason.clone(),
+                cancellation: None,
+            },
+            &format!("{}:adopt", request.idempotency_key),
+            &format!("{}:propose", request.idempotency_key),
+        ).map_err(ApiError::bad)?;
+        let result = cached_revision_submission(
+            &state,
+            &format!("{}:adopt", request.idempotency_key),
+            &format!("{}:propose", request.idempotency_key),
+        )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
+        signal_changed(&state);
+        return Ok(Json(result));
+    }
     // The revision records its publisher: a broken gate in it raises attention for them.
     state
         .store

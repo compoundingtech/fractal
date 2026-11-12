@@ -61,14 +61,18 @@ fn finish_cancellation(store: &Store, run: &MissionRunView) {
 fn requeue_heads(store: &Store) {
     // Replay disposable work without changing authoritative publications or refusal claims.
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hb4f3c30874b6 owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v1(mission_id) SELECT mission_id FROM mission_definitions",
+        /* sqlite-large-value: allow-for-now lv-h700ff73f6bb1 owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v2(mission_id) SELECT mission_id FROM mission_definitions",
         [],
+    ).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h50f9356df39c owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v2))
+         WHERE key='local_mission_supersession_heads_v2_sequence'", [],
     ).unwrap();
 }
 
 fn assert_queue_converged(store: &Store) {
     let pending: u64 = store.readers.get().query_row(
-        "SELECT COUNT(*) FROM local_mission_supersession_heads_v1",
+        "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
         [], |row| row.get(0),
     ).unwrap();
     assert_eq!(pending, 0);

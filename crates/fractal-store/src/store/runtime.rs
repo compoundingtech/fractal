@@ -1022,9 +1022,39 @@ mod schema_install_tests {
     }
 
     #[test]
+    fn supersession_queue_counter_survives_empty_reopen_without_frontier_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue-counter.sqlite");
+        let mut previous = 0;
+        for (attempt, goal) in ["First publication.", "Second publication.", "Third publication."].into_iter().enumerate() {
+            let store = Store::open(&path, "owner").unwrap();
+            let source = format!("version 2\nmission \"counter\" state=\"ready\" {{ goal {goal:?}; step \"work\" {{ agentless }} }}\n");
+            let intent = crate::graph::parse_test_intent(&source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source, source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, &format!("counter-{attempt}")).unwrap();
+            let sequence: u64 = store.readers.get().query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v2_sequence'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(sequence > previous, "emptying and reopening must not reuse a drain ceiling");
+            previous = sequence;
+            assert_eq!(store.readers.get().query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 0, "ordinary publication drains its own head");
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            assert!(store.index().unwrap() > 0);
+            let work = scope.finish();
+            assert_eq!(work.fullscan_steps, 0, "private queue allocation must not add work to canonical frontier reads: {work:?}");
+        }
+    }
+
+    #[test]
     fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        for refused_table in ["local_mission_supersession_heads_v1", "meta"] {
+        for refused_table in ["local_mission_supersession_heads_v2", "meta"] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("bootstrap.sqlite");
             let store = Store::open(&path, "owner").unwrap();
@@ -1038,7 +1068,7 @@ mod schema_install_tests {
                 let connection = store.connection.write();
                 connection.execute("DELETE FROM meta WHERE key=?1",
                     [mission_supersession::BOOTSTRAP_KEY]).unwrap();
-                connection.execute("DELETE FROM local_mission_supersession_heads_v1", []).unwrap();
+                connection.execute("DELETE FROM local_mission_supersession_heads_v2", []).unwrap();
                 connection.authorizer(Some(move |context: AuthContext<'_>| {
                     if matches!(context.action, AuthAction::Insert { table_name } if table_name == refused_table) {
                         Authorization::Deny
@@ -1050,7 +1080,7 @@ mod schema_install_tests {
                 connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
                 assert!(connection.is_autocommit(), "failed bootstrap must roll back");
                 assert_eq!(connection.query_row(
-                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v1",
+                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
                     [], |row| row.get::<_, u64>(0),
                 ).unwrap(), 0, "head seed and completion marker must commit together");
                 assert!(!connection.query_row(
@@ -1062,7 +1092,7 @@ mod schema_install_tests {
             let store = Store::open(&path, "owner").unwrap();
             let connection = store.connection.write();
             assert_eq!(connection.query_row(
-                "SELECT COUNT(*) FROM local_mission_supersession_heads_v1 WHERE mission_id='existing-head'",
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v2 WHERE mission_id='existing-head'",
                 [], |row| row.get::<_, u64>(0),
             ).unwrap(), 1, "reopen must recover the existing selected head");
             assert!(connection.query_row(

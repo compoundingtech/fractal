@@ -3957,11 +3957,10 @@ impl MissionsStore for Store {
         smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
         let subjects = {
             let connection = self.readers.get();
-            let subjects = connection
+            connection
                 .prepare_cached("SELECT 'mission-run/' || id FROM mission_runs WHERE parent_step_run=?1")?
                 .query_map([step], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            subjects
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut seen = BTreeSet::new();
         for subject in subjects {

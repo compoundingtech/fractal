@@ -3439,6 +3439,61 @@ impl Store {
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, FractalError> {
+        self.apply_as_impl_receipting(
+            intent, expected, idempotency_key, actor,
+            local_receipt.map(LocalApplyReceipt::Template), checks,
+        )
+    }
+
+    /// Publish a candidate and its explicit run revision under one writer fence.
+    /// Cache the imperative API's response in that same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_run_revision(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: &str,
+        run: &str,
+        operation: &MissionRevisionOperation,
+        direct_key: &str,
+        proposal_key: &str,
+    ) -> Result<ApplyResponse, FractalError> {
+        let mut intent = intent.clone();
+        let subject = if run.starts_with("mission-run/") {
+            run.to_owned()
+        } else {
+            format!("mission-run/{run}")
+        };
+        let mut expected = expected.clone();
+        expected.insert(
+            subject.clone(),
+            self.latest_claim(&subject, None).map_err(internal)?
+                .map(|claim| claim.id).into_iter().collect(),
+        );
+        intent.mission_runs.insert(subject.clone(), MissionRunDeclaration {
+            subject,
+            revisions: BTreeMap::from([(operation.id.clone(), operation.clone())]),
+            ..Default::default()
+        });
+        self.apply_as_impl_receipting(
+            &intent, &expected, key, Some(actor),
+            Some(LocalApplyReceipt::RunRevision {
+                run, operation: &operation.id, direct_key, proposal_key,
+            }),
+            publication::CommitChecks::default(),
+        )
+    }
+
+    fn apply_as_impl_receipting(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        idempotency_key: &str,
+        actor: Option<&str>,
+        local_receipt: Option<LocalApplyReceipt<'_>>,
+        checks: publication::CommitChecks<'_>,
+    ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard, force, source_map } = checks;
@@ -12109,15 +12164,55 @@ pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<Strin
         .collect())
 }
 
+#[derive(Clone, Copy)]
+enum LocalApplyReceipt<'a> {
+    Template((&'a str, &'a Value)),
+    RunRevision {
+        run: &'a str,
+        operation: &'a str,
+        direct_key: &'a str,
+        proposal_key: &'a str,
+    },
+}
+
 fn cache_local_apply_receipt_tx(
     transaction: &Transaction<'_>,
     response: ApplyResponse,
-    local_receipt: Option<(&str, &Value)>,
+    local_receipt: Option<LocalApplyReceipt<'_>>,
     primary_key: &str,
 ) -> Result<ApplyResponse, FractalError> {
-    if let Some((key, template)) = local_receipt {
-        let mut receipt = template.clone();
-        receipt["event_cursor"] = json!(response.store_index);
+    let receipt = match local_receipt {
+        Some(LocalApplyReceipt::Template((key, template))) => {
+            let mut receipt = template.clone();
+            receipt["event_cursor"] = json!(response.store_index);
+            Some((key, receipt))
+        }
+        Some(LocalApplyReceipt::RunRevision { run, operation, direct_key, proposal_key }) => {
+            let subject = if run.starts_with("mission-run/") {
+                run.to_owned()
+            } else {
+                format!("mission-run/{run}")
+            };
+            let proposal_id = hex::encode(Sha256::digest(format!(
+                "st3.declared-revision-proposal.v1\0{subject}\0{operation}"
+            )))[..32].to_owned();
+            let has_proposal = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM revision_proposals WHERE id=?1)",
+                [&proposal_id], |row| row.get::<_, bool>(0),
+            ).map_err(internal)?;
+            if has_proposal {
+                let proposal = revision_proposal_view_tx(transaction, &proposal_id).map_err(internal)?;
+                Some((proposal_key, serde_json::to_value(proposal).map_err(internal)?))
+            } else {
+                let run = mission_run_view_tx(
+                    transaction, run.strip_prefix("mission-run/").unwrap_or(run),
+                ).map_err(internal)?;
+                Some((direct_key, serde_json::to_value(run).map_err(internal)?))
+            }
+        }
+        None => None,
+    };
+    if let Some((key, receipt)) = receipt {
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h2e14f4e7d2c8 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO idempotency(operation_id,response) VALUES(?1,?2)",
@@ -12127,13 +12222,11 @@ fn cache_local_apply_receipt_tx(
                 ],
             )
             .map_err(internal)?;
+        mark_replay_safe_receipt_tx(transaction, key).map_err(internal)?;
     }
     mark_replay_safe_receipt_tx(transaction, primary_key).map_err(internal)?;
     mark_replay_safe_receipt_tx(transaction, &format!("owned-set-request:{primary_key}"))
         .map_err(internal)?;
-    if let Some((key, _)) = local_receipt {
-        mark_replay_safe_receipt_tx(transaction, key).map_err(internal)?;
-    }
     Ok(response)
 }
 

@@ -8210,8 +8210,16 @@ mission "targeted" state="ready" revisions="human-only" {
     .await;
     assert_eq!(status, StatusCode::OK, "{approved}");
     assert_eq!(approved["status"], "approved");
-    let revised = store.mission_run(&run.id).unwrap().unwrap();
+    let source = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(source.generation, run.generation);
+    assert_eq!(source.revision, run.revision);
+    let revised = store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    assert_ne!(revised.subject, run.subject);
+    assert_eq!(revised.supersedes.as_deref(), Some(run.subject.as_str()));
     assert_ne!(revised.generation, run.generation);
+    assert_eq!(revised.revision, approved["published_revision"].as_str().unwrap());
+    assert_eq!(approved["target_mission_run"], run.subject);
+    assert_eq!(approved["source_generation"], run.generation);
 
     let approvals = store
         .events_after(0, None)
@@ -12459,6 +12467,13 @@ version 2
     assert_ne!(revised["mission_run"]["revision"], run.revision);
     assert_eq!(revised["mission_run"]["root_revision"], run.root_revision);
     assert_eq!(revised["mission_run"]["steps"][0]["status"], "pending");
+    assert_eq!(revised["mission_run"]["subject"], run.subject);
+    assert_eq!(revised["mission_run"]["phase"], "normal");
+    assert!(revised["mission_run"].get("superseded_by").is_none_or(Value::is_null));
+    assert_eq!(
+        state.store.run_generations(&run.subject).unwrap().first().unwrap().revision,
+        run.revision
+    );
     let published = state.store.mission_spec("revision", None).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:revision");

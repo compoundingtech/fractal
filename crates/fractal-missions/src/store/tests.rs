@@ -5256,10 +5256,11 @@ version 2
         intent.missions["lineage"].clone()
     };
     let first = publish("Use the first goal for ${ST_STEP_RUN}.", "lineage-one");
+    let second = publish("Use the second goal for ${ST_STEP_RUN}.", "lineage-two");
     let run = source
         .create_mission_run(&MissionRunRequest {
             mission: first.id,
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -5272,7 +5273,6 @@ version 2
     source
         .set_step_state(&stable.subject, "completed", None)
         .unwrap();
-    let second = publish("Use the second goal for ${ST_STEP_RUN}.", "lineage-two");
     let revised = source
         .adopt_mission_revision(
             &run.id,
@@ -9750,23 +9750,6 @@ version 2
 "#,
         "revision-one",
     );
-    let run = store
-        .create_mission_run(&MissionRunRequest {
-            mission: first.id,
-            revision: None,
-            workspace: "/tmp".into(),
-            requester: Some("person/test".into()),
-            mode: Some("run".into()),
-            inputs: BTreeMap::new(),
-            idempotency_key: "revision-run".into(),
-        })
-        .unwrap();
-    let worker = format!("agent/{}/worker", run.id);
-    for step in &run.steps {
-        store
-            .set_step_state(&step.subject, "completed", None)
-            .unwrap();
-    }
     let second = publish(
         r#"
 version 2
@@ -9786,6 +9769,23 @@ version 2
 "#,
         "revision-two",
     );
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: first.id,
+            revision: Some(first.revision),
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "revision-run".into(),
+        })
+        .unwrap();
+    let worker = format!("agent/{}/worker", run.id);
+    for step in &run.steps {
+        store
+            .set_step_state(&step.subject, "completed", None)
+            .unwrap();
+    }
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -10148,18 +10148,6 @@ version 2
 "#,
         "authority-one",
     );
-    let run = store
-        .create_mission_run(&MissionRunRequest {
-            mission: first.id,
-            revision: None,
-            workspace: "/tmp".into(),
-            requester: Some("person/test".into()),
-            mode: Some("run".into()),
-            inputs: BTreeMap::new(),
-            idempotency_key: "authority-run".into(),
-        })
-        .unwrap();
-    let worker = format!("agent/{}/worker", run.id);
     let escalated = publish(
         r#"
 version 2
@@ -10176,6 +10164,18 @@ version 2
 "#,
         "authority-two",
     );
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: first.id,
+            revision: Some(first.revision),
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "authority-run".into(),
+        })
+        .unwrap();
+    let worker = format!("agent/{}/worker", run.id);
     // Free mode: an agent revises any part of a run, and the revision records it as actor.
     let revised = store
         .adopt_mission_revision(
@@ -10198,11 +10198,22 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
         "step \"other\"",
         "step \"done\" { assigned-to \"agent/node.worker\"; goal \"Finish the work.\" }\n    step \"other\"",
     );
-    publish_carry(&store, &source, "notes-one");
+    let first = publish_carry(&store, &source, "notes-one");
+    // Publish all candidates before starting the explicitly old-pinned legacy run.
+    let candidates = (2..=3)
+        .map(|revision| {
+            let next = publish_carry(
+                &store,
+                &source.replace("Use the first goal.", &format!("Use goal {revision}.")),
+                &format!("notes-publish-{revision}"),
+            );
+            (revision, next)
+        })
+        .collect::<Vec<_>>();
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10234,12 +10245,7 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
     report(&work, "progress", "notes-work", "Checking the result");
     let original = store.mission_run(&run.subject).unwrap().unwrap();
     let mut current = original.clone();
-    for revision in 2..=3 {
-        let next = publish_carry(
-            &store,
-            &source.replace("Use the first goal.", &format!("Use goal {revision}.")),
-            &format!("notes-publish-{revision}"),
-        );
+    for (revision, next) in candidates {
         current = store
             .adopt_mission_revision(
                 &run.id,
@@ -10520,11 +10526,13 @@ version 2
 "#
         )
     };
-    publish_carry(&store, &source("exit 2", "Do the work."), "regate-one");
+    let initial = publish_carry(&store, &source("exit 2", "Do the work."), "regate-one");
+    let regated = publish_carry(&store, &source("exit 0", "Do the work."), "regate-two");
+    let rewritten = publish_carry(&store, &source("exit 0", "Do other work."), "regate-three");
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(initial.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10549,7 +10557,6 @@ version 2
         .unwrap();
     assert_eq!(submitted.status, "verifying");
 
-    let regated = publish_carry(&store, &source("exit 0", "Do the work."), "regate-two");
     let adopted = store
         .adopt_mission_revision(
             &run.id,
@@ -10570,7 +10577,6 @@ version 2
         ("verifying", true, 1)
     );
 
-    let rewritten = publish_carry(&store, &source("exit 0", "Do other work."), "regate-three");
     let adopted = store
         .adopt_mission_revision(
             &run.id,
@@ -10716,20 +10722,20 @@ fn carried_claim_successor_requires_literal_ownership() {
     for actor in ["node/worker", "agent/node/worker"] {
         for holder in ["node/worker", "agent/node/worker"] {
             let store = Store::open_memory("node").unwrap();
-            publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let initial = publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let revised = publish_carry(
+                &store,
+                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+                "alias-carry-two",
+            );
             let run = store.create_mission_run(&MissionRunRequest {
-                mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+                mission: "carry".into(), revision: Some(initial.revision), workspace: "/tmp".into(),
                 requester: Some("person/requester".into()), mode: Some("run".into()),
                 inputs: BTreeMap::new(), idempotency_key: "alias-carry-run".into(),
             }).unwrap();
             let old = &run.steps.iter().find(|step| step.step == "work").unwrap().subject;
             store.set_step_state(old, "ready", None).unwrap();
             store.work_action(old, "claim", &carry_request("one", "alias-carry-claim")).unwrap();
-            let revised = publish_carry(
-                &store,
-                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
-                "alias-carry-two",
-            );
             let adopted = store.adopt_mission_revision(
                 &run.id, &revised, "person/requester", "revise other work", "alias-carry-revision",
             ).unwrap();
@@ -10979,11 +10985,16 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
             ).unwrap();
             (store, run, proposal)
         };
-        let (normal_store, _, normal_proposal) = fixture();
+        let (normal_store, run, proposal) = fixture();
+        // Both executions must share publication claims: linked successor identities
+        // include the publication claim, not just the approval's idempotency key.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("approval.sqlite3");
+        normal_store.copy_store_to(&path).unwrap();
         let normal = normal_store.approve_revision_proposal(
-            &normal_proposal.id, "person/reviewer", normal_proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
+            &proposal.id, "person/reviewer", proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
         ).unwrap();
-        let (store, run, proposal) = fixture();
+        let store = Arc::new(Store::open(&path, "node").unwrap());
         let preview = proposal.preview_hash.as_deref().unwrap();
         let (start_tx, start_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -11021,6 +11032,10 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
         assert_eq!(error.code, "database-busy");
         assert_eq!(error.details.get("reason").and_then(serde_json::Value::as_str), Some("run-projection-drain"));
         assert_eq!(committed.approvals, vec!["person/reviewer"]);
+        // The committed approval and exact applied successor must survive losing
+        // the process before its response has been cached.
+        drop(store);
+        let store = Store::open(&path, "node").unwrap();
         let retried = store.approve_revision_proposal(
             &proposal.id, "person/reviewer", preview, "approval-race-approve",
         ).unwrap();
@@ -11032,12 +11047,25 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
         } else {
             assert_ne!(retried.mission_run.subject, run.subject);
             assert_eq!(retried.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
-            assert_eq!(store.mission_run(&run.id).unwrap().unwrap().generation, run.generation);
+            assert_eq!(retried.mission_run.revision, normal.mission_run.revision);
+            assert_eq!(retried.mission_run.subject, normal.mission_run.subject);
+            assert_eq!(retried.mission_run.generation, normal.mission_run.generation);
+            let original = store.mission_run(&run.id).unwrap().unwrap();
+            assert_eq!(original.generation, run.generation);
+            assert_eq!(original.revision, run.revision);
+            assert_eq!(original.superseded_by.as_deref(), Some(retried.mission_run.subject.as_str()));
+            assert!(original.steps.iter().zip(&run.steps).all(|(after, before)| after.subject == before.subject));
+            assert_eq!(original.steps.len(), run.steps.len());
+            assert_eq!(store.run_generations(&run.id).unwrap().len(), 1);
+            assert_eq!(
+                retried.proposal.as_ref().unwrap().successor_generation.as_deref(),
+                Some(retried.mission_run.generation.as_str()),
+            );
         }
         assert_eq!(retried.status, normal.status);
         let actual_proposal = retried.proposal.as_ref().unwrap();
         let mut normal_proposal = normal.proposal.unwrap();
-        // Separate executions have separate clocks, but identical operation-derived identities.
+        // The cutover clocks may differ, but the shared publication fixes its identity.
         normal_proposal.created_at_unix_ms = actual_proposal.created_at_unix_ms;
         normal_proposal.updated_at_unix_ms = actual_proposal.updated_at_unix_ms;
         assert_eq!(serde_json::to_value(actual_proposal).unwrap(), serde_json::to_value(normal_proposal).unwrap());
@@ -11057,6 +11085,16 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
             [&proposal.subject], |row| row.get(0),
         ).unwrap();
         assert_eq!(approvals, 1, "recovery must not approve twice");
+        let applications: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind='revision-proposal.applied'",
+            [&proposal.subject], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(applications, usize::from(cutover != "when-idle"), "recovery must not apply twice");
+        let runs: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM mission_runs",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(runs, if cutover == "when-idle" { 1 } else { 2 }, "recovery must not create duplicate runs");
     }
 }
 
@@ -12179,10 +12217,11 @@ mission "review-current" state="ready" revision-cutover="restart-active" {{
         )
     };
     let first = publish("Review the first revision.", "review-current-first");
+    let second = publish("Review the second revision.", "review-current-second");
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: first.id.clone(),
-            revision: None,
+            revision: Some(first.revision),
             workspace: ".".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -12235,7 +12274,6 @@ mission "review-current" state="ready" revision-cutover="restart-active" {{
     );
     assert_eq!(store.pending_human_reviews(None).unwrap().len(), 1);
 
-    let second = publish("Review the second revision.", "review-current-second");
     let revised = store
         .adopt_mission_revision(
             &run.id,

@@ -160,6 +160,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_credit_progress",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local mission-head work, rebuilt from selected published revisions.
+        "local_mission_supersession_heads_v2",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.
         "local_run_eta_pending",
         "local_run_eta_dirty",

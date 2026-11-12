@@ -11,7 +11,7 @@ impl Store {
         smallclaims::touched::note_read(|| "kind:mission.published".to_owned());
         smallclaims::touched::note_read(|| "kind:owned-set.revised".to_owned());
         let ceiling: u64 = self.readers.get().query_row(
-            "SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v1",
+            "SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v2",
             [], |row| row.get(0),
         ).map_err(internal)?;
         if ceiling == 0 {
@@ -22,7 +22,7 @@ impl Store {
             let (page_changed, done) = self.with_all_runs_fenced_internal(|transaction| {
                 let page_changed = self.supersede_mission_heads_through_tx(transaction, ceiling)?;
                 let done: bool = transaction.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM local_mission_supersession_heads_v1 WHERE seq<=?1)",
+                    "SELECT NOT EXISTS(SELECT 1 FROM local_mission_supersession_heads_v2 WHERE seq<=?1)",
                     [ceiling], |row| row.get(0),
                 ).map_err(internal)?;
                 Ok::<_, FractalError>((page_changed, done))
@@ -48,7 +48,7 @@ impl Store {
     ) -> Result<bool, FractalError> {
         let missions = {
             let mut query = transaction.prepare(
-                "SELECT mission_id FROM local_mission_supersession_heads_v1
+                "SELECT mission_id FROM local_mission_supersession_heads_v2
                  WHERE seq<=?1 ORDER BY seq LIMIT ?2",
             ).map_err(internal)?;
             query.query_map(params![ceiling, HEAD_PAGE as u64], |row| row.get::<_, String>(0))
@@ -210,7 +210,7 @@ impl Store {
         if idle_run.is_none() {
             for mission in missions {
                 changed |= transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h71c5f0a9c814 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_supersession_heads_v1 WHERE mission_id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h41542fcc45af owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_supersession_heads_v2 WHERE mission_id=?1",
                     [mission],
                 ).map_err(internal)? != 0;
             }
@@ -365,32 +365,41 @@ fn supersession_cycle(subject: &str) -> FractalError {
 fn supersession_queue_installed(connection: &Connection) -> Result<bool, FractalError> {
     connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-         WHERE type='table' AND name='local_mission_supersession_heads_v1')",
+         WHERE type='table' AND name='local_mission_supersession_heads_v2')",
         [], |row| row.get(0),
     ).map_err(internal)
 }
 
-pub(super) const BOOTSTRAP_KEY: &str = "local_mission_supersession_heads_v1_bootstrapped";
+pub(super) const BOOTSTRAP_KEY: &str = "local_mission_supersession_heads_v2_bootstrapped";
+const SEQUENCE_KEY: &str = "local_mission_supersession_heads_v2_sequence";
 
 pub(super) fn install_schema(connection: &Connection) -> Result<(), FractalError> {
     let installed = supersession_queue_installed(connection)?;
     // Schema belongs to startup, before readers prepare request statements. Installing it
     // lazily in apply changes their schema cookie and makes request work depend on history.
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h7f65103d5e70 owner=fractal_store::store::mission_supersession TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_mission_supersession_heads_v1 (
-             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        /* sqlite-large-value: allow-for-now lv-hebc5b91aff4f owner=fractal_store::store::mission_supersession TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_mission_supersession_heads_v2 (
+             seq INTEGER PRIMARY KEY,
              mission_id TEXT NOT NULL UNIQUE
          );
-         CREATE TRIGGER IF NOT EXISTS mission_supersession_head_insert_v1
+         CREATE TRIGGER IF NOT EXISTS mission_supersession_head_insert_v2
          AFTER INSERT ON mission_definitions BEGIN
-             INSERT INTO local_mission_supersession_heads_v1(mission_id)
-             VALUES(NEW.mission_id) ON CONFLICT(mission_id) DO NOTHING;
+             UPDATE meta SET value=CAST(value AS INTEGER)+1
+             WHERE key='local_mission_supersession_heads_v2_sequence';
+             INSERT INTO local_mission_supersession_heads_v2(seq,mission_id)
+             SELECT CAST(value AS INTEGER),NEW.mission_id FROM meta
+             WHERE key='local_mission_supersession_heads_v2_sequence'
+             ON CONFLICT(mission_id) DO NOTHING;
          END;
-         CREATE TRIGGER IF NOT EXISTS mission_supersession_head_update_v1
+         CREATE TRIGGER IF NOT EXISTS mission_supersession_head_update_v2
          AFTER UPDATE OF claim_id ON mission_definitions
          WHEN OLD.claim_id IS NOT NEW.claim_id BEGIN
-             INSERT INTO local_mission_supersession_heads_v1(mission_id)
-             VALUES(NEW.mission_id) ON CONFLICT(mission_id) DO NOTHING;
+             UPDATE meta SET value=CAST(value AS INTEGER)+1
+             WHERE key='local_mission_supersession_heads_v2_sequence';
+             INSERT INTO local_mission_supersession_heads_v2(seq,mission_id)
+             SELECT CAST(value AS INTEGER),NEW.mission_id FROM meta
+             WHERE key='local_mission_supersession_heads_v2_sequence'
+             ON CONFLICT(mission_id) DO NOTHING;
          END;
          CREATE INDEX IF NOT EXISTS claims_mission_supersession_refused_v1
          ON claims(subject, json_extract(body,'$.fields.scope'),
@@ -416,9 +425,21 @@ pub(super) fn install_schema(connection: &Connection) -> Result<(), FractalError
 }
 
 fn bootstrap_heads(connection: &Connection) -> Result<(), FractalError> {
+    // A private counter preserves the drain ceiling after the queue becomes empty.
+    // AUTOINCREMENT would add a sqlite_sequence row before the first claim, making
+    // unrelated canonical-frontier reads scan past this queue's allocation counter.
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h86217191c9b5 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v1(mission_id)
-         SELECT mission_id FROM mission_definitions ORDER BY mission_id", [],
+        /* sqlite-large-value: allow-for-now lv-hbec72dc68a70 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v2(seq,mission_id)
+         SELECT MAX(COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0),
+                    COALESCE((SELECT MAX(seq) FROM local_mission_supersession_heads_v2),0))
+                  +ROW_NUMBER() OVER (ORDER BY mission_id),mission_id
+         FROM mission_definitions ORDER BY mission_id", [SEQUENCE_KEY],
+    ).map_err(internal)?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h96236fd1b2df owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value)
+         SELECT ?1,COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v2 WHERE true
+         ON CONFLICT(key) DO UPDATE SET value=MAX(CAST(meta.value AS INTEGER),CAST(excluded.value AS INTEGER))",
+        [SEQUENCE_KEY],
     ).map_err(internal)?;
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-hce6543b39244 owner=fractal_store::store::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1')
