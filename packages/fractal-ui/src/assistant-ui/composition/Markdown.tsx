@@ -4,7 +4,7 @@ import { Button, Link, VisuallyHidden } from 'react-aria-components'
 import { HoverCard } from '../entity/HoverCard'
 import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
-import type { Components, ExtraProps } from 'react-markdown'
+import type { Components, ExtraProps, Options as MarkdownOptions } from 'react-markdown'
 import type { Root } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
@@ -16,6 +16,7 @@ import { useCopyFeedback } from './useCopyFeedback'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
 import { remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
+import { loadPulldown, pulldownReady, remarkPulldown } from './markdown-pulldown'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
@@ -40,6 +41,10 @@ export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardB
 const EMPTY_RESOURCES: readonly InlineResource[] = []
 const REMARK_PLUGINS = [remarkGfm, remarkHtmlPolicy]
 const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkHtmlPolicy, remarkHardBreaks]
+// pulldown-cmark replaces only the parse step; GFM tables, task lists, strikethrough and footnotes are its own options.
+type RemarkPlugins = NonNullable<MarkdownOptions['remarkPlugins']>
+const PULLDOWN_PLUGINS = [remarkPulldown, remarkHtmlPolicy] as RemarkPlugins
+const PULLDOWN_PLUGINS_HARD_BREAKS = [remarkPulldown, remarkHtmlPolicy, remarkHardBreaks] as RemarkPlugins
 const STREAMING_PLUGINS = [markStreamingTail]
 type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone' | 'hardBreaks'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
@@ -91,9 +96,9 @@ function delimiters(source: string): number {
   }
   return count
 }
-const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
+const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks, pulldown }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean; readonly pulldown: boolean }) {
   if (delimiters(source) > DELIMITER_LIMIT) return <PlainBlock source={source} />
-  return <BlockFallback source={source}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
+  return <BlockFallback source={source}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={pulldown ? (hardBreaks ? PULLDOWN_PLUGINS_HARD_BREAKS : PULLDOWN_PLUGINS) : hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
 })
 /** Images keep their source for the consent-gated placeholder; a link opens only an http(s) URL. */
 const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : key === 'href' ? safeLinkHref(url) ?? '' : defaultUrlTransform(url)
@@ -103,8 +108,11 @@ export const Markdown = React.memo(function Markdown({ text: markdown, streaming
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const text = React.useMemo(() => limitNesting(markdownSource(markdown)), [markdown])
   const blocks = React.useMemo(() => splitMarkdownBlocks(text), [text])
+  // One parser for this mount's life: the WebAssembly one only once it is ready, so nothing re-renders when it arrives.
+  const [pulldown] = React.useState(pulldownReady)
+  React.useEffect(() => { void loadPulldown() }, [])
   const tail = blocks.length - 1
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} data-parser={pulldown ? 'pulldown' : 'remark'} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} pulldown={pulldown} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
