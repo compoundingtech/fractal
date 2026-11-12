@@ -79,6 +79,14 @@ Give goals observable end states. Keep operational instructions in constraints o
 
 Publishing a new definition does not silently change existing runs. An explicit run revision creates a new generation with preserved history. Finished work carries forward only where it remains compatible with the new plan; changed work and its dependents may need to run again.
 
+## Retrying a failed run
+
+`fractal missions retry RUN --as ACTOR` creates a **new run**, using the latest published mission revision by default. Add `--same-revision` to use the source run's current revision instead. The source must be failed and terminal; a person or the owning agent uses the same authority as an ordinary run start.
+
+The new run keeps the source's exact resolved inputs and workspace, not new defaults from the selected revision. If those inputs do not fit the latest revision, retry refuses with both revision IDs and the incompatibility reason. It never falls back to an older revision.
+
+Every step and the program restart from the top. Make steps idempotent against effects already present in the shared workspace or external systems; retry does not undo those effects or carry completed work forward. The source's status, generation, and history stay unchanged. JSON and `fractal missions show` expose `retry_of` on the new run and `retried_by` on its source so either execution can be traced to the other.
+
 ## Finite and continuing work
 
 A finite mission ends when its work and checks finish. For continuing event intake, use a deliberate retirement gate to keep subscriptions alive until you choose to stop them. Do not create an empty mission to keep an agent available: declare an independent agent instead.

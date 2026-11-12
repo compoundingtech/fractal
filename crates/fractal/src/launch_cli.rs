@@ -567,6 +567,7 @@ pub(super) async fn run_mission_view(
             check_mission_file(attributed.as_ref().unwrap_or(client), args, json_output).await
         }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
+        MissionViewCommand::Retry(args) => retry_mission_run(client, args, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await
         }
@@ -680,6 +681,32 @@ async fn cancel_mission_run(
         )
         .await?;
     print_client_value(&response, json_output)
+}
+
+async fn retry_mission_run(
+    client: &Client,
+    args: MissionRunRetryArgs,
+    json_output: bool,
+) -> Result<()> {
+    let subject = format!("mission-run/{}", args.run.trim_start_matches("mission-run/"));
+    let run: MissionRunView = client
+        .post(
+            &format!("/v1/mission-runs/{}/retry", urlencoding::encode(&subject)),
+            &fractal_daemon::model::MissionRunRetryRequest {
+                actor: args.actor,
+                same_revision: args.same_revision,
+                reason: args.reason,
+                idempotency_key: format!("mission-retry:{subject}:{}", uuid::Uuid::now_v7().simple()),
+            },
+        )
+        .await?;
+    if json_output {
+        print_value(&run, true)
+    } else {
+        println!("{} retries {subject} at revision {}", run.subject, run.revision);
+        print!("{}", cli_help::mission_next_steps(&run));
+        Ok(())
+    }
 }
 
 async fn set_mission_run_outcome(
