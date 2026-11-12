@@ -146,33 +146,44 @@ fractal missions ls --all --cursor 'CURSOR'
 fractal missions show mission/example/build
 ```
 
-Showing a mission with multiple runs prints counts by state, the ten newest runs, and the ten
-newest failed runs with reasons. Showing a mission with one run opens that run. `--follow`
-requires choosing an exact run when the mission has multiple runs.
+Showing a mission with multiple runs prints counts by state, and two windows: the ten
+newest runs and the ten newest failed runs with reasons. Each window says so, and names
+the full-history read: `fractal missions ls --all --mission mission/example/build`.
+Showing a mission with one run opens that run. `--follow` requires choosing an exact
+run when the mission has multiple runs. The published missions list is the same kind of
+window: `active_runs`, `total_runs`, and `run_counts` count the entire history, while the
+card previews at most three runs and `runs_truncated` says when the preview is incomplete.
 
-To investigate outcomes in a time window:
+To investigate outcomes in a time window, or every terminal transition of one mission:
 
 ```sh
 fractal missions ls --since 6h --status failed
+fractal missions ls --all --mission mission/example/build
+fractal missions ls --all --mission mission/example/build --status failed
 fractal work ls --since 6h --status timed-out
 fractal work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
 ```
 
 `--since` and `--until` accept RFC3339 timestamps or durations in milliseconds, seconds,
-minutes, or hours. Supplying either time filter or `--status` selects terminal transition history
-across missions. Status accepts `failed`, `cancelled`, `timed-out`, and `completed`; without a
+minutes, or hours. Supplying either time filter, `--status`, or `--mission` selects terminal
+transition history. Status accepts `failed`, `cancelled`, `timed-out`, and `completed`; without a
 status filter, all terminal transitions are returned. A timeout is a failed transition whose
 recorded reason names a timeout. Cleanup sometimes omits the reason in the terminal claim;
-the reader recovers it from an earlier transition for that outcome.
+the reader recovers it from an earlier transition for that outcome. `--mission` keeps one
+mission's terminal transitions across every page (`/v1/outcome-history?collection=missions&mission=...`);
+other missions' runs never appear. Running and waiting runs are not terminal transitions and
+never appear in this history: read `/v1/mission-runs?mission=...` for the active runs.
 
 These are events, so retries preserve earlier failures and a run can appear more than once.
 Times are the graph claims' accepted timestamps. `--as` on work also filters by the recorded
 actor or step assignment. Pages contain reasons and their claim IDs; the continuation printed
-by the command fixes the original time window. Resume using that command without repeating
-relative time filters. JSON includes `next_cursor`, and an exhausted page has `has_more=false`.
+by the command fixes the original time window and `--mission`. Resume using that command without
+repeating relative time filters. JSON includes `next_cursor`, and an exhausted page has `has_more=false`.
 History cursors and page order are local to the serving daemon, like raw claim-history cursors;
 they are not shared state folds. Reason selection uses canonical claim order, including recovery
 from an earlier transition, so replicated arrival order cannot choose a different reason.
+A daemon that predates `--mission` answers the unfiltered page; the command refuses it with
+"this daemon does not support --mission; upgrade the daemon" instead of mislabelling it.
 
 Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor's
 currently held claimed/working/verifying/blocked steps, with owner and lease validity applied. This view
@@ -239,4 +250,5 @@ without running dependency checks. File profiling remains available for deeper i
 
 The local API serves `/v1/mission-overview?mission=...`, `/v1/outcome-history?collection=...`,
 and `/v1/performance`. Outcome API times are epoch milliseconds; `before` resumes by immutable
-claim index and `limit` is between 1 and 200.
+claim index and `limit` is between 1 and 200. `mission` on outcome history keeps one mission's
+terminal transitions; `status`, time window, and cursor paging compose with it unchanged.
