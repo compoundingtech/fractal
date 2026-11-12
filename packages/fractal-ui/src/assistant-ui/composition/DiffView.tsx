@@ -6,7 +6,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { createLazyChunk } from '../../lazy-chunk'
-import { surfaceVars as surface, textVars as text, borderVars as border, interactionVars as interaction, statusVars as status, diffPanelVars as diffColor, typeVars as t, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, interactionVars as interaction, syntaxVars as syntax, typeVars as t, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { collapseWhitespaceChanges, normalizePatch, truncatePatch, type NormalizedDiffFile } from './diff-patch'
 import type { PierrePatchProps } from './DiffView.pierre'
 
@@ -170,35 +170,34 @@ const styles = stylex.create({
     '--diffs-line-height': t.uiLeading,
     '--diffs-light-bg': surface.canvas,
     '--diffs-dark-bg': surface.canvas,
-    // Unset --fractal-syntax-* fall back to the semantic ink, resolved here so every token theme applies.
-    '--fractal-diff-fg': `var(--fractal-syntax-fg, ${text.fgSoft})`,
-    '--fractal-diff-addition': `var(--fractal-syntax-addition, ${diffColor.added})`,
-    '--fractal-diff-deletion': `var(--fractal-syntax-deletion, ${diffColor.removed})`,
+    '--fractal-diff-fg': syntax.fg,
+    '--fractal-diff-addition': syntax.addition,
+    '--fractal-diff-deletion': syntax.deletion,
+    '--fractal-diff-addition-ink': syntax.additionInk,
+    '--fractal-diff-deletion-ink': syntax.deletionInk,
     '--diffs-light': 'var(--fractal-diff-fg)',
     '--diffs-dark': 'var(--fractal-diff-fg)',
     '--diffs-addition-color-override': 'var(--fractal-diff-addition)',
     '--diffs-deletion-color-override': 'var(--fractal-diff-deletion)',
     '--diffs-fg-number-override': text.fgMuted,
-    // Kit washes (9% line; word changes underlined in DiffView.pierre) keep muted ink at 4.5:1; Pierre's default 20% line wash does not.
-    '--diffs-bg-addition-override': 'color-mix(in srgb, var(--fractal-diff-addition) 9%, var(--fractal-diff-canvas))',
-    '--diffs-bg-deletion-override': 'color-mix(in srgb, var(--fractal-diff-deletion) 9%, var(--fractal-diff-canvas))',
-    '--diffs-bg-addition-number-override': 'color-mix(in srgb, var(--fractal-diff-addition) 6%, var(--fractal-diff-canvas))',
-    '--diffs-bg-deletion-number-override': 'color-mix(in srgb, var(--fractal-diff-deletion) 6%, var(--fractal-diff-canvas))',
+    '--diffs-fg-number-addition-override': 'var(--fractal-diff-addition-ink)',
+    '--diffs-fg-number-deletion-override': 'var(--fractal-diff-deletion-ink)',
+    // Word changes are underlined (DiffView.pierre) rather than washed, so syntax ink keeps 4.5:1.
     '--diffs-bg-addition-emphasis-override': 'transparent',
     '--diffs-bg-deletion-emphasis-override': 'transparent',
     '--fractal-diff-token-foreground': 'var(--fractal-diff-fg)',
     '--fractal-diff-token-background': surface.canvas,
-    '--fractal-diff-token-token-comment': `var(--fractal-syntax-comment, ${text.fgMuted})`,
-    '--fractal-diff-token-token-keyword': `var(--fractal-syntax-keyword, ${status.runningFg})`,
-    '--fractal-diff-token-token-string': `var(--fractal-syntax-string, ${text.fgMuted})`,
-    '--fractal-diff-token-token-string-expression': `var(--fractal-syntax-string, ${text.fgMuted})`,
-    '--fractal-diff-token-token-constant': `var(--fractal-syntax-constant, ${status.attention})`,
-    '--fractal-diff-token-token-function': `var(--fractal-syntax-func, ${text.fg})`,
-    '--fractal-diff-token-token-parameter': `var(--fractal-syntax-parameter, ${text.fgSoft})`,
-    '--fractal-diff-token-token-punctuation': `var(--fractal-syntax-punctuation, ${text.fgSoft})`,
-    '--fractal-diff-token-token-link': `var(--fractal-syntax-link, ${text.fgMuted})`,
-    '--fractal-diff-token-token-inserted': `var(--fractal-syntax-inserted, ${text.fgMuted})`,
-    '--fractal-diff-token-token-deleted': `var(--fractal-syntax-deleted, ${status.dangerFg})`,
+    '--fractal-diff-token-token-comment': syntax.comment,
+    '--fractal-diff-token-token-keyword': syntax.keyword,
+    '--fractal-diff-token-token-string': syntax.string,
+    '--fractal-diff-token-token-string-expression': syntax.string,
+    '--fractal-diff-token-token-constant': syntax.constant,
+    '--fractal-diff-token-token-function': syntax.func,
+    '--fractal-diff-token-token-parameter': syntax.parameter,
+    '--fractal-diff-token-token-punctuation': syntax.punctuation,
+    '--fractal-diff-token-token-link': syntax.link,
+    '--fractal-diff-token-token-inserted': syntax.inserted,
+    '--fractal-diff-token-token-deleted': syntax.deleted,
     display: 'flex', flexDirection: 'column', minWidth: 0,
     backgroundColor: surface.canvas,
     outlineStyle: 'none',

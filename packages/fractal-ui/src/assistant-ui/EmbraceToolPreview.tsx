@@ -3,7 +3,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Markdown, type MarkdownProps, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
 import { tokens } from './embrace-tokens.stylex'
-import { diffPanelVars as diffColor } from './composition-tokens.stylex'
+import { syntaxVars as syntax } from './composition-tokens.stylex'
 import type { ToolDiff } from './embrace-tool-preview'
 import { DiffView } from './composition/DiffView'
 import { patchFromRows } from './composition/diff-patch'
@@ -40,6 +40,6 @@ const styles = stylex.create({
   caption: { display: 'flex', alignItems: 'baseline', gap: 10, padding: 8, fontSize: 11, color: tokens.ink, backgroundColor: tokens.recess },
   path: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere' },
   counts: { flexShrink: 0, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums' },
-  countAdded: { color: `var(--fractal-syntax-addition, ${diffColor.added})` },
-  countRemoved: { color: `var(--fractal-syntax-deletion, ${diffColor.removed})` },
+  countAdded: { color: syntax.additionInk },
+  countRemoved: { color: syntax.deletionInk },
 })

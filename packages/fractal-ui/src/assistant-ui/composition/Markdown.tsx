@@ -10,7 +10,7 @@ import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
 import { MarkdownLinkPreviewContext } from './markdownLinkPreview.ts'
-import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, syntaxVars as syntax } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
@@ -506,14 +506,13 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  // One palette with the kit DiffView: a chosen theme sets --fractal-syntax-* (composition/syntax-themes.ts);
-  // unset, each falls back to Fractal's semantic ink, resolved where it is used.
-  syntaxComment: { color: `var(--fractal-syntax-comment, ${textColor.fgMuted})`, fontStyle: 'italic' },
-  syntaxKeyword: { color: `var(--fractal-syntax-keyword, ${status.runningFg})` },
-  syntaxString: { color: `var(--fractal-syntax-string, ${textColor.fgMuted})` },
-  syntaxLiteral: { color: `var(--fractal-syntax-constant, var(--fractal-diff-literal, ${status.attention}))` },
-  syntaxFunction: { color: `var(--fractal-syntax-func, ${textColor.fg})`, fontWeight: t.weightMedium },
-  syntaxDeleted: { color: `var(--fractal-syntax-deleted, ${status.dangerFg})` },
+  // One palette with the kit DiffView (syntaxVars: Pierre's default theme), so code blocks and diffs never disagree.
+  syntaxComment: { color: syntax.comment, fontStyle: 'italic' },
+  syntaxKeyword: { color: syntax.keyword },
+  syntaxString: { color: syntax.string },
+  syntaxLiteral: { color: syntax.constant },
+  syntaxFunction: { color: syntax.func },
+  syntaxDeleted: { color: syntax.deleted },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
   tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },

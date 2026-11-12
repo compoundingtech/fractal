@@ -75,9 +75,9 @@ const meta = { excludeStories: ['scenarioExemptions'], id: 'fractal-ui-diff-tint
   }
   // Control: a grey addition ink is rejected.
   const view = canvasElement.querySelector<HTMLElement>('[data-testid="diff-code"]')!
-  view.style.setProperty('--fractal-syntax-addition', 'rgb(128, 128, 128)')
+  view.style.setProperty('--fractal-diff-addition', 'rgb(128, 128, 128)')
   view.style.setProperty('--fractal-diff-canvas', 'rgb(128, 128, 128)')
-  try { await expect(() => assertDiffTint(canvasElement)).toThrow() } finally { view.style.removeProperty('--fractal-syntax-addition'); view.style.removeProperty('--fractal-diff-canvas') }
+  try { await expect(() => assertDiffTint(canvasElement)).toThrow() } finally { view.style.removeProperty('--fractal-diff-addition'); view.style.removeProperty('--fractal-diff-canvas') }
   await expect(assertDiffTint(canvasElement)).toEqual(receipt)
 } } satisfies Meta<typeof DiffTintCanvas>
 export default meta

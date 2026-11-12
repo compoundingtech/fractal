@@ -16,15 +16,23 @@ let registered = false
 function registerTheme() {
   if (registered) return
   registered = true
-  const theme = createCSSVariablesTheme({ name: FRACTAL_DIFF_THEME, variablePrefix: FRACTAL_SYNTAX_PREFIX, fontStyle: true })
-  registerCustomTheme(FRACTAL_DIFF_THEME, () => Promise.resolve(theme), 'diffs')
+  // A CSS-variables theme is typed dark; register a light twin so Pierre's color-scheme (and every
+  // light-dark() wash) follows the surface the diff sits on.
+  const dark = createCSSVariablesTheme({ name: `${FRACTAL_DIFF_THEME}-dark`, variablePrefix: FRACTAL_SYNTAX_PREFIX, fontStyle: true })
+  const light = { ...createCSSVariablesTheme({ name: `${FRACTAL_DIFF_THEME}-light`, variablePrefix: FRACTAL_SYNTAX_PREFIX, fontStyle: true }), type: 'light' as const }
+  registerCustomTheme(`${FRACTAL_DIFF_THEME}-dark`, () => Promise.resolve(dark), 'diffs')
+  registerCustomTheme(`${FRACTAL_DIFF_THEME}-light`, () => Promise.resolve(light), 'diffs')
 }
 registerTheme()
 
 /** Inside the shadow root: the header reads the kit's sans stack; the host paints the shared focus ring. */
 const unsafeCSS = `
 :host { background: transparent; }
+/* Change washes at 7% (light) and 9% (dark) of the change hue (Pierre: 12% and 20%), so syntax ink keeps 4.5:1. */
+[data-diff] :is([data-line], [data-no-newline], [data-gutter-buffer], [data-column-number]) { --mix-light: 93% !important; --mix-dark: 91% !important; }
 /* Word changes: a light wash plus an underline in the change ink, so muted syntax keeps 4.5:1. */
+[data-additions-count] { color: var(--fractal-diff-addition-ink); }
+[data-deletions-count] { color: var(--fractal-diff-deletion-ink); }
 [data-line-type='change-addition'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-addition); text-underline-offset: 3px; }
 [data-line-type='change-deletion'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-deletion); text-underline-offset: 3px; }
 `
@@ -42,7 +50,7 @@ export interface PierrePatchProps {
 
 export default function PierrePatch({ file, layout, wrap, header, lineNumbers, scheme, collapsed, renderHeaderMetadata }: PierrePatchProps) {
   const options = React.useMemo(() => ({
-    theme: FRACTAL_DIFF_THEME,
+    theme: { dark: `${FRACTAL_DIFF_THEME}-dark`, light: `${FRACTAL_DIFF_THEME}-light` },
     themeType: scheme,
     preferredHighlighter: 'highlights' as const,
     diffStyle: layout,
