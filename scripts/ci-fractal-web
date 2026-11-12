@@ -143,6 +143,7 @@ stream_kit() {
     lane "UI kit scenario story check" pnpm --filter @fractal/ui test:stories
     lane "UI kit tab-strip policy" pnpm -C packages/fractal-ui run test:tab-strip
     lane "UI kit entity descriptor" pnpm -C packages/fractal-ui run test:entity
+    lane "UI kit diff patch normalizer" pnpm -C packages/fractal-ui run test:diff-patch
   fi
   case "${KIT_INPUTS:-true}" in
     true)
