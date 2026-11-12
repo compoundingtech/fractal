@@ -742,17 +742,17 @@ pub async fn approve_planning_session(
             &format!("{approval_key}:cutover"),
             &format!("{approval_key}:proposal"),
         )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
-        if let Some(proposal) = revision.proposal {
-            if proposal.reviewers.contains(&request.actor) {
-                let revision_preview = proposal.preview_hash.as_deref()
-                    .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
-                state.store.approve_revision_proposal(
-                    &proposal.subject,
-                    &request.actor,
-                    revision_preview,
-                    &format!("{approval_key}:revision-approval"),
-                ).map_err(ApiError::bad)?;
-            }
+        if let Some(proposal) = revision.proposal
+            && proposal.reviewers.contains(&request.actor)
+        {
+            let revision_preview = proposal.preview_hash.as_deref()
+                .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
+            state.store.approve_revision_proposal(
+                &proposal.subject,
+                &request.actor,
+                revision_preview,
+                &format!("{approval_key}:revision-approval"),
+            ).map_err(ApiError::bad)?;
         }
     } else {
         state.store.apply_as(
