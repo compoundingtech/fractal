@@ -732,8 +732,9 @@ fn excerpts() -> &'static Mutex<HashMap<(String, String, u64), Option<String>>> 
 /// closed, so the quote renders as the comment does.
 pub fn quote(text: &str) -> Option<String> {
     let visible = without_html_tags(text);
-    let text = visible.trim();
-    if text.is_empty() {
+    // Indentation is Markdown syntax, not disposable whitespace.
+    let text = visible.trim_matches(['\n', '\r']);
+    if text.trim().is_empty() {
         return None;
     }
     let mut cut = text.chars().take(EXCERPT_CHARS).collect::<String>();
