@@ -146,7 +146,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
         return <View key={shown?.id ?? step?.id} style={{ paddingHorizontal: 12, paddingVertical: 5 }}>
           <T><T bold color={style.color}>{style.glyph} </T><T bold>{shown?.path ?? step?.path}</T><T color={style.color}>  {style.word}</T></T>
           {shown?.note ? <T color={theme.waiting} style={{ paddingLeft: 22 }}>{shown.note}</T> : null}
-          {shown?.word === 'working' && step?.last_progress ? <T style={{ paddingLeft: 22 }}>{step.last_progress}</T> : null}
+          {shown?.word === 'working' && step?.last_progress ? <View style={{ paddingLeft: 22 }}><Markdown text={markdownSource(step.last_progress)} color={theme.text} /></View> : null}
           {step?.goals?.[0] ? <View style={{ paddingLeft: 22 }}><Markdown text={markdownSource(step.goals[0])} color={theme.subtext0} /></View> : null}
           {agent
             ? <Pressable onPress={() => navigation.navigate('Conversation', { target: agent.id, title: agentName(agent) })} style={{ paddingLeft: 22 }}><T><T dim>held by </T><T color={theme.accent}>{agentName(agent)}</T></T></Pressable>

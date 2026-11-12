@@ -85,7 +85,7 @@ test('settled blocks are cut, so a long document is not parsed whole', () => {
 
 test('multiline reference labels resolve across settled block boundaries', () => {
   for (const source of [
-    '[two\\nlines]: https://example.test\\n\\nUse [two lines].'.replaceAll('\\n', '\n'),
+    '[two\nlines]: https://example.test\n\nUse [two lines].',
     'Use [two lines].\n\n[two\nlines]: https://example.test',
     '[escaped\\] label\ncontinued]: https://example.test\n\nUse [escaped\\] label continued].',
   ]) {
@@ -98,7 +98,7 @@ test('multiline reference labels resolve across settled block boundaries', () =>
 
 test('both plain-text helper copies preserve literal entity-looking text', async () => {
   const kit = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
-  const client = await server.ssrLoadModule(new URL('../../../../../../clients/typescript/fractal-client/markdown-text.ts', import.meta.url).pathname)
+  const client = await server.ssrLoadModule(new URL('../../../../../clients/typescript/fractal-client/markdown-text.ts', import.meta.url).pathname)
   for (const helpers of [kit, client]) {
     const source = '&copy; &#65; &#x41; &amp;'
     for (const helper of [helpers.markdownFromPlain, helpers.inlineFromPlain]) {
