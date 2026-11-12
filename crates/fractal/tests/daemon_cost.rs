@@ -607,6 +607,18 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "a bound mailbox stream's receipt; the same lifecycle write is measured as \
          POST /v1/messages/{message_id}/claims",
     ),
+    (
+        "GET /v1/source-maps/revisions",
+        "reads the source.mapped claims of one subject through the claims (subject, kind) index; generated cost stores publish no source maps, so the probe would measure an empty range; cost grows with that subject's mapped revisions",
+    ),
+    (
+        "GET /v1/source-maps/where",
+        "a reverse lookup that decodes the source map of every live agent and non-retired mission revision and reads the matching file texts on each request; generated cost stores publish no source maps; cost grows with live mapped subjects and is not measured here",
+    ),
+    (
+        "GET /v1/source-maps/declaration",
+        "renders one stored agent or mission revision as canonical KDL by subject and revision key; generated cost stores publish no source maps, so the subject has no mapped revision to resolve",
+    ),
 ];
 
 /// One request the check makes. `{name}` in a path stands for an item of the generated store;
