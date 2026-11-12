@@ -24,6 +24,8 @@ function luminance(rgb) {
   return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
 }
 
+// Scope: status, chrome and prose ink stay green-free; syntax and diff ink follow the Pierre palette and are not palette tokens.
+// `good` (status) and `added` (the directions' own changed-row wash) are not Pierre's syntax or diff ink, so both stay in scope.
 test('all shipped direction/scheme palettes have no green good or added value', () => {
   assert.deepEqual([...palettes.keys()].sort(), ['folio.dark', 'folio.light', 'orbit.dark', 'orbit.light', 'relay.dark', 'relay.light'])
   const findings = []

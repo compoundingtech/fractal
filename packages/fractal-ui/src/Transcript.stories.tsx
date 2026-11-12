@@ -1389,15 +1389,18 @@ export const DefaultEmpty: Story = { tags: ['critical'], args: { state: 'empty' 
 } }
 export const SettledAnswerMetaLight: Story = { ...SettledAnswerMeta, args: { scheme: 'light' } }
 
-const tokenAnswer = 'Quoted shell and diff tokens stay neutral.\n\n```bash\nprintf \'%s\\n\' "retained rows"\necho \'single quoted\' > "out file.txt"\n```\n\n```diff\n--- a/src/rows.ts\n+++ b/src/rows.ts\n@@ -1,2 +1,2 @@\n-const label = "old row"\n+const label = "new row"\n```'
+const tokenAnswer = 'Quoted shell strings and diff lines take the syntax palette; the prose around them stays green-free.\n\n```bash\nprintf \'%s\\n\' "retained rows"\necho \'single quoted\' > "out file.txt"\n```\n\n```diff\n--- a/src/rows.ts\n+++ b/src/rows.ts\n@@ -1,2 +1,2 @@\n-const label = "old row"\n+const label = "new row"\n```'
 const tokenItems: readonly ConversationItem[] = cases.settled.turns[0]!.items.map(item => item._tag === 'ToolCall' && item.name === 'run' ? { ...item, input: { command: 'printf \'%s\\n\' "retained rows"' }, result: { content: 'printf \'%s\\n\' "retained rows"\n+inserted line', mediaType: 'text/x-diff', isError: false, at } } : item._tag === 'Text' && item.role === 'assistant' ? { ...item, id: 'tokens/answer', text: tokenAnswer } : item)
 const tokenData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ ...cases.settled.turns[0]!, id: 'tokens', items: tokenItems, work: workLogTurnFromItems([cases.settled.turns[0]!.prompt!, ...tokenItems], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: false, interrupted: false, durationMs: 24000, startedAt: at, completeHistory: true }) }] }
 const noGreenData: readonly (readonly [string, TranscriptStoryData])[] = [['tokens', tokenData], ['semantic', semanticData], ...(Object.keys(cases) as State[]).map(state => [state, cases[state]] as const)]
 // Green is hue 90-170° with HSL saturation above 25%; any colour function the parser cannot read fails too.
+// Syntax and diff ink use the Pierre palette (green strings, green additions), so an element marked [data-syntax-token],
+// with everything inside it, is out of scope; status, chrome and prose stay green-free. The walk stays in the light DOM:
+// a DiffView's shadow root holds only Pierre's diff rendering, while its host, header and caption are checked here.
 function greenFindings(root: Element): string[] {
   const findings: string[] = []
   const properties = ['color', 'background-color', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color', 'fill', 'stroke', 'box-shadow', 'background-image']
-  for (const element of [root, ...root.querySelectorAll('*')]) for (const pseudo of [null, '::before', '::after']) {
+  for (const element of [root, ...root.querySelectorAll('*')]) if (element.closest('[data-syntax-token]') === null) for (const pseudo of [null, '::before', '::after']) {
     const style = getComputedStyle(element, pseudo)
     for (const property of properties) {
       const value = style.getPropertyValue(property)
@@ -1432,6 +1435,18 @@ export const NoGreenAllStates: Story = { tags: ['critical', 'merge-only'], rende
   await expect(tokens.querySelectorAll('[data-syntax-token~="string"]').length).toBeGreaterThan(2)
   await expect(tokens.querySelector('[data-testid="tool-detail-preview"]')).not.toBeNull()
   await expect(canvasElement.querySelectorAll('[data-testid="thinking-entry"]').length).toBeGreaterThan(0)
+  // Control: the exemption is the structural marker, not the colour. The inserted token's own green is out of scope,
+  // but the same ink on the chrome that holds it, the tool preview, is still a finding.
+  const inserted = tokens.querySelector<HTMLElement>('[data-syntax-token~="inserted"]')!
+  const preview = tokens.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
+  const syntaxGreen = getComputedStyle(inserted).color
+  await expect(greenFindings(inserted)).toEqual([])
+  preview.style.color = syntaxGreen
+  try {
+    await expect(greenFindings(preview)).toContain(`${preview.tagName.toLowerCase()}[tool-detail-preview] color ${syntaxGreen}`)
+  } finally {
+    preview.style.removeProperty('color')
+  }
   await expect(greenFindings(canvasElement)).toEqual([])
 } }
 export const NoGreenAllStatesLight: Story = { ...NoGreenAllStates, tags: ['critical', '!merge-only'], args: { scheme: 'light' } }
