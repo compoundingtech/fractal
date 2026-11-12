@@ -684,7 +684,7 @@ origins; replication must not create another publisher for the same member.
 | `st.agent.state` | `faulted`, `unreachable`, `asking`, `waiting`, `working`, `idle`, `starting`, `unknown` |
 | `st.agent.reason` | Only the state-specific values in the table below |
 | `st.agent.has_work` | Boolean `true`, `false` |
-| `st.attention.kind` | `person-step`, `human-gate`, `launch-approval`, `unread-message`, `agent-request`, `revision-approval`, `harness-login`, `harness-prompt`, `fault`, `unattributed` |
+| `st.attention.kind` | `person-step`, `human-gate`, `launch-approval`, `unread-message`, `agent-request`, `revision-approval`, `harness-login`, `harness-prompt`, `fault`, `model-drift`, `unattributed` |
 
 R is a closed registry, not a regex, workspace path, arbitrary remote URL, branch
 or dynamically discovered set. Missing, ambiguous, unapproved and unknown

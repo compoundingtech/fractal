@@ -12221,6 +12221,71 @@ mission "agent-human" state="ready" {
 }
 
 #[test]
+fn a_run_seats_drift_item_resolves_its_person_without_rebuilding_the_run() {
+    use crate::store::model_drift::{MODEL_DRIFT_CONDITION, MODEL_DRIFT_TITLE, ModelDrift, model_drift_episode};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"drift-owner\" state=\"ready\" {\n  goal \"Exercise drift ownership.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "drift-owner-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "drift-owner".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "drift-owner-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reason = ModelDrift { declared: "anthropic/claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 1 }.reason();
+    store.record_failure(&model_drift_episode(&subject), &crate::model::AttentionRequest {
+        reviewer: subject.clone(), title: MODEL_DRIFT_TITLE.into(), reason, severity: "error".into(),
+        targets: vec![subject.clone()], actor: "agent/st3/reconciler".into(),
+        idempotency_key: "drift-owner:attention".into(),
+    }, MODEL_DRIFT_CONDITION).unwrap();
+    // The person comes from the run's requester header: no step of the run is enriched.
+    crate::store::STEPS_ENRICHED.with(|enriched| enriched.set(0));
+    let items = store.model_drift_attention_items(Some("person/test"), u128::MAX).unwrap();
+    assert_eq!(crate::store::STEPS_ENRICHED.with(std::cell::Cell::get), 0);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].person, "person/test");
+    assert_eq!(items[0].targets, [subject]);
+}
+
+#[test]
+fn only_a_client_that_negotiated_model_drift_reads_the_kind_as_it_is() {
+    let row = json!({"kind": "attention", "attention_kind": "model-drift", "source_kind": "model-drift",
+        "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
+    let negotiated = AttentionCompatibility { custom_forms: true, model_drift: true };
+    let mut current = vec![row.clone()];
+    client_attention_compatibility(&mut current, negotiated);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0], row);
+    // A client with custom forms but without the model-drift feature (an existing TypeScript
+    // client) and a client with neither both read a request without actions.
+    for custom_forms in [true, false] {
+        let mut older = vec![row.clone()];
+        client_attention_compatibility(&mut older, AttentionCompatibility { custom_forms, model_drift: false });
+        assert_eq!(older[0]["attention_kind"], "agent-request", "custom_forms={custom_forms}");
+        assert_eq!(older[0]["actions"], json!([]));
+        assert_eq!(older[0]["title"], "2 agents declared a run b since 09:14Z (oldest agent/example.a)");
+    }
+}
+
+#[test]
 fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
