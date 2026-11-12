@@ -1026,6 +1026,18 @@ gate "the release is approved" type="human" {
 
 A human gate requires a full `person/...` reviewer. The question and repeated review targets are optional.
 
+A step's first human gate requests review as soon as the step becomes `ready`, including at run
+start for first steps. Later human gates open in declaration order after the earlier gates pass,
+so two questions for the same reviewer cannot hide one another. No worker claim or completion
+report is required: the person can see
+the alert and approve while the worker has not claimed the step. Approval does not complete
+worker work; the worker must still submit it and the other completion conditions must hold.
+Claiming or re-evaluating the same step attempt does not open another request. Cancelling or
+superseding the step closes its old review.
+For `mode="feedback"` on an unclaimed open-pool step, a request for changes stays bound to
+the current request until a worker claims it; then that worker receives the feedback and the
+next attempt starts.
+
 Fractal creates one `gate.requested` claim for the exact mission or step revision and attempt. A review decision must match that request.
 A newer Fractal build can word the same gate's request differently and ask again for the same attempt.
 The reviewer then sees one review: the newest request, which is the one the gate waits on, aged
@@ -1084,6 +1096,17 @@ and send the requester one message from `daemon/runtime` with the answer. They s
 turns, re-declarations and the end of the agent's owning work while the agent remains declared.
 Only an answer, deadline resolution, withdrawal, or removal of the agent ends them.
 A requester withdraws with `fractal work cancel-ask STEP --as AGENT --summary TEXT`.
+For an ask attached to a native Data-DSL step, withdrawal fails the waiting step with
+`ask cancelled by ACTOR`; ordinary retry, run failure and `finally` handling apply.
+The response projection applies this only to the exact originating attempt still waiting on
+that asking episode. A delayed cancellation from another member cannot fail a newer attempt,
+replace a later ask, or clear a resumed step's live lease, including during full replay.
+Derived origin state claims remain notifications for reactive run invalidation, not a second
+authoritative cancellation effect. Upgraded readers also ignore those redundant effects from
+older writers; older daemons must be upgraded to gain this consumption fence.
+It does not resume that step as ready. A program's `Fractal.ask` instead propagates typed
+`AskCancelled`, which the program may catch; uncaught, it fails the program step and
+uses the same ordinary failure cleanup (see [program engine §6](program-engine.md#6-linked-child-runs-worker-turns-and-asks)).
 Repeated keys return the same source.
 
 #### Deadlines
