@@ -43,6 +43,7 @@ import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
 import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
 import { ownAvailability, servesAvailability, writeRefusal } from './availability';
+import { PresenceReporter } from './presence';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -551,6 +552,18 @@ function useAppStore(proof?: FabricProfile) {
     } catch (e) { if (capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
+  // While a connection is live and its pairing may report presence, this phone says whether the person is here.
+  useEffect(() => {
+    if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/') || !caps.capabilities.some(capability => capability.id === 'write.presence' && capability.state === 'granted')) return;
+    const reporter = new PresenceReporter({
+      report: async (presence, observed_at) => { const person = (await client.presenceReport({ presence, observed_at })).value; if (capsRef.current === caps) setAvailability(previous => ({ ...previous, person })); },
+      after: (run, ms) => { const timer = setTimeout(run, ms); return () => clearTimeout(timer); }, now: Date.now,
+    });
+    const gate = foreground.current;
+    if (gate.active) reporter.foreground(true);
+    const leave = gate.subscribe(active => reporter.foreground(active));
+    return () => { leave(); reporter.stop(); };
+  }, [proof, client, status, caps]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
