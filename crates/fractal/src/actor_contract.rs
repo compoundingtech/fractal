@@ -147,6 +147,7 @@ mod tests {
             "st conversations reply",
             "st agents rename-id",
             "st missions rename-id",
+            "st missions retry",
         ] {
             assert_eq!(commands[path]["actor"], "required", "{path}");
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");

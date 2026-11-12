@@ -2874,6 +2874,8 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  retried_by?: Array<MissionRunId>;
+  retry_of?: MissionRunId;
   started_at?: number | null;
   state_since: Timestamp;
   status: string;

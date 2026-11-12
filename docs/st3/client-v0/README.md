@@ -259,6 +259,21 @@ completion audit is retained. Unmarked legacy challenges have a bounded
 five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
 for secret storage, logical-backup exclusions, and restart/downgrade guidance.
 
+### Mission run retry links
+
+Mission `run_details[]` summaries expose optional `retry_of` (a mission-run ID) and
+`retried_by` (an array of mission-run IDs). Ordinary starts omit `retry_of`; a run
+without retries may omit `retried_by`. Older servers omit both fields. Readers
+must preserve the distinction between a new-run retry and a step's next attempt.
+
+A retry creates a new run, defaulting to the latest published mission revision;
+explicit same-revision retry uses the source's current revision. It retains exact
+resolved inputs and workspace, refuses incompatible latest inputs with both
+revisions and a reason, and restarts all steps and the program from the top.
+The source's status, generation, and execution history do not change. These links
+are navigation and attribution, not a signal to hide the source or reuse its work.
+See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
+
 ### Mission run timing
 
 `GET /v1/client/missions/{id}` requires `read.projections`, like other projection reads.

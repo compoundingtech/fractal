@@ -102,14 +102,19 @@ impl Store {
                     )
                     .optional()?
                     .flatten();
-                items.push(
-                    json!({"id": subject, "generation_id": format!("run-generation/{generation}"),
+                let (retry_of, retried_by) = mission_run_retry_links_tx(&connection, &subject)?;
+                let mut item = json!({
+                    "id": subject, "generation_id": format!("run-generation/{generation}"),
                     "requester": short(&requester), "status": status, "phase": phase,
-                    "revision":revision,
+                    "revision": revision, "retried_by": retried_by,
                     "created_at_unix_ms": created.parse::<u128>()?,
                     "updated_at_unix_ms": updated.parse::<u128>()?,
-                    "reason": reason.as_deref().map(short)}),
-                );
+                    "reason": reason.as_deref().map(short),
+                });
+                if let Some(source) = retry_of {
+                    item["retry_of"] = Value::String(source);
+                }
+                items.push(item);
             }
             previews.push(items);
         }
@@ -194,10 +199,16 @@ impl Store {
                 "assignee": assignee, "claimant": claimant,
             }));
         }
-        Ok(Some(json!({
-            "id": format!("mission-run/{run}"), "status": status,
+        let subject = format!("mission-run/{run}");
+        let (retry_of, retried_by) = mission_run_retry_links_tx(&connection, &subject)?;
+        let mut metadata = json!({
+            "id": subject, "status": status, "retried_by": retried_by,
             "progress": {"total": steps.len(), "done": done}, "steps": steps,
-        })))
+        });
+        if let Some(source) = retry_of {
+            metadata["retry_of"] = Value::String(source);
+        }
+        Ok(Some(metadata))
     }
 
     /// A run card's progress counts cover every step; only its first twenty steps are hydrated.

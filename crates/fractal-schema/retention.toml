@@ -127,6 +127,7 @@
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
 "mission-run.created" = { class = "durable" }
 "mission-run.report-to" = { class = "durable" }
+"mission-run.retry-linked" = { class = "durable" }
 "mission-run.state" = { class = "durable" }
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
