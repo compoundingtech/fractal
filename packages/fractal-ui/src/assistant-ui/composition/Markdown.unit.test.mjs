@@ -520,6 +520,69 @@ test('literal URL precedence matches original remark-gfm, including exact destin
   } finally { await isolated.close() }
 })
 
+test('literal URLs stay inside original inline containers on both parser paths', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' || key === 'implicit' ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    const protocols = ['https://example.test/', 'www.example.test/']
+    for (const prefix of protocols) {
+      for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a\\\\|b', 'a(b)).']) {
+        for (const source of [
+          `|link|other|\n|---|---|\n|${prefix}${suffix}|b|`,
+          `|${prefix}${suffix}|other|\n|---|---|\n|a|b|`,
+          `|${prefix}${suffix}|${prefix}next|\n|---|---|\n|${prefix}${suffix}|${prefix}last|`,
+          `link|other\n---|---\n${prefix}${suffix}|b`,
+        ]) {
+          const expected = parse(source, [remarkGfm])
+          for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+            const actual = parse(source, plugins)
+            assert.deepEqual(actual, expected, source)
+            assert.deepEqual(actual.tree.children[0].children.map(row => row.children.length), [2, 2], source)
+          }
+        }
+      }
+    }
+    const table = '|link|other|\n|---|---|\n|https://example.test/a\\|b|next|'
+    for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+      const cells = parse(table, plugins).tree.children[0].children[1].children
+      assert.equal(cells.length, 2)
+      assert.equal(cells[0].children[0].url, 'https://example.test/a|b')
+      assert.deepEqual(cells[0].children[0].children, [{ type: 'text', value: 'https://example.test/a|b' }])
+      assert.deepEqual(cells[1].children, [{ type: 'text', value: 'next' }])
+    }
+    for (const source of [
+      '> https://example.test/a*b*c\n> www.example.test/d_e_f',
+      '> https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '- https://example.test/a*b*c\n  www.example.test/d_e_f',
+      '- https://example.test/a*b*c\n\n  www.example.test/d_e_f\n\n- next',
+      '- outer\n  - https://example.test/a*b*c\n    www.example.test/d_e_f\n- next',
+      '# https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '# https://example.test/a*b*c ###\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\n===\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c  \nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\\\nwww.example.test/d_e_f',
+      '> https://example.test/a*b*c  \n> www.example.test/d_e_f',
+      '- https://example.test/a*b*c\\\n  www.example.test/d_e_f',
+      '[https://example.test/a*b*c](https://target.test/) www.example.test/after',
+      '![https://example.test/a*b*c](https://image.test/) www.example.test/after',
+      '|[https://example.test/a*b*c](https://target.test/)|www.example.test/after|\n|---|---|\n|![https://example.test/a*b*c](https://image.test/)|next|',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, source)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
 test('the suite runs on the parser it names after parity', () => {
   assert.equal(pulldown.pulldownReady(), usePulldown)
   assert.match(block('**x**'), /<strong/)

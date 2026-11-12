@@ -54,9 +54,9 @@ export const setPulldownEnabled = (on: boolean): void => { enabled = on }
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
-function events(source: string): readonly Event[] {
+function events(source: string | Uint8Array): readonly Event[] {
   const module = exports!
-  const bytes = encoder.encode(source)
+  const bytes = typeof source === 'string' ? encoder.encode(source) : source
   const pointer = module.alloc(bytes.length)
   try {
     new Uint8Array(module.memory.buffer, pointer, bytes.length).set(bytes)
@@ -225,47 +225,88 @@ function* literalUrls(source: string): Generator<LiteralUrl> {
 }
 
 /**
- * The first event pass supplies source offsets and opaque contexts, not the already-parsed URL text. Turn eligible
- * raw URL extents into escaped explicit links and parse once more: emphasis/code/delete can no longer consume their
- * delimiters, and surrounding emphasis is parsed with the same precedence as GFM. Code, HTML, existing links and
- * image alt text are never rewritten. Documents without literal URLs need only the original pass.
+ * Text events identify both the original text span and its enclosing inline run. Recognize URL extents only within
+ * that run, never across structural cell delimiters, then rewrite eligible raw extents as escaped explicit links.
+ * Reparse so emphasis/code/delete cannot consume URL delimiters. Existing links, images, code and HTML stay opaque.
+ * In table cells, GFM removes escaped-pipe backslashes before inline tokenization; retain a source map for rewriting.
  */
 function literalEvents(source: string): readonly Event[] {
-  const candidates = [...literalUrls(source)]
-  const original = events(source)
-  if (candidates.length === 0) return original
-  const ranges: { start: number; end: number }[] = []
+  const bytes = encoder.encode(source)
+  const original = events(bytes)
+  if (!/https?:\/\/|www\./i.test(source)) return original
+  interface Rewrite { readonly start: number; readonly end: number; readonly value: string }
+  interface InlineRun {
+    readonly start: number; readonly end: number; readonly tableCell: boolean
+    readonly candidates: Rewrite[]; next: number
+  }
+  const runs = new Map<string, InlineRun>()
+  const ranges: { start: number; end: number; run: InlineRun }[] = []
   const stack: string[] = []
   let opaque = 0
-  for (const [kind, first, start, end] of original) {
+  for (const [kind, first, start, end, inlineStart, inlineEnd, tableCell] of original) {
     if (kind === 's') { stack.push(first!); if (['code', 'html', 'link', 'image'].includes(first!)) opaque++ }
     else if (kind === 'e') { if (['code', 'html', 'link', 'image'].includes(stack.pop()!)) opaque-- }
-    else if (kind === 't' && opaque === 0 && start !== undefined) ranges.push({ start: Number(start), end: Number(end) })
+    else if (kind === 't' && opaque === 0 && inlineStart !== undefined && inlineEnd !== undefined) {
+      const key = `${inlineStart}:${inlineEnd}`
+      let run = runs.get(key)
+      if (run === undefined) {
+        run = { start: Number(inlineStart), end: Number(inlineEnd), tableCell: tableCell === '1', candidates: [], next: 0 }
+        runs.set(key, run)
+      }
+      ranges.push({ start: Number(start), end: Number(end), run })
+    }
+  }
+  for (const run of runs.values()) {
+    const raw = decoder.decode(bytes.subarray(run.start, run.end))
+    let text = raw
+    let offsets: number[] | undefined
+    if (run.tableCell && raw.includes('\\|')) {
+      const characters: string[] = []
+      offsets = [0]
+      for (let index = 0; index < raw.length; index++) {
+        if (raw[index] === '\\' && raw[index + 1] === '|') index++
+        characters.push(raw[index]!)
+        offsets.push(index + 1)
+      }
+      text = characters.join('')
+    }
+    let cursor = 0
+    let byte = run.start
+    for (const candidate of literalUrls(text)) {
+      const start = offsets?.[candidate.index] ?? candidate.index
+      const end = offsets?.[candidate.index + candidate.value.length] ?? candidate.index + candidate.value.length
+      byte += encoder.encode(raw.slice(cursor, start)).length
+      const byteEnd = byte + encoder.encode(raw.slice(start, end)).length
+      run.candidates.push({ start: byte, end: byteEnd, value: candidate.value })
+      cursor = end
+      byte = byteEnd
+    }
   }
   const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, '\\$&')
   const parts: string[] = []
-  let byte = 0
-  let cursor = 0
-  let range = 0
   let at = 0
-  for (const candidate of candidates) {
-    byte += encoder.encode(source.slice(cursor, candidate.index)).length
-    cursor = candidate.index
-    while (range < ranges.length && ranges[range]!.end <= byte) range++
-    if (range === ranges.length || ranges[range]!.start > byte) continue
-    let before = source.slice(at, candidate.index)
-    // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
-    const marker = source[candidate.index - 1]
-    let slash = candidate.index - (marker === '!' ? 1 : 0)
-    while (slash > at && source[slash - 1] === '\\') slash--
-    const slashCount = candidate.index - (marker === '!' ? 1 : 0) - slash
-    if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
-    else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
-    parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
-    at = candidate.index + candidate.value.length
+  // Text ranges arrive in source order. Consume each run's candidate cursor here rather than sorting overlapping
+  // item/paragraph runs, so recognition and reconstruction remain bounded scans.
+  for (const range of ranges) {
+    const run = range.run
+    while (run.next < run.candidates.length && run.candidates[run.next]!.start < range.start) run.next++
+    while (run.next < run.candidates.length && run.candidates[run.next]!.start < range.end) {
+      const candidate = run.candidates[run.next++]!
+      if (candidate.start < at) continue
+      let before = decoder.decode(bytes.subarray(at, candidate.start))
+      // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
+      const marker = before.at(-1)
+      let slash = before.length - (marker === '!' ? 1 : 0)
+      while (slash > 0 && before[slash - 1] === '\\') slash--
+      const slashCount = before.length - (marker === '!' ? 1 : 0) - slash
+      if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
+      else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
+      parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
+      at = candidate.end
+    }
   }
   if (parts.length === 0) return original
-  parts.push(source.slice(at))
+  parts.push(decoder.decode(bytes.subarray(at)))
   return events(parts.join(''))
 }
 
