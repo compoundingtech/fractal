@@ -26,11 +26,25 @@ const meta = {
   id: 'fractal-ui-diff-view',
   title: 'Kit/DiffView',
   component: DiffViewStory,
+  excludeStories: ['scenarioExemptions'],
   args: { scheme: 'dark', width: 1280, layout: 'unified', wrap: false, header: true, patch: samplePatch },
   argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] }, layout: { control: 'inline-radio', options: ['unified', 'split'] }, width: { control: 'inline-radio', options: [1280, 440] } },
   parameters: { scenario: { _tag: 'primitive', reason: 'The kit diff renderer over fixed patch text; no domain state.' }, layout: 'fullscreen' },
 } satisfies Meta<typeof DiffViewStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'BareFence:primitive',
+  'Compact:primitive',
+  'Narrow:primitive',
+  'NarrowLight:primitive',
+  'Split:primitive',
+  'SplitLight:primitive',
+  'Streaming:primitive',
+  'Unified:primitive',
+  'UnifiedLight:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 const rendered = async (canvasElement: HTMLElement) => {

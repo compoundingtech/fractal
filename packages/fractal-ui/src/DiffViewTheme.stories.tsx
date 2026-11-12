@@ -50,6 +50,7 @@ const meta = {
   id: 'fractal-ui-diff-view-theme',
   title: 'Kit/DiffView/Theme',
   component: ThemeBoard,
+  excludeStories: ['scenarioExemptions'],
   args: { scheme: 'dark', width: 1280, candidate: 'all' },
   argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] }, width: { control: 'inline-radio', options: [1280, 440] }, candidate: { control: 'inline-radio', options: ['all', ...names] } },
   parameters: {
@@ -59,6 +60,14 @@ const meta = {
   },
 } satisfies Meta<typeof ThemeBoard>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:primitive',
+  'DarkNarrow:primitive',
+  'Light:primitive',
+  'LightNarrow:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 /** Code block and diff paint the same keyword colour in every candidate: one palette, two renderers. */
