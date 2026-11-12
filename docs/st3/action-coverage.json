@@ -2712,7 +2712,7 @@
     },
     {
       "command": "st work cancel-ask",
-      "description": "Cancel your own ask and resume its live origin",
+      "description": "Cancel your own ask; fail its waiting native origin or propagate typed AskCancelled to its program",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],

@@ -384,6 +384,14 @@ receives:
 | resolved at its deadline | the same, with the default answer (none for a free-text ask) and `resolved_by: 'deadline'` |
 | withdrawn while the run goes on | Failure `{ _tag: 'AskCancelled', ask }` |
 
+Withdrawal is a typed failure, not a successful empty answer. A program may handle
+`AskCancelled` (for example with `Effect.catchTag`) and continue. If it leaves that failure
+uncaught, its waiting program step fails and the run follows ordinary failure handling,
+including declared native `finally` steps; the attempt's other open children and asks are
+cancelled. Native Data-DSL steps have no typed program handler: cancelling their ask fails
+the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries and `finally`
+handling rather than resuming the step as ready.
+
 An ask that ends with its run is never resolved: the program ended with it.
 
 **Cancellation.** Cancelling the parent run cancels its children through
