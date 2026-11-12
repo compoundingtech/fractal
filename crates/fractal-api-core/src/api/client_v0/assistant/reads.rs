@@ -73,6 +73,10 @@ pub async fn project_with_context(
                 "title": item["title"], "detail": item["detail"], "request": attention_request(item),
             })))
         },
+        "availability" => {
+            allow(parameters, SUMMARY_FIELDS, max_bytes)?;
+            availability(state).await
+        }
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),
@@ -241,6 +245,26 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
         })
     })
     .await?
+}
+
+/// The grant person's own availability, with raw presence because the person is the reader,
+/// and their current directive note, from one store snapshot.
+async fn availability(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> {
+    use fractal_store::store::availability::AvailabilityStore as _;
+    let person = owner(state)?;
+    let reader = state.clone();
+    blocking_store(move || {
+        reader.store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&reader, index);
+            let now = client_snapshot_time(&snapshot);
+            let availability = reader.store.person_availability(&person, now)?;
+            let note = fractal_store::store::directive_notes::current(&reader.store.readers.get(), &person, now)?;
+            Ok((snapshot, json!({
+                "kind": "person-availability", "availability": availability, "directive_note": note,
+            })))
+        })
+    })
+    .await
 }
 
 /// Native cards put informational person-step requests in `update`, not `request`.
