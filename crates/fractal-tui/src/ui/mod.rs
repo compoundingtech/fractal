@@ -1621,6 +1621,12 @@ impl Ui {
         if self.paste_into_palette(&first) {
             return;
         }
+        if self.focused_pane() == Some(Pane::Availability)
+            && let Some(typed) = self.availability.typed_mut()
+        {
+            typed.push_str(&first);
+            return;
+        }
         if self.mission_form_focused()
             && let Some((fields, focus)) = self.new_mission.as_mut()
         {
