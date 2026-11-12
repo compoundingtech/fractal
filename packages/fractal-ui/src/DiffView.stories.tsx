@@ -50,6 +50,7 @@ export const scenarioExemptions: readonly string[] = [
   'NarrowLight:primitive',
   'SchemeSwitch:primitive',
   'Split:primitive',
+  'SplitFocusRing:primitive',
   'SplitLight:primitive',
   'Streaming:primitive',
   'TranscriptToolDiff:primitive',
