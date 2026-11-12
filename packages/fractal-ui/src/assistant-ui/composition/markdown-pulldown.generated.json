@@ -1,7 +1,7 @@
 {
-  "sha256": "4b64c75c4c538acb9900ffa5956e3a55459917f2f2944bf01f2867bf33350f13",
-  "bytes": 222758,
-  "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "sha256": "379fc05c2b257c7de01604cea1f44f6cfd19fc9da88b346193d4170f1df3b0d0",
+  "bytes": 225331,
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07) (built from a source tarball)",
   "crates": [
     {
       "name": "bitflags",
