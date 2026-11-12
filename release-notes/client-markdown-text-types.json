@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Markdown wire fields carry x-st-text (markdown-block or markdown-inline) in the client-v0 schema, and the generated TypeScript client types them as opaque MarkdownBlock or MarkdownInline text; a guard rejects plain text spliced into Markdown templates unescaped",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The wire and decoded values are unchanged strings. Forty client-v0 schema fields gain an x-st-text annotation; the generated TypeScript client now types them as branded MarkdownBlock or MarkdownInline, so TypeScript consumers read the words through markdownSource. Rust and Swift clients are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores plain string types; no stored data changes."
+  }
+}
