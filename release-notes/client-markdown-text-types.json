@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The wire and decoded values are unchanged strings. Forty client-v0 schema fields gain an x-st-text annotation; the generated TypeScript client now types them as branded MarkdownBlock or MarkdownInline, so TypeScript consumers read the words through markdownSource. Rust and Swift clients are unchanged."
+    "detail": "The wire and decoded values are unchanged strings. Forty client-v0 schema fields gain an x-st-text annotation; the generated TypeScript client now types them as opaque MarkdownBlock or MarkdownInline, including nullable fields, so TypeScript consumers read the words through markdownSource. This deliberate source-level contract is not a published client API: @fractal/client, @fractal/sdk, @fractal/views, @fractal/scenarios, fractal-web and apps/ios are all private: true packages in this repository, and the gate typechecks their consumers. Rust and Swift clients are unchanged."
   },
   "downtime": {
     "status": "none",

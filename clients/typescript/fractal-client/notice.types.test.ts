@@ -2,6 +2,7 @@ import type { Brand, DateTime, Option } from 'effect';
 import type { NoticeId, NoticeSnapshot, NoticeTimestamp, NoticeTimestampEncoded, Timestamp } from './Schema.generated.ts';
 import type { MissionStep, Work } from './Models.generated.ts';
 import type { MarkdownInline } from './markdown-text.ts';
+import { markdownSource } from './markdown-text.ts';
 
 type Assert<T extends true> = T;
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -17,3 +18,10 @@ type RichParity = [
 ];
 declare const richParity: RichParity;
 void richParity;
+
+declare const inlineMarkdown: MarkdownInline;
+// @ts-expect-error MarkdownInline is deliberately opaque, never an implicit string.
+const implicitSource: string = inlineMarkdown;
+const explicitSource: string = markdownSource(inlineMarkdown);
+void implicitSource;
+void explicitSource;
