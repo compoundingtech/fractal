@@ -12,7 +12,7 @@ import type {
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
-    MissionDeclaration,
+    MissionDeclaration, SubjectSourceMap, SourceBlob,
     GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -306,8 +306,8 @@ export class FractalClient {
     }
     private features(): string {
         return this.messagesPaging
-            ? 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2'
-            : 'custom-subjects.v1, conversation-blocks.v1';
+            ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1, messages-paging.v2'
+            : 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1';
     }
 
 

@@ -489,6 +489,8 @@ pub struct ClientSession {
     /// Accept-time kernel connector generation; never supplied by a request header.
     pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub custom_forms: bool,
+    /// Negotiated `model-drift-attention.v1`: the client reads `model-drift` attention rows.
+    pub model_drift_attention: bool,
     pub conversation_blocks: bool,
     pub conversation_delivery_links: bool,
     pub conversation_message_participants: bool,
@@ -499,6 +501,14 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    /// Which attention rows this session's client can read as they are.
+    pub fn attention_compatibility(&self) -> crate::api::AttentionCompatibility {
+        crate::api::AttentionCompatibility {
+            custom_forms: self.custom_forms,
+            model_drift: self.model_drift_attention,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
@@ -512,6 +522,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: true,
+            model_drift_attention: true,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -555,6 +566,7 @@ impl ClientSession {
                 local_peer: false,
                 peer_process: None,
                 custom_forms,
+                model_drift_attention: false,
                 conversation_blocks: false,
                 conversation_delivery_links: false,
                 conversation_message_participants: false,
@@ -595,6 +607,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -616,6 +629,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -781,6 +795,10 @@ pub fn authenticate(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|feature|
             feature.trim() == "conversation-delivery-links.v1"));
+    let model_drift_attention = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|feature|
+            feature.trim() == "model-drift-attention.v1"));
     let messages_paging = request
         .headers()
         .get("x-st3-features")
@@ -796,6 +814,7 @@ pub fn authenticate(
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
         session.custom_forms = custom_forms;
+        session.model_drift_attention = model_drift_attention;
         session.grant_expires_at = Some(web.expires_at);
         session.conversation_blocks = conversation_blocks;
         session.messages_paging = messages_paging;
@@ -824,6 +843,7 @@ pub fn authenticate(
                 return Err(forbidden("local harnesses and peers cannot inspect owner administration"));
             }
             session.custom_forms = custom_forms;
+            session.model_drift_attention = model_drift_attention;
             session.conversation_blocks = conversation_blocks;
             session.conversation_delivery_links = conversation_delivery_links;
             session.conversation_message_participants = conversation_message_participants;
@@ -879,6 +899,7 @@ pub fn authenticate(
     {
         return Err(super::custom::notices_unavailable());
     }
+    session.model_drift_attention = model_drift_attention;
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
@@ -954,6 +975,7 @@ pub fn paired_client_session_at(
         local_peer: false,
         peer_process: None,
         custom_forms,
+        model_drift_attention: false,
         conversation_blocks: false,
         conversation_delivery_links: false,
         conversation_message_participants: false,
@@ -1004,6 +1026,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
         }
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
+    current.model_drift_attention = session.model_drift_attention;
     current.conversation_blocks = session.conversation_blocks;
     current.conversation_delivery_links = session.conversation_delivery_links;
     current.conversation_message_participants = session.conversation_message_participants;
@@ -1114,7 +1137,7 @@ pub fn mission_list_cards_with(
             let current=shown.iter().filter(|s| matches!(s["state"].as_str(),Some("ready"|"claimed"|"verifying"|"blocked")))
                 .map(|s| json!({"id":s["id"],"title":s["title"],"assignee":s["assignee"],"claimant":s["claimant"],"state":s["state"],"since":s["since"],"progress_at":s["progress_at"]})).collect::<Vec<_>>();
             Ok::<Value,anyhow::Error>(json!({
-                "id":run["id"],"generation_id":run["generation_id"],"requester":run["requester"],
+                "id":run["id"],"generation_id":run["generation_id"],"revision":run["revision"],"requester":run["requester"],
                 "status":run["status"],"phase":run["phase"],"progress":{"done":done,"total":total},
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
@@ -1834,7 +1857,7 @@ pub async fn now(
         move |state, snapshot| {
             let mut items =
                 super::client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             // The default Now view is the person's attention queue. Mission work belongs
             // in Control; only an explicit work filter opts it into this combined view.
             if actor.is_some() || owner_run.is_some() {

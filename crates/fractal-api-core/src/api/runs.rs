@@ -295,6 +295,10 @@ pub struct OutcomeHistoryQuery {
     until: Option<u64>,
     status: Option<String>,
     actor: Option<String>,
+    /// One mission's runs (identity- or canonical-named); absent keeps the fleet-wide page.
+    /// Terminal transitions only: `/v1/mission-runs?mission=` still serves the
+    /// running and waiting runs.
+    mission: Option<String>,
     before: Option<u64>,
     limit: Option<usize>,
 }
@@ -326,6 +330,7 @@ pub async fn outcome_history(
                 query.until.map(u128::from).unwrap_or_else(client_now_ms),
                 query.status.as_deref(),
                 query.actor.as_deref(),
+                query.mission.as_deref(),
                 query.before.unwrap_or(index.saturating_add(1)),
                 query.limit.unwrap_or(50),
             )
