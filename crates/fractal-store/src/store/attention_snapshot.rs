@@ -1814,6 +1814,8 @@ pub fn person_attention_item(
     };
     // An ask resolves by itself at its deadline, with its default answer if it names one. Only
     // while this member counts deadlines (`[asks] deadlines` on): off, nothing resolves by one.
+    // The deadline is the effective one, past the time the person held their deadline clock;
+    // none while it is held.
     let (counting_since, default_ms) = person_work::ask_deadline_policy(connection)?;
     let (deadline_unix_ms, default_answer) = match &ask {
         Some(ask) if counting_since != 0 && !person_work::is_update(ask) => {
@@ -1827,7 +1829,7 @@ pub fn person_attention_item(
                     .map(|answer| json!({"id": id, "label": answer["label"]}))
             });
             (
-                person_work::ask_deadline(ask, counting_since, default_ms),
+                person_work::effective_ask_deadline(connection, ask, counting_since, default_ms)?,
                 default_answer,
             )
         }
