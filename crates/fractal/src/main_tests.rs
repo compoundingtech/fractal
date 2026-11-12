@@ -187,6 +187,16 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 }
 
 #[test]
+fn mission_outcomes_refuse_an_old_daemon_unfiltered_page() {
+    let old = json!({"collection": "missions", "items": [], "has_more": false});
+    let new = json!({"collection": "missions", "mission": "mission/example", "items": []});
+    assert!(require_mission_echo(&old, None).is_ok());
+    let refusal = require_mission_echo(&old, Some("mission/example")).unwrap_err();
+    assert_eq!(refusal.to_string(), "this daemon does not support --mission; upgrade the daemon");
+    assert!(require_mission_echo(&new, Some("mission/example")).is_ok());
+}
+
+#[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
         "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
@@ -6701,13 +6711,27 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let kdl = agent_start_document(
+        &args,
+        None,
+        &Default::default(),
+        &StartWorkspace::Set(cwd.display().to_string(), false),
+    )
+    .unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
             .owner_run
             .is_none()
+    );
+    assert_eq!(
+        intent.subjects["agent/example/cos/standing/cos"]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.as_str()),
+        Some(cwd.to_str().unwrap()),
     );
 
     let cli = Cli::try_parse_from([
@@ -6726,6 +6750,87 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
             command: AgentsCommand::Stop(_)
         }
     ));
+}
+
+#[test]
+fn agents_start_keeps_a_declared_remote_workspace_and_passes_overrides_through() {
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = format!(
+        "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"claude\" {{}}\n  restart always\n }}\n}}\n"
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let subject = "agent/dotfiles/build-capacity";
+    let existing = &intent.subjects[subject];
+    assert_eq!(
+        existing.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    let start_args = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(
+            ["st3", "agents", "start", subject, "--as", "person/alex"]
+                .into_iter()
+                .chain(extra.iter().copied()),
+        )
+        .unwrap();
+        let Command::Agents {
+            command: AgentsCommand::Start(args),
+        } = cli.command
+        else {
+            panic!("agents start did not parse");
+        };
+        args
+    };
+    let workspace_of = |kdl: &str| {
+        let started = fractal_daemon::parse_intent(kdl, "node").unwrap();
+        started.subjects[subject]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.clone())
+    };
+    // A declared agent started from another member keeps its declaration's workspace, which
+    // only exists on the agent's member: the document never consults this machine's files.
+    let args = start_args(&[]);
+    let kdl = agent_start_document(&args, Some(existing), &Default::default(), &StartWorkspace::Keep)
+        .unwrap();
+    assert_eq!(workspace_of(&kdl).as_deref(), Some(declared));
+    assert!(kdl.contains("host distant"), "{kdl}");
+    // An override for the agent's member is published as written, even when no such path
+    // exists on the caller's machine.
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    let args = start_args(&["--workspace", missing.to_str().unwrap()]);
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
+    // An override keeps the declaration's own create policy for the new path.
+    let source = source.replace(
+        &format!("workspace {declared:?}"),
+        &format!("workspace {declared:?} create=#true"),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let existing = &intent.subjects[subject];
+    assert!(existing.member.as_ref().is_some_and(|member| member.workspace_create));
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert!(kdl.contains("create=#true"), "{kdl}");
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
 }
 
 #[test]
