@@ -1059,7 +1059,8 @@
               "agent-request",
               "fault",
               "harness-login",
-              "harness-prompt"
+              "harness-prompt",
+              "model-drift"
             ]}, {"type": "string", "pattern": "^custom\\.[a-zA-Z0-9_.-]+$"}]},
           "custom_form": {"type": "object", "description": "Data-only registered reply form; absent on native attention."},
             "source_kind": {"type": "string"},
@@ -4232,6 +4233,7 @@
           "fault",
           "harness-login",
           "harness-prompt",
+          "model-drift",
           "custom",
           "unknown"
         ], "description": "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." },

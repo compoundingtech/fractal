@@ -726,6 +726,7 @@ export type AssistantAttentionItem = {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
   | "custom"
   | "unknown"
 ;
@@ -1022,6 +1023,7 @@ export type Attention = ResourceHeader & {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
  | string);
   because?: string;
   blocked?: AttentionBlocked;

@@ -53,6 +53,9 @@ use crate::resource::{
     RegisteredResourceProvider, ResourceProvider,
 };
 use crate::store::Store;
+use crate::store::model_drift::{
+    MODEL_DRIFT_CONDITION, MODEL_DRIFT_TITLE, ModelDrift, model_drift_episode,
+};
 
 pub mod channel_recovery;
 pub mod github_events;
@@ -142,13 +145,6 @@ const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
-/// Condition of the per-seat `operational.failure` raised while its current incarnation's
-/// latest `harness.usage` names a different model than its declaration. `record_failure`
-/// fences it by source revision and runtime incarnation; the reason carries
-/// `[drift-since-ms]` so later passes keep the first-detected time without rescanning.
-/// Non-blocking: the seat keeps running, and the failure recovers when usage returns to
-/// the declared model or the declaration changes.
-pub const MODEL_DRIFT_CONDITION: &str = "harness-model-drift";
 
 /// While a seat has reached Claude's trust prompt more than [`CLAUDE_TRUST_RECOVERY_ATTEMPTS`]
 /// times within [`CLAUDE_TRUST_RECOVERY_WINDOW_MS`], recovery holds back; this is when enough of
@@ -4652,9 +4648,10 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// declared harness model. A silent provider fallback (omp falling down its model ladder on
     /// a 429) otherwise runs undeclared for hours with zero faults. This raises a non-blocking
     /// operational failure (`harness/model-drift`) on the seat naming declared vs live model
-    /// and since when: it never stops, parks, or crash-loops the seat. The item's owner is
-    /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees it
-    /// in `fractal now` and `agents show` faults, never as a personal inbox item. It resolves
+    /// and since when: it never stops, parks, or crash-loops the seat. The fault's owner is
+    /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees the
+    /// drift in one aggregated attention item over every drifting seat they own
+    /// (`Store::model_drift_attention_items`), never one item per seat. It resolves
     /// when usage returns to the declared model or the declaration adopts the live model.
     /// Models compare through `pricing::declared_model_matches`: Claude aliases (`sonnet`)
     /// match their family, and a declaration that is no resolvable API ID raises nothing.
@@ -4662,7 +4659,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// resume handshake; this is the durable observable signal for the same underlying
     /// concept, kept as a fault rather than a crash loop so the seat keeps working.
     fn reconcile_model_drift(&self, subject: &DesiredSubject, incarnation: &str) -> Result<()> {
-        let episode = format!("model-drift/{}", subject.subject);
+        let episode = model_drift_episode(&subject.subject);
         let Some(declared) = Self::declared_harness_model(&subject.desired) else {
             return self.recover_model_drift(&episode, "the seat declares no harness model");
         };
@@ -4677,14 +4674,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             Some(false) => {}
         }
         let open = self.store.operational_failure(&episode)?.filter(|failure| failure.status == "pending");
-        let since = open
+        let since_ms = open
             .as_ref()
-            .and_then(|failure| Self::drift_since_ms(&failure.reason))
-            .unwrap_or_else(now_ms);
-        let mut reason = format!("declared {declared} but running on {live}");
-        let at = Utc.timestamp_millis_opt(since.min(i64::MAX as u128) as i64).single();
-        reason.push_str(&format!(" since {}", at.map_or_else(|| format!("{since}ms"), |time| time.format("%H:%MZ").to_string())));
-        reason.push_str(&format!(" [drift-since-ms:{since}]"));
+            .and_then(|failure| ModelDrift::parse(&failure.reason))
+            .map_or_else(now_ms, |drift| drift.since_ms);
+        let reason = ModelDrift { declared, live, since_ms }.reason();
         if let Some(failure) = &open {
             if failure.reason == reason {
                 return Ok(());
@@ -4702,7 +4696,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // above without waking the loop, which would otherwise run passes back to back.
         self.store.record_runtime_failure(&episode, &AttentionRequest {
             reviewer: subject.subject.clone(),
-            title: "Seat runs on a fallback model".into(),
+            title: MODEL_DRIFT_TITLE.into(),
             reason,
             severity: "error".into(),
             targets: vec![subject.subject.clone()],
@@ -4741,18 +4735,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             .first()?
             .as_str()
             .map(str::to_owned)
-    }
-
-    /// The `since` the open drift fault stored when first raised, carried in its reason as
-    /// `[drift-since-ms:<millis>]` so later passes reuse it without scanning history.
-    fn drift_since_ms(reason: &str) -> Option<u128> {
-        reason
-            .rsplit("[drift-since-ms:")
-            .next()?
-            .split(']')
-            .next()?
-            .parse()
-            .ok()
     }
 
     /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
@@ -49345,6 +49327,90 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         report("agent/node.local", "claude-haiku-4-5", "context_occupancy", "local-other");
         reconciler.reconcile_model_drift(&desired("agent/node.local"), "one").unwrap();
         assert!(drift("agent/node.local").is_none());
+    }
+
+    #[test]
+    fn drifting_agents_share_one_person_item_that_follows_them_and_clears() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspaces = [(); 3].map(|()| tempfile::tempdir().unwrap());
+        let [a, b, c] = workspaces.each_ref().map(|dir| dir.path().display().to_string());
+        let source = format!(
+            "version 2\nagent \"a\" {{ workspace {a:?}; harness \"omp\" {{ model \"anthropic/claude-opus-5-5\" }} }}\nagent \"b\" {{ workspace {b:?}; harness \"omp\" {{ model \"anthropic/claude-opus-5-5\" }} }}\nagent \"c\" {{ workspace {c:?}; harness \"omp\" {{ model \"anthropic/claude-opus-5-5\" }} }}\n"
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let planned = store
+            .mission(&intent, crate::model::IntentInput { kdl: source.clone(), source_name: None })
+            .unwrap();
+        store
+            .apply_as(&intent, &planned.subject_tokens, "drift-inbox", Some("person/avery"))
+            .unwrap();
+        let desired = |agent: &str| {
+            store.desired_subjects().unwrap().into_iter().find(|subject| subject.subject == agent).unwrap()
+        };
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let run_on = |agent: &str, model: &str, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: agent.into(),
+                    kind: "harness.usage".into(),
+                    actor: Some(agent.into()),
+                    fields: BTreeMap::from([
+                        ("driver".into(), Value::String("omp".into())),
+                        ("model".into(), Value::String(model.into())),
+                        ("semantics".into(), Value::String("context_occupancy".into())),
+                        ("incarnation_id".into(), Value::String("one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap();
+            reconciler.reconcile_model_drift(&desired(agent), "one").unwrap();
+        };
+        // Everything waiting on the person: only ever the one aggregated item, never an item
+        // per drifting agent.
+        let inbox = || store.attention_items(Some("person/avery")).unwrap();
+        let only = || {
+            let items = inbox();
+            assert_eq!(items.len(), 1, "{items:#?}");
+            assert_eq!(store.attention_items(None).unwrap().len(), 1);
+            let item = items.into_iter().next().unwrap();
+            assert_eq!(item.kind, "model-drift");
+            assert!(!item.is_alert());
+            item
+        };
+        run_on("agent/node.a", "claude-opus-5-5", "a-declared");
+        assert!(inbox().is_empty());
+        run_on("agent/node.a", "gpt-6.1-sol", "a-fallback");
+        let one = only();
+        assert!(one.title.starts_with("agent/node.a declared anthropic/claude-opus-5-5 runs gpt-6.1-sol since "), "{}", one.title);
+        run_on("agent/node.b", "gpt-6.1-sol", "b-fallback");
+        let two = only();
+        assert!(two.title.starts_with("2 agents declared anthropic/claude-opus-5-5 run gpt-6.1-sol since "), "{}", two.title);
+        assert!(two.title.ends_with("(oldest agent/node.a)"), "{}", two.title);
+        assert_eq!(two.targets, ["agent/node.a", "agent/node.b"]);
+        assert_eq!(two.subject, "agent/node.a");
+        // A third agent on another fallback model: still one item, now counting three.
+        run_on("agent/node.c", "gpt-6-luna", "c-fallback");
+        let three = only();
+        assert!(three.title.starts_with("3 agents run a fallback model since "), "{}", three.title);
+        assert!(three.detail.contains("agent/node.c: declared anthropic/claude-opus-5-5, running gpt-6-luna"), "{}", three.detail);
+        // The oldest recovers: the item stays for the others, and the next oldest stands for it.
+        run_on("agent/node.a", "claude-opus-5-5", "a-recovered");
+        let rest = only();
+        assert_eq!(rest.targets, ["agent/node.b", "agent/node.c"]);
+        assert_eq!(rest.subject, "agent/node.b");
+        // The last drifting agents recover: the item resolves by itself.
+        run_on("agent/node.b", "claude-opus-5-5", "b-recovered");
+        assert_eq!(only().targets, ["agent/node.c"]);
+        run_on("agent/node.c", "claude-opus-5-5", "c-recovered");
+        assert!(inbox().is_empty());
+        assert!(store.attention_items(None).unwrap().is_empty());
     }
 
     #[test]
