@@ -128,6 +128,7 @@ pub use harness_questions::{
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod message_reads;
+pub mod relayed_close_maintenance;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod population_metrics;
@@ -136,6 +137,8 @@ pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
+mod source_maps;
+mod source_index;
 pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
@@ -275,8 +278,9 @@ pub struct AppState {
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
-pub const CLIENT_API_VERSION: &str = "st3.client.v0";
+pub const CLIENT_API_VERSION: &str = "fractal.client.v0";
+/// Frozen hash input; changing it invalidates issued preview tokens.
+const LAUNCH_PREVIEW_HASH_API_VERSION: &str = "st3.client.v0";
 pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
@@ -351,7 +355,7 @@ pub struct ClientListQuery {
     /// when the latest roster refresh failed and none is in flight.
     #[serde(default)]
     pub fresh: bool,
-    /// Agents: wait for publication of this host-local mutation store_index, not the head.
+    /// Agents and current work: wait for this host-local cut instead of sampling a newer head.
     pub min_cut: Option<u64>,
 }
 
@@ -747,6 +751,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/preview", post(owned_sets::preview))
         .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/source/status", get(owned_sets::source_status))
+        .route("/v1/source-maps", get(source_maps::get))
+        .route("/v1/source-maps/revisions", get(source_index::revisions))
+        .route("/v1/source-maps/where", get(source_index::where_used))
+        .route("/v1/source-maps/declaration", get(source_index::declaration))
+        .route("/v1/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
@@ -1976,7 +1985,7 @@ pub fn client_host_id(node: &str) -> String {
 pub fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
     let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": request_id,
         "code": client_error_code(raw.get("code").and_then(Value::as_str)),
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
@@ -2254,6 +2263,39 @@ pub fn client_page_expired(message: impl Into<String>) -> ApiError {
     }
 }
 
+/// Launch page hashes retain their original visualization bytes independently of wire names.
+fn client_items_digest(collection: &str, items: &[Value]) -> anyhow::Result<String> {
+    use serde::ser::{SerializeMap as _, SerializeSeq as _, Serializer as _};
+    struct HashValue<'a> { value: &'a Value, visualization: bool }
+    impl Serialize for HashValue<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let Some(object) = self.value.as_object() else { return self.value.serialize(serializer); };
+            let mut map = serializer.serialize_map(Some(object.len()))?;
+            for (key, value) in object {
+                if self.visualization && key == "version" && value == "fractal.visualization.v0" {
+                    // Frozen cache/cursor hash input, not an emitted version.
+                    map.serialize_entry(key, "st3.visualization.v0")?;
+                } else if !self.visualization && key == "visualization" {
+                    map.serialize_entry(key, &HashValue { value, visualization: true })?;
+                } else {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            map.end()
+        }
+    }
+    let bytes = if collection == "launches" || (collection.starts_with("launches/") && collection.ends_with("/variants")) {
+        let mut serializer = serde_json::Serializer::new(Vec::with_capacity(128));
+        let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+        for value in items { sequence.serialize_element(&HashValue { value, visualization: false })?; }
+        serde::ser::SerializeSeq::end(sequence)?;
+        serializer.into_inner()
+    } else {
+        serde_json::to_vec(items)?
+    };
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 pub fn client_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -2408,9 +2450,7 @@ fn client_page_read_projected(
             cursor.expires_at_unix_ms,
         )
     } else {
-        let items_digest = hex::encode(Sha256::digest(
-            serde_json::to_vec(&items).map_err(ApiError::internal)?,
-        ));
+        let items_digest = client_items_digest(collection, &items).map_err(ApiError::internal)?;
         let cached = client_page_cache()
             .lock()
             .expect("client page cache poisoned")
@@ -4183,6 +4223,14 @@ fn client_agent_cards_presented(
                 .cloned()
                 .unwrap_or_default();
             let usage = usage_summaries.get(&subject.subject);
+            // The model the seat actually runs on: the model its session last reported for the
+            // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
+            // literal: the literal already nests at the macro recursion limit. A step script
+            // reads what a one-shot reviewer actually ran on even after it exits.
+            let live_model: Option<String> = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+                None => None,
+            };
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4245,6 +4293,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }
@@ -5058,13 +5107,29 @@ fn client_attention_resources_from_items(
     Ok(resources)
 }
 
+/// The attention row shapes a client negotiated (`x-st3-features`): each newer kind has its
+/// own feature, since a client that has one may predate the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionCompatibility {
+    /// `custom-subjects.v1`: registered `custom.*` kinds and their reply forms.
+    pub custom_forms: bool,
+    /// `model-drift-attention.v1`: the `model-drift` kind.
+    pub model_drift: bool,
+}
+
 // Older client-v0 models use closed enums for attention kinds and action names.
-pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
-    if custom_forms {
-        return;
-    }
+pub fn client_attention_compatibility(items: &mut [Value], compatibility: AttentionCompatibility) {
     for item in items {
-        if item["kind"] == "attention" && item["source_kind"] == "custom" {
+        // A model-drift item asks nothing; a client that cannot read the kind shows it as a
+        // request it can read.
+        if !compatibility.model_drift
+            && item["kind"] == "attention" && item["attention_kind"] == "model-drift" {
+            item["attention_kind"] = json!("agent-request");
+            item["actions"] = json!([]);
+            continue;
+        }
+        if !compatibility.custom_forms
+            && item["kind"] == "attention" && item["source_kind"] == "custom" {
             item["custom_attention_kind"] = item["attention_kind"].clone();
             item["attention_kind"] = json!("agent-request");
             item["actions"] = json!([]);
@@ -5674,7 +5739,7 @@ fn launch_preview_token_values(
     diagnostics: &[Value],
 ) -> anyhow::Result<String> {
     let input = json!({
-        "api_version": CLIENT_API_VERSION,
+        "api_version": LAUNCH_PREVIEW_HASH_API_VERSION,
         "launch_id": format!("launch/{launch_id}"),
         "variant_id": format!("launch-variant/{launch_id}/{variant}"),
         "candidate_revision": candidate_revision,
@@ -5768,7 +5833,7 @@ fn launch_visualization(
             .push(format!("step/{}", step.path));
     }
     json!({
-        "version": "st3.visualization.v0",
+        "version": "fractal.visualization.v0",
         "views": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"],
         "mission": format!("mission/{}", mission.id),
         "nodes": nodes,
@@ -5934,7 +5999,7 @@ fn client_launch_variant_resources(
                 (
                     json!({}),
                     Vec::new(),
-                    json!({"version": "st3.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
+                    json!({"version": "fractal.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
                     json!({"changes": [], "predicted_actions": []}),
                     None,
                 )
@@ -11347,8 +11412,9 @@ async fn apply_with_authority(
     Ok(Json(response))
 }
 
-/// The request body a publication may use: program bundles travel inside it as base64.
-pub const PUBLICATION_BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// The request body a publication may use: program bundles travel inside it as base64, and a set
+/// apply may also carry a source map of at most `MAX_MAP_BYTES`.
+pub const PUBLICATION_BODY_LIMIT: usize = 32 * 1024 * 1024 + fractal_schema::source_map::MAX_MAP_BYTES;
 
 /// Verify each program bundle a publication carries against the hash its intent names, then stage
 /// the bytes as local blobs; the `mission.published` claim that names the hash promotes them

@@ -147,6 +147,21 @@ fn an_empty_expected_set_stops_the_change_at_the_expect_claim() {
 }
 
 #[test]
+fn one_kind_may_start_the_sample_and_name_its_members() {
+    // Merge to live: the merge claim both starts the sample and names the hosts it must stop on.
+    let source = declaration("", "7d", "").replace(&format!("start \"{READY}\" at=\"ready_at\""), &format!("start \"{MERGED}\" at=\"merged_at\""));
+    let store = store_with(&source);
+    change(&store, "a", 10 * MINUTE, &["hosta", "hostb"], &[("hosta", 21), ("hostb", 31)], "routine");
+    // Merged 20 minutes ago for two hosts and live on one: open and overdue.
+    change(&store, "b", 20 * MINUTE, &["hosta", "hostb"], &[("hosta", 11)], "routine");
+    let rows = evaluate(&store);
+    let p50 = &rows["ops/change-rollout/p50"];
+    // a: merged at ready + 1 s, last host at ready + 31 s, so 30 s; b enters at its age since merge.
+    assert_eq!(p50["current"], "p50 30 s over 2 samples (1 open over)");
+    assert!(p50["explain"].as_str().unwrap().contains("1 closed, 1 open over 1 min, 0 open within it"));
+}
+
+#[test]
 fn an_excluded_change_is_counted_apart_and_never_in_a_percentile() {
     let store = store_with(&declaration("    exclude \"exclusion\" \"deferred-launch\"\n", "7d", ""));
     change(&store, "a", 10 * MINUTE, &["hosta"], &[("hosta", 40)], "routine");

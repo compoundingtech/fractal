@@ -82,12 +82,21 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case documentReferencesGet = "document-references.get"
     case publicationDefinition = "publication.definition"
     case missionDeclarationGet = "mission-declaration.get"
+    case sourceMapGet = "source-map.get"
+    case sourceBlobGet = "source-blob.get"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
     case sloHistory = "slo.history"
     case usagePeriod = "usage.period"
     case usageHubQuota = "usage-hub.quota"
+    case githubPluginPullRequest = "github-plugin.pull-request"
+    case githubPluginIssue = "github-plugin.issue"
+    case githubPluginConversation = "github-plugin.conversation"
+    case githubPluginChecks = "github-plugin.checks"
+    case githubPluginFiles = "github-plugin.files"
+    case githubPluginComment = "github-plugin.comment"
+    case githubPluginRun = "github-plugin.run"
     case clientsList = "clients.list"
     case nowList = "now.list"
     case machinesList = "machines.list"
@@ -174,12 +183,21 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .documentReferencesGet: "/v1/client/document-references",
     .publicationDefinition: "/v1/client/publication-definition",
     .missionDeclarationGet: "/v1/client/mission-declaration",
+    .sourceMapGet: "/v1/client/source-maps",
+    .sourceBlobGet: "/v1/client/source-blobs/{id}",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
     .sloHistory: "/v1/client/slo/history",
     .usagePeriod: "/v1/client/usage",
     .usageHubQuota: "/v1/client/usage/quota",
+    .githubPluginPullRequest: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+    .githubPluginIssue: "/v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+    .githubPluginConversation: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+    .githubPluginChecks: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+    .githubPluginFiles: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+    .githubPluginComment: "/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+    .githubPluginRun: "/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
     .clientsList: "/v1/client/clients",
     .nowList: "/v1/client/now",
     .machinesList: "/v1/client/machines",

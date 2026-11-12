@@ -16,6 +16,7 @@ pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
 pub mod read_positions;
+pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
@@ -786,6 +787,9 @@ impl Registry {
         }
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
+        }
+        if kind == source_map::KIND {
+            source_map::validate_claim(subject, fields)?;
         }
         harness_questions::validate(kind, fields)?;
         if kind == "harness.todo.observed" {
@@ -1750,6 +1754,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("missions"),
             true,
             &["provenance"],
+        ),
+        (
+            "source.mapped",
+            &["agent", "mission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
         ),
         (
             "mission.produced",
@@ -3341,6 +3354,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", required_string()),
             ("provenance", required_object()),
         ],
+        "source.mapped" => &[
+            ("subject", required_reference_to(&["agent", "mission"])),
+            ("revision", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("sequence", required_integer()),
+            ("files", required_array()),
+            ("declaration", required_integer()),
+            ("inputs", required_array()),
+            ("nodes", required_array()),
+        ],
         "mission.produced" => &[
             ("name", string()),
             ("mission", reference()),
@@ -3961,6 +3987,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("signal", string()),
             ("reason", string()),
             ("fresh_session", boolean()),
+            ("from_stale_handoff", boolean()),
             ("ignore_fit", boolean()),
         ],
         "runtime.action.succeeded"
@@ -5062,9 +5089,11 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
-        for kind in ["source.debt.recorded", "source.debt.closed", "source.audited"] {
+        for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.get_mut("runtime.action.requested").unwrap()
+            .fields.remove("from_stale_handoff").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

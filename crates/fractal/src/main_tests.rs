@@ -187,6 +187,16 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 }
 
 #[test]
+fn mission_outcomes_refuse_an_old_daemon_unfiltered_page() {
+    let old = json!({"collection": "missions", "items": [], "has_more": false});
+    let new = json!({"collection": "missions", "mission": "mission/example", "items": []});
+    assert!(require_mission_echo(&old, None).is_ok());
+    let refusal = require_mission_echo(&old, Some("mission/example")).unwrap_err();
+    assert_eq!(refusal.to_string(), "this daemon does not support --mission; upgrade the daemon");
+    assert!(require_mission_echo(&new, Some("mission/example")).is_ok());
+}
+
+#[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
         "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
@@ -3590,6 +3600,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     #[cfg(test)]
     const CLAIMS_SOURCE: &str = include_str!("claims_cli.rs");
+    #[cfg(test)]
+    const SOURCE_SOURCE: &str = include_str!("source_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -3606,6 +3618,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
+        ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("validate", VALIDATE_SOURCE),
@@ -5167,6 +5180,93 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 }
 
 #[test]
+fn mission_workspace_uses_actual_step_hosts_and_refuses_unknown_placement() {
+    let source = "version 2\nmission \"placement\" state=\"ready\" {\n goal \"Resolve actual placement\"\n step \"executor\" {\n agentless\n host \"${ST_STEP}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n }\n }\n}\n";
+    let intent = fractal_daemon::parse_intent(source, "publisher").unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    let cwd = Path::new(".").canonicalize().unwrap();
+    for workspace in [None, Some(Path::new("."))] {
+        assert_eq!(resolve_mission_workspace(&mission, workspace, "executor", &inputs).unwrap(), cwd);
+        let error = resolve_mission_workspace(&mission, workspace, "migration-step", &inputs).unwrap_err();
+        assert!(error.to_string().contains(if workspace.is_none() { "pass --workspace" } else { "absolute path" }), "{error:#}");
+    }
+    let remote = Path::new("/srv/only-on-executor/../workspace");
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-step", &inputs).unwrap(), remote);
+    mission.steps.get_mut("executor").unwrap().declarations_kdl = Some(
+        "version 2\nhost \"${ST_REQUESTER}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n}\n".into()
+    );
+    assert!(resolve_mission_workspace(&mission, None, "migration-reviewer", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-reviewer", &inputs).unwrap(), remote);
+}
+
+#[test]
+fn mission_workspace_respects_execution_members() {
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nmission \"workspace\" state=\"ready\" {\n goal \"Check workspace placement\"\n step \"wait\" { agentless }\n}\n",
+        "publisher",
+    ).unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    assert_eq!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap(),
+        Path::new(".").canonicalize().unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(root.path()), "publisher", &inputs).unwrap(),
+        root.path().canonicalize().unwrap(),
+    );
+    let missing = root.path().join("missing");
+    assert!(resolve_mission_workspace(&mission, Some(&missing), "publisher", &inputs).is_err());
+    mission
+        .gates
+        .push(fractal_daemon::model::GateSpec::Mechanical {
+            name: "remote-proof".into(),
+            command: "true".into(),
+            host: "executor".into(),
+            workspace: "${ST_WORKSPACE}".into(),
+            environment: BTreeMap::new(),
+            time_limit_ms: 1000,
+        });
+    let remote = Path::new("/srv/workspace-only-on-executor/../project");
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    assert!(
+        resolve_mission_workspace(&mission, Some(Path::new(".")), "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute path")
+    );
+    mission.gates.clear();
+    mission.declarations_kdl = Some("version 2\nhost \"executor\" {\n agent \"workspace/worker\" {\n workspace \"${ST_WORKSPACE}\"\n harness \"claude\" {}\n }\n}\n".into());
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    mission.declarations_kdl = None;
+    mission.steps.get_mut("wait").unwrap().uses_mission = Some(
+        fractal_daemon::model::UsedMissionSpec::StepOutput { step: "prepare".into() },
+    );
+    assert!(resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(), remote);
+}
+
+#[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
     for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
@@ -6632,13 +6732,27 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let kdl = agent_start_document(
+        &args,
+        None,
+        &Default::default(),
+        &StartWorkspace::Set(cwd.display().to_string(), false),
+    )
+    .unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
             .owner_run
             .is_none()
+    );
+    assert_eq!(
+        intent.subjects["agent/example/cos/standing/cos"]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.as_str()),
+        Some(cwd.to_str().unwrap()),
     );
 
     let cli = Cli::try_parse_from([
@@ -6657,6 +6771,87 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
             command: AgentsCommand::Stop(_)
         }
     ));
+}
+
+#[test]
+fn agents_start_keeps_a_declared_remote_workspace_and_passes_overrides_through() {
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = format!(
+        "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"claude\" {{}}\n  restart always\n }}\n}}\n"
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let subject = "agent/dotfiles/build-capacity";
+    let existing = &intent.subjects[subject];
+    assert_eq!(
+        existing.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    let start_args = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(
+            ["st3", "agents", "start", subject, "--as", "person/alex"]
+                .into_iter()
+                .chain(extra.iter().copied()),
+        )
+        .unwrap();
+        let Command::Agents {
+            command: AgentsCommand::Start(args),
+        } = cli.command
+        else {
+            panic!("agents start did not parse");
+        };
+        args
+    };
+    let workspace_of = |kdl: &str| {
+        let started = fractal_daemon::parse_intent(kdl, "node").unwrap();
+        started.subjects[subject]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.clone())
+    };
+    // A declared agent started from another member keeps its declaration's workspace, which
+    // only exists on the agent's member: the document never consults this machine's files.
+    let args = start_args(&[]);
+    let kdl = agent_start_document(&args, Some(existing), &Default::default(), &StartWorkspace::Keep)
+        .unwrap();
+    assert_eq!(workspace_of(&kdl).as_deref(), Some(declared));
+    assert!(kdl.contains("host distant"), "{kdl}");
+    // An override for the agent's member is published as written, even when no such path
+    // exists on the caller's machine.
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    let args = start_args(&["--workspace", missing.to_str().unwrap()]);
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
+    // An override keeps the declaration's own create policy for the new path.
+    let source = source.replace(
+        &format!("workspace {declared:?}"),
+        &format!("workspace {declared:?} create=#true"),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let existing = &intent.subjects[subject];
+    assert!(existing.member.as_ref().is_some_and(|member| member.workspace_create));
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert!(kdl.contains("create=#true"), "{kdl}");
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
 }
 
 #[test]
@@ -8724,6 +8919,7 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             unmanaged_allow: vec![],
             force: false,
             reason: None,
+            source_map: None,
             dry_run: false,
             at_index: None,
             actor: Some("person/test".into()),
@@ -8760,7 +8956,7 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
                 mission: format!("mission/{mission}"),
                 revision: None,
                 id: Some("2026-10-07".into()),
-                workspace: root.path().to_path_buf(),
+                workspace: Some(root.path().to_path_buf()),
                 inputs: Vec::new(),
                 after: None,
                 report_to: None,
@@ -8785,6 +8981,118 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
             .unwrap()
             .is_none()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
+    for combined in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("publisher").unwrap());
+        let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+        let session: PlanningSessionView = client.post("/v1/launches", &json!({
+            "mission": "remote-launch", "request": b"Run the remote task.",
+            "workspace": root.path().display().to_string(), "requester": "person/test",
+            "idempotency_key": "remote-launch-plan"
+        })).await.unwrap();
+        let path = format!("/v1/launches/{}", urlencoding::encode(&session.id));
+        let candidate = b"version 2\nmission \"remote-launch\" state=\"ready\" {\n goal \"Run remotely\"\n loop \"improve\" {\n max-rounds 2\n round { completion { when \"all-steps-exhausted\" } }\n }\n step \"work\" {\n agentless\n host \"executor\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\"; restart \"never\" }\n }\n }\n}\n";
+        let parsed = fractal_daemon::parse_intent(std::str::from_utf8(candidate).unwrap(), "publisher").unwrap();
+        assert_eq!(parsed.missions.len(), 2, "the valid candidate includes an implicit loop graph");
+        assert_eq!(fractal_daemon::mission::top_level_mission_ids(&parsed.missions).len(), 1);
+        let _: PlanningSessionView = client.post(&format!("{path}/submit"), &PlanningCandidateSubmitRequest {
+            actor: session.planner, markdown: b"# Remote task".to_vec(),
+            kdl: candidate.to_vec(), idempotency_key: "remote-launch-submit".into(),
+        }).await.unwrap();
+        let preview: PlanningSessionView = client.post(&format!("{path}/preview"), &json!({})).await.unwrap();
+        let hash = preview.preview.unwrap().hash;
+        if !combined {
+            let _: PlanningSessionView = client.post(&format!("{path}/approve"), &PlanningApprovalRequest {
+                actor: "person/test".into(), preview_hash: hash.clone(), idempotency_key: "remote-launch-approve".into(),
+            }).await.unwrap();
+            let _: Value = client.post("/v1/missions/rename-id", &json!({
+                "from": "mission/remote-launch", "to": "mission/renamed-launch",
+                "actor": "person/test", "reason": "Clarify mission name",
+                "idempotency_key": "remote-launch-rename"
+            })).await.unwrap();
+            let renamed: PlanningSessionView = client.get(&path).await.unwrap();
+            assert_eq!(renamed.mission, "renamed-launch");
+        }
+        let command = |workspace| if combined {
+            LaunchCommand::ApproveAndLaunch(LaunchApproveAndStartArgs {
+                session: session.id.clone(), preview_hash: hash.clone(), workspace,
+                inputs: Vec::new(), actor: "person/test".into(),
+            })
+        } else {
+            LaunchCommand::Run(LaunchRunArgs {
+                session: session.id.clone(), workspace, inputs: Vec::new(), actor: "person/test".into(),
+            })
+        };
+        let endpoint = Endpoint::Unix(root.path().join("st3.sock"));
+        let error = launch_cli::run_launch(&client, &endpoint, command(None), &PlannerSpec::default(), true).await.unwrap_err();
+        assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+        let remote = "/srv/only-on-executor/../launch";
+        launch_cli::run_launch(&client, &endpoint, command(Some(PathBuf::from(remote))), &PlannerSpec::default(), true).await.unwrap();
+        let runs: Vec<MissionRunView> = client.get("/v1/mission-runs?mission=remote-launch").await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].workspace, remote);
+        assert_eq!(runs[0].mission, if combined { "mission/remote-launch" } else { "mission/renamed-launch" });
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn missions_start_publishes_remote_workspace_without_resolving_it_locally() {
+    const FLEET: &str = "5d0c1c52-3f7a-4b0e-9b61-1f2d3c4b5a69";
+    let root = tempfile::tempdir().unwrap();
+    let publisher = Arc::new(Store::open_memory("publisher").unwrap());
+    let executor = Arc::new(Store::open_memory("executor").unwrap());
+    publisher.bind_fleet(FLEET).unwrap();
+    executor.bind_fleet(FLEET).unwrap();
+    let (client, server) = serve_test_store(publisher.clone(), root.path(), "publisher").await;
+    publish_text(
+        &client,
+        r#"version 2
+mission "remote-workspace" state="ready" {
+ goal "Execute on the declared member."
+ step "work" {
+  agentless
+  host "executor" {
+   exec "workspace-check" { command "true"; workspace "${ST_WORKSPACE}"; restart "never" }
+  }
+ }
+}
+        "#.into(),
+        "remote workspace regression".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let args = |workspace| MissionRunStartArgs {
+        mission: "remote-workspace".into(),
+        revision: None,
+        id: Some("remote-workspace/check".into()),
+        workspace,
+        inputs: Vec::new(),
+        after: None,
+        report_to: None,
+        report_completed: false,
+        follow: false,
+        actor: "person/test".into(),
+        print_kdl: false,
+    };
+    let error = start_mission_run(&client, args(None), true).await.unwrap_err();
+    assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+    let remote = "/srv/only-on-executor/../workspace";
+    start_mission_run(&client, args(Some(PathBuf::from(remote))), true).await.unwrap();
+    let exchange = publisher.export_replication_exchange(FLEET, &fractal_daemon::model::ReplicationInventory::default()).unwrap();
+    executor.receive_replication_exchange("publisher", FLEET, &exchange).unwrap();
+    executor.validate_replication_backlog().unwrap();
+    executor.apply_replication_repairs().unwrap();
+    executor.project_replication_backlog().unwrap();
+    let executor_root = tempfile::tempdir().unwrap();
+    let (executor_client, executor_server) = serve_test_store(executor, executor_root.path(), "executor").await;
+    let run: MissionRunView = executor_client.get("/v1/mission-runs/mission-run%2Fremote-workspace%2Fcheck").await.unwrap();
+    assert_eq!(run.workspace, remote);
+    executor_server.abort();
     server.abort();
 }
 
@@ -8839,7 +9147,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
             mission: "arrival".into(),
             revision: Some(revision.clone()),
             id: Some("arrival/after-replication".into()),
-            workspace: starter_root.path().to_path_buf(),
+            workspace: Some(starter_root.path().to_path_buf()),
             inputs: Vec::new(),
             after: None,
             report_to: None,

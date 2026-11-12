@@ -25,7 +25,12 @@ fractal apply --set garden seats.kdl missions.kdl schedules.kdl \
 Remove `--dry-run` to publish. A dry run prints blockers and exits with failure when any
 are present. Add `--check` to execute gates during the preview, with `--workspace DIR` and
 `--input NAME=VALUE` as needed; gate answers appear on stderr. Publication checks for broken
-mission and step exec gates by default; `--no-gate-check` skips them. Loop `until` scripts
+mission and step exec gates by default; `--no-gate-check` skips them. Both checks cover only
+the missions the preview lists under `gate_check`: those whose exact revision this daemon does
+not hold yet. An unchanged or adopted member is not checked again, so a large set's publication
+does not rerun its gates; that includes a revision published with `--no-gate-check` or
+replicated from another daemon. Use `fractal missions check FILE` to check every gate again.
+Loop `until` scripts
 are listed as "not checked, they run after each round", including in dry-run checks.
 Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
@@ -146,6 +151,49 @@ because older daemons refuse replicated revisions that carry such members.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 
+## Source maps
+
+`fractal apply --set ... --source-map MAP.json` records a `fractal.source-map/v1` document beside
+the set commit, in the same transaction. Each mapped subject must be a live member of this
+publication; anything else is refused with `invalid-source-map`, and nothing is applied. A file
+may omit `text` and name only its `sha256` when the daemon already stores that text; an unknown
+sha256 is refused with `source-blob-missing`. Files are capped at 1 MiB and a map at 32 MiB.
+
+Each mapped member revision gets one `source.mapped` claim on `<agent|mission>/<id>@<revision>`
+naming the set revision, source commit, its files (`blob` is the git blob id, `blob_hash` the
+sha256 of its text) and the spans of its KDL nodes. The texts those files name are stored once by
+sha256 as claim-referenced blobs, so they replicate and survive checkpoints with the claim. The
+first mapped publication of a revision wins; a later map for the same revision is kept, never
+refused, so the claim says where the revision was introduced. A noop publication records nothing.
+Maps never enter a revision, bundle, preview or set hash. The apply result reports
+`source_maps: {recorded, kept, blobs_new, blobs_deduped}` (blob counts are distinct texts).
+
+The apply idempotency check covers the intent, options and actor, not the map: a retry with the
+same key and a different map answers the first response and records nothing from the second map.
+A revision left unmapped that way gets its map from the next publication that carries one.
+
+`GET /v1/source-maps?subject=ID[&revision=REV][&texts=true]` answers the claim of a revision
+(default: the current one), with `texts: {blob_hash: text}` on request; 404 `source-map-missing`
+when that revision has none. `GET /v1/source-blobs/<sha256>` answers one stored text.
+A `step-run/...` subject answers its mission at the revision its run's generation pinned, plus
+`step` and `node`, the step's KDL node path (`mission[ID]/step[STEP]`, nested steps
+`.../step[OUTER]/mission[NESTED]/step[INNER]`, gates `.../gate[NAME]`). A node the map does not
+list inherits its nearest listed ancestor.
+
+- `GET /v1/source-maps/revisions?subject=ID` lists the revisions with a map, newest first, with
+  their commit and set revision, plus the subject's `current` revision.
+- `GET /v1/source-maps/where?path=PATH[&repository=OWNER/REPO][&line=N]` reads the maps of every
+  live agent and mission revision that name the file. Per repository it answers the newest
+  recorded version (`reference`), and per subject whether the file declares it and the nodes with
+  a span or frame in the file. `lines` is a span carried into the reference text by a line diff
+  (`null` once every line of it changed); with `line`, only nodes covering it are answered.
+- `GET /v1/source-maps/declaration?subject=ID&revision=REV` answers the canonical KDL of that
+  revision, environment values redacted, for diffs between revisions.
+
+`fractal subject show ID --source`, `fractal source where` and `fractal source diff` read these;
+`fractal work claim` adds a `SOURCE` row, and the faults for a broken gate or a step out of time,
+and a failing gate's reason, name the declaring line.
+
 ## Inspect publication and rollout
 
 ```sh
@@ -214,7 +262,17 @@ claim top-level `agent/`, `schedule/`, `subscription/` or `mission/` subjects on
 
 Terminal `agents retire` of a live member of an `enforce` set is refused with `set-managed-subject`
 through every path, including client-v0. It cannot be forced: omit the member from the set
-publication, then retire it.
+publication, then retire it. An `audit` set accepts the retirement, records it as `source.audited`
+and also as `source.debt.recorded` with the verb `retire`.
+
+No publication can undo a terminal retirement. A publication that still declares a retired agent,
+whatever the set's policy, keeps it as a retired member instead of failing with
+`recipient-retired`: its preview reports the change `retired` with the effect `keep terminally
+retired by ACTOR: REASON; drop it from the source`, and the rest of the bundle applies. The retire
+debt stays open while the source declares the member. A publication that omits the member reports
+the same change with the effect `keep terminally retired by ACTOR: REASON`. That is not a retirement
+by the publication, so it does not count toward the `--confirm-retire` threshold. That publication
+closes the debt as `adopted`.
 
 `--force --reason TEXT` accepts the write on an `audit` or `enforce` set. The reason must be
 nonempty. Persons and agents may force (`fractal apply`, `agents stop|start|hold|suspend|resume`,
@@ -226,9 +284,10 @@ forced declaration (including a mission) overrides the set's member reference un
 publishes again.
 
 The next publication with a new source sequence converges every member and closes all of the set's
-open debt. Its preview lists `reverted_debts`, and apply returns `source_debts_reverted`. Each entry
-has the outcome `reverted` (the source differs, or a forced hold or suspension is still in place),
-`adopted` (the source now declares the forced value or created subject), or `closed` (a runtime
+open debt, except retire debt on a member it still declares. Its preview lists `reverted_debts`, and
+apply returns `source_debts_reverted`. Each entry has the outcome `reverted` (the source differs, or
+a forced hold or suspension is still in place), `adopted` (the source now declares the forced value
+or created subject, or no longer declares a retired member), or `closed` (a runtime
 change that no longer stands, such as a forced resume or a hold someone replaced). A reverted change
 shows the effect `revert ad hoc change by ACTOR: REASON`. In its own transaction the publication
 writes one `source.debt.closed` per debt (debt claim, outcome, closing set revision, publisher),
