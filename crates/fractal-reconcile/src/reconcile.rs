@@ -4673,7 +4673,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if fractal_kernel::pricing::canonical_model(&live) == fractal_kernel::pricing::canonical_model(&declared) {
             return self.recover_model_drift(&episode, "usage returned to the declared model");
         }
-        let open = self.store.operational_failure(&episode)?;
+        let open = self.store.operational_failure(&episode)?.filter(|failure| failure.status == "pending");
         let since = open
             .as_ref()
             .and_then(|failure| Self::drift_since_ms(&failure.reason))
@@ -4699,8 +4699,10 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn recover_model_drift(&self, episode: &str, reason: &str) -> Result<()> {
-        if self.store.operational_failure(episode)?.is_some_and(|failure| failure.status == "pending") {
-            self.store.recover_operational_failure(episode, reason, &format!("{episode}:resolved"))?;
+        if let Some(failure) = self.store.operational_failure(episode)?.filter(|failure| failure.status == "pending") {
+            // Keyed by the failure's request: each raise episode recovers once, and a later
+            // re-raise recovers again under its own key.
+            self.store.recover_operational_failure(episode, reason, &format!("{episode}:resolved:{}", failure.request))?;
             self.signal_changed();
         }
         Ok(())
@@ -49186,6 +49188,35 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         report("claude-opus-5-5", "drift-usage-recovered");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         assert!(drift().is_none());
+        // Fallback again, then the declaration adopts the live model: the fault resolves.
+        report("gpt-6.1-sol", "drift-usage-fallback-again");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        assert!(drift().is_some());
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; harness \"omp\" {{ model \"openai/gpt-6.1-sol\" }} }}\n",
+                workspace.path().display().to_string()
+            ),
+            "drift-redeclared",
+        );
+        let redeclared = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        reconciler.reconcile_model_drift(&redeclared, "worker-one").unwrap();
+        assert!(drift().is_none());
+        // A fresh incarnation that has not reported reads no live model: no fault, and the
+        // previous incarnation's readings never count for it.
+        reconciler.reconcile_model_drift(&desired, "worker-two").unwrap();
+        assert!(drift().is_none());
+        assert_eq!(store.latest_usage_model("agent/node.worker", "worker-two").unwrap(), None);
+        assert_eq!(
+            store.latest_usage_model("agent/node.worker", "worker-one").unwrap().as_deref(),
+            Some("gpt-6.1-sol")
+        );
         drop(member);
     }
 

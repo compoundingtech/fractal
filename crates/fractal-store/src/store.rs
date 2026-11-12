@@ -6652,34 +6652,45 @@ impl Store {
     }
 
     /// The latest `harness.usage` `model` reported for `incarnation`, or `None` when it
-    /// reported none. One indexed newest-first lookup through
-    /// `claims_subject_kind_accepted_index`; never a full usage fold. Includes held local
-    /// readings, so a seat whose latest reading has not replicated yet still reports live.
+    /// reported none. Bounded: held local readings (newest, one per slot) first, then at
+    /// most `LATEST_USAGE_MODEL_WINDOW` replicated readings newest-first through
+    /// `claims_subject_kind_accepted_index`. Never a usage fold or a scan of the seat's
+    /// usage history: a new incarnation that has not reported yet reads `None` after one
+    /// bounded window, however long the seat's history.
     pub fn latest_usage_model(&self, subject: &str, incarnation: &str) -> Result<Option<String>> {
+        /// Model-less readings (context occupancy) interleave with response readings, and a
+        /// replaced incarnation's last readings can land after the new one's first, so the
+        /// newest model-bearing reading of a live incarnation sits well inside this.
+        const LATEST_USAGE_MODEL_WINDOW: i64 = 64;
+        fn model_of(body: &Value, incarnation: &str) -> Option<String> {
+            if body.pointer("/fields/incarnation_id").and_then(Value::as_str) != Some(incarnation) {
+                return None;
+            }
+            body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned)
+        }
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index WHERE subject=?1 AND kind='harness.usage' AND json_extract(body, '$.fields.incarnation_id')=?2 AND json_extract(body, '$.fields.model') IS NOT NULL ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, batch_id DESC, id DESC LIMIT 1",
-        )?;
-        let replicated: Option<String> = statement
-            .query_row(params![subject, incarnation], |row| {
-                let body: String = row.get(0)?;
-                Ok(serde_json::from_str::<Value>(&body)
-                    .ok()
-                    .and_then(|body| body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned)))
-            })
-            .optional()?
-            .flatten();
-        if replicated.is_some() {
-            return Ok(replicated);
-        }
-        Ok(crate::store::pending_usage(&connection, Some(subject), false)?
+        let held = crate::store::pending_usage(&connection, Some(subject), false)?
             .into_iter()
             .rev()
             .filter_map(|(_, body, _)| serde_json::from_str::<Value>(&body).ok())
-            .filter(|body| body.pointer("/fields/incarnation_id").and_then(Value::as_str) == Some(incarnation))
-            .filter_map(|body| body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned))
-            .next())
+            .find_map(|body| model_of(&body, incarnation));
+        if held.is_some() {
+            return Ok(held);
+        }
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha1115674eac8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE subject=?1 AND kind='harness.usage'
+             ORDER BY CANONICAL_DESC(claims) LIMIT ?2",
+        ))?;
+        let mut rows = statement.query(params![subject, LATEST_USAGE_MODEL_WINDOW])?;
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(0)?;
+            if let Some(model) = serde_json::from_str::<Value>(&body).ok().and_then(|body| model_of(&body, incarnation)) {
+                return Ok(Some(model));
+            }
+        }
+        Ok(None)
     }
 
     /// The current faults raised for `person` under the reviewer each one names, owners aside.
