@@ -1037,37 +1037,34 @@ async fn resolve_start_workspace(
         return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
     }
     // Another host's home is only known there, so it names the new agent's directory itself,
-    // like `agents new`: the placement host creates it when the agent starts.
+    // like `agents new`: the placement host creates it when the agent starts. A placement no
+    // member can reach names nothing, and the caller's own default is no path on that host.
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!(
+            "asking {placement} for a workspace needs the local Unix endpoint; pass --workspace"
+        );
+    };
     let person = Some(args.actor.as_str())
         .filter(|actor| actor.starts_with("person/"))
-        .or(configured_person);
+        .or(configured_person)
+        .with_context(|| {
+            format!(
+                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+            )
+        })?;
     let path = format!(
         "/v1/hosts/{}/agent-workspace?identity={}",
         urlencoding::encode(placement),
         urlencoding::encode(subject)
     );
-    let answer: Result<Value> = if placement == local {
-        client.get(&path).await
-    } else {
-        let Some(socket) = endpoint.unix_socket() else {
-            anyhow::bail!(
-                "asking {placement} for a workspace needs the local Unix endpoint; pass --workspace"
-            );
-        };
-        let person = person.with_context(|| {
-            format!(
-                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
-            )
+    let answer: Value = Client::unix_as(socket.as_ref(), person)?
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+        .get(&path)
+        .await
+        .with_context(|| {
+            format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
         })?;
-        Client::unix_as(socket.as_ref(), person)?
-            .with_endpoint(endpoint.clone())
-            .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
-            .get(&path)
-            .await
-    };
-    let answer = answer.with_context(|| {
-        format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
-    })?;
     let workspace = answer
         .get("workspace")
         .and_then(Value::as_str)
