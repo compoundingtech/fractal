@@ -49,6 +49,19 @@ const rollout = {
   }),
 } satisfies ObjectiveInput
 
+const throughput = {
+  name: 'factory/work-throughput',
+  about: "Factory-authored pull requests merged into the roster's default branches",
+  indicator: Fractal.indicator.count({
+    subjectPrefix: 'custom/factory/merged-pr/',
+    event: { kind: 'custom.factory.pr-merged', at: 'merged_at' },
+    labels: ['repository'],
+    exclude: [{ field: 'author', values: ['renovate'] }],
+  }),
+  window: { span: '24h' },
+  targets: [{ stat: 'per-hour', min: 10 }],
+} satisfies ObjectiveInput
+
 describe('Fractal.objective lowering', () => {
   it('lowers an interval over claims as docs/st3/objectives.md declares it', () => {
     expect(render(rollout)).toBe(`version 2
@@ -97,6 +110,24 @@ objective "ops/build" {
   target "p99" within="30m"
 }
 `)
+  })
+
+  it('lowers a count over claims as docs/st3/objectives.md declares it', () => {
+    expect(render(throughput)).toBe(`version 2
+objective "factory/work-throughput" {
+  about "Factory-authored pull requests merged into the roster's default branches"
+  indicator "count" {
+    subject-prefix "custom/factory/merged-pr/"
+    event "custom.factory.pr-merged" at="merged_at"
+    label "repository"
+    exclude "author" "renovate"
+  }
+  window "24h"
+  target "per-hour" min=10
+}
+`)
+    const flakes = { ...throughput, name: 'factory/flakes', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/flake/', event: { kind: 'custom.factory.flake', at: 'seen_at' } }), targets: [{ stat: 'per-hour', max: 0.5 }] }
+    expect(render(flakes)).toContain('  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=0.5\n')
   })
 
   const native: ReadonlyArray<{
@@ -209,8 +240,8 @@ describe('Fractal.objective validation', () => {
     { name: 'an exclude without values', input: { ...base, indicator: { ...interval, exclude: [{ field: 'exclusion', values: [] }] } }, message: /needs a field and at least one value/ },
     { name: 'a pause without resume', input: { ...base, indicator: { ...interval, pause: { kind: 'held', resume: '' } } }, message: /`pause` needs `resume`/ },
     { name: 'a claim kind in two roles', input: { ...base, indicator: { ...interval, cancel: 'custom.acme.change-ready' } }, message: /claim kind "custom.acme.change-ready" has two roles/ },
-    { name: 'an interval without a window', input: { ...base, window: undefined }, message: /an interval needs a `window`/ },
-    { name: 'a window on native telemetry', input: { name: 'x', about: 'a', indicator: latency, window: { span: '1d' }, targets: [{ stat: 'p99', within: '1s' }] }, message: /only an interval takes a `window`/ },
+    { name: 'an interval without a window', input: { ...base, window: undefined }, message: /a `interval` indicator needs a `window`/ },
+    { name: 'a window on native telemetry', input: { name: 'x', about: 'a', indicator: latency, window: { span: '1d' }, targets: [{ stat: 'p99', within: '1s' }] }, message: /only an interval or a count takes a `window`/ },
     { name: 'a zero window', input: { ...base, window: { span: '0d' } }, message: /must be positive/ },
     { name: 'a malformed duration', input: { ...base, targets: [{ stat: 'p95', within: '5 minutes' }] }, message: /invalid duration `5 minutes`/ },
     { name: 'a zero minimum sample count', input: { ...base, window: { span: '1d', minSamples: 0 } }, message: /minSamples is not a positive integer/ },
@@ -225,7 +256,18 @@ describe('Fractal.objective validation', () => {
     { name: 'a remote latency below local', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }, { stat: 'p99', within: '500ms', scope: 'remote' }] }, message: /remote latency is below its own/ },
     { name: 'a fractional divergence max', input: { name: 'x', about: 'a', indicator: Fractal.indicator.divergence(), targets: [{ stat: 'open', max: 0.5 }] }, message: /no target `open` with that bound/ },
     { name: 'a min-percent over 100', input: { name: 'x', about: 'a', indicator: Fractal.indicator.share({ path: 'p' }), targets: [{ stat: 'live-share', minPercent: 101 }] }, message: /is not between 0 and 100/ },
-    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only an interval takes `onBreach`/ },
+    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only an interval or a count takes `onBreach`/ },
+    { name: 'a count with min and max', input: { ...throughput, targets: [{ stat: 'per-hour', min: 1, max: 2 }] }, message: /needs one bound/ },
+    { name: 'a count with a zero minimum', input: { ...throughput, targets: [{ stat: 'per-hour', min: 0 }] }, message: /no target `per-hour` with that bound/ },
+    { name: 'a count with a negative maximum', input: { ...throughput, targets: [{ stat: 'per-hour', max: -1 }] }, message: /no target `per-hour` with that bound/ },
+    { name: 'a count with a percentile', input: { ...throughput, targets: [{ stat: 'p95', within: '5m' }] }, message: /no target `p95` with that bound/ },
+    { name: 'a count without a window', input: { ...throughput, window: undefined }, message: /a `count` indicator needs a `window`/ },
+    { name: 'a count window with a sample minimum', input: { ...throughput, window: { span: '24h', minSamples: 5 } }, message: /takes no `minSamples`/ },
+    { name: 'a count without an event', input: { ...throughput, indicator: { ...throughput.indicator, event: undefined } }, message: /a count needs `event`/ },
+    { name: 'a count event without a time field', input: { ...throughput, indicator: { ...throughput.indicator, event: { kind: 'custom.factory.pr-merged' } } }, message: /`event` needs `at`/ },
+    { name: 'a count with an interval child', input: { ...throughput, indicator: { ...throughput.indicator, start: { kind: 'k' } } }, message: /indicator `count` has an unknown field `start`/ },
+    { name: 'a count prefix without a slash', input: { ...throughput, indicator: { ...throughput.indicator, subjectPrefix: 'custom' } }, message: /must name subjects/ },
+    { name: 'a min on native telemetry', input: { name: 'x', about: 'a', indicator: { kind: 'ci-count', series: 'ci/flakes' }, targets: [{ stat: 'per-hour', min: 1 }] }, message: /no target `per-hour` with that bound/ },
     { name: 'an owner that is not an agent', input: { ...base, onBreach: { ...rollout.onBreach, owner: 'person/ada' } }, message: /`owner` is not an agent/ },
     { name: 'a backup equal to the owner', input: { ...base, onBreach: { ...rollout.onBreach, backup: rollout.onBreach.owner } }, message: /`backup` is an agent other than the owner/ },
     { name: 'a malformed condition', input: { ...base, onBreach: { ...rollout.onBreach, condition: 'Missed' } }, message: /needs `condition`/ },
