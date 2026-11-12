@@ -4219,8 +4219,8 @@ fn client_agent_cards_presented(
                 .cloned()
                 .unwrap_or_default();
             let usage = usage_summaries.get(&subject.subject);
-            // The model the seat actually runs on: the latest `harness.usage` model for the
-            // card's incarnation, or null when it reported none. Hoisted out of the card
+            // The model the seat actually runs on: the model its session last reported for the
+            // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
             // literal: the literal already nests at the macro recursion limit. A step script
             // reads what a one-shot reviewer actually ran on even after it exits.
             let live_model: Option<String> = match incarnation_id.as_deref() {

@@ -12264,13 +12264,17 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert!(typed.live_model.is_none());
     // Usage on another incarnation does not leak into this card.
-    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "total_tokens": 1}));
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
     assert!(card()["live_model"].is_null());
-    // Usage on this incarnation reports live, and survives a typed decode.
-    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "total_tokens": 1}));
+    // The session's reading on this incarnation reports live, and survives a typed decode.
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
     assert_eq!(card()["live_model"], "gpt-6.1-sol");
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // Response spend on another model (a subagent's, rolled up on the parent) is not what
+    // the seat runs on: the card keeps the session's model.
+    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "claude-haiku-4-5", "total_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
     // A stale incarnation keeps its own live model after the seat moves on.
     append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
     append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));

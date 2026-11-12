@@ -4648,30 +4648,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         Ok(())
     }
-    /// Compare the current incarnation's latest `harness.usage` model against the declared
-    /// harness model. A silent provider fallback (omp falling down its model ladder on a 429)
-    /// otherwise runs undeclared for hours with zero faults. This raises a non-blocking
+    /// Compare the current incarnation's latest main-loop `harness.usage` model against the
+    /// declared harness model. A silent provider fallback (omp falling down its model ladder on
+    /// a 429) otherwise runs undeclared for hours with zero faults. This raises a non-blocking
     /// operational failure (`harness/model-drift`) on the seat naming declared vs live model
     /// and since when: it never stops, parks, or crash-loops the seat. The item's owner is
     /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees it
     /// in `fractal now` and `agents show` faults, never as a personal inbox item. It resolves
-    /// when usage returns to the declared model or the declaration changes (which retires the
-    /// episode via its source revision). The Codex resume model check
-    /// (`resume_permission_overrides_applied`) only guards a resume handshake; this is the
-    /// durable observable signal for the same underlying concept, kept as a fault rather
-    /// than a crash loop so the seat keeps working.
+    /// when usage returns to the declared model or the declaration adopts the live model.
+    /// Models compare through `pricing::declared_model_matches`: Claude aliases (`sonnet`)
+    /// match their family, and a declaration that is no resolvable API ID raises nothing.
+    /// The Codex resume model check (`resume_permission_overrides_applied`) only guards a
+    /// resume handshake; this is the durable observable signal for the same underlying
+    /// concept, kept as a fault rather than a crash loop so the seat keeps working.
     fn reconcile_model_drift(&self, subject: &DesiredSubject, incarnation: &str) -> Result<()> {
         let episode = format!("model-drift/{}", subject.subject);
         let Some(declared) = Self::declared_harness_model(&subject.desired) else {
             return self.recover_model_drift(&episode, "the seat declares no harness model");
         };
-        // Bounded reads only: one indexed newest-first `harness.usage` lookup for this
+        // Bounded reads only: one indexed newest-first `harness.usage` window for this
         // incarnation, never a full usage fold.
         let Some(live) = self.store.latest_usage_model(&subject.subject, incarnation)? else {
             return self.recover_model_drift(&episode, "the seat has reported no usage model yet");
         };
-        if fractal_kernel::pricing::canonical_model(&live) == fractal_kernel::pricing::canonical_model(&declared) {
-            return self.recover_model_drift(&episode, "usage returned to the declared model");
+        match fractal_kernel::pricing::declared_model_matches(&declared, &live) {
+            Some(true) => return self.recover_model_drift(&episode, "usage returned to the declared model"),
+            None => return self.recover_model_drift(&episode, "the declared model is not a comparable model ID"),
+            Some(false) => {}
         }
         let open = self.store.operational_failure(&episode)?.filter(|failure| failure.status == "pending");
         let since = open
@@ -4682,9 +4685,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         let at = Utc.timestamp_millis_opt(since.min(i64::MAX as u128) as i64).single();
         reason.push_str(&format!(" since {}", at.map_or_else(|| format!("{since}ms"), |time| time.format("%H:%MZ").to_string())));
         reason.push_str(&format!(" [drift-since-ms:{since}]"));
-        if open.as_ref().is_some_and(|failure| failure.reason == reason) {
-            return Ok(());
+        if let Some(failure) = &open {
+            if failure.reason == reason {
+                return Ok(());
+            }
+            // A pending failure keeps its reason: recording over it is a no-op. The live model
+            // moved (or the declaration changed) while drifted, so close this episode and raise
+            // the new one, keeping the first-detected `since`.
+            self.store.recover_operational_failure(
+                &episode,
+                "the live or declared model changed while drifted",
+                &format!("{episode}:resolved:{}", failure.request),
+            )?;
         }
+        // No episode is pending here, so this appends; an unchanged pending reason returned
+        // above without waking the loop, which would otherwise run passes back to back.
         self.store.record_runtime_failure(&episode, &AttentionRequest {
             reviewer: subject.subject.clone(),
             title: "Seat runs on a fallback model".into(),
@@ -49122,12 +49137,15 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .find(|subject| subject.subject == "agent/node.worker")
             .unwrap();
         let member = desired.member.as_ref().unwrap().clone();
+        let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
-            Arc::new(Notify::new()),
+            notify.clone(),
         );
+        // Whether a pass since the last check woke the reconcile loop.
+        let woke = || futures_util::FutureExt::now_or_never(notify.notified()).is_some();
         let report = |model: &str, idempotency_key: &str| {
             store
                 .append_claim(&ClaimInput {
@@ -49171,10 +49189,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert!(item.detail.contains("anthropic/claude-opus-5-5"), "{}", item.detail);
         assert!(item.detail.contains("gpt-6.1-sol"), "{}", item.detail);
         assert!(item.detail.contains("[drift-since-ms:"), "{}", item.detail);
-        // A second pass keeps the first-detected `since` without rescanning history.
+        // A second pass keeps the first-detected `since` without rescanning history, and an
+        // unchanged fault appends nothing and does not wake the loop.
+        assert!(woke());
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let again = drift().expect("drift fault still raised");
         assert_eq!(again.detail, item.detail);
+        assert!(!woke());
         // The seat is not parked, stopped, or crash-looped: parked faults name the seat.
         assert!(
             store
@@ -49191,7 +49212,20 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         // Fallback again, then the declaration adopts the live model: the fault resolves.
         report("gpt-6.1-sol", "drift-usage-fallback-again");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
-        assert!(drift().is_some());
+        let first = drift().expect("drift fault raised again");
+        let since = first.detail.rsplit("[drift-since-ms:").next().unwrap().split(']').next().unwrap().to_owned();
+        // The live model moves to another undeclared model while drifted: the fault names
+        // the new model and keeps its `since`, and the next pass is quiet again.
+        report("gpt-6-luna", "drift-usage-second-rung");
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        let moved = drift().expect("drift fault follows the live model");
+        assert!(moved.detail.contains("running on gpt-6-luna"), "{}", moved.detail);
+        assert!(moved.detail.contains(&format!("[drift-since-ms:{since}]")), "{}", moved.detail);
+        assert!(woke());
+        reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
+        assert_eq!(drift().unwrap().detail, moved.detail);
+        assert!(!woke());
+        report("gpt-6.1-sol", "drift-usage-back-to-first-rung");
         apply_source(
             &store,
             &format!(
@@ -49218,6 +49252,83 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             Some("gpt-6.1-sol")
         );
         drop(member);
+    }
+
+    #[test]
+    fn usage_model_drift_ignores_subagent_usage_and_resolves_claude_aliases() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspaces = [(); 3].map(|()| tempfile::tempdir().unwrap());
+        let [parent, aliased, local] = workspaces.each_ref().map(|dir| dir.path().display().to_string());
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nagent \"parent\" {{ workspace {parent:?}; harness \"claude\" {{ model \"anthropic/claude-opus-5-5\" }} }}\nagent \"aliased\" {{ workspace {aliased:?}; harness \"claude\" {{ model \"sonnet\" }} }}\nagent \"local\" {{ workspace {local:?}; harness \"omp\" {{ model \"local-model\" }} }}\n"
+            ),
+            "drift-subagents-aliases",
+        );
+        let desired = |agent: &str| {
+            store
+                .desired_subjects()
+                .unwrap()
+                .into_iter()
+                .find(|subject| subject.subject == agent)
+                .unwrap()
+        };
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        // `context_occupancy` is the session's own reading (status line, channel context);
+        // `response` is spend, which carries subagents' responses under their own models.
+        let report = |agent: &str, model: &str, semantics: &str, idempotency_key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: agent.into(),
+                    kind: "harness.usage".into(),
+                    actor: Some(agent.into()),
+                    fields: BTreeMap::from([
+                        ("driver".into(), Value::String("claude".into())),
+                        ("model".into(), Value::String(model.into())),
+                        ("semantics".into(), Value::String(semantics.into())),
+                        ("total_tokens".into(), Value::from(1)),
+                        ("incarnation_id".into(), Value::String("one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(idempotency_key.into()),
+                })
+                .unwrap();
+        };
+        let drift = |agent: &str| {
+            store
+                .fault_items(None)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.subject == agent && item.title == "Seat runs on a fallback model")
+        };
+        // A parent whose newest reading is a subagent's response on another model: spend is
+        // not the model the seat runs on, so no fault and the live model stays the session's.
+        report("agent/node.parent", "claude-opus-5-5", "context_occupancy", "parent-session");
+        report("agent/node.parent", "claude-haiku-4-5", "response", "parent-subagent");
+        reconciler.reconcile_model_drift(&desired("agent/node.parent"), "one").unwrap();
+        assert!(drift("agent/node.parent").is_none());
+        assert_eq!(
+            store.latest_usage_model("agent/node.parent", "one").unwrap().as_deref(),
+            Some("claude-opus-5-5")
+        );
+        // A declared Claude alias matches its family's full API ID, and only that family.
+        report("agent/node.aliased", "claude-sonnet-4-6", "context_occupancy", "aliased-sonnet");
+        reconciler.reconcile_model_drift(&desired("agent/node.aliased"), "one").unwrap();
+        assert!(drift("agent/node.aliased").is_none());
+        report("agent/node.aliased", "claude-haiku-4-5", "context_occupancy", "aliased-haiku");
+        reconciler.reconcile_model_drift(&desired("agent/node.aliased"), "one").unwrap();
+        assert!(drift("agent/node.aliased").is_some());
+        // A declaration that is neither an alias nor a known API ID is not comparable.
+        report("agent/node.local", "claude-haiku-4-5", "context_occupancy", "local-other");
+        reconciler.reconcile_model_drift(&desired("agent/node.local"), "one").unwrap();
+        assert!(drift("agent/node.local").is_none());
     }
 
     #[test]

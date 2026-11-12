@@ -6651,22 +6651,34 @@ impl Store {
         Ok(claim.into_iter().chain(local).max_by_key(claim_log_order))
     }
 
-    /// The latest `harness.usage` `model` reported for `incarnation`, or `None` when it
-    /// reported none. Bounded: held local readings (newest, one per slot) first, then at
-    /// most `LATEST_USAGE_MODEL_WINDOW` replicated readings newest-first through
-    /// `claims_subject_kind_accepted_index`. Never a usage fold or a scan of the seat's
-    /// usage history: a new incarnation that has not reported yet reads `None` after one
-    /// bounded window, however long the seat's history.
+    /// The model the seat's own session reports for `incarnation`, or `None` when it reported
+    /// none: the newest `context_occupancy` or `session_cumulative` reading carrying a model.
+    /// Those come from the harness's session context (Claude's status line, the omp/pi
+    /// channel, OpenCode), so they name the main loop's model. Response spend
+    /// (`response_rollup`) never counts: subagent responses (Claude subagent transcripts,
+    /// Codex subagent rollouts) are rolled up on the parent's incarnation under the
+    /// subagent's own model, and the rollup claim keeps no turn to tell them apart. A
+    /// driver whose session reports no model (Codex) reads `None`. Bounded: held local
+    /// readings (newest, one per slot) first, then at most `LATEST_USAGE_MODEL_WINDOW`
+    /// replicated readings newest-first through `claims_subject_kind_accepted_index`. Never a
+    /// usage fold or a scan of the seat's usage history: a new incarnation that has not
+    /// reported yet reads `None` after one bounded window, however long the seat's history.
     pub fn latest_usage_model(&self, subject: &str, incarnation: &str) -> Result<Option<String>> {
-        /// Model-less readings (context occupancy) interleave with response readings, and a
-        /// replaced incarnation's last readings can land after the new one's first, so the
-        /// newest model-bearing reading of a live incarnation sits well inside this.
+        /// Response rollups interleave with session readings, and a replaced incarnation's
+        /// last readings can land after the new one's first, so the newest session reading
+        /// of a live incarnation sits well inside this.
         const LATEST_USAGE_MODEL_WINDOW: i64 = 64;
         fn model_of(body: &Value, incarnation: &str) -> Option<String> {
-            if body.pointer("/fields/incarnation_id").and_then(Value::as_str) != Some(incarnation) {
+            let fields = body.get("fields")?;
+            if fields.get("incarnation_id").and_then(Value::as_str) != Some(incarnation)
+                || !matches!(
+                    fields.get("semantics").and_then(Value::as_str),
+                    Some("context_occupancy" | "session_cumulative")
+                )
+            {
                 return None;
             }
-            body.pointer("/fields/model").and_then(Value::as_str).map(str::to_owned)
+            fields.get("model").and_then(Value::as_str).map(str::to_owned)
         }
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
