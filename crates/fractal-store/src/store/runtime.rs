@@ -1054,7 +1054,9 @@ mod schema_install_tests {
     #[test]
     fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        for refused_table in ["local_mission_supersession_heads_v2", "meta"] {
+        for (refused_table, refused_meta_insert) in [
+            ("local_mission_supersession_heads_v2", 0), ("meta", 1), ("meta", 2),
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("bootstrap.sqlite");
             let store = Store::open(&path, "owner").unwrap();
@@ -1069,8 +1071,20 @@ mod schema_install_tests {
                 connection.execute("DELETE FROM meta WHERE key=?1",
                     [mission_supersession::BOOTSTRAP_KEY]).unwrap();
                 connection.execute("DELETE FROM local_mission_supersession_heads_v2", []).unwrap();
+                let counter = || connection.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v2_sequence'",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap();
+                let counter_before = counter();
+                let meta_inserts = std::sync::atomic::AtomicUsize::new(0);
                 connection.authorizer(Some(move |context: AuthContext<'_>| {
-                    if matches!(context.action, AuthAction::Insert { table_name } if table_name == refused_table) {
+                    let denied = match context.action {
+                        AuthAction::Insert { table_name } if table_name == refused_table => {
+                            table_name != "meta" || meta_inserts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == refused_meta_insert
+                        }
+                        _ => false,
+                    };
+                    if denied {
                         Authorization::Deny
                     } else {
                         Authorization::Allow
@@ -1079,6 +1093,7 @@ mod schema_install_tests {
                 assert!(mission_supersession::install_schema(&connection).is_err());
                 connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
                 assert!(connection.is_autocommit(), "failed bootstrap must roll back");
+                assert_eq!(counter(), counter_before, "failed bootstrap must roll back its allocator");
                 assert_eq!(connection.query_row(
                     "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
                     [], |row| row.get::<_, u64>(0),
