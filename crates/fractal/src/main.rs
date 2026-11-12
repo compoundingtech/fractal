@@ -108,6 +108,7 @@ mod uninstall_cli;
 mod program_bundles;
 mod validate_cli;
 mod work_cli;
+mod source_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
@@ -318,7 +319,7 @@ enum Command {
         #[command(subcommand)]
         command: OwnedSetsCommand,
     },
-    /// Inspect source enforcement: each owned set's policy and open ad hoc source debt.
+    /// Inspect source: owned sets' policy and debt, and where declarations come from in source.
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -2439,6 +2440,16 @@ struct SubjectShowArgs {
     /// Include literal environment values in the KDL output.
     #[arg(long, requires = "kdl")]
     show_env_values: bool,
+    /// Where this agent or mission revision was authored, from its recorded source map. A
+    /// `step-run/…` subject resolves through the revision its run pinned.
+    #[arg(long, conflicts_with_all = ["kdl", "references"])]
+    source: bool,
+    /// The revision to show the source of; defaults to the current one.
+    #[arg(long, requires = "source")]
+    revision: Option<String>,
+    /// One node and its frames: a KDL node path or `step:ID[/gate:NAME|/goal]`.
+    #[arg(long, requires = "source")]
+    node: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3474,6 +3485,10 @@ enum SourceCommand {
         #[arg(long)]
         audit: bool,
     },
+    /// Which live agents and missions a file, or one line of it, declares or feeds.
+    Where(source_cli::SourceWhereArgs),
+    /// What changed between two mapped revisions of a subject: source files, KDL, and why.
+    Diff(source_cli::SourceDiffArgs),
 }
 
 /// Bundle each versioned file into one intent so references may cross file boundaries.
@@ -6166,6 +6181,8 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             print_value(&status, cli.json)
         }
+        Command::Source { command: SourceCommand::Where(args) } => source_cli::run_where(&client, args, cli.json).await,
+        Command::Source { command: SourceCommand::Diff(args) } => source_cli::run_diff(&client, args, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
         Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
@@ -12037,6 +12054,9 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.source {
+                return source_cli::show(client, &args.subject, args.revision.as_deref(), args.node.as_deref(), json_output).await;
+            }
             if args.references {
                 let references: Vec<Value> = client
                     .get(&format!("/v1/resource-references/{}", args.subject))
