@@ -175,6 +175,24 @@ A revision left unmapped that way gets its map from the next publication that ca
 `GET /v1/source-maps?subject=ID[&revision=REV][&texts=true]` answers the claim of a revision
 (default: the current one), with `texts: {blob_hash: text}` on request; 404 `source-map-missing`
 when that revision has none. `GET /v1/source-blobs/<sha256>` answers one stored text.
+A `step-run/...` subject answers its mission at the revision its run's generation pinned, plus
+`step` and `node`, the step's KDL node path (`mission[ID]/step[STEP]`, nested steps
+`.../step[OUTER]/mission[NESTED]/step[INNER]`, gates `.../gate[NAME]`). A node the map does not
+list inherits its nearest listed ancestor.
+
+- `GET /v1/source-maps/revisions?subject=ID` lists the revisions with a map, newest first, with
+  their commit and set revision, plus the subject's `current` revision.
+- `GET /v1/source-maps/where?path=PATH[&repository=OWNER/REPO][&line=N]` reads the maps of every
+  live agent and mission revision that name the file. Per repository it answers the newest
+  recorded version (`reference`), and per subject whether the file declares it and the nodes with
+  a span or frame in the file. `lines` is a span carried into the reference text by a line diff
+  (`null` once every line of it changed); with `line`, only nodes covering it are answered.
+- `GET /v1/source-maps/declaration?subject=ID&revision=REV` answers the canonical KDL of that
+  revision, environment values redacted, for diffs between revisions.
+
+`fractal subject show ID --source`, `fractal source where` and `fractal source diff` read these;
+`fractal work claim` adds a `SOURCE` row, and the faults for a broken gate or a step out of time,
+and a failing gate's reason, name the declaring line.
 
 ## Inspect publication and rollout
 

@@ -138,6 +138,7 @@ pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 mod source_maps;
+mod source_index;
 pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
@@ -751,6 +752,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/source/status", get(owned_sets::source_status))
         .route("/v1/source-maps", get(source_maps::get))
+        .route("/v1/source-maps/revisions", get(source_index::revisions))
+        .route("/v1/source-maps/where", get(source_index::where_used))
+        .route("/v1/source-maps/declaration", get(source_index::declaration))
         .route("/v1/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
@@ -4219,6 +4223,14 @@ fn client_agent_cards_presented(
                 .cloned()
                 .unwrap_or_default();
             let usage = usage_summaries.get(&subject.subject);
+            // The model the seat actually runs on: the model its session last reported for the
+            // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
+            // literal: the literal already nests at the macro recursion limit. A step script
+            // reads what a one-shot reviewer actually ran on even after it exits.
+            let live_model: Option<String> = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+                None => None,
+            };
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4281,6 +4293,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }
@@ -5094,13 +5107,29 @@ fn client_attention_resources_from_items(
     Ok(resources)
 }
 
+/// The attention row shapes a client negotiated (`x-st3-features`): each newer kind has its
+/// own feature, since a client that has one may predate the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionCompatibility {
+    /// `custom-subjects.v1`: registered `custom.*` kinds and their reply forms.
+    pub custom_forms: bool,
+    /// `model-drift-attention.v1`: the `model-drift` kind.
+    pub model_drift: bool,
+}
+
 // Older client-v0 models use closed enums for attention kinds and action names.
-pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
-    if custom_forms {
-        return;
-    }
+pub fn client_attention_compatibility(items: &mut [Value], compatibility: AttentionCompatibility) {
     for item in items {
-        if item["kind"] == "attention" && item["source_kind"] == "custom" {
+        // A model-drift item asks nothing; a client that cannot read the kind shows it as a
+        // request it can read.
+        if !compatibility.model_drift
+            && item["kind"] == "attention" && item["attention_kind"] == "model-drift" {
+            item["attention_kind"] = json!("agent-request");
+            item["actions"] = json!([]);
+            continue;
+        }
+        if !compatibility.custom_forms
+            && item["kind"] == "attention" && item["source_kind"] == "custom" {
             item["custom_attention_kind"] = item["attention_kind"].clone();
             item["attention_kind"] = json!("agent-request");
             item["actions"] = json!([]);

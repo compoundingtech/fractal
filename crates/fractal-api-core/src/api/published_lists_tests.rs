@@ -2072,6 +2072,10 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     let waiting = start(&store, "eta/b", "waiting");
     let (before, _) = fold(&store);
     assert!(before.rows.cards["mission/eta/b"]["run_details"][0]["eta"].is_null());
+    // The run chip pins the declaration sheet to the run's revision.
+    let card = &before.rows.cards["mission/eta/b"];
+    assert_eq!(card["run_details"][0]["revision"], card["mission_revision"]);
+    assert!(card["run_details"][0]["revision"].is_string());
     for (index, duration) in [100_u64, 300].into_iter().enumerate() {
         let run = start(&store, "eta/a", &format!("sample-{index}"));
         store
