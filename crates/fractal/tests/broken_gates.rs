@@ -1620,7 +1620,12 @@ impl SupersessionFixture {
     }
 
     fn view(&self, run: &str) -> Value {
-        self.daemon.command(&["missions", "show", run])
+        let subject = if run.starts_with("mission-run/") {
+            std::borrow::Cow::Borrowed(run)
+        } else {
+            std::borrow::Cow::Owned(format!("mission-run/{run}"))
+        };
+        self.daemon.command(&["missions", "show", &subject])
     }
 
     fn until(&self, label: &str, done: impl FnMut() -> bool) {

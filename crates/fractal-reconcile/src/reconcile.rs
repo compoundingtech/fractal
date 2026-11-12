@@ -11147,23 +11147,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             return Ok(changed);
         }
-        if run.phase == "revision-draining" {
-            if self.store.apply_drained_revision(&run.id)?.is_some() {
-                return Ok(true);
-            }
-            // A replica can receive the old proposal's draining claim after the
-            // successor generation. Recover the persisted run phase when no
-            // draining proposal still targets its current generation.
-            if !self
-                .store
-                .revision_proposal_for_run(&run.id)?
-                .is_some_and(|proposal| proposal.status == "draining")
-            {
-                return self
-                    .store
-                    .set_mission_run_state(&run.id, &run.status, "normal", None);
-            }
-        }
         // Cleanup reads only the run's owned declarations. It never waits for the mission
         // revision or its steps, so a run whose revision is unavailable still stops its runtimes.
         if run.phase.starts_with("cleanup-") {
@@ -11199,6 +11182,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_run(&self, run: &MissionRunView, mission: &MissionSpec) -> Result<bool> {
+        let idle_cutover = self.store.supersede_idle_mission_run(run, mission)?;
+        if idle_cutover == Some(true) {
+            return Ok(true);
+        }
+        // A late proposal claim can leave a stale draining phase. An automatic idle
+        // hold uses that same phase and must not be released while work is active.
+        if run.phase == "revision-draining" && idle_cutover.is_none() {
+            if self.store.apply_drained_revision(&run.id)?.is_some() {
+                return Ok(true);
+            }
+            if !self.store.revision_proposal_for_run(&run.id)?
+                .is_some_and(|proposal| proposal.status == "draining")
+            {
+                return self.store.set_mission_run_state(&run.id, &run.status, "normal", None);
+            }
+        }
         if run.phase == "supersession-waiting" {
             return self.evaluate_active_mission_run(run, None);
         }
@@ -25418,10 +25417,22 @@ version 2
 "#,
             "retire-first",
         );
+        let second = publish(
+            r#"
+version 2
+
+  mission "retire" state="ready" {
+    goal "Retire superseded generation members."
+    step "team" { goal "Use the replacement team." }
+  }
+
+"#,
+            "retire-second",
+        );
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: first.id,
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -25507,18 +25518,6 @@ version 2
             )
             .unwrap();
 
-        let second = publish(
-            r#"
-version 2
-
-  mission "retire" state="ready" {
-    goal "Retire superseded generation members."
-    step "team" { goal "Use the replacement team." }
-  }
-
-"#,
-            "retire-second",
-        );
         let revised = store
             .adopt_mission_revision(
                 &run.id,
@@ -29513,10 +29512,16 @@ mission "render-retire" state="ready" {{
             workspace.path().display().to_string()
         );
         apply_source(&store, &first, "render-retire-first");
+        let first_revision = store.mission_spec("render-retire", None).unwrap().unwrap();
+        let second = r#"version 2
+mission "render-retire" state="ready" { goal "Retire a broken renderer."; step "wait" { goal "Replacement without the worker." } }
+"#;
+        apply_source(&store, second, "render-retire-second");
+        let intent = parse_intent(second, "node").unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "render-retire".into(),
-                revision: None,
+                revision: Some(first_revision.revision),
                 workspace: workspace.path().display().to_string(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -29551,11 +29556,6 @@ mission "render-retire" state="ready" {{
         fs::remove_file(workspace.path().join("output")).unwrap();
         fs::create_dir(workspace.path().join("output")).unwrap();
         assert!(crate::render::apply(&store, &member.desired, workspace.path()).is_err());
-        let second = r#"version 2
-mission "render-retire" state="ready" { goal "Retire a broken renderer."; step "wait" { goal "Replacement without the worker." } }
-"#;
-        apply_source(&store, second, "render-retire-second");
-        let intent = parse_intent(second, "node").unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -30266,10 +30266,18 @@ mission "proof" state="ready" {{
     }
 
     fn start_proof_run(store: &Store, key: &str) -> crate::model::MissionRunView {
+        start_proof_revision(store, None, key)
+    }
+
+    fn start_proof_revision(
+        store: &Store,
+        revision: Option<String>,
+        key: &str,
+    ) -> crate::model::MissionRunView {
         store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "proof".into(),
-                revision: None,
+                revision,
                 workspace: "/tmp".into(),
                 requester: Some("person/requester".into()),
                 mode: Some("run".into()),
@@ -30678,8 +30686,10 @@ mission "proof" state="ready" {{
             )
         };
         let broken = "export PATH=/usr/bin:/bin; cargo test -p example --test suite";
-        publish_as(&store, &source(broken), "regate-one", "agent/node.planner");
-        let run = start_proof_run(&store, "regate-run");
+        let first = publish_as(&store, &source(broken), "regate-one", "agent/node.planner");
+        let fixed = "export PATH=/opt/mold/bin:/usr/bin:/bin; cargo test -p example --test suite";
+        let revised = publish_as(&store, &source(fixed), "regate-two", "agent/node.planner");
+        let run = start_proof_revision(&store, Some(first.revision), "regate-run");
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(
             store.clone(),
@@ -30745,8 +30755,6 @@ mission "proof" state="ready" {{
         assert_eq!(fault.item.step.as_deref(), Some(land.as_str()));
 
         // The publisher corrects only the gate. The work stays submitted and the new gate checks it.
-        let fixed = "export PATH=/opt/mold/bin:/usr/bin:/bin; cargo test -p example --test suite";
-        let revised = publish_as(&store, &source(fixed), "regate-two", "agent/node.planner");
         let adopted = store
             .adopt_mission_revision(
                 &run.id,
@@ -44737,10 +44745,13 @@ mission "intake" state="ready" {{
             "intake-first",
         );
         let first = store.mission_spec("intake", None).unwrap().unwrap();
+        let standing = "observer/github/acme/garden";
+        apply_source(&store, &intake(standing, ""), "intake-second");
+        let second = store.mission_spec("intake", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: first.id,
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -44761,7 +44772,6 @@ mission "intake" state="ready" {{
             reconciler.reconcile_once().unwrap();
         }
         let own = format!("observer/{}/repository", run.id);
-        let standing = "observer/github/acme/garden";
         let resource = "resource/github/acme/old";
         let reviews = format!("subscription/{}/reviews", run.id);
         let triage = format!("subscription/{}/triage", run.id);
@@ -44839,8 +44849,6 @@ mission "intake" state="ready" {{
 
         // The revision moves both subscriptions onto the standing observer, which takes the
         // intake observer's resource; the intake observer stops.
-        apply_source(&store, &intake(standing, ""), "intake-second");
-        let second = store.mission_spec("intake", None).unwrap().unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -45929,10 +45937,17 @@ version 2
 
 "#;
         apply_source(&store, source, "publish-keep");
+        let first = store.mission_spec("keep", None).unwrap().unwrap();
+        apply_source(
+            &store,
+            &source.replace("Use the first goal.", "Use the second goal."),
+            "publish-keep-two",
+        );
+        let revised = store.mission_spec("keep", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "keep".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -45989,12 +46004,6 @@ version 2
                 },
             )
             .unwrap();
-        apply_source(
-            &store,
-            &source.replace("Use the first goal.", "Use the second goal."),
-            "publish-keep-two",
-        );
-        let revised = store.mission_spec("keep", None).unwrap().unwrap();
         let adopted = store
             .adopt_mission_revision(
                 &run.id,
@@ -46051,10 +46060,17 @@ version 2
             &standing_intake_source(&standing_intake(&review)),
             "standing-with-intake",
         );
+        let first = store.mission_spec("standing", None).unwrap().unwrap();
+        apply_source(
+            &store,
+            &standing_intake_source(""),
+            "standing-without-intake",
+        );
+        let revised = store.mission_spec("standing", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "standing".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -46082,12 +46098,6 @@ version 2
                 .unwrap_or_else(|| panic!("`{subject}` is desired"))
         };
         assert!(!intake_is_stopped(&desired(&subscription), "node"));
-        apply_source(
-            &store,
-            &standing_intake_source(""),
-            "standing-without-intake",
-        );
-        let revised = store.mission_spec("standing", None).unwrap().unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -49780,10 +49790,14 @@ mission "carry" state="ready" {{
             )
         };
         apply_source(&store, &source("Use the first goal."), "carry-blocked-one");
+        let first = store.mission_spec("carry", None).unwrap().unwrap();
+        let second = source("Use the second goal.");
+        apply_source(&store, &second, "carry-blocked-two");
+        let intent = parse_intent(&second, "node").unwrap();
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "carry".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -49808,9 +49822,6 @@ mission "carry" state="ready" {{
         assert_eq!(before.status, "blocked", "{before:?}");
         assert!(before.blocked_reason.is_some(), "{before:?}");
 
-        let second = source("Use the second goal.");
-        apply_source(&store, &second, "carry-blocked-two");
-        let intent = parse_intent(&second, "node").unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -51627,12 +51638,21 @@ mission "fresh" state="ready" {
 
         /// Start a run a little later than the last so join times differ.
         fn start(&self, mission: &str, key: &str) -> crate::model::MissionRunView {
+            self.start_revision(mission, None, key)
+        }
+
+        fn start_revision(
+            &self,
+            mission: &str,
+            revision: Option<String>,
+            key: &str,
+        ) -> crate::model::MissionRunView {
             std::thread::sleep(std::time::Duration::from_millis(2));
             let run = self
                 .store
                 .create_mission_run(&crate::model::MissionRunRequest {
                     mission: mission.into(),
-                    revision: None,
+                    revision,
                     workspace: "/tmp".into(),
                     requester: Some("person/requester".into()),
                     mode: Some("run".into()),
@@ -51757,22 +51777,24 @@ mission "fresh" state="ready" {
             .replace("agent/node.worker", SEAT);
         let legacy_source = canonical_source.replace(SEAT, "node/worker");
         apply_source(&seat.store, &legacy_source, "literal-wake-legacy-definition");
-        let a = seat.start("queued", "literal-wake-a");
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
+        let canonical = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
+        apply_source(&seat.store, &revised_source, "literal-wake-revision");
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let a = seat.start_revision("queued", Some(first.revision), "literal-wake-a");
         let legacy = a.steps.iter().find(|step| step.step == "work").unwrap();
         assert_eq!(legacy.assigned_to.as_deref(), Some("node/worker"));
         assert_eq!(legacy.created_at_unix_ms, 1);
         smallclaims::store::set_thread_clock(Some(10));
         seat.store.set_write_clock_at(10).unwrap();
-        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
-        let b = seat.start("queued", "literal-wake-b");
+        let b = seat.start_revision("queued", Some(canonical.revision), "literal-wake-b");
         let b_work = SeatQueueFixture::step(&b, "work");
         smallclaims::store::set_thread_clock(Some(20));
         seat.store.set_write_clock_at(20).unwrap();
         // A new generation joins the literal seat at 20, while its old
         // generation keeps the alias join at 1 for presentation.
-        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
-        apply_source(&seat.store, &revised_source, "literal-wake-revision");
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let a = seat.store.adopt_mission_revision(
             &a.id, &revision, "person/requester", "join the literal seat",
             "literal-wake-adopt",
@@ -52681,8 +52703,18 @@ mission "draining" state="ready" revision-cutover="when-idle" {
     #[test]
     fn a_revision_keeps_the_place_of_work_the_seat_held() {
         let seat = SeatQueueFixture::new();
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(
+            &seat.store,
+            &SEAT_QUEUE_SOURCE.replace(
+                "Give the durable seat one step in each run.",
+                "Give the durable seat one revised step in each run.",
+            ),
+            "seat-revision-publish",
+        );
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let gated = seat.start("gated", "seat-revision-gated");
-        let queued = seat.start("queued", "seat-revision-queued");
+        let queued = seat.start_revision("queued", Some(first.revision), "seat-revision-queued");
         let held = SeatQueueFixture::step(&queued, "work");
         let earlier = SeatQueueFixture::step(&gated, "work");
         seat.work(&held, "claim", "seat-revision-claim").unwrap();
@@ -52704,15 +52736,6 @@ mission "draining" state="ready" revision-cutover="when-idle" {
             "the seat still holds the later run's step"
         );
 
-        apply_source(
-            &seat.store,
-            &SEAT_QUEUE_SOURCE.replace(
-                "Give the durable seat one step in each run.",
-                "Give the durable seat one revised step in each run.",
-            ),
-            "seat-revision-publish",
-        );
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let revised = seat
             .store
             .adopt_mission_revision(
@@ -52754,8 +52777,18 @@ mission "draining" state="ready" revision-cutover="when-idle" {
     #[test]
     fn a_released_carried_step_returns_to_queue_order() {
         let seat = SeatQueueFixture::new();
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(
+            &seat.store,
+            &SEAT_QUEUE_SOURCE.replace(
+                "Give the durable seat one step in each run.",
+                "Give the durable seat one released step in each run.",
+            ),
+            "seat-release-publish",
+        );
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let gated = seat.start("gated", "seat-release-gated");
-        let queued = seat.start("queued", "seat-release-queued");
+        let queued = seat.start_revision("queued", Some(first.revision), "seat-release-queued");
         let held = SeatQueueFixture::step(&queued, "work");
         let earlier = SeatQueueFixture::step(&gated, "work");
         seat.work(&held, "claim", "seat-release-claim").unwrap();
@@ -52771,15 +52804,6 @@ mission "draining" state="ready" revision-cutover="when-idle" {
             "ready",
             "the earlier run now has ready work for the seat"
         );
-        apply_source(
-            &seat.store,
-            &SEAT_QUEUE_SOURCE.replace(
-                "Give the durable seat one step in each run.",
-                "Give the durable seat one released step in each run.",
-            ),
-            "seat-release-publish",
-        );
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let revised = seat
             .store
             .adopt_mission_revision(

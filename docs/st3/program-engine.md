@@ -283,13 +283,15 @@ A program's revision is its bundle hash: `sha256` is part of the step definition
 step's `definition_hash` and the mission revision. A run generation binds one revision, hence one
 bundle.
 
-Publishing a new revision automatically supersedes already-active stale mission runs,
-subject to [replacement admission and cleanup](mission-graph-runtime.md#automatic-publication-supersession).
-This does not rewrite a generation's bundle or journal. The fresh linked replacement restarts
-all programs and steps, and effects must be idempotent against prior workspace and external
-effects. Republish of the same revision does nothing; a same-revision retry begun after
-publication remains selected until a later new-revision publication. There is no journal
-adoption across automatic supersession and no new data-DSL semantics.
+For a policy-less mission, publishing a new revision automatically supersedes already-active
+stale runs, subject to [replacement admission and cleanup](mission-graph-runtime.md#automatic-publication-supersession).
+Existing human-only review and when-idle cutover policies take precedence: publication does not
+bypass review or cancel work before its declared idle boundary. Approved proposal cutover uses
+a new linked run at the exact approved revision. Neither path rewrites a generation's bundle or
+journal. The fresh replacement restarts all programs and steps, and effects must be idempotent
+against prior workspace and external effects. Republish of the same revision does nothing; a
+same-revision retry begun after publication remains selected until a later new-revision
+publication. No journal is adopted and no new data-DSL syntax is introduced.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
    sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and

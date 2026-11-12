@@ -6,7 +6,7 @@ See [Configuration and KDL](../site/reference/configuration.md) for complete day
 
 Every Fractal KDL document starts with `version 2`. Declarations follow the version directly.
 
-A mission is an immutable definition in the claims graph. Initial publication does not start it; publishing a new revision automatically supersedes eligible active runs as described below.
+A mission is an immutable definition in the claims graph. Initial publication does not start it; publishing a new revision supersedes eligible active runs by default, subject to their existing revision policies.
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
@@ -22,11 +22,15 @@ The source's status, generation, and execution history are immutable. Append-onl
 
 ## Automatic publication supersession
 
-Publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
+For a mission without a revision policy, publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
+
+The pinned source's existing revision policies take precedence. Mission- or step-level `revisions="human-only"` prevents automatic supersession; publication cannot strip that protection. The existing proposal, exact preview, reviewer authorization, and all-reviewer approval path remains. Successful approved cutover admits a **new linked run at the exact approved revision**, not a new generation of the source; it uses the same admission-first and cleanup barriers described below.
+
+With `revision-cutover="when-idle"`, publication does not immediately cancel active work. At reconciliation, the existing `revision-draining` phase holds new step admission while current claimed, working, or verifying work, including descendant work, finishes; holders can still finish their work. The next idle boundary preflights the latest eligible selected revision before cancellation. An explicit draining proposal takes precedence. A refusal releases that hold, keeps the source active, and exposes the incompatibility instead of abandoning the wait silently.
 
 A different publication receipt for an unchanged definition revision does not by itself expire a post-publication pin or reopen the same refusal episode. A genuinely different target can be preflighted again; after an intervening incompatible revision, restoring compatible code can recover the run.
 
-An owner also recovers pending selected-head work at startup. If a newer head was already selected after a run was admitted, recovery applies this same cutover instead of resuming stale code; upgrading an owner can therefore supersede an already-stale active run without another publication.
+An owner also recovers pending selected-head work at startup. If a newer head was already selected after a run was admitted, recovery applies the same policy precedence instead of resuming stale code blindly; upgrading an owner can therefore supersede an already-stale unprotected active run without another publication, or wait for its declared review/idle policy.
 
 Preflight the replacement before cancelling its source: exact resolved input declarations and kinds, capacity, original starter authority, workspace, and interpolation must admit an ordinary start against the target revision. A refusal leaves the source active, without a replacement or cancellation, and records a durable visible `supersession_fault` naming the source revision, target revision, and incompatibility. Other candidates remain independent.
 
@@ -34,7 +38,7 @@ On success, append bidirectional `supersedes` / `superseded_by` lineage and ordi
 
 Repeated publications form a chain: a replacement awaits terminal cleanup of every superseded predecessor, including an earlier run behind an intermediate replacement that never started. Cancelling a waiting replacement does not let its finally steps execute before its source reaches terminal. Existing run-level `after` dependencies remain in force and follow their own supersession chains. Neither cleanup nor dependency waiting spends the replacement's execution timeout; its admission claim starts the clock, or the existing `after-run` admission step does when a dependency is present. Replaying those claims preserves the same deadline.
 
-Every step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. Explicit run generations still pin exact code and journal, and explicit run revision remains a separate operation. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or opt-in supersession control is introduced.
+Every superseding step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. Unreviewed direct run revision remains a separate generation-adoption operation; approved proposal cutover uses a fresh linked run. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or revision-policy knob is introduced.
 
 
 ## First readiness under load
@@ -2253,15 +2257,16 @@ fractal work revision cancel PROPOSAL --as person/reviewer --reason "The request
 
 A run can have one pending proposal. A second proposal fails until the first proposal is applied or cancelled.
 
-A failed root run can be revised when its failed steps are the only reason it failed. It has no
-active work to drain, so an unreviewed revision cuts over immediately and an approved proposal cuts
-over on its final approval. The successor generation reopens the run: compatible completed normal
-work carries forward, each unchanged failed step starts its next attempt, and changed, cancelled,
-and final work starts again.
+A failed root run can be directly revised when its failed steps are the only reason it failed.
+An unreviewed direct revision retains the legacy successor-generation behavior: compatible
+completed normal work carries forward, and failed steps start their next attempts.
+An approved proposal instead starts a fresh linked run at the exact approved revision, including
+when its source is failed and terminal. The source's generation and terminal history remain
+unchanged; no completed work or journal carries to that replacement.
 
 ### Immutable generations
 
-Each accepted revision creates one immutable successor generation. The stable mission-run subject points to the current generation.
+Each unreviewed direct generation adoption creates one immutable successor generation under the stable mission-run subject. Approved proposal cutover instead creates a new mission-run subject; follow `superseded_by` to its generation history.
 
 The cutover transaction creates generation-specific step-run subjects. It also marks the old generation as superseded.
 

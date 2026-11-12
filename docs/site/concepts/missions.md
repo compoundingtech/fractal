@@ -71,17 +71,17 @@ mission "example/first-note" report-to="agent/example/worker" state="ready" {
 
 ## Publish, then start
 
-`fractal apply mission.kdl --as person/ada` saves the definition. Initial publication does not start work. `fractal missions start` creates a run with its own identity, workspace, and history; later new-revision publication automatically supersedes active stale runs as described below. Read [Your first mission](../getting-started/first-mission.md) for the full procedure.
+`fractal apply mission.kdl --as person/ada` saves the definition. Initial publication does not start work. `fractal missions start` creates a run with its own identity, workspace, and history; later new-revision publication supersedes active stale runs by default, respecting existing revision policies as described below. Read [Your first mission](../getting-started/first-mission.md) for the full procedure.
 
 Give goals observable end states. Keep operational instructions in constraints or documents named by the mission. A mission should say what must be true, not merely that an agent should try.
 
 ## Revising a running mission
 
-Publishing a **new revision automatically supersedes already-active runs on older revisions**. Before cancelling anything, publication checks whether a fresh run can start with each source's exact resolved inputs, input declarations and kinds, workspace, capacity, authority, and interpolation. If admission fails, the source stays active and `supersession_fault` names both revisions and the incompatibility.
+For a mission without a revision policy, publishing a **new revision automatically supersedes already-active runs on older revisions**. Existing human-only review prevents automatic supersession; a person must approve the exact proposal before a fresh linked run is admitted. A when-idle policy waits for current work to drain in the existing `revision-draining` phase, rather than cancelling immediately. Before cancelling anything, cutover checks whether a fresh run can start with each source's exact resolved inputs, input declarations and kinds, workspace, capacity, authority, and interpolation. If admission fails, the source stays active and `supersession_fault` names both revisions and the incompatibility.
 
 If admission succeeds, the source follows ordinary cancellation, finalization, and cleanup. Its linked fresh replacement waits in `supersession-waiting` until the source is terminal, then restarts every step and program from the top. No successful steps or program journals carry over. Effects already present in the workspace or external systems remain: work must be idempotent. Native JSON, public mission summaries, and `fractal missions show` expose `supersedes`, `superseded_by`, and any `supersession_fault`.
 
-Republishing the same revision does nothing. Supersession applies at the publication boundary, not as a continuous stale-run scan: an explicit `retry --same-revision` started after a newer publication remains on the selected revision until another new revision is published. Explicit run revision remains a separate native operation that creates a generation and may preserve compatible work; every generation still pins its code and journal. No additional data-DSL syntax is required.
+Republishing the same revision does nothing. Supersession responds to publication and declared policy boundaries, not a continuous stale-run scan: an explicit `retry --same-revision` started after a newer publication remains on the selected revision until another new revision is published. Unreviewed direct run revision remains a separate generation-adoption operation that may preserve compatible work; approved proposal cutover creates a fresh linked run. Every generation still pins its code and journal. No additional data-DSL syntax is required.
 
 ## Retrying a failed run
 

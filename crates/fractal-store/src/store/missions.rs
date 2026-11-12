@@ -102,7 +102,7 @@ pub fn normalize_intent_missions(
     Ok(())
 }
 
-fn mission_spec_at(
+pub(super) fn mission_spec_at(
     connection: &Connection,
     mission_id: &str,
     revision: Option<&str>,
@@ -273,11 +273,64 @@ impl Store {
         )
     }
 
+    /// Complete an authorized revision cutover inside its approval transaction.
+    /// The caller fences the proposal; ordinary start admission still precedes cancellation.
+    pub fn supersede_mission_run_at_revision_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        source: &MissionRunView,
+        revision: &str,
+    ) -> Result<MissionRunView, FractalError> {
+        let owned: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims
+             WHERE subject=?1 AND kind='mission-run.created' AND origin=?2)",
+            params![source.subject, self.origin], |row| row.get(0),
+        ).map_err(internal)?;
+        if !owned {
+            return Err(FractalError::new("mission-run-not-owned",
+                "only the source run's owner may supersede it"));
+        }
+        let current = mission_run_header_tx(transaction, &source.id).map_err(internal)?;
+        if current.generation != source.generation {
+            return Err(FractalError::new("stale-revision-proposal",
+                "the revision proposal does not target the current generation"));
+        }
+        if let Some(successor) = mission_run_lineage_tx(transaction, &source.subject)
+            .map_err(internal)?.superseded_by
+        {
+            let replacement = mission_run_view_tx(
+                transaction, successor.trim_start_matches("mission-run/"),
+            ).map_err(internal)?;
+            if replacement.revision != revision {
+                return Err(FractalError::new("mission-run-already-superseded",
+                    "the source run already has a replacement at a different revision"));
+            }
+            return Ok(replacement);
+        }
+        let mission = mission_storage_id(transaction, &source.mission)?;
+        let publication: String = transaction.query_row(
+            "SELECT claim_id FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
+            params![mission, revision], |row| row.get(0),
+        ).optional().map_err(internal)?.ok_or_else(|| FractalError::new(
+            "missing-mission-revision", "the proposed mission revision is unavailable",
+        ))?;
+        let replacement = self.create_superseding_mission_run_tx(
+            transaction, source, &publication, Some(revision),
+        )?;
+        if !is_terminal_run_state(&current.status) {
+            cancel_mission_run_tx(transaction, &self.origin, &source.subject,
+                &format!("superseded by {} at revision {revision}", replacement.subject),
+                None, now_ms())?;
+        }
+        Ok(replacement)
+    }
+
     pub(super) fn create_superseding_mission_run_tx(
         &self,
         transaction: &Transaction<'_>,
         source: &MissionRunView,
         publication: &str,
+        revision: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
         let (starter, selector): (Option<String>, Option<String>) = transaction
             .query_row(
@@ -301,7 +354,7 @@ impl Store {
         }).transpose()?;
         let request = MissionRunRequest {
             mission: source.mission.clone(),
-            revision: None,
+            revision: revision.map(str::to_owned),
             workspace: source.workspace.clone(),
             requester: Some(source.requester.clone()),
             mode: Some(source.mode.clone()),

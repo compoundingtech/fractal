@@ -274,8 +274,10 @@ The source's status, generation, and execution history do not change. These link
 are navigation and attribution, not a signal to hide the source or reuse its work.
 See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
 
-New-revision publication automatically supersedes already-active stale runs after
-replacement admission succeeds. List, detail, and history `run_details[]` include
+For a policy-less mission, new-revision publication automatically supersedes already-active
+stale runs after replacement admission succeeds. Existing human-only review and when-idle
+policies take precedence; approved cutover also creates a fresh linked run, and
+the existing `revision-draining` phase denotes the source's idle-boundary wait. List, detail, and history `run_details[]` include
 optional `supersedes` and `superseded_by` mission-run IDs and optional string
 `supersession_fault`. Absent strings are omitted, never null; older servers omit
 them. A refusal names both revisions and the incompatibility while leaving the

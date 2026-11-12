@@ -395,3 +395,78 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         }
     }
 }
+
+#[test]
+fn mission_supersession_when_idle_drains_without_dispatching_a_new_generation() {
+    let store = Store::open_memory("owner").unwrap();
+    let definition = ORIGINAL.replace("state=\"ready\"", "state=\"ready\" revision-cutover=\"when-idle\"");
+    let first = publish_mission(&store, &definition, "idle-original");
+    let source = start_source(&store, None);
+    let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "working", None).unwrap();
+    let target = publish_mission(&store, &definition.replace("exit 1", "exit 0"), "idle-corrected");
+    assert_eq!(current(&store, &source).phase, "normal");
+    assert!(current(&store, &source).superseded_by.is_none());
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
+    let draining = current(&store, &source);
+    assert_eq!(draining.phase, "revision-draining");
+    assert_eq!(draining.generation, source.generation);
+    assert!(draining.superseded_by.is_none());
+    assert_eq!(store.supersede_idle_mission_run(&draining, &first).unwrap(), Some(false));
+    rebuild(&store, &[&source]);
+    assert_eq!(current(&store, &source).phase, "revision-draining");
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
+    let fresh = replacement(&store, &source);
+    assert_eq!(fresh.revision, target.revision);
+    assert_eq!(current(&store, &source).generation, source.generation);
+    assert_link(&current(&store, &source), &fresh);
+    assert_eq!(fresh.phase, "supersession-waiting");
+    assert!(!store.resume_superseding_mission_run(&fresh.id).unwrap());
+    store.set_mission_run_state(&source.id, "cancelled", "terminal", Some("idle work and cleanup finished")).unwrap();
+    assert!(store.resume_superseding_mission_run(&fresh.id).unwrap());
+    assert_eq!(current(&store, &fresh).phase, "normal");
+}
+
+#[test]
+fn mission_supersession_when_idle_refusal_releases_the_source_and_recovers() {
+    let store = Store::open_memory("owner").unwrap();
+    let definition = ORIGINAL.replace("state=\"ready\"", "state=\"ready\" revision-cutover=\"when-idle\"");
+    let first = publish_mission(&store, &definition, "idle-original");
+    let source = start_source(&store, None);
+    let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "working", None).unwrap();
+    let incompatible = definition.replace("input \"value\"", "input \"renamed\"");
+    let target = publish_mission(&store, &incompatible, "idle-incompatible");
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
+    let refused = current(&store, &source);
+    assert_eq!(refused.phase, "normal");
+    assert_eq!(refused.generation, source.generation);
+    assert!(refused.superseded_by.is_none());
+    let reason = refused.supersession_fault.as_deref().unwrap();
+    assert!(reason.contains(&source.revision));
+    assert!(reason.contains(&target.revision));
+    assert_eq!(store.supersede_idle_mission_run(&refused, &first).unwrap(), None);
+    let corrected = publish_mission(&store, &definition.replace("exit 1", "exit 0"), "idle-compatible");
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
+    assert_eq!(replacement(&store, &source).revision, corrected.revision);
+    assert!(current(&store, &source).supersession_fault.is_none());
+}
+
+#[test]
+fn mission_supersession_respects_step_level_human_revision_policy() {
+    let store = Store::open_memory("owner").unwrap();
+    let protected = ORIGINAL.replace("step \"prepare\"", "step \"prepare\" revisions=\"human-only\"");
+    let first = publish_mission(&store, &protected, "protected-original");
+    let source = start_source(&store, None);
+    publish_mission(&store, &protected.replace("exit 1", "exit 0"), "protected-corrected");
+    let retained = current(&store, &source);
+    assert_eq!(retained.generation, source.generation);
+    assert_eq!(retained.revision, first.revision);
+    assert_eq!(retained.phase, "normal");
+    assert!(retained.superseded_by.is_none());
+    assert_eq!(store.supersede_idle_mission_run(&retained, &first).unwrap(), None);
+    assert!(retained.supersession_fault.is_none());
+}
