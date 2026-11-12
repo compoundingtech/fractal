@@ -30,6 +30,8 @@ export interface DiffViewProps {
   readonly hideWhitespace?: boolean
   readonly collapsed?: boolean
   readonly tone?: 'default' | 'muted'
+  /** `compact`: hover-card scale (dense type, meta leading, no line numbers by default). */
+  readonly density?: 'default' | 'compact'
   /** Accessible name of the scrollable region. */
   readonly label?: string
   readonly testId?: string
@@ -121,7 +123,7 @@ function SwapWhenPainted({ fallback, children }: { readonly fallback: React.Reac
   </div>
 }
 
-export const DiffView = React.memo(function DiffView({ patch, files: suppliedFiles, path, layout = 'unified', wrap = false, header = false, lineNumbers, maxLines, hideWhitespace = false, collapsed, tone = 'default', label, testId = 'diff-view' }: DiffViewProps) {
+export const DiffView = React.memo(function DiffView({ patch, files: suppliedFiles, path, layout = 'unified', wrap = false, header = false, lineNumbers, maxLines, hideWhitespace = false, collapsed, tone = 'default', density = 'default', label, testId = 'diff-view' }: DiffViewProps) {
   // Streaming input: a deferred patch lets the transcript stay responsive while hunks arrive.
   const deferredPatch = React.useDeferredValue(patch)
   const host = React.useRef<HTMLDivElement>(null)
@@ -146,11 +148,11 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   const added = prepared.files.reduce((sum, file) => sum + file.added, 0)
   const removed = prepared.files.reduce((sum, file) => sum + file.removed, 0)
   const Pierre = pierre === 'failed' || pierre === undefined ? undefined : pierre.default
-  return <div ref={host} role="region" aria-label={label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} tabIndex={0} data-testid={testId} data-diff-state={Pierre ? 'rendered' : pierre === 'failed' ? 'plain-failed' : 'plain'} data-added={added} data-removed={removed} {...stylex.props(styles.host, tone === 'muted' && styles.muted)}>
+  return <div ref={host} role="region" aria-label={label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} tabIndex={0} data-testid={testId} data-diff-state={Pierre ? 'rendered' : pierre === 'failed' ? 'plain-failed' : 'plain'} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
       const plain = <PlainDiff file={file} wrap={wrap} />
       return <div key={`${file.path}:${index}`} data-diff-file={file.path} {...stylex.props(styles.file)}>
-        {Pierre ? <PierreBoundary fallback={plain}><SwapWhenPainted fallback={plain}><Pierre file={file} layout={layout} wrap={wrap} header={header} lineNumbers={lineNumbers ?? !file.excerpt} scheme={scheme} collapsed={collapsed} /></SwapWhenPainted></PierreBoundary> : plain}
+        {Pierre ? <PierreBoundary fallback={plain}><SwapWhenPainted fallback={plain}><Pierre file={file} layout={layout} wrap={wrap} header={header} lineNumbers={lineNumbers ?? (density !== 'compact' && !file.excerpt)} scheme={scheme} collapsed={collapsed} /></SwapWhenPainted></PierreBoundary> : plain}
       </div>
     })}
     {prepared.hidden > 0 ? <p data-diff-more {...stylex.props(styles.more)}>{prepared.hidden} more {prepared.hidden === 1 ? 'line' : 'lines'}</p> : null}
@@ -196,13 +198,14 @@ const styles = stylex.create({
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` },
   },
   muted: { opacity: 0.8 },
+  compact: { '--diffs-font-size': t.denseSize, '--diffs-line-height': t.metaLeading, '--fractal-diff-plain-leading': t.metaLeading, '--fractal-diff-plain-size': t.denseSize, '--fractal-diff-plain-pad': s.xs, '--diffs-gap-block': s.xs },
   file: { minWidth: 0 },
   swap: { display: 'grid', minWidth: 0 },
   swapCell: { gridArea: '1 / 1', minWidth: 0 },
   swapPending: { visibility: 'hidden' },
-  plain: { margin: 0, paddingBlock: s.md, overflowX: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: 'var(--fractal-diff-fg)', whiteSpace: 'pre' },
+  plain: { margin: 0, paddingBlock: `var(--fractal-diff-plain-pad, ${s.md})`, overflowX: 'auto', fontFamily: t.fontMono, fontSize: `var(--fractal-diff-plain-size, ${t.codeSize})`, lineHeight: `var(--fractal-diff-plain-leading, ${t.uiLeading})`, color: 'var(--fractal-diff-fg)', whiteSpace: 'pre' },
   plainWrap: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
-  plainLine: { display: 'block', minHeight: t.uiLeading, paddingInline: s.sm },
+  plainLine: { display: 'block', minHeight: `var(--fractal-diff-plain-leading, ${t.uiLeading})`, paddingInline: s.sm },
   plainHunk: { color: text.fgMuted },
   plainAdded: { backgroundColor: 'color-mix(in srgb, var(--fractal-diff-addition) 12%, transparent)' },
   plainRemoved: { backgroundColor: 'color-mix(in srgb, var(--fractal-diff-deletion) 12%, transparent)' },

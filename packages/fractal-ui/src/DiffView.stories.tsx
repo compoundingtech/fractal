@@ -7,6 +7,7 @@ import { lightTheme } from './assistant-ui/composition-theme'
 import { DiffView } from './assistant-ui/composition/DiffView'
 import { samplePatch } from './assistant-ui/composition/diff-fixtures'
 import { EmbraceDiffPreview } from './assistant-ui/EmbraceToolPreview'
+import { ResourceEntityCard } from './assistant-ui/entity/ResourceCard'
 import { toolDiffs } from './assistant-ui/embrace-tool-preview'
 
 
@@ -134,6 +135,19 @@ export const TranscriptToolDiff: Story = {
   },
 }
 export const TranscriptToolDiffLightNarrow: Story = { args: { scheme: 'light', width: 440 }, render: TranscriptToolDiff.render, play: TranscriptToolDiff.play }
+
+/** Resource hover cards: a compact six-line DiffView instead of tinted text lines. */
+export const HoverCardPreview: Story = {
+  render: ({ scheme }) => <Canvas scheme={scheme} width={360}><ResourceEntityCard id="src/rows.ts" title="src/rows.ts" kind="Diff" icon="swap" summary={['+3 −2']} previewKind="diff" preview={samplePatch.split('\n').slice(4)} /></Canvas>,
+  play: async ({ canvasElement }) => {
+    const view = canvasElement.querySelector<HTMLElement>('[data-entity-card-preview="diff"] [data-testid="diff-view"]')!
+    await expect(view).not.toBeNull()
+    await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+    await expect(view.dataset.density).toBe('compact')
+    await expect(canvasElement.querySelector('[data-diff-more]')?.textContent).toBe('6 more lines')
+  },
+}
+export const HoverCardPreviewLight: Story = { args: { scheme: 'light' }, render: HoverCardPreview.render, play: HoverCardPreview.play }
 
 const styles = stylex.create({
   canvas: { minHeight: '100vh', backgroundColor: surface.canvas, color: text.fg, fontFamily: type.fontSans, padding: space.xl, boxSizing: 'border-box' },
