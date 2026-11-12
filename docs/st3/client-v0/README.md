@@ -2002,6 +2002,12 @@ grant, policy and disclosure class; unfiltered requests retain existing fleet pa
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
 
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note}`: the grant
+issuer's own full `PersonAvailability` (raw presence included, because the person is the
+reader) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. `fractal_availability_get` reads it.
+
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,
 `{"agent_id":"agent/chief-of-staff"}` returns at most that agent's existing metadata row,
