@@ -124,9 +124,7 @@ pub fn effective_deadline(asked_at: u128, deadline: u128, urgent: bool, holds: &
             break;
         }
         remaining -= start - cursor;
-        if hold.end.is_none() {
-            return None;
-        }
+        hold.end?;
         cursor = end;
     }
     Some(cursor + remaining)
