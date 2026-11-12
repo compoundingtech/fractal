@@ -3,16 +3,17 @@
     "fractal": {
       "flake": false,
       "locked": {
-        "lastModified": 1794435240,
-        "narHash": "sha256-J6BzCu0CxPHvEVb/xu+QTjFdDVirainG+P6az0EjNIU=",
-        "ref": "refs/heads/main",
-        "rev": "3b8e57cbfdda1caedfa14871aa80ef624a0bda4b",
+        "lastModified": 1794487980,
+        "narHash": "sha256-MnzAuojmUThe9Bhv+IgDgdXSWyZeox0umgntMS+vYt4=",
+        "ref": "schickling-assistant/2026-11-12-availability-surface",
+        "rev": "93a83bbb18494a6249e568e0ee32941ebd7209cf",
         "shallow": true,
         "type": "git",
         "url": "https://github.com/compoundingtech/fractal"
       },
       "original": {
-        "rev": "3b8e57cbfdda1caedfa14871aa80ef624a0bda4b",
+        "ref": "schickling-assistant/2026-11-12-availability-surface",
+        "rev": "93a83bbb18494a6249e568e0ee32941ebd7209cf",
         "shallow": true,
         "type": "git",
         "url": "https://github.com/compoundingtech/fractal"
