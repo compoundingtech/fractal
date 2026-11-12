@@ -508,7 +508,7 @@ async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_a
         command.args(["-c", "env -u ST_RUN_CREDENTIAL \"$@\"; result=$?; exit \"$result\"", "scratch-probe"]);
         if marker { command.arg("ST_AGENT=agent/fixture/scratch"); }
         command.arg(std::env::current_exe().unwrap())
-            .args(["--exact", concat!(module_path!(), "::scratch_attributed_client_probe"), "--nocapture"])
+            .args(["--exact", "api::tests::scratch_attributed_client_probe", "--nocapture"])
             .env("ST_RUN_CREDENTIAL", "foreign-instance-credential")
             .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env("FRACTAL_SCRATCH_PROBE_SOCKET", &socket)
@@ -517,6 +517,7 @@ async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_a
             .stdin(std::process::Stdio::null()).process_group(0);
         let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "probe did not execute: {}", String::from_utf8_lossy(&output.stdout));
         let claim = store.latest_claim(&format!("mission/fixture/scratch-{index}"), Some("mission.published")).unwrap();
         if allowed {
             assert_eq!(claim.unwrap().actor.as_deref(), Some(actor));

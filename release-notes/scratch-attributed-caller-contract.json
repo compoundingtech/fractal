@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "summary": "Document and exercise attributed scratch clients under mission exec ancestry without weakening caller guards.",
   "replay": { "status": "none", "detail": "Documentation and regression tests only; no runtime or replay changes." },
   "schema": { "status": "none", "detail": "No stored format or database changes." },
