@@ -1148,8 +1148,9 @@ async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant
     assert_eq!((availability.person.as_str(), availability.status, availability.interruptions),
         (OWNER, Status::Away, Interruptions::None));
     assert!(availability.status_until.is_some());
-    // The grant person is the reader, so raw presence is part of the view.
-    assert_eq!(availability.presence, Some(Presence::Locked));
+    // An assistant is not the person: raw presence never reaches it, only the effective status.
+    assert_eq!((availability.presence, availability.presence_observed_at), (None, None));
+    assert!(!read["availability"].to_string().contains("locked"), "{value}");
     assert_eq!(read["directive_note"]["person"], OWNER);
     assert_eq!(read["directive_note"]["text"], "Hold routine asks until the review lands");
     assert!(!value.to_string().contains("person/ada"), "{value}");

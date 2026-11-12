@@ -894,7 +894,8 @@ fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
     let value = &tool["outputSchema"]["oneOf"][0]["properties"]["value"];
     let availability = &value["properties"]["availability"];
     assert_eq!(availability["properties"]["status"], json!({"enum":["available","away"]}));
-    assert_eq!(availability["properties"]["presence"], json!({"enum":["present","idle","locked","unknown",null]}));
+    assert_eq!(availability["properties"]["presence"], json!({"type":"null"}), "assistants never see raw presence");
+    assert_eq!(availability["properties"]["presence_observed_at"], json!({"type":"null"}));
     assert_eq!(availability["properties"]["interruptions"], json!({"enum":["all","urgent","none"]}));
     assert_eq!(availability["properties"]["deadline_clock"], json!({"enum":["run","hold-routine","hold-all"]}));
     assert_eq!(availability["required"].as_array().unwrap().len(), 11);
