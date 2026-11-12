@@ -89,6 +89,8 @@ actor FractalAttentionAdapter: AttentionAdapter {
 
   func readAttention() async throws -> AttentionPage {
     do {
+      let capabilities = try await client.capabilities().value.capabilities
+      let canAnswer = capabilities.contains { $0.id == "work.done" && $0.state == "granted" }
       // Publish only after every cursor page succeeds, never an incomplete count.
       var cursor: String?
       var records: [AttentionRecord] = []
@@ -108,7 +110,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
           cursor = nil
         }
       } while cursor != nil
-      return AttentionPage(records: records)
+      return AttentionPage(records: records, canAnswer: canAnswer)
     } catch {
       throw ReadFailure(error)
     }
@@ -120,6 +122,52 @@ actor FractalAttentionAdapter: AttentionAdapter {
       return SloSnapshot(asOf: Self.date(ms: list.asOfUnixMS) ?? .now, rows: list.rows.map(Self.entry))
     } catch {
       throw ReadFailure(error)
+    }
+  }
+
+  /// Mirrors Fractal web `alert-action-port.ts`: read the card again, require it still open,
+  /// still offering `work.done` and at the revision the person read; then submit once,
+  /// fenced on that read. A failure is never retried here: the person sees why.
+  func submit(_ submission: WorkDoneSubmission) async throws {
+    let current: Envelope<Resource>
+    do {
+      current = try await client.attentionGet(id: submission.attentionID)
+    } catch let envelope as ErrorEnvelope where envelope.code == .notFound {
+      throw AnswerRefused("This was already answered or closed.")
+    } catch {
+      throw AnswerRefused("Could not read this ask again, so nothing was sent: \(ReadFailure(error)).")
+    }
+    guard case .attention(let item) = current.value, item.state == "open" else {
+      throw AnswerRefused("This was already answered or closed.")
+    }
+    guard item.actions.contains("work.done") else {
+      throw AnswerRefused("Fractal no longer offers this answer here.")
+    }
+    guard item.revision == submission.revision else {
+      throw AnswerRefused("This changed since you read it. Read it again before answering.")
+    }
+    let answer = submission.answer
+    let parameters = PersonStepParameters(
+      targetID: submission.targetID, summary: answer.summary, episode: submission.episode,
+      answer: answer.hasTypedAnswer ? PersonAnswerInput(id: answer.answerID, text: answer.answerText) : nil)
+    let result: ActionResult
+    do {
+      result = try await client.workDone(
+        id: submission.actionID, idempotencyKey: submission.actionID,
+        fence: Fence(snapshotID: current.snapshot.id, subjectRevisions: [submission.attentionID: submission.revision]),
+        parameters: parameters
+      ).value
+    } catch let envelope as ErrorEnvelope {
+      throw AnswerRefused("\(ReadFailure.describe(envelope)).")
+    } catch {
+      throw AnswerRefused(
+        "The answer could not be confirmed (\(ReadFailure(error))); check the ask before answering again. It was not sent again.")
+    }
+    switch result.status {
+    case "accepted", "completed": return
+    case "rejected": throw AnswerRefused("Fractal did not take this answer.")
+    default:
+      throw AnswerRefused("Fractal did not say whether it took this answer; check the ask before answering again.")
     }
   }
 
@@ -136,13 +184,33 @@ actor FractalAttentionAdapter: AttentionAdapter {
         answers.compactMap { if case .string(let answer) = $0, !answer.isEmpty { answer } else { nil } }
       } else { [] }
     return AttentionRecord(
-      id: item.id, kind: item.attentionKind, state: item.state, title: item.title, detail: item.detail,
+      id: item.id, revision: item.revision, kind: item.attentionKind, state: item.state,
+      sourceID: item.sourceID, episode: item.episode, title: item.title, detail: item.detail,
       // Web `alertFrom`: the agent that asked, else the subject it is about.
       from: (item.requesterID ?? item.sourceID).replacingOccurrences(of: "agent/", with: "", options: .anchored),
       requestedAt: Self.date(iso: item.requestedAt), deadlineAt: item.deadlineAt.flatMap(Self.date(iso:)),
       defaultAnswerLabel: item.defaultAnswer?.label, actions: item.actions, promptAnswers: promptAnswers,
+      request: item.request.map {
+        RequestForm(
+          type: $0.type, question: $0.question,
+          answers: ($0.answers ?? []).map {
+            RequestAnswer(id: $0.id, label: $0.label, consequence: $0.consequence, outcome: $0.outcome)
+          },
+          custom: $0.custom ?? false, recommendedAnswerID: $0.recommendation?.answer)
+      },
       update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary) },
+      workDoneDefaults: Self.workDoneDefaults(parameters["work.done"]),
       url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef))
+  }
+
+  /// The server-filled `work.done` summary and answer (an update's `Read` / `{id: read}`).
+  private static func workDoneDefaults(_ value: JSONValue?) -> WorkDoneAnswer? {
+    guard case .object(let object) = value, case .string(let summary) = object["summary"], !summary.isEmpty
+    else { return nil }
+    guard case .object(let answer) = object["answer"] else { return WorkDoneAnswer(summary: summary) }
+    let id: String? = if case .string(let id) = answer["id"] { id } else { nil }
+    let text: String? = if case .string(let text) = answer["text"] { text } else { nil }
+    return WorkDoneAnswer(summary: summary, answerID: id, answerText: text)
   }
 
   private static func entry(_ row: SloRow) -> SloEntry {

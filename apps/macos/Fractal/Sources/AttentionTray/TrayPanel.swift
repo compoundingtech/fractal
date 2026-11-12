@@ -3,6 +3,8 @@ import AttentionCore
 import SwiftUI
 
 extension EnvironmentValues {
+  /// Snapshot verification shows every card's answer controls without hovering.
+  @Entry var revealControls = false
   /// The scrolling body's height limit; snapshots lift it to render every section.
   @Entry var panelMaxHeight: CGFloat = 620
 }
@@ -148,16 +150,31 @@ private struct AsksSection: View {
   let model: AttentionModel
 
   var body: some View {
-    let asks = model.asks
+    let asks = model.asks()
+    let snoozed = model.snoozedAsks()
     VStack(alignment: .leading, spacing: 8) {
       SectionTitle(title: "Asks", aside: "\(asks.count)")
       SectionFailure(state: model.attention.state)
+      if !model.canAnswer, model.attention.value != nil,
+        asks.contains(where: { $0.role == .ask(.native) })
+      {
+        Note(
+          symbol: "lock",
+          text: "This device may only read. Answer in Fractal, or pair the tray with control.attention to answer here.")
+      }
       if asks.isEmpty {
         Text(model.attention.value == nil ? "Loading…" : "Nothing needs you right now.")
           .font(.system(size: 12))
           .foregroundStyle(.tertiary)
       } else {
-        ForEach(asks) { AskCard(record: $0) }
+        ForEach(asks) { AskCard(record: $0, model: model) }
+      }
+      if !snoozed.isEmpty {
+        DisclosureGroup("\(snoozed.count) snoozed on this Mac") {
+          ForEach(snoozed) { SnoozedRow(record: $0, model: model) }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
       }
     }
   }
@@ -165,7 +182,21 @@ private struct AsksSection: View {
 
 private struct AskCard: View {
   let record: AttentionRecord
+  let model: AttentionModel
+  @Environment(\.revealControls) private var revealAll
   @State private var hovered = false
+  @State private var words = ""
+  @State private var selected: String?
+  @FocusState private var editing: Bool
+
+  private var choices: [AnswerChoice] { AnswerChoice.choices(for: record) }
+  private var state: AnswerState? { model.answers[record.id] }
+  private var sending: Bool { if case .sending = state { true } else { false } }
+  private var committed: Bool { if case .committed = state { true } else { false } }
+  private var native: Bool { record.role == .ask(.native) && model.canAnswer }
+  private var revealed: Bool {
+    revealAll || hovered || editing || !words.isEmpty || selected != nil || state != nil
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -176,17 +207,154 @@ private struct AskCard: View {
         Text(record.detail)
           .font(.system(size: 11.5))
           .foregroundStyle(.secondary)
-          .lineLimit(hovered ? 12 : 2)
+          .lineLimit(revealed ? 12 : 2)
           .textSelection(.enabled)
       }
       CardMeta(record: record)
-      Link("Answer in Fractal", destination: record.url)
-        .font(.system(size: 11.5))
-        .help(record.url.absoluteString)
+      if revealed && !committed {
+        if native { answerControls } else { inFractalControls }
+      }
+      if let state { AnswerStatusView(state: state) }
     }
     .card()
     .onHover { hovered = $0 }
     .accessibilityElement(children: .contain)
+  }
+
+  @ViewBuilder private var answerControls: some View {
+    let options = choices.filter(\.isOption)
+    if !options.isEmpty {
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 6) { optionButtons(options) }
+        VStack(alignment: .leading, spacing: 4) { optionButtons(options) }
+      }
+    }
+    if choices.contains(where: { $0.words != .none }) {
+      HStack(alignment: .bottom, spacing: 6) {
+        TextField(placeholder, text: $words, axis: .vertical)
+          .textFieldStyle(.roundedBorder)
+          .lineLimit(1...5)
+          .font(.system(size: 12))
+          .focused($editing)
+          .onSubmit(sendWords)
+        // Return in the focused field sends (onSubmit); no window-wide shortcut, which
+        // several revealed cards would share.
+        Button("Send", action: sendWords)
+          .disabled(sending || !AnswerChoice.canSend(effective, words: words))
+          .help(effective.map { "Send as “\($0.label)”" } ?? "Write an answer first")
+      }
+      .controlSize(.small)
+    }
+    HStack(spacing: 12) {
+      if let setAside = choices.first(where: \.isSetAside) {
+        Button(setAside.label) { send(setAside) }
+          .disabled(sending || !words.isEmpty)
+          .help(setAside.kind == .dismiss ? "Set aside without an answer; Fractal tells the asker" : AnswerWords.nothing)
+      }
+      SnoozeMenu(record: record, model: model)
+      Spacer()
+      Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
+    }
+    .buttonStyle(.borderless)
+    .controlSize(.small)
+    .font(.system(size: 11))
+  }
+
+  @ViewBuilder private func optionButtons(_ options: [AnswerChoice]) -> some View {
+    ForEach(options) { choice in
+      Button {
+        if choice.words == .required && words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          selected = choice.id
+          editing = true
+        } else {
+          send(choice)
+        }
+      } label: {
+        Text(choice.recommended ? "\(choice.label) ★" : choice.label)
+          .foregroundStyle(choice.tone == .danger ? Color.red : Color.primary)
+      }
+      .buttonStyle(.bordered)
+      .controlSize(.small)
+      .tint(choice.tone == .primary ? .accentColor : nil)
+      .disabled(sending || (choice.words == .none && !words.isEmpty))
+      .help(
+        [choice.consequence, choice.recommended ? "Recommended" : nil,
+          choice.words == .none && !words.isEmpty ? "Clear your text to pick this answer" : nil]
+          .compactMap { $0 }.joined(separator: "\n"))
+    }
+  }
+
+  private var inFractalControls: some View {
+    HStack(spacing: 12) {
+      Link("Answer in Fractal", destination: record.url).help(record.url.absoluteString)
+      SnoozeMenu(record: record, model: model)
+      Spacer()
+    }
+    .buttonStyle(.borderless)
+    .controlSize(.small)
+    .font(.system(size: 11.5))
+  }
+
+  private var effective: AnswerChoice? { AnswerChoice.effective(choices, selected: selected, words: words) }
+
+  private var placeholder: String {
+    let changes = choices.first { choice in
+      if case .named = choice.kind { choice.words == .required } else { false }
+    }
+    if let changes, selected == changes.id || !choices.contains(where: { $0.kind == .words }) {
+      return "What should change? (\(changes.label))"
+    }
+    return record.request?.type == "feedback" ? "Your feedback" : "Answer in your own words"
+  }
+
+  private func sendWords() {
+    guard let choice = effective, AnswerChoice.canSend(choice, words: words) else { return }
+    send(choice)
+  }
+
+  private func send(_ choice: AnswerChoice) {
+    guard !sending, let answer = choice.answer(words: words, request: record.request) else { return }
+    let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
+    let label = choice.kind == .words ? "“\(text)”" : text.isEmpty ? choice.label : "\(choice.label): “\(text)”"
+    Task { await model.answer(record, with: answer, label: label) }
+  }
+}
+
+private struct SnoozeMenu: View {
+  let record: AttentionRecord
+  let model: AttentionModel
+
+  var body: some View {
+    Menu("Snooze") {
+      Button("1 hour") { model.snooze(record, until: .now.addingTimeInterval(3600)) }
+      Button("4 hours") { model.snooze(record, until: .now.addingTimeInterval(4 * 3600)) }
+      Button("Until tomorrow 9:00") { model.snooze(record, until: Self.tomorrowMorning()) }
+    }
+    .menuStyle(.borderlessButton)
+    .fixedSize()
+    .help("Hide on this Mac until then; Fractal keeps the ask open")
+  }
+
+  private static func tomorrowMorning() -> Date {
+    let calendar = Calendar.current
+    let tomorrow = calendar.date(byAdding: .day, value: 1, to: .now) ?? .now
+    return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+  }
+}
+
+private struct SnoozedRow: View {
+  let record: AttentionRecord
+  let model: AttentionModel
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 6) {
+      Text(record.title).lineLimit(1).foregroundStyle(.primary)
+      Spacer(minLength: 4)
+      if let until = model.snoozedUntil(record) { RelativeTime(date: until, prefix: "until") }
+      Button("Show") { model.unsnooze(record) }.buttonStyle(.borderless)
+    }
+    .font(.system(size: 11))
+    .padding(.vertical, 2)
   }
 }
 
@@ -198,14 +366,24 @@ private struct UpdatesSection: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       SectionTitle(title: "Updates", aside: "\(model.updates.count)")
-      ForEach(model.updates) { UpdateRow(record: $0) }
+      ForEach(model.updates) { UpdateRow(record: $0, model: model) }
     }
   }
 }
 
 private struct UpdateRow: View {
   let record: AttentionRecord
+  let model: AttentionModel
+  @Environment(\.revealControls) private var revealAll
   @State private var hovered = false
+
+  private var state: AnswerState? { model.answers[record.id] }
+  private var settledOrSending: Bool {
+    switch state {
+    case .sending, .committed: true
+    case .refused, nil: false
+    }
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
@@ -216,8 +394,14 @@ private struct UpdateRow: View {
         Text(summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(hovered ? 8 : 2)
       }
       CardMeta(record: record)
-      if hovered {
+      if (revealAll || hovered) && !settledOrSending {
         HStack(spacing: 12) {
+          if model.canAnswer {
+            Button("Mark read") {
+              Task { await model.answer(record, with: record.readAnswer, label: "Read") }
+            }
+            .help("Complete this update in Fractal; it leaves every client")
+          }
           Spacer()
           Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
         }
@@ -225,6 +409,7 @@ private struct UpdateRow: View {
         .controlSize(.small)
         .font(.system(size: 11))
       }
+      if let state { AnswerStatusView(state: state) }
     }
     .card(subtle: true)
     .onHover { hovered = $0 }
@@ -253,6 +438,32 @@ private struct CardMeta: View {
     }
     .font(.system(size: 10.5))
     .foregroundStyle(.tertiary)
+  }
+}
+
+private struct AnswerStatusView: View {
+  let state: AnswerState
+
+  var body: some View {
+    Group {
+      switch state {
+      case .sending(let label):
+        HStack(spacing: 6) {
+          ProgressView().controlSize(.mini)
+          Text("Sending \(label)…")
+        }
+      case .committed(let label):
+        Label("Answered \(label) — committed in Fractal", systemImage: "checkmark.circle.fill")
+          .foregroundStyle(.green)
+      case .refused(let reason):
+        Label {
+          Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+      }
+    }
+    .font(.system(size: 11))
   }
 }
 
@@ -398,6 +609,18 @@ private struct SectionFailure: View {
       .lineLimit(4)
       .textSelection(.enabled)
     }
+  }
+}
+
+private struct Note: View {
+  let symbol: String
+  let text: String
+
+  var body: some View {
+    Label(text, systemImage: symbol)
+      .font(.system(size: 11))
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
   }
 }
 
