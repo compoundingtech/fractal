@@ -1,8 +1,8 @@
 //! What an `objective` declaration says (docs/st3/objectives.md): an indicator that measures
-//! samples, the targets that bound them, the window an interval is judged over, and who a miss
-//! is delivered to. One strict reader serves the objectives Fractal ships (`slo/objectives.kdl`)
-//! and the ones a fleet declares: a missing, unknown, repeated or nonsensical child is an error,
-//! never a default.
+//! samples or counts events, the targets that bound them, the window they are judged over, and
+//! who a miss is delivered to. One strict reader serves the objectives Fractal ships
+//! (`slo/objectives.kdl`) and the ones a fleet declares: a missing, unknown, repeated or
+//! nonsensical child is an error, never a default.
 
 use std::collections::BTreeSet;
 
@@ -51,6 +51,8 @@ pub enum Indicator {
     CiCount { series: String },
     /// Work that starts and stops in claims, one sample per subject.
     Interval(Box<Interval>),
+    /// Events in claims per hour, one per subject.
+    Count(Box<Count>),
 }
 
 impl Indicator {
@@ -67,6 +69,7 @@ impl Indicator {
             Self::CiDuration { .. } => "ci-duration",
             Self::CiCount { .. } => "ci-count",
             Self::Interval(_) => "interval",
+            Self::Count(_) => "count",
         }
     }
 }
@@ -100,6 +103,17 @@ pub struct Interval {
 pub struct Exclude {
     pub field: String,
     pub values: Vec<String>,
+}
+
+/// One event per subject under `subject_prefix`, at its earliest `event` claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Count {
+    pub subject_prefix: String,
+    pub event: Event,
+    /// Fields of the event claim that split the rows.
+    pub labels: Vec<String>,
+    /// Leave out an event whose claim has one of the values in the field.
+    pub excludes: Vec<Exclude>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +158,8 @@ pub enum Bound {
     Within(u64),
     Max(f64),
     MinPercent(f64),
+    /// At least this many.
+    Min(f64),
 }
 
 /// A miss opens a fault for `owner`; `backup` is held, recorded and never the reviewer.
@@ -164,11 +180,12 @@ impl Objective {
         self.targets.iter().find(|target| target.stat == stat && target.remote == remote)
     }
 
-    /// Whether a fleet may declare it: an interval over claims, named `NAMESPACE/NAME` or deeper so
-    /// it never takes the name of one Fractal ships, which are one word each. Native telemetry
-    /// counts each path, series and reading toward the one objective the daemon was built with.
+    /// Whether a fleet may declare it: an interval or count over claims, named `NAMESPACE/NAME` or
+    /// deeper so it never takes the name of one Fractal ships, which are one word each. Native
+    /// telemetry counts each path, series and reading toward the one objective the daemon was
+    /// built with.
     pub fn declarable(&self) -> bool {
-        matches!(self.indicator, Indicator::Interval(_)) && self.name.contains('/')
+        matches!(self.indicator, Indicator::Interval(_) | Indicator::Count(_)) && self.name.contains('/')
     }
 }
 
@@ -377,6 +394,7 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
             if kind == "ci-duration" { Indicator::CiDuration { series } } else { Indicator::CiCount { series } }
         }
         "interval" => Indicator::Interval(Box::new(parse_interval(&kids, fail)?)),
+        "count" => Indicator::Count(Box::new(parse_count(&kids, fail)?)),
         other => return Err(fail(format!("has an unknown indicator `{other}`"))),
     })
 }
@@ -406,12 +424,7 @@ fn parse_interval(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Res
         };
         match name {
             "subject-prefix" => {
-                only_properties(kid, &[], fail)?;
-                let value = one_string(kid, fail)?;
-                if !value.ends_with('/') || value.len() < 2 || value.starts_with('/') {
-                    return Err(fail(format!("subject-prefix {value:?} must name subjects and end with `/`")));
-                }
-                if prefix.replace(value.to_owned()).is_some() {
+                if prefix.replace(subject_prefix(kid, fail)?).is_some() {
                     return Err(repeated());
                 }
             }
@@ -449,24 +462,8 @@ fn parse_interval(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Res
                     return Err(repeated());
                 }
             }
-            "label" => {
-                only_properties(kid, &[], fail)?;
-                let label = one_string(kid, fail)?;
-                if !is_field(label) || labels.contains(&label.to_owned()) {
-                    return Err(fail(format!("label {label:?} is not a field, or is repeated")));
-                }
-                labels.push(label.to_owned());
-            }
-            "exclude" => {
-                only_properties(kid, &[], fail)?;
-                let values = arguments(kid)
-                    .iter()
-                    .map(|value| value.as_str().filter(|value| !value.is_empty()).map(str::to_owned))
-                    .collect::<Option<Vec<_>>>()
-                    .filter(|values| values.len() >= 2 && is_field(&values[0]))
-                    .ok_or_else(|| fail("`exclude` needs a field and at least one value".into()))?;
-                excludes.push(Exclude { field: values[0].clone(), values: values[1..].to_vec() });
-            }
+            "label" => labels.push(label(kid, &labels, fail)?),
+            "exclude" => excludes.push(exclude(kid, fail)?),
             other => return Err(fail(format!("indicator `interval` has an unknown child `{other}`"))),
         }
     }
@@ -496,6 +493,73 @@ fn parse_interval(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Res
     Ok(interval)
 }
 
+fn parse_count(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Result<Count, FractalError> {
+    let mut prefix = None;
+    let mut event = None;
+    let mut labels = Vec::new();
+    let mut excludes = Vec::new();
+    for kid in kids {
+        let name = kid["name"].as_str().unwrap_or_default();
+        no_children(kid, fail)?;
+        let repeated = || fail(format!("the count repeats `{name}`"));
+        match name {
+            "subject-prefix" => {
+                if prefix.replace(subject_prefix(kid, fail)?).is_some() {
+                    return Err(repeated());
+                }
+            }
+            "event" => {
+                only_properties(kid, &["at"], fail)?;
+                let kind = one_string(kid, fail)?;
+                if kind.is_empty() {
+                    return Err(fail("`event` names no claim kind".into()));
+                }
+                if event.replace(Event { kind: kind.to_owned(), at: field_property(kid, "at", fail)? }).is_some() {
+                    return Err(repeated());
+                }
+            }
+            "label" => labels.push(label(kid, &labels, fail)?),
+            "exclude" => excludes.push(exclude(kid, fail)?),
+            other => return Err(fail(format!("indicator `count` has an unknown child `{other}`"))),
+        }
+    }
+    Ok(Count {
+        subject_prefix: prefix.ok_or_else(|| fail("a count needs `subject-prefix`".into()))?,
+        event: event.ok_or_else(|| fail("a count needs `event`".into()))?,
+        labels,
+        excludes,
+    })
+}
+
+fn subject_prefix(kid: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<String, FractalError> {
+    only_properties(kid, &[], fail)?;
+    let value = one_string(kid, fail)?;
+    if !value.ends_with('/') || value.len() < 2 || value.starts_with('/') {
+        return Err(fail(format!("subject-prefix {value:?} must name subjects and end with `/`")));
+    }
+    Ok(value.to_owned())
+}
+
+fn label(kid: &Value, labels: &[String], fail: &dyn Fn(String) -> FractalError) -> Result<String, FractalError> {
+    only_properties(kid, &[], fail)?;
+    let label = one_string(kid, fail)?;
+    if !is_field(label) || labels.iter().any(|existing| existing == label) {
+        return Err(fail(format!("label {label:?} is not a field, or is repeated")));
+    }
+    Ok(label.to_owned())
+}
+
+fn exclude(kid: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<Exclude, FractalError> {
+    only_properties(kid, &[], fail)?;
+    let values = arguments(kid)
+        .iter()
+        .map(|value| value.as_str().filter(|value| !value.is_empty()).map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .filter(|values| values.len() >= 2 && is_field(&values[0]))
+        .ok_or_else(|| fail("`exclude` needs a field and at least one value".into()))?;
+    Ok(Exclude { field: values[0].clone(), values: values[1..].to_vec() })
+}
+
 impl Interval {
     /// Every claim kind the interval reads, once each. One kind has one role, except that the
     /// expect claim may also start the sample (`start` and `expect` naming the same kind).
@@ -512,9 +576,9 @@ impl Interval {
 }
 
 fn parse_target(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<Target, FractalError> {
-    only_properties(node, &["within", "max", "min-percent", "scope"], fail)?;
+    only_properties(node, &["within", "max", "min", "min-percent", "scope"], fail)?;
     let stat = one_string(node, fail)?.to_owned();
-    let bounds = ["within", "max", "min-percent"]
+    let bounds = ["within", "max", "min", "min-percent"]
         .into_iter()
         .filter_map(|name| property(node, name).map(|value| (name, value)))
         .collect::<Vec<_>>();
@@ -524,6 +588,7 @@ fn parse_target(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<T
             fail,
         )?),
         [("max", value)] => Bound::Max(number(value, &format!("target `{stat}`'s `max`"), fail)?),
+        [("min", value)] => Bound::Min(number(value, &format!("target `{stat}`'s `min`"), fail)?),
         [("min-percent", value)] => {
             let min = number(value, &format!("target `{stat}`'s `min-percent`"), fail)?;
             if !(min > 0.0 && min <= 100.0) {
@@ -531,7 +596,7 @@ fn parse_target(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<T
             }
             Bound::MinPercent(min)
         }
-        _ => return Err(fail(format!("target `{stat}` needs one bound: `within`, `max` or `min-percent`"))),
+        _ => return Err(fail(format!("target `{stat}` needs one bound: `within`, `max`, `min` or `min-percent`"))),
     };
     let remote = match property(node, "scope") {
         None => false,
@@ -589,6 +654,10 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
             (Indicator::Database, "live-gb" | "growth-mb-per-day") => max(false, false),
             (Indicator::Divergence, "open") => max(true, true),
             (Indicator::CiCount { .. }, "per-hour") => max(true, true),
+            (Indicator::Count(_), "per-hour") => match target.bound {
+                Bound::Min(min) => min.is_finite() && min > 0.0,
+                _ => max(false, true),
+            },
             (Indicator::CiDuration { .. } | Indicator::Interval(_), stat) => percentile(stat).is_some() && within,
             _ => false,
         }
@@ -604,7 +673,7 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         Indicator::Cpu { .. } => &["cores", "idle-cores"],
         Indicator::Database => &["live-gb", "growth-mb-per-day"],
         Indicator::Divergence => &["open"],
-        Indicator::CiCount { .. } => &["per-hour"],
+        Indicator::CiCount { .. } | Indicator::Count(_) => &["per-hour"],
         _ => &[],
     };
     if let Some(missing) = required.iter().find(|stat| objective.target(stat, false).is_none()) {
@@ -634,14 +703,18 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
     {
         return Err(fail("its idle minimum is not between 1 and 60 minutes".into()));
     }
-    match (&objective.indicator, objective.window) {
-        (Indicator::Interval(_), None) => return Err(fail("an interval needs a `window`".into())),
-        (Indicator::Interval(_), Some(_)) => {}
-        (_, Some(_)) => return Err(fail("only an interval takes a `window`; native telemetry keeps its own".into())),
-        (_, None) => {}
+    let claims = matches!(objective.indicator, Indicator::Interval(_) | Indicator::Count(_));
+    match (claims, objective.window) {
+        (true, None) => return Err(fail(format!("a `{kind}` indicator needs a `window`"))),
+        (true, Some(window)) if matches!(objective.indicator, Indicator::Count(_)) && window.min_samples != 1 => {
+            return Err(fail("a count's window takes no `min-samples`: an empty window is a real 0".into()));
+        }
+        (true, Some(_)) => {}
+        (false, Some(_)) => return Err(fail("only an interval or a count takes a `window`; native telemetry keeps its own".into())),
+        (false, None) => {}
     }
-    if objective.on_breach.is_some() && !matches!(objective.indicator, Indicator::Interval(_)) {
-        return Err(fail("only an interval takes `on-breach`; native objectives respond as they are built".into()));
+    if objective.on_breach.is_some() && !claims {
+        return Err(fail("only an interval or a count takes `on-breach`; native objectives respond as they are built".into()));
     }
     Ok(())
 }
