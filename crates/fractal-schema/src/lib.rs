@@ -5089,6 +5089,7 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("workspace_ci").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }
