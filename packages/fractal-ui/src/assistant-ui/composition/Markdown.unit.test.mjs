@@ -168,6 +168,10 @@ const FALLBACK_LITERAL_CODE = [
   '~~~\n<script data-x="~~~">literal</script>\n~~~',
   '    <script data-x="`">literal</script>',
   '\t<!-- literal -->',
+]
+// Blank-line-separated containers can settle into multiple independently rendered blocks. Exercise their source
+// preservation directly; the DOM fallback matrix below covers every hostile payload and single-block code island.
+const FALLBACK_CONTAINER_CODE = [
   '- item\n\n      <script>literal</script>',
   '- item\n\n \t  <!-- literal -->',
   '1. item\n\n       <script>literal</script>',
@@ -183,7 +187,7 @@ test('delimiter and error fallback text applies HTML policy without stripping co
   const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
   assert.match(block(hostile), /Visible/)
-  for (const source of FALLBACK_LITERAL_CODE) {
+  for (const source of [...FALLBACK_LITERAL_CODE, ...FALLBACK_CONTAINER_CODE]) {
     assert.equal(filteredMarkdownText(source), source)
   }
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
