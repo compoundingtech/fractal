@@ -110,7 +110,7 @@ fn mission_spec_at(
     let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
     smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
     let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-h9d524e52ffa5 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+        /* sqlite-large-value: allow-for-now lv-h6a343d94790f owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
              SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
          )
          SELECT r.body, requested.identity, COALESCE(h.unavailable,
