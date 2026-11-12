@@ -765,6 +765,128 @@ const HTML_ELEMENTS: &[&str] = &[
     "video", "audio", "iframe", "wbr",
 ];
 
+#[derive(Clone, Copy)]
+enum MarkdownContainer {
+    Quote,
+    List(usize),
+}
+
+/// Consume only containers already open on the preceding line. In particular, a list sibling is not
+/// a continuation of an unclosed fence in the previous item.
+fn markdown_container_continuation(
+    line: &str,
+    containers: &[MarkdownContainer],
+    quote_count: usize,
+) -> (usize, usize, usize) {
+    let bytes = line.as_bytes();
+    let (mut at, mut column) = (0, 0);
+    let mut matched_quotes = 0;
+    for (matched, container) in containers.iter().enumerate() {
+        let (start, start_column) = (at, column);
+        match container {
+            MarkdownContainer::Quote => {
+                while bytes.get(at) == Some(&b' ') && column - start_column < 3 {
+                    at += 1;
+                    column += 1;
+                }
+                if bytes.get(at) != Some(&b'>') {
+                    return (start, start_column, matched);
+                }
+                matched_quotes += 1;
+                at += 1;
+                column += 1;
+                if bytes.get(at) == Some(&b' ') {
+                    at += 1;
+                    column += 1;
+                }
+            }
+            MarkdownContainer::List(indent) => {
+                while column - start_column < *indent {
+                    match bytes.get(at) {
+                        Some(b' ') => column += 1,
+                        Some(b'\t') => column += 4 - column % 4,
+                        _ => break,
+                    }
+                    at += 1;
+                }
+                if column - start_column < *indent {
+                    // Missing quotes still end their fence. Scanning to one removes that suffix,
+                    // so repeated blank lines in deeply nested lists also stay linear.
+                    if bytes[at..].iter().all(u8::is_ascii_whitespace) {
+                        let matched = if matched_quotes == quote_count {
+                            containers.len()
+                        } else {
+                            matched + containers[matched..].iter()
+                                .position(|container| matches!(container, MarkdownContainer::Quote))
+                                .unwrap()
+                        };
+                        return (bytes.len(), column, matched);
+                    }
+                    return (start, start_column, matched);
+                }
+            }
+        }
+    }
+    (at, column, containers.len())
+}
+
+/// Discover new quote/list prefixes only outside code. Offsets always refer to the original line.
+fn markdown_container_openings(
+    line: &str,
+    containers: &mut Vec<MarkdownContainer>,
+    quote_count: &mut usize,
+    mut at: usize,
+    mut column: usize,
+) -> usize {
+    let bytes = line.as_bytes();
+    loop {
+        let (start, start_column) = (at, column);
+        while bytes.get(at) == Some(&b' ') && column - start_column < 3 {
+            at += 1;
+            column += 1;
+        }
+        if bytes.get(at) == Some(&b'>') {
+            at += 1;
+            column += 1;
+            if bytes.get(at) == Some(&b' ') {
+                at += 1;
+                column += 1;
+            }
+            containers.push(MarkdownContainer::Quote);
+            *quote_count += 1;
+            continue;
+        }
+        let marker = at;
+        if matches!(bytes.get(at), Some(b'-' | b'+' | b'*')) {
+            at += 1;
+        } else {
+            while bytes.get(at).is_some_and(u8::is_ascii_digit) && at - marker < 9 {
+                at += 1;
+            }
+            if at == marker || !matches!(bytes.get(at), Some(b'.' | b')')) {
+                return start;
+            }
+            at += 1;
+        }
+        if !matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            return start;
+        }
+        column += at - marker;
+        let padding_column = column;
+        let padding = at;
+        while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            column += if bytes[at] == b'\t' { 4 - column % 4 } else { 1 };
+            at += 1;
+        }
+        if column - padding_column > 4 {
+            // Excess padding belongs to the item's content, not its container.
+            at = padding + 1;
+            column = padding_column + if bytes[padding] == b'\t' { 4 - padding_column % 4 } else { 1 };
+        }
+        containers.push(MarkdownContainer::List(column - start_column));
+    }
+}
+
 /// Code islands, scanned once so HTML-looking code remains literal. Matching backtick runs are indexed from the
 /// end: an unmatched run never scans the remaining document again.
 fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
@@ -784,13 +906,27 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
     }
     let mut ranges = Vec::new();
     let mut fence: Option<(u8, usize, usize)> = None;
+    let mut containers = Vec::new();
+    let mut quote_count = 0;
     at = 0;
     while at < bytes.len() {
         if at == 0 || bytes[at - 1] == b'\n' {
             let end = text[at..].find('\n').map_or(bytes.len(), |end| at + end + 1);
             let line = &text[at..end];
-            let trimmed = line.trim_start_matches(' ');
-            let indent = line.len() - trimmed.len();
+            let (mut content, column, matched) = markdown_container_continuation(line, &containers, quote_count);
+            if matched < containers.len() {
+                // A fence ends with its container, not at the next fence-shaped line in unrelated prose.
+                if let Some((_, _, start)) = fence.take() { ranges.push((start, at)); }
+                for container in containers.drain(matched..) {
+                    if matches!(container, MarkdownContainer::Quote) { quote_count -= 1; }
+                }
+            }
+            if fence.is_none() {
+                content = markdown_container_openings(line, &mut containers, &mut quote_count, content, column);
+            }
+            let body = &line[content..];
+            let trimmed = body.trim_start_matches(' ');
+            let indent = body.len() - trimmed.len();
             let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
             let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
             if let Some((character, width, start)) = fence {
@@ -808,7 +944,7 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
                 at = end;
                 continue;
             }
-            if indent >= 4 || line.starts_with('\t') {
+            if indent >= 4 || body.starts_with('\t') {
                 ranges.push((at, end));
                 at = end;
                 continue;
@@ -870,7 +1006,13 @@ fn without_html_tags(text: &str) -> String {
         }
         if (name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")) && !tag[1..].starts_with('/') {
             let close = if name.eq_ignore_ascii_case("script") { "</script" } else { "</style" };
-            rest = match text.as_bytes()[absolute + end + 1..].windows(close.len()).position(|candidate| candidate.eq_ignore_ascii_case(close.as_bytes())) {
+            let hidden = &text.as_bytes()[absolute + end + 1..];
+            rest = match hidden.windows(close.len()).enumerate().position(|(at, candidate)| {
+                candidate.eq_ignore_ascii_case(close.as_bytes())
+                    && hidden.get(at + close.len()).is_some_and(|byte| {
+                        *byte == b'>' || *byte == b'/' || byte.is_ascii_whitespace()
+                    })
+            }) {
                 Some(close) => {
                     let closing = absolute + end + 1 + close;
                     text[closing..].find('>').map_or("", |end| &text[closing + end + 1..])
@@ -1612,6 +1754,69 @@ mod tests {
         }
         assert_eq!(quote("<!-- hidden `code` -->After").as_deref(), Some("> After"));
         assert_eq!(quote("\\`<!-- hidden -->` after").as_deref(), Some("> \\`` after"));
+    }
+
+    #[test]
+    fn excerpts_preserve_fenced_html_in_markdown_containers() {
+        for source in [
+            "> ```html\n> <!-- literal -->\n> <script>literal</script>\n> ```",
+            "> ~~~html\n> <style>literal</style>\n> ~~~",
+            "- ```html\n  <!-- literal -->\n  <b>literal</b>\n  ```",
+            "* ~~~html\n  <script>literal</script>\n  ~~~",
+            "12. item\n    ```html\n    <!-- literal -->\n    ```",
+            "+ item\n  ~~~html\n  <style>literal</style>\n  ~~~",
+            "> - ```html\n>   <!-- literal -->\n>   <script>literal</script>\n>   ```",
+            "- > ~~~html\n  > <!-- literal -->\n  > <style>literal</style>\n  > ~~~",
+            "> 1. > - ~~~html\n>    >   <b>literal</b>\n>    >   ~~~",
+            "- outer\n  - inner\n    ```html\n    <!-- literal -->\n\n    <b>literal</b>\n    ```",
+            "1. ```html\n\t<!-- literal -->\n\t```",
+            "> ```\n> <!-- literal -->",
+            "- ~~~\n  <style>literal</style>",
+            "> - ~~~\n>   <!-- literal -->",
+            "- > ```\n  > <script>literal</script>",
+            "> ```\n> ~~~\n> <!-- literal -->\n> ````",
+            "- ~~~~\n  ~~~\n  <!-- literal -->\n  ~~~~",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}").trim_end().to_owned())
+                .collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+    }
+
+    #[test]
+    fn unclosed_container_fences_do_not_protect_outside_html() {
+        for (source, expected) in [
+            ("> ```\n> <!-- literal -->\n<script>hidden</script><b>Visible</b>",
+             "> ```\n> <!-- literal -->\nVisible"),
+            ("- ~~~\n  <style>literal</style>\n<!-- hidden --><b>Visible</b>",
+             "- ~~~\n  <style>literal</style>\nVisible"),
+            ("- ```\n  <!-- literal -->\n- <script>hidden</script>Visible",
+             "- ```\n  <!-- literal -->\n- Visible"),
+            ("> - ~~~\n>   <!-- literal -->\n> <style>hidden</style>Visible",
+             "> - ~~~\n>   <!-- literal -->\n> Visible"),
+            ("- > ```\n  > <!-- literal -->\n  <script>hidden</script>Visible",
+             "- > ```\n  > <!-- literal -->\n  Visible"),
+            ("- > ~~~\n  > <!-- literal -->\n\n  <b>Visible</b>",
+             "- > ~~~\n  > <!-- literal -->\n\n  Visible"),
+            ("> ```\n> <!-- literal -->\n<b>Visible</b>\n~~~\n<!-- literal again -->\n~~~\n<style>hidden</style>After",
+             "> ```\n> <!-- literal -->\nVisible\n~~~\n<!-- literal again -->\n~~~\nAfter"),
+        ] {
+            assert_eq!(without_html_tags(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn hidden_html_closing_tags_require_an_exact_name_boundary() {
+        for name in ["script", "style", "ScRiPt", "StYlE"] {
+            for boundary in [">", " >", "\t>", "\n>", "\r>", "/>"] {
+                let source = format!(
+                    "<{name}>hidden</{name}ure>LEAK</{name}-suffix>LEAK</{name}{boundary}Visible"
+                );
+                assert_eq!(quote(&source).as_deref(), Some("> Visible"), "{source}");
+            }
+            let unclosed = format!("<{name}>hidden</{name}ure>LEAK");
+            assert_eq!(quote(&unclosed), None, "{unclosed}");
+        }
     }
 
     #[test]
