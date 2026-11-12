@@ -411,6 +411,8 @@ enum Fetched {
     Document(String, Result<fractal_client::DocumentContent, fractal_ui_model::documents::Unavailable>),
     DocumentList(Option<String>, Result<fractal_client::DocumentsPage, fractal_ui_model::documents::Unavailable>),
     DocumentReferences(String, Result<fractal_client::DocumentReferences, String>),
+    /// What the Availability pane asked: the person's availability and note.
+    Availability(super::availability::Done),
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
@@ -749,6 +751,7 @@ pub fn run(context: Context) -> Result<()> {
                     // Another member's objectives are not this one's: drop them until it answers.
                     extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
                     extras.reset_connection();
+                    ui.availability.connected();
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
@@ -1167,6 +1170,7 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Document(reference, outcome) => ui.documents.got(&reference, outcome),
                 Fetched::DocumentList(prefix, outcome) => ui.documents.listed(prefix.as_deref(), outcome),
                 Fetched::DocumentReferences(subject, outcome) => ui.documents.referenced(&subject, outcome),
+                Fetched::Availability(done) => ui.availability.done(done),
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
@@ -1369,6 +1373,17 @@ pub fn run(context: Context) -> Result<()> {
                             }
                         };
                         let _ = tx.send(fetched);
+                    });
+                }
+            }
+            // Availability is on no stream: it is read when its pane opens, when the terminal
+            // regains focus and after a reconnect.
+            if extras.live {
+                for want in ui.availability.wanted(shown.contains(&super::pane::Pane::Availability)) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        let _ = tx.send(Fetched::Availability(super::availability::perform(&reader, want).await));
                     });
                 }
             }

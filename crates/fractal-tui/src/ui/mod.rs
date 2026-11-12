@@ -9,6 +9,7 @@ pub mod adapt;
 mod alerts;
 mod answers;
 mod attach;
+mod availability;
 mod clickable;
 mod content;
 mod context;
@@ -430,6 +431,8 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    /// The person's own availability and directive note, as last read.
+    availability: availability::Availability,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -877,6 +880,7 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            availability: availability::Availability::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -2627,6 +2631,7 @@ impl Ui {
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
+            Pane::Availability => self.availability.page(self.live, width, &chrono::Local::now()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
     }
@@ -4301,6 +4306,10 @@ impl Ui {
             self.middle_tab = None;
             self.terminal_selecting = false;
             self.cancel_drag();
+        }
+        // Back from another window: what was decided there may have changed availability.
+        if event == Event::FocusGained {
+            self.availability.refresh();
         }
         let focused = self.input_terminal();
         match event {
@@ -6586,6 +6595,9 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Availability(letter) => {
+                self.availability_press(letter);
+            }
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
