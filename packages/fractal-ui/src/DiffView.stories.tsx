@@ -48,6 +48,7 @@ export const scenarioExemptions: readonly string[] = [
   'HoverCardPreviewLight:primitive',
   'Narrow:primitive',
   'NarrowLight:primitive',
+  'SchemeSwitch:primitive',
   'Split:primitive',
   'SplitLight:primitive',
   'Streaming:primitive',
