@@ -550,3 +550,136 @@ fn a_missed_count_is_a_fault_for_its_owner() {
     let failure = store.operational_failure("slo-objective/node/factory/work-throughput").unwrap().unwrap();
     assert_eq!(failure.reviewer, "agent/node.ops");
 }
+
+#[test]
+fn a_count_label_row_is_a_part_shown_without_a_verdict_while_the_total_is_judged() {
+    // At least 2 an hour in all: 3 is met, though no repository alone reaches 2.
+    let store = store_with(&count_declaration("    label \"repository\"\n", "1h", "min=2", ""));
+    merged(&store, "a", 10 * MINUTE, json!({"repository": "fractal"}));
+    merged(&store, "b", 20 * MINUTE, json!({"repository": "fractal"}));
+    merged(&store, "c", 30 * MINUTE, json!({"repository": "factory"}));
+    let rows = evaluate(&store);
+    let total = &rows[THROUGHPUT];
+    assert_eq!((total["status"].as_str(), total["target"].as_str()), (Some("met"), Some("≥ 2 an hour")));
+    assert_eq!(total["current"], "3 in the last 1h (3.00 an hour)");
+    let factory = &rows["factory/work-throughput{repository=factory}"];
+    assert_eq!(factory["current"], "1 in the last 1h (1.00 an hour)");
+    assert_eq!(
+        (factory["status"].as_str(), factory["target"].as_str()),
+        (Some("no-data"), Some("part of factory/work-throughput")),
+        "a part is never met or missed against the whole count's minimum"
+    );
+    assert!(factory["remaining_percent"].is_null());
+    let explain = factory["explain"].as_str().unwrap();
+    assert!(explain.contains("those whose repository is factory"), "{explain}");
+    assert!(explain.contains("It applies to factory/work-throughput as a whole: this part of it is shown, never met or missed."), "{explain}");
+}
+
+#[test]
+fn a_missed_count_opens_one_fault_for_its_total_and_none_for_its_parts() {
+    let store = store_with(&count_declaration("    label \"repository\"\n", "1h", "min=4", BREACH));
+    with_owner(&store, "node");
+    merged(&store, "a", 10 * MINUTE, json!({"repository": "fractal"}));
+    merged(&store, "c", 10 * MINUTE, json!({"repository": "factory"}));
+    let rows = rows(&store, *NOW).unwrap();
+    assert_eq!(rows.iter().map(|row| row["status"].as_str().unwrap()).collect::<Vec<_>>(), ["missed", "no-data", "no-data"]);
+    assert_eq!(check(&store, &rows).unwrap().opened, 1);
+    assert!(store.operational_failure("slo-objective/node/factory/work-throughput").unwrap().is_some());
+    assert!(store.operational_failure("slo-objective/node/factory/work-throughput{repository=fractal}").unwrap().is_none());
+}
+
+#[test]
+fn a_count_label_row_reads_zero_once_its_events_leave_the_window() {
+    let store = store_with(&count_declaration("    label \"repository\"\n", "1h", "min=1", ""));
+    merged(&store, "a", 50 * MINUTE, json!({"repository": "fractal"}));
+    merged(&store, "b", 10 * MINUTE, json!({"repository": "factory"}));
+    // Merged before the window: its repository is read, so its row is there from the start.
+    merged(&store, "c", 2 * 60 * MINUTE, json!({"repository": "smallclaims"}));
+    let ids = |rows: &[Value]| rows.iter().map(|row| row["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let expected = [
+        s(THROUGHPUT),
+        s("factory/work-throughput{repository=factory}"),
+        s("factory/work-throughput{repository=fractal}"),
+        s("factory/work-throughput{repository=smallclaims}"),
+    ];
+    let now = rows(&store, *NOW).unwrap();
+    assert_eq!(ids(&now[..]), expected);
+    assert_eq!(now[3]["current"], "0 in the last 1h (0.00 an hour)");
+    let later = rows(&store, *NOW + 20 * MINUTE).unwrap();
+    assert_eq!(ids(&later[..]), expected, "a label value read once keeps its row");
+    assert_eq!(later[2]["current"], "0 in the last 1h (0.00 an hour)");
+    assert_eq!(held(&store), [s("custom/acme/change/b")], "only the events in the window are held");
+    // A new revision reads the claims again, keeping the values its own label reads.
+    apply(&store, &count_declaration("    label \"author\"\n", "1h", "min=1", ""));
+    assert_eq!(ids(&rows(&store, *NOW + 20 * MINUTE).unwrap()[..]), [s(THROUGHPUT)]);
+}
+
+/// An open fault for objective row `id`, as an earlier evaluation, or build, opened it.
+fn open_fault(store: &Store, id: &str) {
+    store
+        .append_claim(&ClaimInput {
+            subject: s("daemon/node"),
+            kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("episode".into(), json!(crate::objective_faults::episode("node", id))),
+                ("condition".into(), json!("change-rollout-slo-missed")),
+                ("reviewer".into(), json!("agent/node.ops")),
+                ("title".into(), json!(format!("{id} missed"))),
+                ("reason".into(), json!("An earlier evaluation missed it.")),
+                ("severity".into(), json!("warning")),
+                ("targets".into(), json!(["daemon/node"])),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+fn fault_status(store: &Store, id: &str) -> String {
+    store.operational_failure(&crate::objective_faults::episode("node", id)).unwrap().unwrap().status
+}
+
+#[test]
+fn the_open_fault_of_a_count_label_row_ends_and_another_objectives_stays() {
+    let store = store_with(&count_declaration("    label \"repository\"\n", "1h", "min=1", BREACH));
+    with_owner(&store, "node");
+    let part = "factory/work-throughput{repository=fractal}";
+    let deeper = "factory/work-throughput/flakes";
+    for id in [part, deeper, "flakes"] {
+        open_fault(&store, id);
+    }
+    merged(&store, "a", 10 * MINUTE, json!({"repository": "fractal"}));
+    let rows = rows(&store, *NOW).unwrap();
+    assert_eq!(rows[0]["status"], "met");
+    assert_eq!(check(&store, &rows).unwrap(), ObjectiveFaults { recovered: 1, ..ObjectiveFaults::default() });
+    assert_eq!(fault_status(&store, part), "resolved", "a part is never judged, so its fault ends");
+    assert_eq!((fault_status(&store, deeper), fault_status(&store, "flakes")), (s("pending"), s("pending")));
+}
+
+#[test]
+fn the_fault_of_an_interval_label_row_ends_once_its_samples_leave_the_window() {
+    let store = store_with(&declaration("    label \"class\"\n", "7d", BREACH));
+    with_owner(&store, "node");
+    change(&store, "a", 30 * MINUTE, &["hosta"], &[("hosta", 600)], "routine");
+    let missed = rows(&store, *NOW).unwrap();
+    assert_eq!(check(&store, &missed).unwrap().opened, 4, "p50 and p95, in all and for class routine");
+    // Eight days on, the sample has left the window: the class rows are gone and the totals are
+    // no-data, which neither opens nor ends a fault.
+    let later = rows(&store, *NOW + 8 * 24 * 60 * MINUTE).unwrap();
+    assert_eq!(later.iter().map(|row| row["status"].as_str().unwrap()).collect::<Vec<_>>(), ["no-data", "no-data"]);
+    assert_eq!(check(&store, &later).unwrap(), ObjectiveFaults { recovered: 2, ..ObjectiveFaults::default() });
+    assert_eq!(fault_status(&store, "ops/change-rollout/p95{class=routine}"), "resolved");
+    assert_eq!(fault_status(&store, "ops/change-rollout/p95"), "pending");
+}
+
+#[test]
+fn an_objective_owns_its_rows_and_not_a_deeper_objectives() {
+    for id in ["a/b", "a/b/p95", "a/b{x=y}", "a/b/p95{x=y/p1}"] {
+        assert!(owns("a/b", id), "{id}");
+    }
+    for id in ["a/bc", "a/b/c", "a/b/p", "a/b/pq", "a/b/p95x", "a/b/c{x=y}", "a"] {
+        assert!(!owns("a/b", id), "{id}");
+    }
+}
