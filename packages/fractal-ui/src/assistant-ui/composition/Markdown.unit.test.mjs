@@ -130,3 +130,11 @@ test('inline Markdown is phrasing only, with links as words by default', () => {
   assert.match(inline({ text: '[here](https://example.test)', links: 'anchor' }), /<a[^>]*href="https:\/\/example.test"/)
   assert.doesNotMatch(inline({ text: 'cut in `the mid', clipped: true }), /`/)
 })
+
+test('plain text of inline Markdown keeps the words a label needs', async () => {
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  assert.equal(markdownPlainText('Run `st work claim **x**` for **the** _first_ [step](https://example.test) ![chart](u.png)'), 'Run st work claim **x** for the first step chart')
+  assert.equal(markdownPlainText('## Ship snake_case_names and 2*3*4'), 'Ship snake_case_names and 2*3*4')
+  assert.equal(markdownPlainText('- [x] done\nnext line'), 'done next line')
+  assert.equal(markdownPlainText('escaped \\*star\\* and ~~gone~~'), 'escaped *star* and gone')
+})

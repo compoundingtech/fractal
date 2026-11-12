@@ -110,3 +110,23 @@ export function remarkHardBreaks() {
   }
   return (tree: SourceNode) => visit(tree)
 }
+
+/**
+ * Inline Markdown as the words it renders to, for one-line labels that cannot carry formatting (rows, titles, accessible
+ * names) and must not load the parser. Code keeps its text, emphasis and link markers go, an image keeps its alt text.
+ */
+export function markdownPlainText(markdown: string): string {
+  const code: string[] = []
+  return markdown
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
+    .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _fence: string, text: string) => `\u0000${code.push(text.trim()) - 1}\u0001`)
+    .replace(/\\([\\`*_{}[\]()#+\-.!|<>~])/g, (_, character: string) => `\u0000${code.push(character) - 1}\u0001`)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/(^|[^\w*])([*_])(?=\S)([^*_]*?\S)\2(?![\w*])/g, '$1$3')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '')
+    .trim()
+}

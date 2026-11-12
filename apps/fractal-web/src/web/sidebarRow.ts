@@ -1,3 +1,4 @@
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
 import { markdownSource } from '@fractal/client/markdown'
 import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@fractal/ui/assistant-ui'
 import { statuses, type SidebarMissionInfo, type SidebarOtherMission } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
@@ -126,7 +127,7 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
     progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
     eta: run === undefined || ['completed', 'failed', 'cancelled'].includes(run.status) || Option.isSome(run.completed_at)
       ? undefined : Option.getOrUndefined(run.eta),
-    step: question !== undefined ? { _tag: 'Waiting', question: markdownSource(question.detail).trim() || question.title } :
+    step: question !== undefined ? { _tag: 'Waiting', question: markdownPlainText(markdownSource(question.detail)) || question.title } :
       work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: workStepName(work) },
     queued: [...queued.values()],
   }
