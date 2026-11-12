@@ -22,7 +22,7 @@ pub(super) fn start(store: &Store) -> MissionRunView {
     }).unwrap()
 }
 
-fn fail(store: &Store, run: &MissionRunView) -> MissionRunView {
+pub(super) fn fail(store: &Store, run: &MissionRunView) -> MissionRunView {
     for step in &run.steps {
         store.set_step_state(&step.subject, if step.step == "prepare" { "completed" } else { "failed" }, Some("script failed")).unwrap();
     }
@@ -30,7 +30,7 @@ fn fail(store: &Store, run: &MissionRunView) -> MissionRunView {
     store.mission_run(&run.subject).unwrap().unwrap()
 }
 
-fn retry_options(key: &str, same_revision: bool) -> MissionRunRetryRequest {
+pub(super) fn retry_options(key: &str, same_revision: bool) -> MissionRunRetryRequest {
     MissionRunRetryRequest {
         actor: "person/operator".into(), same_revision,
         reason: Some("Run the corrected script.".into()), idempotency_key: key.into(),

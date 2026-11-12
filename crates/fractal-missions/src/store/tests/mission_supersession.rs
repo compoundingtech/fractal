@@ -1,5 +1,5 @@
 use super::*;
-use super::run_retry::ORIGINAL;
+use super::run_retry::{ORIGINAL, fail, retry_options, start};
 
 fn apply_source(store: &Store, source: &str, key: &str) {
     let intent = parse_intent(source, &store.origin).unwrap();
@@ -344,4 +344,54 @@ fn mission_supersession_owned_head_promotion_after_publication_scan_is_not_lost(
     owner.supersede_mission_publications().unwrap();
     assert_eq!(replacement(&owner, &source).subject, target.subject);
     assert_eq!(owner.claims_for(&source.subject, Some("mission-run.supersede-linked")).unwrap().len(), 1);
+}
+
+#[test]
+fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episode() {
+    for pinned in [true, false] {
+        let owner = Store::open_memory("owner").unwrap();
+        let peer = Store::open_memory("peer").unwrap();
+        let original = ORIGINAL.replace("host \"local\"", "host \"orchid\"");
+        publish_mission(&owner, &original, "equivalent-original");
+        let source = start(&owner);
+        let source = if pinned { fail(&owner, &source) } else { source };
+        let fixed = original.replace("exit 1", "exit 0");
+        let fixed = if pinned { fixed } else {
+            fixed.replace("input \"value\"", "input \"replacement\"")
+        };
+        let selected = publish_mission(&owner, &fixed, "equivalent-fixed");
+        let run = if pinned {
+            owner.retry_mission_run(&source.subject, &retry_options("equivalent-pin", true)).unwrap()
+        } else { source };
+        let head = || owner.readers.get().query_row(
+            "SELECT claim_id FROM mission_definitions WHERE mission_id='retry-work'",
+            [], |row| row.get::<_, String>(0),
+        ).unwrap();
+        let previous_head = head();
+        let faults = owner.claims_for(&run.subject, Some("reconcile.fault")).unwrap().len();
+        assert_eq!(faults, usize::from(!pinned));
+
+        receive_and_project(&peer, "owner", &exchange_from(&owner, &Default::default()));
+        // Publish a genuine later receipt for identical code, causally after the owner's
+        // current head, without splitting batches or fabricating projection state.
+        publish_mission(&peer, &fixed.replace("exit 0", "exit 2"), "equivalent-intermediate");
+        publish_mission(&peer, &fixed, "equivalent-republication");
+        receive_and_project(&owner, "peer", &exchange_from(&peer, &Default::default()));
+        assert_eq!(owner.mission_spec("retry-work", None).unwrap().unwrap().revision, selected.revision);
+        assert_ne!(head(), previous_head, "the selected receipt must actually change");
+        owner.supersede_mission_publications().unwrap();
+        assert!(current(&owner, &run).superseded_by.is_none());
+        assert_eq!(owner.claims_for(&run.subject, Some("reconcile.fault")).unwrap().len(), faults);
+        assert_queue_converged(&owner);
+        if pinned {
+            let incompatible = fixed.replace("input \"value\"", "input \"replacement\"");
+            publish_mission(&owner, &incompatible, "equivalent-later-incompatible");
+            assert!(current(&owner, &run).supersession_fault.is_some());
+            let restored = publish_mission(&owner, &fixed, "equivalent-restored-compatible");
+            assert_eq!(restored.revision, selected.revision);
+            let target = replacement(&owner, &run);
+            assert_eq!(target.revision, restored.revision);
+            assert!(current(&owner, &run).supersession_fault.is_none());
+        }
+    }
 }

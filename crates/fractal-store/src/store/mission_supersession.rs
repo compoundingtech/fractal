@@ -117,13 +117,34 @@ impl Store {
                              THEN c.store_index<?4
                            WHEN json_type(c.body,'$.fields.admission_publication')='null'
                              THEN 1
-                           ELSE json_extract(c.body,'$.fields.admission_publication')<>?5 END)
+                           ELSE json_extract(c.body,'$.fields.admission_publication')<>?5
+                             AND EXISTS(SELECT 1 FROM claims admitted
+                               WHERE admitted.id=json_extract(c.body,'$.fields.admission_publication')
+                                 AND (admitted.kind<>'mission.published'
+                                   OR json_extract(admitted.body,'$.revision')<>?2
+                                   OR EXISTS(SELECT 1 FROM claims fault
+                                     WHERE fault.subject='mission-run/'||r.id
+                                       AND fault.kind='reconcile.fault'
+                                       AND json_extract(fault.body,'$.fields.scope')=?6
+                                       AND json_extract(fault.body,'$.fields.status')='faulted'))) END)
                      ORDER BY r.created_at_unix_ms, r.id",
                 ).map_err(internal)?;
-                query.query_map(params![mission, revision, self.origin, publication_index, publication],
+                query.query_map(params![mission, revision, self.origin, publication_index, publication, FAULT_SCOPE],
                     |row| row.get::<_, String>(0)).map_err(internal)?
                     .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
             };
+            if sources.is_empty() { continue }
+            let mut refusal = transaction.prepare(/* sqlite-large-value: allow-for-now lv-h314fb8a28f46 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT EXISTS(SELECT 1 FROM (
+                   SELECT json_extract(body,'$.fields.status') status,
+                          json_extract(body,'$.fields.publication') publication
+                   FROM claims WHERE subject=?1 AND kind='reconcile.fault'
+                     AND json_extract(body,'$.fields.scope')=?2
+                   ORDER BY CANONICAL_DESC(claims) LIMIT 1
+                 ) latest JOIN claims publication ON publication.id=latest.publication
+                 WHERE latest.status='faulted' AND publication.kind='mission.published'
+                   AND json_extract(publication.body,'$.revision')=?3)",
+            )).map_err(internal)?;
             for source_id in sources {
                 let source = mission_run_header_tx(transaction, &source_id).map_err(internal)?;
                 // Cancelling an earlier source can also cancel one of its descendants.
@@ -135,15 +156,10 @@ impl Store {
                 if mission_run_lineage_tx(transaction, &source.subject).map_err(internal)?.superseded_by.is_some() {
                     continue;
                 }
-                // Refusal is an immutable source/publication decision, not a retry queue.
-                // Another page (or a rebuilt dirty queue) can encounter the same head again.
-                let refused: bool = transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM claims
-                     WHERE subject=?1 AND kind='reconcile.fault'
-                       AND json_extract(body,'$.fields.status')='faulted'
-                       AND json_extract(body,'$.fields.scope')=?2
-                       AND json_extract(body,'$.fields.publication')=?3)",
-                    params![source.subject, FAULT_SCOPE, publication], |row| row.get(0),
+                // An unchanged definition keeps its refusal episode even when a different
+                // receipt becomes canonical. A genuinely new target may be preflighted.
+                let refused: bool = refusal.query_row(
+                    /* sqlite-large-value: allow-for-now lv-hc3ab25f6ec10 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ params![source.subject, FAULT_SCOPE, revision], |row| row.get(0),
                 ).map_err(internal)?;
                 if refused {
                     continue;
