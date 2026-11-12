@@ -30,6 +30,7 @@ overrides:
   "@overeng/utils-dev": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-dev"
   "@overeng/utils-storybook": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-storybook"
   "@effect/platform-node>@effect/platform-node-shared": 4.1.0
+  "@pierre/diffs>@pierre/highlights": 0.3.0
 
 peerDependencyRules:
   allowedVersions:

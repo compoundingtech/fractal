@@ -22,6 +22,7 @@ overrides:
   '@overeng/utils-dev': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-dev
   '@overeng/utils-storybook': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-storybook
   '@effect/platform-node>@effect/platform-node-shared': 4.1.0
+  '@pierre/diffs>@pierre/highlights': 0.3.0
 
 importers:
 
@@ -1662,9 +1663,6 @@ packages:
         optional: true
       react-dom:
         optional: true
-
-  '@pierre/highlights@0.2.0':
-    resolution: {integrity: sha512-hTpcOU1EzDAP4bYtEhxmMu2jwMvtkUydRUBUpWMSHTs3dw0IaC3Ld5ansMy18L0GE3b6Vfl2OGkLK+pWWpnBmw==}
 
   '@pierre/highlights@0.3.0':
     resolution: {integrity: sha512-s6xZ/giPPrSeCO2w254GiysUXD4ditKMTOrl1vHynvPqP7VdlujYi01O9joxJ0T16XkoXGQMN6zkRi9+O8NCzg==}
@@ -7347,7 +7345,7 @@ snapshots:
 
   '@pierre/diffs@1.6.1(@shikijs/themes@4.6.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
     dependencies:
-      '@pierre/highlights': 0.2.0
+      '@pierre/highlights': 0.3.0
       '@pierre/theme': 2.0.0
       '@pierre/theming': 1.0.2(@pierre/theme@2.0.0)(@shikijs/themes@4.6.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(shiki@4.6.0)
       diff: 9.0.0
@@ -7359,8 +7357,6 @@ snapshots:
       react-dom: 19.2.3(react@19.2.3)
     transitivePeerDependencies:
       - '@shikijs/themes'
-
-  '@pierre/highlights@0.2.0': {}
 
   '@pierre/highlights@0.3.0': {}
 
