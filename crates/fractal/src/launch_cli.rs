@@ -410,6 +410,7 @@ pub(super) async fn run_mission_view(
             since,
             until,
             status,
+            mission,
         } => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -418,6 +419,7 @@ pub(super) async fn run_mission_view(
             if since.is_some()
                 || until.is_some()
                 || status.is_some()
+                || mission.is_some()
                 || cursor
                     .as_deref()
                     .is_some_and(|c| c.starts_with("outcomes:"))
@@ -429,6 +431,7 @@ pub(super) async fn run_mission_view(
                     until,
                     status,
                     None,
+                    mission,
                     cursor,
                     limit,
                     json_output,
@@ -854,7 +857,7 @@ fn render_mission_overview(view: &Value) -> String {
         out.push_str(&fractal_daemon::provenance::render(&provenance));
     }
     for (key, title) in [("newest", "NEWEST"), ("failed", "FAILED")] {
-        let _ = writeln!(out, "{title} (up to {} runs)", view["preview_limit"]);
+        let _ = writeln!(out, "{title} (up to {} runs; a window, not the full history)", view["preview_limit"]);
         if let Some(runs) = view[key].as_array() {
             for run in runs {
                 let _ = writeln!(
@@ -869,6 +872,8 @@ fn render_mission_overview(view: &Value) -> String {
             }
         }
     }
+    let mission = view["mission"].as_str().unwrap_or("?");
+    let _ = writeln!(out, "Full history: fractal missions ls --all --mission {mission}");
     out
 }
 

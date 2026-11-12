@@ -253,6 +253,7 @@ pub(super) async fn run_work(
                     until,
                     status,
                     actor,
+                    None,
                     cursor,
                     limit,
                     json_output,
