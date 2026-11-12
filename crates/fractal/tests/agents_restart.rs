@@ -33,8 +33,6 @@ struct Runtime {
     /// Refuse each start with this launcher error, as a launcher this build cannot use does.
     refuse_with: Mutex<Option<String>>,
     attempts: Mutex<Vec<MemberSpec>>,
-    /// The system time of each attempt, in milliseconds since the epoch, as the reconciler reads it.
-    attempted_at: Mutex<Vec<u128>>,
     exit_on_start: Mutex<bool>,
     before_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     snapshot_unavailable: Mutex<bool>,
@@ -79,7 +77,6 @@ impl RuntimeControl for Runtime {
     }
     fn start(&self, member: &MemberSpec) -> anyhow::Result<()> {
         self.attempts.lock().unwrap().push(member.clone());
-        self.attempted_at.lock().unwrap().push(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
         anyhow::ensure!(
             !*self.refuse_start.lock().unwrap(),
             "fixture rejected launch"
@@ -3913,48 +3910,54 @@ fn retry_clock(fixture: &Fixture, subject: &str) -> (u128, usize) {
     (since, retries)
 }
 
-fn wait_until(unix_ms: u128) {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-    wait_ms(u64::try_from(unix_ms.saturating_sub(now)).unwrap());
-}
-
-/// Wait until the next crash-loop retry is due: the base wait doubled once per retry so far.
-fn wait_for_the_next_retry(fixture: &Fixture, subject: &str, base: u128) {
-    let (since, retries) = retry_clock(fixture, subject);
-    wait_until(since + (base << retries));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_restarts_always() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
+    let _clock = RestartClock;
+    let at = smallclaims::store::now_ms();
+    smallclaims::store::set_thread_clock(Some(at));
     let base = 1500;
     fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(1500, std::sync::atomic::Ordering::SeqCst);
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    let advance = |at| {
+        smallclaims::store::set_thread_clock(Some(at));
+        fixture.store.set_write_clock_at(at).unwrap();
+    };
+    advance(at);
     park(&fixture, &subject, "claude");
     *fixture.runtime.refuse_start.lock().unwrap() = true;
     hang_up(&fixture);
     assert!(parked_fault(&fixture, &subject), "the park is a fault until a retry succeeds");
 
-    // The first retry fails, and says so. Passes run in wall time, so a slow host's passes can
-    // outlast a wait and make the next retry too: each wait is judged from the attempts' times below.
+    // No retry before the first deadline, even across repeated daemon starts.
     fresh_passes(&fixture, 4);
-    wait_for_the_next_retry(&fixture, &subject, base);
+    let first_due = retry_clock(&fixture, &subject).0 + base;
+    advance(first_due - 1);
     fresh_passes(&fixture, 4);
-    let retries = retry_decisions(&fixture, &subject).len();
-    assert!(retries >= 1);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1 + retries, "each retry is one attempt");
+    assert!(retry_decisions(&fixture, &subject).is_empty());
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
+    advance(first_due);
+    fresh_passes(&fixture, 4);
+    assert_eq!(retry_decisions(&fixture, &subject).len(), 1);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2, "one attempt at the deadline");
     assert!(parked_fault(&fixture, &subject));
-    // The second wait is longer: passes once the first wait is over again start no retry yet. A
-    // retry these passes do start is judged below against the doubled wait.
-    let (since, _) = retry_clock(&fixture, &subject);
-    wait_until(since + base);
-    fresh_passes(&fixture, 4);
 
-    // Once the launcher works, the next retry starts the seat and the fault is gone.
+    // The next wait doubles; neither the old wait nor one millisecond early is due.
+    let (since, retries) = retry_clock(&fixture, &subject);
+    assert_eq!(retries, 1);
+    let second_due = since + (base << retries);
+    for at in [since + base, second_due - 1] {
+        advance(at);
+        fresh_passes(&fixture, 4);
+        assert_eq!(retry_decisions(&fixture, &subject).len(), 1);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    }
+
+    // Once the launcher works, the exact doubled deadline starts one successful retry.
     *fixture.runtime.refuse_start.lock().unwrap() = false;
-    wait_for_the_next_retry(&fixture, &subject, base);
+    advance(second_due);
     fresh_passes(&fixture, 4);
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2, "the retry started the seat");
     let retries = retry_decisions(&fixture, &subject);
@@ -3967,14 +3970,13 @@ async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_rest
     fresh_passes(&fixture, 4);
     assert_eq!(retry_decisions(&fixture, &subject).len(), retries.len(), "a running seat is not retried");
 
-    // No launch came before its wait was over, and each wait doubled the one before it.
-    let attempted_at = fixture.runtime.attempted_at.lock().unwrap().clone();
-    assert_eq!(attempted_at.len(), 1 + retries.len());
-    assert!(attempted_at.len() >= 3, "the seat started on a second retry at the earliest");
-    for (retry, pair) in attempted_at.windows(2).enumerate() {
-        let wait = base << retry;
-        assert!(pair[1] - pair[0] >= wait, "retry {} came {} ms after the attempt before it, inside its {wait} ms wait", retry + 1, pair[1] - pair[0]);
-    }
+    // The exact deadline assertions above cover launch timing on the clock that grants
+    // retries; runtime starts execute on worker threads without this thread's clock override.
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1 + retries.len());
+    assert_eq!(
+        retries.iter().map(|claim| claim.accepted_at_unix_ms).collect::<Vec<_>>(),
+        [first_due, second_due],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
