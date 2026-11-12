@@ -227,7 +227,7 @@ const styles = stylex.create({
     // The shared focus ring for the keyboard-focusable code columns inside the shadow root.
     '--fractal-diff-focus-width': g.focusRing,
     '--fractal-diff-focus-color': interaction.focusRing,
-    '--fractal-diff-focus-inset': g.focusInset,
+    '--fractal-diff-focus-inset': `calc(-1 * ${g.focusOffset})`,
     display: 'flex', flexDirection: 'column', minWidth: 0,
     backgroundColor: surface.canvas,
     outlineStyle: 'none',
