@@ -2,6 +2,64 @@ use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
+/// Resolve against the approved revision, or the exact candidate being approved, not the
+/// planning agent's local workspace. Planning itself remains local to the publishing daemon.
+async fn launch_run_workspace(
+    client: &Client,
+    session_id: &str,
+    preview_hash: Option<&str>,
+    workspace: Option<&Path>,
+    inputs: &[(String, String)],
+) -> Result<PathBuf> {
+    let session: PlanningSessionView = client
+        .get(&format!("/v1/launches/{}", urlencoding::encode(session_id)))
+        .await?;
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let candidate = if let Some(hash) = preview_hash {
+        session
+            .variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.hash == hash)
+            })
+            .map(|variant| &variant.candidate)
+            .or_else(|| {
+                session
+                    .preview
+                    .as_ref()
+                    .filter(|preview| preview.hash == hash)
+                    .and(session.candidate.as_ref())
+            })
+            .context("the launch has no candidate matching this preview hash")?
+    } else {
+        let revision = session.published_revision.as_deref().context("the launch has no approved revision")?;
+        session.candidate.iter()
+            .chain(session.variants.iter().map(|variant| &variant.candidate))
+            .find(|candidate| candidate.mission_revision == revision)
+            .context("the launch has no candidate matching its approved revision")?
+    };
+    let (name, hash) = candidate.kdl.rsplit_once('@').context("the launch candidate has no pinned KDL document")?;
+    let bytes = document_bytes(client, name, hash).await?;
+    let source = std::str::from_utf8(&bytes).context("the launch candidate KDL is not UTF-8")?;
+    let intent = fractal_daemon::parse_intent(source, local)?;
+    // Candidate admission requires exactly one top-level mission. Its immutable document
+    // keeps the authored name even when the session now presents a renamed public label.
+    anyhow::ensure!(intent.missions.len() == 1, "the launch candidate must declare exactly one mission");
+    let mission = intent.missions.values().next().context("the launch candidate declares no mission")?;
+    resolve_mission_workspace(
+        mission,
+        workspace,
+        local,
+        &unique_pairs(inputs.to_vec(), "input")?,
+    )
+}
+
 pub(super) async fn run_launch(
     client: &Client,
     endpoint: &Endpoint,
@@ -210,8 +268,14 @@ pub(super) async fn run_launch(
                 .await?
         }
         LaunchCommand::ApproveAndLaunch(args) => {
-            let workspace = fs::canonicalize(&args.workspace)
-                .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
+            let workspace = launch_run_workspace(
+                client,
+                &args.session,
+                Some(&args.preview_hash),
+                args.workspace.as_deref(),
+                &args.inputs,
+            )
+            .await?;
             let response: LaunchApproveAndStartView = client
                 .post(
                     &format!(
@@ -234,8 +298,14 @@ pub(super) async fn run_launch(
             return Ok(());
         }
         LaunchCommand::Run(args) => {
-            let workspace = fs::canonicalize(&args.workspace)
-                .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
+            let workspace = launch_run_workspace(
+                client,
+                &args.session,
+                None,
+                args.workspace.as_deref(),
+                &args.inputs,
+            )
+            .await?;
             let response: MissionRunView = client
                 .post(
                     &format!("/v1/launches/{}/start", urlencoding::encode(&args.session)),
