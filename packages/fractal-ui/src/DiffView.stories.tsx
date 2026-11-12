@@ -88,10 +88,6 @@ export const Compact: Story = {
   args: { header: false, maxLines: 6, width: 440 },
   play: async ({ canvasElement }) => {
     await expect(canvasElement.querySelector('[data-diff-more]')?.textContent).toBe('6 more lines')
-    // The card is a pointer-events:none tooltip: nothing inside it may take focus.
-    await expect(view.hasAttribute('tabindex')).toBe(false)
-    const shadow = [...view.querySelectorAll('*')].find(element => element.shadowRoot)!.shadowRoot!
-    await expect(shadow.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])').length).toBe(0)
   },
 }
 
@@ -149,6 +145,10 @@ export const HoverCardPreview: Story = {
     await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
     await expect(view.dataset.density).toBe('compact')
     await expect(canvasElement.querySelector('[data-diff-more]')?.textContent).toBe('6 more lines')
+    // The card is a pointer-events:none tooltip: nothing inside it may take focus.
+    await expect(view.hasAttribute('tabindex')).toBe(false)
+    const shadow = [...view.querySelectorAll('*')].find(element => element.shadowRoot)!.shadowRoot!
+    await expect(shadow.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])').length).toBe(0)
   },
 }
 export const HoverCardPreviewLight: Story = { args: { scheme: 'light' }, render: HoverCardPreview.render, play: HoverCardPreview.play }
