@@ -553,8 +553,8 @@ test('literal URLs stay inside original inline containers on both parser paths',
     for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
       const cells = parse(table, plugins).tree.children[0].children[1].children
       assert.equal(cells.length, 2)
-      assert.equal(cells[0].children[0].url, 'https://example.test/a|b')
-      assert.deepEqual(cells[0].children[0].children, [{ type: 'text', value: 'https://example.test/a|b' }])
+      assert.equal(cells[0].children[0].url, 'https://example.test/a\\|b')
+      assert.deepEqual(cells[0].children[0].children, [{ type: 'text', value: 'https://example.test/a\\|b' }])
       assert.deepEqual(cells[1].children, [{ type: 'text', value: 'next' }])
     }
     for (const source of [

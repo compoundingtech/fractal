@@ -67,9 +67,9 @@ fn start(tag: &Tag) -> (&'static str, Vec<String>) {
 }
 
 /// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text, byte_start, byte_end,
-/// inline_start?, inline_end?, table_cell?]`, `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break,
+/// inline_start?, inline_end?]`, `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break,
 /// `["r"]` rule, `["fr", label]`, `["tk", "x" | ""]`. Offsets are decimal strings with exclusive ends in the
-/// original UTF-8 source. Text's enclosing inline run bounds exclude structural table delimiters; table_cell is "1".
+/// original UTF-8 source. Text's enclosing inline run bounds exclude structural table delimiters.
 pub fn events(source: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
     let mut json = Json(String::with_capacity(source.len() * 2 + 16));
@@ -84,7 +84,7 @@ pub fn events(source: &str) -> String {
                 let emit = depth < MAX_DEPTH;
                 if emit {
                     if matches!(tag, Tag::Paragraph | Tag::Heading { .. } | Tag::TableCell | Tag::Item) {
-                        inline_runs.push((range.clone(), matches!(tag, Tag::TableCell)));
+                        inline_runs.push(range.clone());
                     }
                     let (kind, fields) = start(&tag);
                     let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
@@ -109,9 +109,9 @@ pub fn events(source: &str) -> String {
             // Keep the original enclosing run as well as each text span: formatting may split a URL's text, but its
             // source extent must never cross a cell boundary. Tight list items have no paragraph event.
             Event::Text(text) => {
-                if let Some((inline, table_cell)) = inline_runs.last() {
+                if let Some(inline) = inline_runs.last() {
                     json.event("t", &[&text, &range.start.to_string(), &range.end.to_string(),
-                        &inline.start.to_string(), &inline.end.to_string(), if *table_cell { "1" } else { "" }]);
+                        &inline.start.to_string(), &inline.end.to_string()]);
                 } else {
                     json.event("t", &[&text, &range.start.to_string(), &range.end.to_string()]);
                 }
@@ -184,7 +184,7 @@ mod tests {
             let json = super::events(&source);
             // Every text fragment in the first data cell carries that cell's original bounds, even when emphasis
             // or an escaped pipe split its text. The delimiter before `next` must not be inside those bounds.
-            let metadata = format!(",\"{start}\",\"{end}\",\"1\"]");
+            let metadata = format!(",\"{start}\",\"{end}\"]");
             assert!(json.contains(&metadata), "{cell}: {json}");
         }
     }

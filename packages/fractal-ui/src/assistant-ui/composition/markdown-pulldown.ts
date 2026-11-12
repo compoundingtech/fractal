@@ -228,7 +228,7 @@ function* literalUrls(source: string): Generator<LiteralUrl> {
  * Text events identify both the original text span and its enclosing inline run. Recognize URL extents only within
  * that run, never across structural cell delimiters, then rewrite eligible raw extents as escaped explicit links.
  * Reparse so emphasis/code/delete cannot consume URL delimiters. Existing links, images, code and HTML stay opaque.
- * In table cells, GFM removes escaped-pipe backslashes before inline tokenization; retain a source map for rewriting.
+ * Preserve the raw literal, including escaped pipes: GFM keeps their backslash inside URL destinations and labels.
  */
 function literalEvents(source: string): readonly Event[] {
   const bytes = encoder.encode(source)
@@ -236,21 +236,21 @@ function literalEvents(source: string): readonly Event[] {
   if (!/https?:\/\/|www\./i.test(source)) return original
   interface Rewrite { readonly start: number; readonly end: number; readonly value: string }
   interface InlineRun {
-    readonly start: number; readonly end: number; readonly tableCell: boolean
+    readonly start: number; readonly end: number
     readonly candidates: Rewrite[]; next: number
   }
   const runs = new Map<string, InlineRun>()
   const ranges: { start: number; end: number; run: InlineRun }[] = []
   const stack: string[] = []
   let opaque = 0
-  for (const [kind, first, start, end, inlineStart, inlineEnd, tableCell] of original) {
+  for (const [kind, first, start, end, inlineStart, inlineEnd] of original) {
     if (kind === 's') { stack.push(first!); if (['code', 'html', 'link', 'image'].includes(first!)) opaque++ }
     else if (kind === 'e') { if (['code', 'html', 'link', 'image'].includes(stack.pop()!)) opaque-- }
     else if (kind === 't' && opaque === 0 && inlineStart !== undefined && inlineEnd !== undefined) {
       const key = `${inlineStart}:${inlineEnd}`
       let run = runs.get(key)
       if (run === undefined) {
-        run = { start: Number(inlineStart), end: Number(inlineEnd), tableCell: tableCell === '1', candidates: [], next: 0 }
+        run = { start: Number(inlineStart), end: Number(inlineEnd), candidates: [], next: 0 }
         runs.set(key, run)
       }
       ranges.push({ start: Number(start), end: Number(end), run })
@@ -258,23 +258,11 @@ function literalEvents(source: string): readonly Event[] {
   }
   for (const run of runs.values()) {
     const raw = decoder.decode(bytes.subarray(run.start, run.end))
-    let text = raw
-    let offsets: number[] | undefined
-    if (run.tableCell && raw.includes('\\|')) {
-      const characters: string[] = []
-      offsets = [0]
-      for (let index = 0; index < raw.length; index++) {
-        if (raw[index] === '\\' && raw[index + 1] === '|') index++
-        characters.push(raw[index]!)
-        offsets.push(index + 1)
-      }
-      text = characters.join('')
-    }
     let cursor = 0
     let byte = run.start
-    for (const candidate of literalUrls(text)) {
-      const start = offsets?.[candidate.index] ?? candidate.index
-      const end = offsets?.[candidate.index + candidate.value.length] ?? candidate.index + candidate.value.length
+    for (const candidate of literalUrls(raw)) {
+      const start = candidate.index
+      const end = start + candidate.value.length
       byte += encoder.encode(raw.slice(cursor, start)).length
       const byteEnd = byte + encoder.encode(raw.slice(start, end)).length
       run.candidates.push({ start: byte, end: byteEnd, value: candidate.value })
