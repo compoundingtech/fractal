@@ -28,6 +28,73 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+/// A person's effective availability. Values are the schema's lowercase words; `presence` and
+/// `presence_observed_at` are `None` for anyone but the person.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonAvailability {
+    pub person: String,
+    /// `available` or `away`.
+    pub status: String,
+    /// `override` or `presence`.
+    pub status_source: String,
+    pub status_until: Option<String>,
+    /// `present`, `idle`, `locked` or `unknown`.
+    pub presence: Option<String>,
+    pub presence_observed_at: Option<String>,
+    /// `all`, `urgent` or `none`.
+    pub interruptions: String,
+    pub interruptions_until: Option<String>,
+    /// `run`, `hold-routine` or `hold-all`.
+    pub deadline_clock: String,
+    pub deadline_clock_since: Option<String>,
+    pub deadline_clock_until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonAvailabilities {
+    pub people: Vec<PersonAvailability>,
+}
+
+/// `value: None` clears the status override and takes no `until`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusChange {
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityInterruptionsChange {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityDeadlineClockChange {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+/// Changes to the session person's own availability; an absent axis is unchanged.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilitySet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AvailabilityStatusChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruptions: Option<AvailabilityInterruptionsChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_clock: Option<AvailabilityDeadlineClockChange>,
+}
+
+/// One device's `present`, `idle` or `locked` report; the daemon assigns its source.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PresenceReport {
+    pub presence: String,
+    pub observed_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,

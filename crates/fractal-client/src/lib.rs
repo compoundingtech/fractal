@@ -2233,6 +2233,21 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -3817,6 +3832,27 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's presence for the session person; the daemon assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        self.post("/v1/client/presence", report).await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.

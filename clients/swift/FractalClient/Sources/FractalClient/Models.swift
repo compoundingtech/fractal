@@ -22,6 +22,80 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
+public struct PersonAvailability: Codable, Sendable, Equatable {
+    public let person: String
+    /// `available` or `away`.
+    public let status: String
+    /// `override` or `presence`.
+    public let statusSource: String
+    public let statusUntil: String?
+    /// `present`, `idle`, `locked` or `unknown`.
+    public let presence: String?
+    public let presenceObservedAt: String?
+    /// `all`, `urgent` or `none`.
+    public let interruptions: String
+    public let interruptionsUntil: String?
+    /// `run`, `hold-routine` or `hold-all`.
+    public let deadlineClock: String
+    public let deadlineClockSince: String?
+    public let deadlineClockUntil: String?
+    enum CodingKeys: String, CodingKey {
+        case person, status, presence, interruptions
+        case statusSource = "status_source", statusUntil = "status_until", presenceObservedAt = "presence_observed_at"
+        case interruptionsUntil = "interruptions_until", deadlineClock = "deadline_clock"
+        case deadlineClockSince = "deadline_clock_since", deadlineClockUntil = "deadline_clock_until"
+    }
+}
+
+public struct PersonAvailabilities: Codable, Sendable, Equatable {
+    public let people: [PersonAvailability]
+}
+
+/// A nil `value` clears the status override and takes no `until`; it is sent as `null`.
+public struct AvailabilityStatusChange: Codable, Sendable, Equatable {
+    public var value: String?
+    public var until: String?
+    enum CodingKeys: String, CodingKey { case value, until }
+    public init(value: String?, until: String? = nil) { self.value = value; self.until = until }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(value, forKey: .value)
+        try container.encodeIfPresent(until, forKey: .until)
+    }
+}
+
+public struct AvailabilityInterruptionsChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+public struct AvailabilityDeadlineClockChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+/// Changes to the session person's own availability; a nil axis is unchanged.
+public struct AvailabilitySet: Codable, Sendable, Equatable {
+    public var status: AvailabilityStatusChange?
+    public var interruptions: AvailabilityInterruptionsChange?
+    public var deadlineClock: AvailabilityDeadlineClockChange?
+    public init(status: AvailabilityStatusChange? = nil, interruptions: AvailabilityInterruptionsChange? = nil, deadlineClock: AvailabilityDeadlineClockChange? = nil) {
+        self.status = status; self.interruptions = interruptions; self.deadlineClock = deadlineClock
+    }
+    enum CodingKeys: String, CodingKey { case status, interruptions, deadlineClock = "deadline_clock" }
+}
+
+/// One device's `present`, `idle` or `locked` report; the daemon assigns its source.
+public struct PresenceReport: Codable, Sendable, Equatable {
+    public var presence: String
+    public var observedAt: String
+    public init(presence: String, observedAt: String) { self.presence = presence; self.observedAt = observedAt }
+    enum CodingKeys: String, CodingKey { case presence, observedAt = "observed_at" }
+}
+
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
     public let apiVersion: String
     public let requestID: String
