@@ -34,7 +34,22 @@ extension FractalAttentionAdapter: AvailabilityAdapter {
     }
   }
 
+  func reportPresence(_ report: PresenceMachine.Report) async throws -> PresenceAnswer {
+    do {
+      let result = try await client.presenceReport(Self.wire(report)).value
+      return PresenceAnswer(
+        availability: Self.availability(result.availability), reportAgainAt: result.reportAgainAt.flatMap(Self.date(iso:)))
+    } catch {
+      throw ReadFailure(error)
+    }
+  }
+
   // MARK: Wire
+
+  static func wire(_ report: PresenceMachine.Report) -> PresenceReport {
+    PresenceReport(
+      state: report.state.rawValue, lastInputAt: rfc3339(report.lastInputAt), observedAt: rfc3339(report.observedAt))
+  }
 
   static func wire(_ request: AvailabilityRequest) -> AvailabilitySet {
     AvailabilitySet(

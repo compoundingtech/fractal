@@ -175,4 +175,8 @@ private actor FakeAvailability: AvailabilityAdapter {
   }
 
   func setNote(_ request: NoteRequest) async throws -> DirectiveNoteState? { nil }
+
+  func reportPresence(_ report: PresenceMachine.Report) async throws -> PresenceAnswer {
+    PresenceAnswer(availability: read.availability, reportAgainAt: nil)
+  }
 }

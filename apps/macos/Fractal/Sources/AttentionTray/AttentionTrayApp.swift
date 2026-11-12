@@ -26,6 +26,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   let model: AttentionModel
   let build: BuildIdentity
   private let isConfigured: Bool
+  private let presence: PresenceReporter?
   private var refreshLoop: Task<Void, Never>?
   private var lastLogged: String?
 
@@ -38,10 +39,12 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       let adapter = FractalAttentionAdapter(
         configuration: configuration, clientName: "attention-tray \(build.machineVersion)")
       model = AttentionModel(adapter: adapter, availabilityAdapter: adapter)
+      presence = PresenceReporter(adapter: adapter, model: model, log: Self.log)
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
       model = AttentionModel(adapter: nil, configurationError: String(describing: error))
+      presence = nil
       isConfigured = false
     }
     super.init()
@@ -52,12 +55,13 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    log("AttentionTray \(build.machineVersion) started")
+    Self.log("AttentionTray \(build.machineVersion) started")
     if let path = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT"] {
       Task { await snapshot(to: path) }
       return
     }
     guard isConfigured, refreshLoop == nil else { return }
+    presence?.start()
     let model = model
     refreshLoop = Task { [weak self] in
       while !Task.isCancelled {
@@ -71,6 +75,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillTerminate(_ notification: Notification) {
     refreshLoop?.cancel()
     refreshLoop = nil
+    presence?.stop()
   }
 
   /// One line per change of outcome, never per poll, and never request content.
@@ -89,10 +94,10 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       + "availability \(describe(model.availability.state))"
     guard line != lastLogged else { return }
     lastLogged = line
-    log(line)
+    Self.log(line)
   }
 
-  private func log(_ line: String) {
+  nonisolated static func log(_ line: String) {
     FileHandle.standardError.write(Data("\(Date.now.formatted(.iso8601)) \(line)\n".utf8))
   }
 

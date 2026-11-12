@@ -35,9 +35,9 @@ extension AttentionModel {
     }
   }
 
-  /// Fractal's folded availability after a write. Before the first read there is no note to
-  /// keep beside it, so the next refresh publishes both.
-  func apply(_ folded: Availability) {
+  /// Fractal's folded availability after a write or presence report. Before the first read
+  /// there is no note to keep beside it, so the next refresh publishes both.
+  public func apply(_ folded: Availability) {
     availability.value?.availability = folded
   }
 }
