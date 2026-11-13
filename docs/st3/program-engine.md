@@ -463,8 +463,9 @@ journaled execution snapshot without consulting a seat's current model or runnin
 Each execution identifies its work claim, step, attempt, actor and harness incarnation, with the
 declared model captured at claim time, observed models, nullable fallback evidence, response token
 and micro-USD totals, timing, trace correlation and an incarnation-matched runtime exit receipt.
-No usage observation is `usage: null`, not a zero-token observation; `unpriced_tokens` distinguishes
-unknown price from free execution. Exit evidence recorded after the child result was journaled is
+No usage observation is `usage: null`, not a zero-token observation. Either `unpriced_tokens`
+or `unpriced_responses` distinguishes unknown price from free execution: responses without a
+reported total still carry the response counter without inventing tokens. Exit evidence recorded after the child result was journaled is
 available on mission detail reads, not retroactively inserted into the replayed snapshot.
 An effect-form step is not an agent invocation; it retains its ordinary typed result and journal
 duration. A process that fails before claiming work has runtime evidence but no claim-backed

@@ -163,6 +163,7 @@ pub(super) fn attributed_usage(
             });
             if let Some(budget) = account.monthly_credits_usd {
                 let (mut cost, mut unpriced) = (0_u64, 0_u64);
+                let mut unpriced_responses = 0_u64;
                 for row in month_rows
                     .iter_mut()
                     .filter(|row| row["account_ref"].as_str() == Some(account.name.as_str()))
@@ -170,11 +171,14 @@ pub(super) fn attributed_usage(
                     cost = cost.saturating_add(row["cost_microusd"].as_u64().unwrap_or(0));
                     unpriced =
                         unpriced.saturating_add(row["unpriced_tokens"].as_u64().unwrap_or(0));
+                    unpriced_responses = unpriced_responses
+                        .saturating_add(row["unpriced_responses"].as_u64().unwrap_or(0));
                 }
                 value["credits"] = json!({
                     "budget_microusd": budget.saturating_mul(1_000_000),
                     "used_microusd": cost,
                     "unpriced_tokens": unpriced,
+                    "unpriced_responses": unpriced_responses,
                     "period_start_ms": month_start,
                 });
             }
@@ -223,7 +227,7 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
             "operation": "append", "entry_id": id, "source_id": id, "sequence": 1, "revision": 1,
             "role": "system", "entry_type": "usage", "final": true, "driver": driver,
             "incarnation_id": incarnation, "observed_at_unix_ms": now_ms() as u64,
-            "body": {"semantics": "response", "model": model, "input_tokens": 1_000_000, "output_tokens": 1000, "total_tokens": 1_001_000}
+            "body": {"semantics": "response", "model": model, "input_tokens": 1_000_000, "output_tokens": 1000, "cached_tokens": 0, "cache_write_tokens": 0, "total_tokens": 1_001_000}
         }))
         .unwrap();
         if let Some(account) = account {

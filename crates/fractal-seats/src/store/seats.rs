@@ -68,8 +68,8 @@ fn pricing_period_delta(latest: Vec<Value>, baseline: &[Value]) -> Vec<Value> {
                     );
                 }
             }
-            // A zero-token response may still have a reported cost.
-            (entry["total_tokens"] != 0 || entry["cost_microusd"] != 0).then_some(entry)
+            // Missing token totals must not hide an unpriced contribution.
+            USAGE_BUCKETS.iter().any(|name| entry[*name].as_u64().unwrap_or(0) > 0).then_some(entry)
         })
         .collect()
 }
@@ -1526,10 +1526,11 @@ impl SeatsStore for Store {
             )
             .optional()?;
         if let Some(provenance) = provenance {
-            fields.insert(
-                "pricing_provenance".into(),
-                serde_json::from_str(&provenance)?,
-            );
+            let provenance: Vec<Value> = serde_json::from_str(&provenance)?;
+            fields.insert("unpriced_responses".into(), json!(provenance.iter()
+                .map(|entry| entry["unpriced_responses"].as_u64().unwrap_or(0))
+                .fold(0_u64, u64::saturating_add)));
+            fields.insert("pricing_provenance".into(), json!(provenance));
         }
         // Never use the seat's current binding for a response from an older incarnation.
         if let Some(binding) = usage_native_session(&connection, &observation.subject, &fields)? {
@@ -2054,6 +2055,7 @@ impl SeatsStore for Store {
                 until,
                 cost: 0,
                 unpriced: 0,
+                unpriced_responses: 0,
             })
             .collect::<Vec<_>>();
         #[derive(Default)]
@@ -2129,13 +2131,15 @@ impl SeatsStore for Store {
                 let baseline = baseline
                     .filter(|b| b.buckets[0] <= latest.buckets[0])
                     .unwrap_or_default();
-                if latest.buckets[0] > baseline.buckets[0] {
+                if latest.buckets != baseline.buckets {
                     day.cost = day
                         .cost
                         .saturating_add(latest.buckets[6].saturating_sub(baseline.buckets[6]));
                     day.unpriced = day
                         .unpriced
                         .saturating_add(latest.buckets[8].saturating_sub(baseline.buckets[8]));
+                    day.unpriced_responses = day.unpriced_responses
+                        .saturating_add(latest.buckets[9].saturating_sub(baseline.buckets[9]));
                 }
             }
             let Some(latest) = group.latest else {
@@ -2165,7 +2169,7 @@ impl SeatsStore for Store {
                 row[*name] =
                     Value::from(latest.buckets[index].saturating_sub(baseline.buckets[index]));
             }
-            if row["total_tokens"] == 0 {
+            if USAGE_BUCKETS.iter().all(|name| row[*name] == 0) {
                 continue;
             }
             result.push(row);

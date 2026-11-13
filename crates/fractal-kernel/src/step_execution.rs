@@ -37,10 +37,12 @@ pub struct StepExecutionUsage {
     pub cache_write_1h_tokens: u64,
     pub cached_tokens: u64,
     pub total_tokens: u64,
-    /// Known priced portion; `unpriced_tokens` prevents treating this as the full bill.
+    /// Known priced portion; either unpriced counter prevents treating this as the full bill.
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    /// Responses without a price, including those whose total token count was not reported.
+    pub unpriced_responses: u64,
 }
 
 #[cfg(test)]
