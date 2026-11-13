@@ -532,9 +532,11 @@ const styles = stylex.create({
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
   // One palette with the kit DiffView (syntaxVars: Pierre's default theme), so code blocks and diffs never disagree.
-  syntaxComment: { color: syntax.comment, fontStyle: 'italic' },
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
+  // `--fractal-syntax-muted` so comments and strings keep AA contrast on the tint.
+  syntaxComment: { color: `var(--fractal-syntax-muted, ${syntax.comment})`, fontStyle: 'italic' },
   syntaxKeyword: { color: syntax.keyword },
-  syntaxString: { color: syntax.string },
+  syntaxString: { color: `var(--fractal-syntax-muted, ${syntax.string})` },
   syntaxLiteral: { color: syntax.constant },
   syntaxFunction: { color: syntax.func },
   syntaxDeleted: { color: syntax.deleted },

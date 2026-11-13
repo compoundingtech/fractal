@@ -1188,6 +1188,97 @@ pub struct MissionDeclarationProvenance {
     pub renderer: Option<String>,
 }
 
+/// Where one agent or mission revision came from; requires read.declarations.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SubjectSourceMap {
+    pub subject: String,
+    pub revision: String,
+    /// The subject's current revision; absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    pub map: SourceMapClaim,
+    /// Canonical KDL of `revision`, environment values redacted.
+    pub kdl: String,
+    /// The subject's mapped revisions, newest first.
+    pub revisions: Vec<SourceMapRevision>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapRevision {
+    pub revision: String,
+    pub set_revision: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub sha: String,
+    pub sequence: u64,
+    pub recorded_at_unix_ms: u64,
+}
+
+/// The `source.mapped` claim body. File indices refer to `files`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapClaim {
+    pub subject: String,
+    pub revision: String,
+    pub set_revision: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub sha: String,
+    pub sequence: u64,
+    pub files: Vec<SourceMapFile>,
+    pub declaration: usize,
+    pub inputs: Vec<usize>,
+    pub nodes: Vec<SourceMapNode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapFile {
+    pub repository: String,
+    pub path: String,
+    pub blob: String,
+    pub blob_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapNode {
+    pub kdl: String,
+    #[serde(rename = "kdlLines")]
+    pub kdl_lines: [u32; 2],
+    pub span: SourceMapSpan,
+    pub frames: Vec<SourceMapFrame>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapSpan {
+    pub file: usize,
+    pub start: SourceMapPosition,
+    pub end: SourceMapPosition,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapPosition {
+    pub line: u32,
+    pub column: u32,
+}
+
+/// One contributing location: declaration, helper or value; `enclosing` is a range, not a point.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapFrame {
+    pub file: usize,
+    pub start: SourceMapPosition,
+    pub end: SourceMapPosition,
+    pub role: String,
+    pub precision: String,
+}
+
+/// The text of one source file version, by sha256.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceBlob {
+    pub hash: String,
+    pub text: String,
+}
+
 /// Applied desired state, not the original declaration file or a proposed mission revision.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubjectDefinition {
@@ -1598,6 +1689,24 @@ pub struct Mission {
 pub struct MissionRunSummary {
     pub id: String,
     pub generation_id: Option<String>,
+    /// Source run for a new-run retry; absent for an ordinary start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// New runs created by retrying this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// Predecessor replaced by this fresh run after publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Fresh replacement created after a newer revision was published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Replacement admission refusal; the source remains active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
+    /// The mission revision the run is pinned to; absent on older daemons.
+    #[serde(default)]
+    pub revision: Option<String>,
     pub requester: String,
     pub status: String,
     pub phase: String,
@@ -2022,6 +2131,10 @@ pub struct Agent {
     pub next_work: Option<WorkLabel>,
     #[serde(default)]
     pub upcoming_work: Vec<WorkLabel>,
+    /// The model the seat actually runs on: the latest harness usage model for the card's
+    /// incarnation. `None` when it reported none; differs from the declaration while drifted.
+    #[serde(default)]
+    pub live_model: Option<String>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
     #[serde(default)]
@@ -5304,6 +5417,8 @@ pub enum AssistantScope {
     Conversation,
     #[serde(rename = "read.assistant.terminal")]
     Terminal,
+    #[serde(rename = "read.assistant.slo")]
+    Slo,
     #[serde(rename = "write.assistant.messages")]
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]

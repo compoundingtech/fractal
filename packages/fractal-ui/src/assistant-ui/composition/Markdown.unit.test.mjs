@@ -769,7 +769,7 @@ test('literal URLs stay inside original inline containers on both parser paths',
   } finally { await isolated.close() }
 })
 
-test('known upstream divergence: even backslash runs before table pipes remain explicit beside GFM output', async () => {
+test('pulldown intentionally matches GitHub GFM pipe escaping while remark-gfm differs', async () => {
   const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
   try {
     const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
@@ -786,18 +786,18 @@ test('known upstream divergence: even backslash runs before table pipes remain e
       const gfmLink = () => anchor(`${prefix}a\\\\`)
       const gfmParagraphValue = suffix => `${prefix}a${prefix.startsWith('www.') ? '\\' : '\\\\'}|b|${suffix}`
       const knownDivergences = [
-        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        // pulldown-cmark 0.13.5 matches GitHub's GFM: \| takes precedence over other backslash escapes (upstream PR #699).
         { name: 'compact data row', source: `|link|other|\n|---|---|\n|${raw}|b|`,
           pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
-        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        // The same intentional GFM precedence applies in headers; remark-gfm instead ends this table cell.
         { name: 'compact header', source: `|${raw}|other|\n|---|---|\n|a|b|`,
           pulldown: table([nativeLink(), 'other'], ['a', 'b']),
           gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue('other|')), '\n|---|---|\n|a|b|')) },
-        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        // Preserve GitHub/pulldown pipe ownership in both rows and headers, alongside remark-gfm's distinct output.
         { name: 'compact header and row', source: `|${raw}|${prefix}next|\n|---|---|\n|${raw}|${prefix}last|`,
           pulldown: table([nativeLink(), anchor(`${prefix}next`)], [nativeLink(), anchor(`${prefix}last`)]),
           gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue(`${prefix}next|`)), '\n|---|---|\n|', anchor(gfmParagraphValue(`${prefix}last|`)))) },
-        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        // Outer pipes do not change the intentional GitHub/pulldown precedence; remark-gfm still differs.
         { name: 'row without outer pipes', source: `link|other\n---|---\n${raw}|b`,
           pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
       ]
