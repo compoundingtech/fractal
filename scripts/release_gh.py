@@ -107,7 +107,7 @@ def request_failures(trace):
 
 def failure_reason(result):
     """Response bodies can echo secrets; retain only status and allowlisted trace metadata."""
-    status = re.search(r'\bHTTP (\d{3})\b', f'{result.stderr}\n{result.stdout}')
+    status = re.search(r'\bHTTP(?:/[\d.]+)? ([45]\d{2})\b', f'{result.stderr}\n{result.stdout}')
     reason = f'HTTP {status[1]}' if status else f'exit status {result.returncode}'
     if os.environ.get('RELEASE_GH_DIAGNOSTICS') == '1':
         requests = request_failures(result.stderr)
