@@ -166,7 +166,7 @@ private struct AsksSection: View {
       {
         Note(
           symbol: "lock",
-          text: "This device may only read. Answer in Fractal, or pair the tray with control.attention to answer here.")
+          text: "This session may only read (no work.done grant). Answer in Fractal.")
       }
       if asks.isEmpty {
         Text(model.attention.value == nil ? "Loading…" : "Nothing needs you right now.")
