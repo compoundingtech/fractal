@@ -443,20 +443,25 @@
       "type": "object", "additionalProperties": false, "required": ["note"],
       "properties": {"note": {"oneOf": [{"$ref": "#/$defs/DirectiveNote"}, {"type": "null"}]}}
     },
+    "AvailabilityStatus": {"anyOf": [{"enum": ["available", "away"]}, {"type": "string"}], "description": "A person's effective status. Readers retain future values as Unknown."},
+    "AvailabilityStatusSource": {"anyOf": [{"enum": ["override", "presence", "unreported"]}, {"type": "string"}], "description": "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown."},
+    "AvailabilityPresence": {"anyOf": [{"enum": ["present", "idle", "locked", "unreported"]}, {"type": "string"}], "description": "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown."},
+    "AvailabilityInterruptions": {"anyOf": [{"enum": ["all", "urgent", "none"]}, {"type": "string"}], "description": "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown."},
+    "AvailabilityDeadlineClock": {"anyOf": [{"enum": ["run", "hold-routine", "hold-all"]}, {"type": "string"}], "description": "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown."},
     "PersonAvailability": {
       "description": "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person.",
       "type": "object", "additionalProperties": false,
       "required": ["person", "status", "status_source", "status_until", "presence", "presence_observed_at", "interruptions", "interruptions_until", "deadline_clock", "deadline_clock_since", "deadline_clock_until"],
       "properties": {
         "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
-        "status": {"enum": ["available", "away"], "description": "The override while one is in force; otherwise `available` only while presence is `present`."},
-        "status_source": {"enum": ["override", "presence"]},
+        "status": {"$ref": "#/$defs/AvailabilityStatus", "description": "The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present."},
+        "status_source": {"$ref": "#/$defs/AvailabilityStatusSource"},
         "status_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
-        "presence": {"oneOf": [{"enum": ["present", "idle", "locked", "unknown"]}, {"type": "null"}], "description": "The person's fresh device reports folded: `present` anywhere wins, then `idle`, then `locked`; `unknown` without a fresh report."},
+        "presence": {"oneOf": [{"$ref": "#/$defs/AvailabilityPresence"}, {"type": "null"}]},
         "presence_observed_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
-        "interruptions": {"enum": ["all", "urgent", "none"]},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptions"},
         "interruptions_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
-        "deadline_clock": {"enum": ["run", "hold-routine", "hold-all"], "description": "A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask (`hold-all`)."},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClock"},
         "deadline_clock_since": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
         "deadline_clock_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }
@@ -497,11 +502,20 @@
       }
     },
     "PresenceReport": {
-      "description": "One device's presence for the session person. The daemon assigns the source: the pairing grant, or this member for local callers. `observed_at` must be within the last 15 minutes.",
-      "type": "object", "additionalProperties": false, "required": ["presence", "observed_at"],
+      "description": "One device's raw state for the session person, sent on every state change. The device applies no thresholds: the daemon derives presence the same way for every device (an `active` device is present until 10 minutes after `last_input_at`, then idle; `inactive` is idle; `locked` and `sleeping` are locked) and counts a device's newest state for 24 hours. The daemon assigns the source: the pairing grant, or this member for local callers. `observed_at` must be within the last 15 minutes and at most 2 minutes ahead; `last_input_at`, when sent, no later than `observed_at`.",
+      "type": "object", "additionalProperties": false, "required": ["state", "observed_at"],
       "properties": {
-        "presence": {"enum": ["present", "idle", "locked"]},
+        "state": {"enum": ["active", "inactive", "locked", "sleeping"], "description": "`active`: unlocked and in front of the person, with the last input deciding idleness; `inactive`: running but not in front of the person (backgrounded, hidden, display asleep); `locked`; `sleeping`."},
+        "last_input_at": {"$ref": "#/$defs/Timestamp", "description": "When the person last gave this device input. Absent, an `active` report counts from `observed_at`."},
         "observed_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "PresenceReportResult": {
+      "description": "The session person's availability after a presence report, and when this device should report again although its state has not changed.",
+      "type": "object", "additionalProperties": false, "required": ["availability", "report_again_at"],
+      "properties": {
+        "availability": {"$ref": "#/$defs/PersonAvailability"},
+        "report_again_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "While the device is present: the instant it turns idle unless it has newer input, so it reports then with its current `last_input_at`. Null: report on the next state change, or on the next input after an idle stretch. Reporting more often is harmless; the daemon records only transitions."}
       }
     },
     "ObservationLatency": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "count", "over_target", "max_ms", "buckets"], "properties": {"target": {"enum": ["ios-open-to-live", "ios-connect", "ios-message-ack", "ios-conversation-open", "ios-terminal-open", "ios-recover"]}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "latency"}, "count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "over_target": {"type": "integer", "minimum": 0, "maximum": 1000000}, "max_ms": {"type": "integer", "minimum": 0, "maximum": 3600000}, "buckets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0, "maximum": 3670015}, {"type": "integer", "minimum": 1, "maximum": 1000000}], "minItems": 2, "maxItems": 2}}}},
@@ -1069,6 +1083,7 @@
             { "$ref": "#/$defs/PersonAvailabilities" },
             { "$ref": "#/$defs/DirectiveNoteSetResult" },
             { "$ref": "#/$defs/PersonAvailability" },
+            { "$ref": "#/$defs/PresenceReportResult" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
@@ -1251,6 +1266,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "urgent": { "type": "boolean", "description": "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -1730,7 +1746,7 @@
         "current": { "type": "string" },
         "window": { "type": "string" },
         "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
-        "status": { "enum": ["met", "missed", "no-data", "stale"] },
+        "status": { "anyOf": [{ "enum": ["met", "missed", "no-data", "stale"] }, { "type": "string" }], "description": "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
         "tone": { "type": "string", "description": "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." },
@@ -2039,6 +2055,11 @@
       "properties": {
         "id": { "$ref": "#/$defs/MissionRunId" },
         "generation_id": { "$ref": "#/$defs/RunGenerationId" },
+        "retry_of": { "$ref": "#/$defs/MissionRunId", "description": "Source run for this new-run retry; omitted for an ordinary start." },
+        "retried_by": { "type": "array", "items": { "$ref": "#/$defs/MissionRunId" }, "description": "New runs created by retrying this run; omitted when empty." },
+        "supersedes": { "$ref": "#/$defs/MissionRunId", "description": "Predecessor replaced by this fresh run after publication; omitted when absent." },
+        "superseded_by": { "$ref": "#/$defs/MissionRunId", "description": "Fresh replacement created after a newer revision was published; omitted when absent." },
+        "supersession_fault": { "type": "string", "description": "Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent." },
         "revision": { "$ref": "#/$defs/Revision", "description": "The mission revision this run is pinned to. Older daemons omit it." },
         "requester": { "$ref": "#/$defs/ActorRef" },
         "status": { "type": "string" },
@@ -4190,6 +4211,7 @@
       "read.assistant.agents",
       "read.assistant.conversation",
       "read.assistant.terminal",
+      "read.assistant.slo",
       "write.assistant.messages",
       "write.assistant.custom-reply",
       "write.assistant.answers",

@@ -2,7 +2,7 @@
 //! the effective values; writes always act as the session's own person, never one the body names.
 use crate::DirectiveNotesStore;
 use crate::store::availability::{
-    AvailabilityChange, AvailabilityStore, DeadlineClock, Interruptions, Presence, Status,
+    AvailabilityChange, AvailabilityStore, DeadlineClock, DeviceReport, DeviceState, Interruptions, Status,
 };
 use super::*;
 use serde::Deserializer;
@@ -20,6 +20,12 @@ pub(super) fn person_writer(session: &client_v0::ClientSession, scope: &str) -> 
         return Err(client_v0::forbidden("only a person writes their own availability, presence or note; agents are refused"));
     }
     Ok(session.authority_actor.clone())
+}
+
+/// The source a person-state write records, assigned by the daemon and never by the body: the
+/// session's exact pairing grant, or this member for a local caller.
+pub(super) fn writer_source(state: &AppState, session: &client_v0::ClientSession) -> String {
+    session.pairing_grant.clone().unwrap_or_else(|| client_host_id(state.store.origin()))
 }
 
 /// Store refusals in the client vocabulary: bad input fails validation, a foreign writer is forbidden.
@@ -134,9 +140,10 @@ pub async fn set(
     if let Some(change) = input.deadline_clock {
         changes.push(AvailabilityChange::DeadlineClock(change.value, until(change.until.as_deref(), "deadline_clock.until")?));
     }
+    let source = writer_source(&state, &session);
     let now = client_now_ms();
     let store = state.store.clone();
-    let availability = blocking_action(move || store.set_person_availability(&person, &changes, now))
+    let availability = blocking_action(move || store.set_person_availability(&person, &source, &changes, now))
         .await.map_err(client_refusal)?;
     // The deadline clock moves asks' effective deadlines, which the reconciler enforces.
     if holds { signal_changed(&state) } else { signal_visible_change(&state) }
@@ -146,7 +153,9 @@ pub async fn set(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PresenceReport {
-    presence: Presence,
+    state: DeviceState,
+    #[serde(default)]
+    last_input_at: Option<String>,
     observed_at: String,
 }
 
@@ -156,15 +165,18 @@ pub async fn report(
     Json(input): Json<PresenceReport>,
 ) -> Result<Json<Value>, ApiError> {
     let person = person_writer(&session, "write.presence")?;
-    // The daemon names the source: the exact pairing grant, or this member for local callers.
-    let source = session.pairing_grant.clone().unwrap_or_else(|| client_host_id(state.store.origin()));
-    let observed_at = unix_ms(&input.observed_at, "observed_at")?;
+    let source = writer_source(&state, &session);
+    let report = DeviceReport {
+        state: input.state,
+        last_input_at: until(input.last_input_at.as_deref(), "last_input_at")?,
+        observed_at: unix_ms(&input.observed_at, "observed_at")?,
+    };
     let now = client_now_ms();
     let store = state.store.clone();
-    let availability = blocking_action(move || store.report_person_presence(&person, &source, input.presence, observed_at, now))
+    let reported = blocking_action(move || store.report_person_presence(&person, &source, report, now))
         .await.map_err(client_refusal)?;
     signal_visible_change(&state);
-    Ok(Json(serde_json::to_value(availability).map_err(ApiError::internal)?))
+    Ok(Json(serde_json::to_value(reported).map_err(ApiError::internal)?))
 }
 
 #[cfg(test)]
