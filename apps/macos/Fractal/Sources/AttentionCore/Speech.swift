@@ -55,9 +55,10 @@ public enum SpeechStatus: Sendable, Equatable {
   case quiet(SpeechQuiet)
 }
 
-/// Applies `SpeechGate` to urgent asks after each refresh and to the person's read-aloud
-/// requests, and owns the speech queue: one item at a time goes to the speech service, so the
-/// tray always knows what is being spoken and the person's controls act on exactly that.
+/// Applies `SpeechGate` to urgent asks and asked-for updates after each refresh and to the
+/// person's read-aloud requests, and owns the speech queue: one item at a time goes to the speech
+/// service, so the tray always knows what is being spoken and the person's controls act on
+/// exactly that.
 /// Stop ends the current item and moves on; Skip drops a queued one; muting all speech, a
 /// requester, or a call starting drops what it holds and stops it if it is speaking. Every
 /// verdict and outcome is logged once per item revision, never the spoken text.
@@ -94,10 +95,11 @@ public enum SpeechStatus: Sendable, Equatable {
     mutes = muteStore?.load() ?? SpeechMutes()
   }
 
-  /// Deliver each urgent ask the gate allows. `open` is every open card; the ledger, statuses
-  /// and queue keep only cards still open, and an item answered elsewhere stops being spoken.
+  /// Deliver each shown item the gate speaks unasked (urgent asks, updates carrying `speech`).
+  /// `open` is every open card; the ledger, statuses and queue keep only cards still open, and
+  /// an item answered elsewhere stops being spoken.
   public func consider(
-    _ asks: [AttentionRecord], open: [AttentionRecord], availability: Availability?, macPresence: PresenceState?,
+    _ shown: [AttentionRecord], open: [AttentionRecord], availability: Availability?, macPresence: PresenceState?,
     now: Date
   ) {
     let before = gate
@@ -113,7 +115,7 @@ public enum SpeechStatus: Sendable, Equatable {
     pruned.prune(now: now)
     if pruned != mutes { updateMutes { $0 = pruned } }
     let context = context(availability, macPresence, now)
-    for record in asks where record.isUrgent {
+    for record in shown where record.isSpokenUnasked {
       evaluate(record, readAloud: false, context)
     }
     if gate != before { store?.save(gate) }
@@ -215,7 +217,7 @@ public enum SpeechStatus: Sendable, Equatable {
       if readAloud { self.readAloud.insert(record.id) }
       queue.append(record)
       status[record.id] = .queued
-      note(record, readAloud ? "read aloud, queued" : "urgent, queued")
+      note(record, readAloud ? "read aloud, queued" : record.isUrgent ? "urgent, queued" : "asked to be told, queued")
       pump()
     }
   }

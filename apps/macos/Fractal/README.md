@@ -65,25 +65,22 @@ collection, but `FractalClient` has no typed attention or availability stream.
   change.
 - **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what the local
   speech service (`flakes/speech-service`) says; the service only decides how.
-  - **Delivery.** An item is delivered only if the ask is urgent (an explicit
-    deadline of at most an hour, read as `deadline_at - requested_at`) or the
-    person pressed Read aloud, **and** the person is available and this Mac is
-    present as Fractal derives it from the Mac's reports, **and** interruptions
-    are `all`, or `urgent` for an urgent ask; never with `none` or a word the
-    tray does not know. Attention carries no
-    urgent flag, and Fractal stamps `deadline_at` from `[asks] default_deadline`
-    on asks that name none, so urgency matches Fractal's `urgent_ask` only while
-    that default exceeds an hour (it is 24 hours unless configured). Outcomes the
-    person asked to hear (`work update`) are not eligible: attention rows carry
-    no flag for them yet. Delivery is decided after each refresh, so an urgent
-    ask is delivered up to 30 seconds after Fractal shows it; only freshly read
-    asks and availability count. Each revision is delivered once, kept across
-    restarts; Read aloud may repeat it.
-  - **Banner and speech.** A delivery is a native notification, and the title
-    (nothing else) is spoken too unless speech is muted (all, or this
-    requester), the Mac is in a call the person has not allowed speech for, or
-    the requester spoke within 10 minutes. Read aloud posts no banner and shows
-    in the panel why it stayed quiet.
+  - **Delivery.** An item is delivered only if Fractal marks the ask `urgent`
+    (its one urgency rule; the tray never derives urgency from a deadline), it
+    is an update the person asked to be told (it carries `update.speech`), or
+    the person pressed Read aloud, **and** the person is available and this Mac
+    is present as Fractal derives it from the Mac's reports, **and**
+    interruptions are `all`, or `urgent` for an urgent ask or asked-for update;
+    never with `none` or a word the tray does not know. Delivery is decided
+    after each refresh, so an item is delivered up to 30 seconds after Fractal
+    shows it; only freshly read rows and availability count. Each revision is
+    delivered once, kept across restarts; Read aloud may repeat it.
+  - **Banner and speech.** A delivery is a native notification, and the
+    update's own `speech` words, else the title (nothing else), are spoken too
+    unless speech is muted (all, or this requester), the Mac is in a call the
+    person has not allowed speech for, or the requester spoke within 10
+    minutes. Read aloud posts no banner and shows in the panel why it stayed
+    quiet.
   - **Queue and controls.** The tray sends one item at a time and owns the
     queue, so it knows what is being spoken. **Stop** (panel, notification, or
     `⌃⌥⌘.` from any app via Carbon `RegisterEventHotKey`, no permission) ends
@@ -108,10 +105,11 @@ collection, but `FractalClient` has no typed attention or availability stream.
     Fractal's reason on refusal. Notifications of items closed elsewhere are
     removed; an answered one stays as its receipt.
   - **Log.** Each verdict and outcome is logged once per item revision
-    (`speech attention/…#rev from agent: urgent, queued`, `speaking`, then
-    `spoken`, `skipped` or the service's failure), plus mutes and call starts and
-    ends; spoken text never enters the log. The tray waits 30 seconds for
-    `queued`, then 60 seconds plus 30 seconds of margin for the result.
+    (`speech attention/…#rev from agent: urgent, queued` or `asked to be told,
+    queued`, `speaking`, then `spoken`, `skipped` or the service's failure),
+    plus mutes and call starts and ends; spoken text never enters the log. The
+    tray waits 30 seconds for `queued`, then 60 seconds plus 30 seconds of
+    margin for the result.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build

@@ -10,13 +10,13 @@ enum Fixture {
     state: String = "open", episode: String? = "claim/1", title: String = "Ship it?",
     actions: [String] = ["work.done"], promptAnswers: [String] = [], request: RequestForm? = nil,
     update: UpdateNote? = nil, workDoneDefaults: WorkDoneAnswer? = nil, from: String = "builder",
-    requestedAt: Date? = nil, deadlineAt: Date? = nil
+    requestedAt: Date? = nil, deadlineAt: Date? = nil, urgent: Bool = false
   ) -> AttentionRecord {
     AttentionRecord(
       id: id, revision: revision, kind: kind, state: state, sourceID: "work/step-1", episode: episode,
       title: title, detail: "", from: from, requestedAt: requestedAt, deadlineAt: deadlineAt,
       defaultAnswerLabel: nil, actions: actions, promptAnswers: promptAnswers, request: request,
-      update: update, workDoneDefaults: workDoneDefaults, url: url)
+      update: update, workDoneDefaults: workDoneDefaults, url: url, isUrgent: urgent)
   }
 
   static func decision(recommended: String? = "ship") -> RequestForm {
