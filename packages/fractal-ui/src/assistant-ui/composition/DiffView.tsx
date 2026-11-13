@@ -243,6 +243,8 @@ const styles = stylex.create({
     '--diffs-addition-color-override': 'var(--fractal-diff-addition)',
     '--diffs-deletion-color-override': 'var(--fractal-diff-deletion)',
     '--diffs-fg-number-override': text.fgMuted,
+    // Hunk separators ("N unmodified lines") set that muted ink on the code surface, not Pierre's lighter mix (3.6:1 in dark).
+    '--diffs-bg-separator-override': surface.codeBg,
     '--diffs-fg-number-addition-override': 'var(--fractal-diff-addition-ink)',
     '--diffs-fg-number-deletion-override': 'var(--fractal-diff-deletion-ink)',
     // Word changes are underlined (DiffView.pierre) rather than washed, so syntax ink keeps 4.5:1.
