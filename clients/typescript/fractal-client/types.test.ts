@@ -50,6 +50,9 @@ void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-1
 void cancellationClient.presenceReport({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' });
 // @ts-expect-error interruptions are all, urgent or none
 void cancellationClient.availabilitySet({ interruptions: { value: 'focus' } });
+void cancellationClient.notesSet({ text: null }, cancellationOptions);
+// @ts-expect-error a note write always names its text, even to clear it
+void cancellationClient.notesSet({ expires_at: '2026-11-16T09:00:00Z' });
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',

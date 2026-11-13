@@ -173,7 +173,7 @@ async fn service_r30_both_router_refusal_matrix_preserves_graph_documents_proces
         "/v1/client/pairings", "/v1/client/pairings/test/complete", "/v1/client/assistant/grants/test",
         "/v1/client/push-registration", "/v1/work/start", "/v1/work/done", "/v1/work/cancel-ask",
         "/v1/work/wake/step-run/test", "/v1/work/retry/step-run/test", "/v1/work/claim/step-run/test",
-        "/v1/messages", "/v1/intent/apply", "/v1/intent/preview", "/v1/notes",
+        "/v1/messages", "/v1/intent/apply", "/v1/intent/preview", "/v1/client/notes",
         "/v1/sessions/input/agent/test", "/v1/sessions/agent/test/signal", "/v1/repair/apply",
         "/v1/internal/fleet/redeem", "/v1/internal/replication/receive", "/v1/backup", "/v1/future-route",
     ];

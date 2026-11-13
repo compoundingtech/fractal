@@ -2048,6 +2048,13 @@ impl Client {
         self.post("/v1/client/presence", report).await
     }
 
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(&self, request: &DirectiveNoteSet) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request).map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body)).await
+    }
+
     /// Replace this paired device's local-only push registration. No graph receipt.
     pub async fn push_register(&self, registration: &PushRegistration) -> Result<PushRegistrationResponse, ClientError> {
         self.post("/v1/client/push-registration", registration).await

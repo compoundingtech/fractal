@@ -1,6 +1,5 @@
 use crate::DirectiveNotesStore;
 use super::*;
-use axum::http::HeaderMap;
 
 fn forbidden(message: &str) -> ApiError {
     ApiError {
@@ -37,38 +36,29 @@ pub async fn read(
     Ok((Extension(snapshot), Json(json!({"notes": notes}))))
 }
 
+/// `text` is required: a string sets the note, null clears it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NoteWrite {
-    person: String,
-    actor: String,
+pub struct NoteSet {
+    #[serde(deserialize_with = "super::availability::required")]
     text: Option<String>,
+    #[serde(default)]
     expires_at: Option<String>,
 }
 
-pub async fn write(
+/// Set or clear the session person's own directive note; the body never names the person.
+pub async fn set(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<NoteWrite>,
+    Extension(session): Extension<client_v0::ClientSession>,
+    Json(input): Json<NoteSet>,
 ) -> Result<Json<Value>, ApiError> {
-    // The legacy write surface is local/trusted, not a paired-client delegation.
-    // Require the same concrete Unix identity used by authenticated client reads;
-    // free-mode agents cannot turn a body field into person authority.
-    if headers.contains_key(axum::http::header::AUTHORIZATION) {
-        return Err(forbidden("only the person on the trusted local transport writes a directive note"));
-    }
-    let mut request = Request::builder().uri("/v1/notes").body(Body::empty())
-        .map_err(ApiError::internal)?;
-    *request.headers_mut() = headers;
-    let session = client_v0::authenticate(&state, &request, "unix")?;
-    if !session.authority_actor.starts_with("person/")
-        || session.authority_actor != input.actor || input.actor != input.person
-    {
-        return Err(forbidden("only the note's person may set or clear it"));
-    }
-    let note = blocking_action(move || state.store.set_directive_note(
-        &input.person, &input.actor, input.text.as_deref(), input.expires_at.as_deref(),
-    )).await?;
+    let person = super::availability::person_writer(&session, "write.notes")?;
+    let source = super::availability::writer_source(&state, &session);
+    let store = state.store.clone();
+    let note = blocking_action(move || store.set_directive_note(
+        &person, &person, &source, input.text.as_deref(), input.expires_at.as_deref(),
+    )).await.map_err(super::availability::client_refusal)?;
+    signal_visible_change(&state);
     Ok(Json(json!({"note": note})))
 }
 
@@ -103,24 +93,5 @@ mod tests {
         assert_eq!(value["value"]["notes"], json!([]));
         let (status, _) = read_as(&state, Some("agent/unknown"), None).await;
         assert_eq!(status, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn note_write_cannot_impersonate_the_person_or_use_paired_authority() {
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
-        for actor in [None, Some("agent/worker"), Some("person/other")] {
-            let mut request = Request::builder().method("PUT").uri("/v1/notes").header("content-type", "application/json");
-            if let Some(actor) = actor { request = request.header("x-st3-person", actor); }
-            let response = router(state.clone()).oneshot(request.body(Body::from(json!({
-                "person":"person/ada", "actor":"person/ada", "text":"approved"
-            }).to_string())).unwrap()).await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
-        let response = router(state).oneshot(Request::builder().method("PUT").uri("/v1/notes")
-            .header("content-type", "application/json").header("x-st3-person", "person/ada")
-            .header("authorization", "Bearer not-a-person")
-            .body(Body::from(json!({"person":"person/ada", "actor":"person/ada", "text":null}).to_string())).unwrap()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

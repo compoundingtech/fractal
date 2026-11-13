@@ -484,6 +484,31 @@ test('availability reads select a person and writes send the session person noth
     assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('notesSet sends only the text and expiry and a clear as null', async () => {
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json');
+    const set = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(written);
+        },
+    });
+    assert.deepEqual(await client.notesSet(set), written);
+    assert.deepEqual(await client.notesSet({ text: null }), written);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.deepEqual(sent.map(([url, init]) => [init.method, url]), [
+        ['PUT', 'https://example.test/v1/client/notes'],
+        ['PUT', 'https://example.test/v1/client/notes'],
+    ]);
+    assert.deepEqual(JSON.parse(sent[0][1].body), set);
+    assert.deepEqual(JSON.parse(sent[1][1].body), { text: null });
+    assert.equal(sent[0][1].headers.Authorization, 'Bearer test-credential');
+});
+
 const validTraceparent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';
 const traceCases = [
     ['absent callback', undefined, undefined],

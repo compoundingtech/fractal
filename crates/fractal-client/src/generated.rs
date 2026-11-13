@@ -28,6 +28,20 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+/// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSet {
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// The person's current note after a write; `None` once cleared or already expired.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSetResult {
+    pub note: Option<DirectiveNote>,
+}
+
 /// A response word with known values; an unknown word reads as `Unknown`, so a newer daemon's
 /// values stay readable.
 macro_rules! open_word {

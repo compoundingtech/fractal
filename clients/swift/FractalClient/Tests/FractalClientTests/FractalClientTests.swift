@@ -295,6 +295,20 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testDirectiveNoteSetFixturesDecodeAndEncodeAClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let set = try JSONDecoder().decode(DirectiveNoteSet.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set.json")))
+        XCTAssertEqual(set.expiresAt, "2026-11-16T09:00:00Z")
+        let result = try JSONDecoder().decode(Envelope<DirectiveNoteSetResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set-result.json")))
+        XCTAssertEqual(result.value.note?.text, set.text)
+        let cleared = try JSONDecoder().decode(DirectiveNoteSetResult.self, from: Data(#"{"note":null}"#.utf8))
+        XCTAssertNil(cleared.note)
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DirectiveNoteSet(text: nil))) as? NSDictionary
+        XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
+    }
+
     func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
