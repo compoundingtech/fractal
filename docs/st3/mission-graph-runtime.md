@@ -915,6 +915,9 @@ the gate from the run's pinned revision and current attempt, including variable 
 requires the command, host, workspace, environment and time limit to match. Dispatch and executor
 admission have separate subjects and writers. A step retry retires the previous attempt's queued
 and running probes; merely reusing its step subject does not authorize an obsolete dispatch.
+Dispatch faults target the owning run but have a separate scope for each gate operation. A
+successful sibling gate cannot recover another gate's unresolved fault; retirement closes the
+retired request's own dispatch fault.
 
 The command's exit status is its answer:
 

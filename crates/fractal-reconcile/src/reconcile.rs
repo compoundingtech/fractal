@@ -3099,12 +3099,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             if !runner.retired && runner.host == self.host {
-                let _ = self.isolate("gate", &runner.owner_run, || {
+                let scope = format!("gate/{}", runner.subject);
+                let _ = self.isolate(&scope, &runner.owner_run, || {
                     self.execute_remote_mechanical_gate(runner)
                         .with_context(|| format!("remote gate {}", runner.subject))
                 });
             }
             if runner.retired && runner.host == self.host {
+                self.close_fault(&runner.owner_run, &format!("gate/{}", runner.subject),
+                    "the gate request is retired")?;
                 let _ = self.isolate("gate", &runner.subject, || {
                     let runtime_id = runner.subject.replace('/', ".");
                     let observation = self.runtime.observe_exec(&runtime_id)?;
@@ -31118,6 +31121,60 @@ mission "proof" state="ready" {{
             "node".into(), Arc::new(Notify::new()));
         executor_reconciler.reconcile_once().unwrap();
         assert!(gate_runners(&runtime).is_empty());
+    }
+
+    #[test]
+    fn independent_remote_gate_faults_do_not_close_each_other() {
+        struct GateFailures(Mutex<BTreeSet<String>>);
+        impl FaultInjection for GateFailures {
+            fn fault(&self, scope: &str, _subject: &str) -> Option<String> {
+                (scope == "gate" || self.0.lock().unwrap().contains(scope))
+                    .then(|| "the probe is unavailable".into())
+            }
+        }
+        let origin = Arc::new(Store::open_memory("origin").unwrap());
+        publish_as(&origin, r#"
+version 2
+mission "proof" state="ready" {
+  goal "Keep independent gate faults separate."
+  completion { when "all-steps-exhausted" }
+  step "first" {
+    agentless
+    gate "first" { exec "true"; host "node"; workspace "."; }
+  }
+  step "second" {
+    agentless
+    gate "second" { exec "true"; host "node"; workspace "."; }
+  }
+}
+"#, "two-gates", "person/pat");
+        let run = start_proof_run(&origin, "two-gate-faults");
+        let origin_reconciler = Reconciler::new(origin.clone(), Arc::new(FakeRuntime::default()),
+            "origin".into(), Arc::new(Notify::new()));
+        for _ in 0..8 {
+            origin_reconciler.reconcile_once().unwrap();
+        }
+        let executor = Arc::new(Store::open_memory("node").unwrap());
+        executor.import_replication("origin", &origin.export_replication(0).unwrap()).unwrap();
+        let scopes = executor.mission_gate_runners().unwrap().iter()
+            .map(|runner| format!("gate/{}", runner.subject)).collect::<Vec<_>>();
+        assert_eq!(scopes.len(), 2);
+        let failures = Arc::new(GateFailures(Mutex::new(scopes.iter().cloned().collect())));
+        let reconciler = Reconciler::new(executor.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new())).with_fault_injection(failures.clone());
+        assert!(reconciler.reconcile_once().is_err());
+        let faults = executor.open_reconcile_faults("node").unwrap();
+        assert!(scopes.iter().all(|scope| faults.contains_key(&(run.subject.clone(), scope.clone()))));
+        failures.0.lock().unwrap().remove(&scopes[0]);
+        assert!(reconciler.reconcile_once().is_err());
+        let faults = executor.open_reconcile_faults("node").unwrap();
+        assert!(!faults.contains_key(&(run.subject.clone(), scopes[0].clone())));
+        assert!(faults.contains_key(&(run.subject.clone(), scopes[1].clone())),
+            "one successful gate cleared its sibling's unresolved fault");
+        failures.0.lock().unwrap().clear();
+        reconciler.reconcile_once().unwrap();
+        let faults = executor.open_reconcile_faults("node").unwrap();
+        assert!(scopes.iter().all(|scope| !faults.contains_key(&(run.subject.clone(), scope.clone()))));
     }
 
     #[test]
