@@ -1686,6 +1686,76 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
     }
 }
 
+#[test]
+fn native_pty_invalid_cwd_closes_failed_operation_and_retry_succeeds() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    fractal_runtime::initialize_isolation(&BTreeMap::new());
+    let root = tempfile::tempdir().unwrap();
+    let environment = std::env::vars().collect();
+    let pty = fractal_runtime::resolve_executable("pty", &environment).unwrap();
+    let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+    let registry = root.path().join("registry");
+    let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
+    let reconciler = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    let dispatch = |desired: &DesiredSubject| {
+        let member = desired.member.as_ref().unwrap().clone();
+        reconciler.dispatch_start(start_jobs::PreparedStart {
+            subject: desired.clone(),
+            launch_member: member.clone(),
+            member,
+            reason: "invalid PTY cwd rejection regression".into(),
+            request: None,
+            desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(),
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: None,
+            resume_operation: None,
+        })
+    };
+    let cwd = root.path().join("workspace");
+    apply_source(
+        &store,
+        &format!(
+            "version 2\nagent \"example/cwd-retry\" {{ workspace {:?}; argv {:?} \"1000\"; }}",
+            cwd.display().to_string(), sleep_program(),
+        ),
+        "pty-cwd-retry",
+    );
+    let desired = store.desired_subjects_named(&["agent/example/cwd-retry".into()])
+        .unwrap().remove(0);
+    assert!(dispatch(&desired).is_err());
+    let (operation, verified, result): (String, bool, String) = store.readers.get().query_row(
+        "SELECT id,cleanup_verified,result FROM local_runtime_starts WHERE subject=?1 ORDER BY id DESC LIMIT 1",
+        [&desired.subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert!(verified, "failed cwd must not leave the seat busy");
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["producer_closed"], true);
+    assert_eq!(result["closure_kind"], "native-rejection");
+    assert_eq!(result["operation_id"], operation);
+    assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+
+    // Repair only the local directory, then retry the same desired seat through
+    // its durable jobs and the real PTY producer.
+    std::fs::create_dir(&cwd).unwrap();
+    assert!(dispatch(&desired).unwrap());
+    let observation = runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|row| row.runtime_id == desired.member.as_ref().unwrap().runtime_id)
+        .expect("retry must publish a real PTY");
+    runtime.kill(&observation.runtime_id, true, observation.incarnation_id.as_deref()).unwrap();
+    assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+}
+
     #[test]
 fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     if crate::test_support::supervise_test() {
