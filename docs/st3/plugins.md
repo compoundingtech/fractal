@@ -116,11 +116,12 @@ example `github-event/github/acme/garden/pull-request/7/checks/SHA/fail`.
 
 ### The graph kinds
 
-The GitHub plugin's manifest allows two kinds. A poller writes both:
+The GitHub plugin's manifest allows three kinds. A poller writes:
 
 - a `vcs.item.state` in the transaction that records a look, whenever an item's compact facts
   change;
-- each event its mirror derives, as one `github.event` claim.
+- each event its mirror derives, as one `github.event` claim;
+- each completed Workspace CI run, as one `github.workflow-run` claim (below).
 
 Before it hands out an event key, it checks the graph's `github.event` subjects as well as its
 own key table, so a key another poller already wrote is never reused.
@@ -160,6 +161,41 @@ attention on a pull request, and the idle hold's merge-queue check, which also t
 
 Each member advertises `features.github_plugin` in its `daemon.started` claim: 1 from step 3a of
 the plugin store, and 2 from step 3b, which also takes typed relayed reads.
+
+### Workflow runs
+
+A `github.repository` observer whose fields include `main_performance_failures` also records
+Workspace CI (`.github/workflows/fleet.yml`, named `Workspace CI`), the runs the fleet's CI
+objectives read ([objectives](objectives.md#fractals-own-ci)). With the same token, conditional
+cache and cadence it reads two list-runs pages: completed `pull_request` runs (not on a
+`gh-readonly-queue/` branch) and completed `merge_group` runs, each created since the start of the
+previous UTC day. A listing that overflows, falls short of its own total, or answers empty while
+the workflow's newest run is inside the window fails the read; runs listed but none of them named
+`Workspace CI` at that path (a renamed workflow) fail it too.
+
+Each run whose subject holds no claim yet, from this poller or replicated from another, and that
+completed within the last 20 hours, has its artifacts listed once
+(`GET .../actions/runs/ID/artifacts?per_page=100`) and is then written. Workspace CI's test lanes
+name their flaky test count in a one-day artifact, `nextest-flaky-<lane>-<N>` (none for 0, see
+`docs/ci.md`), so a run older than 20 hours is not written: its count could be gone. At most 20
+runs a poll, newest first, so a member that starts polling cannot burst; the rest follow on the
+next polls. A failed listing writes nothing for its run and ends the poll's listings; a later poll
+tries again. A failed read never fails the observation. The graph is the only memory: no run is
+kept in the process.
+
+- **`github.workflow-run` v1**, once per run, on `github-workflow-run/OWNER/REPO/RUN_ID`
+  (lowercase): `version`, `observer`, `repository`, `workflow`, `run_id`, `attempt`, `event`
+  (`pull_request` or `merge_group`), `conclusion`, `head_sha`, `created_at`, `started_at`
+  (`run_started_at`), `completed_at` (the completed run's `updated_at`), `duration_ms`
+  (`completed_at − started_at`), `flaky_tests` (the sum of the run's flaky artifact counts) and
+  `flakes` (`flaky_tests`, plus 1 for a merge group that concluded `failure`, an ejected group).
+  Bound: 1 KiB.
+
+A run is written once, at the attempt the poller first sees completed; a later re-run of it is not
+written again. The idempotency key is `github-workflow-run-observation:v1:DIGEST`, the digest of
+`("github-workflow-run-observation.v1", subject, fields)` as for an event, so two pollers that saw
+different attempts keep both observations without an operation conflict, and objectives read the
+earliest per subject. About one listing and one claim per Workspace CI run, a few hundred a day.
 
 ### Compact mode
 

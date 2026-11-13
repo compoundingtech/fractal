@@ -50,7 +50,7 @@ use crate::model::{
 };
 use crate::resource::{
     LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
-    RegisteredResourceProvider, ResourceProvider,
+    RegisteredResourceProvider, ResourceProvider, WorkflowRunLedger,
 };
 use crate::store::Store;
 use crate::store::model_drift::{
@@ -18435,6 +18435,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                     webhook_covered,
+                    // A repository observer records each completed CI run it reads in the graph.
+                    workflow_runs: (spec.provider == "github.repository").then(|| {
+                        Arc::new(GraphWorkflowRuns { store: store.clone(), observer: observer_subject.clone() })
+                            as Arc<dyn WorkflowRunLedger>
+                    }),
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
                 let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
@@ -20493,6 +20498,38 @@ fn mirror_observation(
     }
 }
 
+/// The graph as a repository observer's [`WorkflowRunLedger`]. A run is written once its subject
+/// holds a claim, this member's or one replicated from another; each write is one
+/// `github.workflow-run` claim within the GitHub plugin's allowlist, naming the observer that
+/// polled the run.
+struct GraphWorkflowRuns {
+    store: Arc<Store>,
+    observer: String,
+}
+
+impl WorkflowRunLedger for GraphWorkflowRuns {
+    fn written(&self, subject: &str) -> Result<bool> {
+        Ok(self.store.latest_claim_id(subject)?.is_some())
+    }
+
+    fn write(&self, subject: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+        let mut fields = fields.clone();
+        fields.insert("observer".to_owned(), Value::String(self.observer.clone()));
+        github_plugin_store::MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, &fields)?;
+        let key = github_events::workflow_run_observation_key(subject, &fields)?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.to_owned(),
+            kind: fractal_schema::github_plugin::WORKFLOW_RUN.into(),
+            actor: None,
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key),
+        }).map_err(|error| anyhow::anyhow!(error.message))?;
+        Ok(())
+    }
+}
+
 /// What a repository's poller lays beside a look it records, from a filled mirror: each listed
 /// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
 /// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
@@ -20580,6 +20617,7 @@ async fn refill_mirror(
         every_ms: spec.every_ms,
         refresh: false,
         webhook_covered: false,
+        workflow_runs: None,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
@@ -42018,6 +42056,59 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(observers.len(), 1);
         assert_eq!(crate::graph::observer_spec(&observers[0].desired).unwrap().fields, ["issues"]);
         assert!(store.messages(None, true).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_repository_observer_records_each_completed_ci_run_once_in_the_graph() {
+        const RUN: &str = "github-workflow-run/example/repo/9001";
+        struct Recorder {
+            calls: Arc<AtomicUsize>,
+            written: Arc<Mutex<Vec<bool>>>,
+        }
+        impl ResourceProvider for Recorder {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let ledger = request.workflow_runs.expect("a repository observer is given the graph's ledger");
+                let fields = BTreeMap::from([
+                    ("version".to_owned(), serde_json::json!(1)), ("repository".to_owned(), serde_json::json!("example/repo")),
+                    ("workflow".to_owned(), serde_json::json!("Workspace CI")), ("run_id".to_owned(), serde_json::json!(9001)),
+                    ("attempt".to_owned(), serde_json::json!(1)), ("event".to_owned(), serde_json::json!("merge_group")),
+                    ("conclusion".to_owned(), serde_json::json!("failure")), ("head_sha".to_owned(), serde_json::json!("a".repeat(40))),
+                    ("created_at".to_owned(), serde_json::json!("2026-11-13T10:00:00Z")),
+                    ("started_at".to_owned(), serde_json::json!("2026-11-13T10:00:30Z")),
+                    ("completed_at".to_owned(), serde_json::json!("2026-11-13T10:09:30Z")),
+                    ("duration_ms".to_owned(), serde_json::json!(540_000)), ("flaky_tests".to_owned(), serde_json::json!(0)),
+                    ("flakes".to_owned(), serde_json::json!(1)),
+                ]);
+                let mut written = self.written.lock().unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                drop(written);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                    cursor: Some("runs".into()),
+                    next_check_unix_ms: now_ms().saturating_add(60_000),
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "record-runs");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()))
+            .with_resource_provider(Arc::new(Recorder { calls: calls.clone(), written: written.clone() }));
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(*written.lock().unwrap(), [false, true], "a written run reads as written");
+        let claims = store.claims_for(RUN, None).unwrap();
+        assert_eq!(claims.len(), 1, "an identical second write is the same claim");
+        assert_eq!(claims[0].kind, fractal_schema::github_plugin::WORKFLOW_RUN);
+        assert_eq!(claims[0].body["fields"]["observer"], "observer/repo");
+        assert_eq!(claims[0].body["fields"]["flakes"], 1);
     }
 
     fn failure_for_item(
