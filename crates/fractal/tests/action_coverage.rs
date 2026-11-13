@@ -4621,6 +4621,73 @@ async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_resta
     }
 }
 
+/// `st alerts seen|snooze|dismiss` drive the person's own attention controls through the real CLI
+/// over the private Unix socket: each result is on the attention row after a restart, a snooze
+/// `--for` ends in the future and `--clear` brings the row back, a dismissed ask tells its asker,
+/// and a human gate refuses dismiss with its typed code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_alerts_seen_snooze_and_dismiss_survive_restart() {
+    use fractal_schema::attention_controls::{SEEN_KIND, SNOOZED_KIND};
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let ask = ask_from_worker(&daemon, PERSON, "cli-attention-controls", json!({})).await;
+    let id = attention_row(&daemon, PERSON, &ask).await.unwrap()["id"].as_str().unwrap().to_owned();
+
+    let seen = cli_value(daemon.cli(PERSON, &["alerts", "seen", &id, "--as", PERSON]).await);
+    assert_eq!(seen["attention_control"]["attention_id"], id.as_str(), "{seen}");
+    let first_seen = seen["attention_control"]["seen_at"].clone();
+    assert!(first_seen.is_string(), "{seen}");
+    daemon.restart().await;
+    assert_eq!(attention_row(&daemon, PERSON, &ask).await.unwrap()["seen_at"], first_seen);
+    assert_eq!(control_claims(&daemon, PERSON, SEEN_KIND), 1);
+
+    let before = chrono::Utc::now().timestamp_millis();
+    let snoozed = cli_value(daemon.cli(PERSON, &["alerts", "snooze", &id, "--for", "4h", "--as", PERSON]).await);
+    let until = snoozed["attention_control"]["snoozed_until"].as_str().unwrap_or_else(|| panic!("{snoozed}")).to_owned();
+    let ahead = chrono::DateTime::parse_from_rfc3339(&until).unwrap().timestamp_millis() - before;
+    assert!((4 * 3_600_000..4 * 3_600_000 + 60_000).contains(&ahead), "{until}");
+    daemon.restart().await;
+    assert_eq!(attention_row(&daemon, PERSON, &ask).await.unwrap()["snoozed_until"], until.as_str());
+    let back = cli_value(daemon.cli(PERSON, &["alerts", "snooze", &id, "--clear", "--as", PERSON]).await);
+    assert_eq!(back["attention_control"]["snoozed_until"], Value::Null, "{back}");
+    daemon.restart().await;
+    assert_eq!(attention_row(&daemon, PERSON, &ask).await.unwrap()["snoozed_until"], Value::Null);
+    assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 2);
+
+    let dismissed = cli_value(daemon.cli(PERSON, &["alerts", "dismiss", &id, "--text", "Not now.", "--as", PERSON]).await);
+    assert_eq!(dismissed["affected_ids"], json!([ask]), "{dismissed}");
+    daemon.restart().await;
+    let work = daemon.store().step_run(&ask).unwrap().unwrap();
+    assert_eq!(work.status, "completed");
+    assert_eq!(work.person_answers.len(), 1);
+    assert_eq!(work.person_answers[0].answer, Some(json!({"type": "feedback", "outcome": "dismissed", "text": "Not now."})));
+    assert!(attention_row(&daemon, PERSON, &ask).await.is_none());
+    let notices = asker_notices(&daemon, &ask);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with(&format!("{PERSON} dismissed `{ask}`")), "{}", notices[0]);
+
+    daemon.apply(r#"version 2
+mission "example/cli-attention-gate" state="ready" {
+  goal "Answer a human gate."
+  step "review" { agentless; gate "accept" type="human" mode="approve" { reviewer "person/avery"; question "Is the copper proof acceptable?" } }
+}
+"#, "cli-attention-gate-mission");
+    let gate_step = daemon.start("example/cli-attention-gate", "cli-attention-gate-run").steps[0].subject.clone();
+    daemon.reconcile();
+    let gate_id = attention_row(&daemon, PERSON, &gate_step).await.unwrap()["id"].as_str().unwrap().to_owned();
+    let index = daemon.store().index().unwrap();
+    let refused = daemon.cli(PERSON, &["alerts", "dismiss", &gate_id, "--as", PERSON]).await;
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("attention-dismiss-unsupported"), "{stderr}");
+    assert_eq!(daemon.store().index().unwrap(), index);
+    daemon.restart().await;
+    assert!(attention_row(&daemon, PERSON, &gate_step).await.is_some());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_mission_output_and_manual_wake_survive_restart() {
     if fractal_daemon::test_support::supervise_test() {

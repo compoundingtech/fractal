@@ -812,6 +812,14 @@
       "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
     },
     {
+      "command": "st alerts dismiss",
+      "description": "Set an ask aside without answering it: the asker is told you dismissed it. An update is read. Other alerts keep their own actions",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; the asker reads dismissed, a human gate refuses with attention-dismiss-unsupported, disk store reopened between actions"
+    },
+    {
       "command": "st alerts ls",
       "description": "List all current human attention items",
       "tests": [
@@ -858,6 +866,22 @@
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st alerts seen",
+      "description": "Mark one of your alerts seen, on every client of yours",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; the seen time is on the person's attention row, disk store reopened between actions"
+    },
+    {
+      "command": "st alerts snooze",
+      "description": "Put one of your alerts off until later, on every client of yours. It stays open, and an ask's deadline does not move",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; --for sets a future until and --clear brings it back on the attention row, disk store reopened between actions"
     },
     {
       "command": "st alerts withdraw",
