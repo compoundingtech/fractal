@@ -47,7 +47,6 @@ impl ThreadSubscription {
 // Same socket limit enforced by client_v0::COLLECTION_MAX_SUBSCRIPTIONS.
 pub(super) const SOCKET_SLOTS: usize = 16;
 const MAX_THREAD_IDS: usize = 4;
-const MAX_CONTEXT_LISTS: usize = 2;
 const PAUSED: &str = "Live thread updates paused: this view exceeds the shared live-window budget. Close another live view or collapse a thread; updates resume automatically.";
 
 #[derive(Default)]
@@ -69,34 +68,29 @@ pub(super) fn plan(desired: &[ThreadInterest], ordinary_slots: usize) -> Plan {
     let mut admitted = Vec::new();
     let mut paused = Vec::new();
     let mut lists = Vec::new();
-    let mut details = Vec::<(String, bool)>::new();
+    let mut details = Vec::<(String, Vec<ThreadInterest>)>::new();
     for interest in desired {
         match interest {
             ThreadInterest::Summary(id) | ThreadInterest::Timeline(id) => {
-                let timeline = matches!(interest, ThreadInterest::Timeline(_));
                 if let Some((_, requested)) = details.iter_mut().find(|(known, _)| known == id) {
-                    *requested |= timeline;
+                    if !requested.contains(interest) { requested.push(interest.clone()); }
                 } else {
-                    details.push((id.clone(), timeline));
+                    details.push((id.clone(), vec![interest.clone()]));
                 }
             }
             _ if !lists.contains(interest) => lists.push(interest.clone()),
             _ => {}
         }
     }
-    for (index, interest) in lists.into_iter().enumerate() {
-        if index < MAX_CONTEXT_LISTS && available > 0 {
+    for interest in lists {
+        if available > 0 {
             available -= 1;
             admitted.push(interest);
         } else {
             paused.push(interest);
         }
     }
-    for (index, (id, timeline)) in details.into_iter().enumerate() {
-        let mut bundle = vec![ThreadInterest::Summary(id.clone())];
-        if timeline {
-            bundle.push(ThreadInterest::Timeline(id));
-        }
+    for (index, (_, bundle)) in details.into_iter().enumerate() {
         if index < MAX_THREAD_IDS && bundle.len() <= available {
             available -= bundle.len();
             admitted.extend(bundle);

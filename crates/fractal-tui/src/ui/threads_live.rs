@@ -802,7 +802,11 @@ impl Threads {
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
         } else if let Some(expanded) = self.open.get(&pane.key()) {
-            for id in expanded {
+            let active = self.focused.as_ref().and_then(|(host, input)| {
+                if host != &pane.key() { return None; }
+                match input { Input::Reply(id) | Input::Rename(id) => Some(id), Input::Start { .. } => None }
+            }).or_else(|| self.selected.get(&pane.key())).filter(|id| expanded.contains(*id));
+            for id in active.into_iter().chain(expanded.iter().filter(|id| Some(*id) != active)) {
                 out.push(ThreadInterest::Summary(id.clone()));
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
