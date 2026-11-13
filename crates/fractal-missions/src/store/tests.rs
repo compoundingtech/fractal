@@ -4040,6 +4040,7 @@ fn standalone_person_ask(store: &Store) -> StepRunView {
     use crate::store::person_work::PersonWorkStore;
 
     store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -4859,6 +4860,7 @@ fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
         idempotency_key: "part-work-claim".into(),
     }).unwrap();
     let ask = store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
