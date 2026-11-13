@@ -323,6 +323,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "write.client-diagnostics",
     "write.availability",
     "write.presence",
+    "write.notes",
     "read.declarations",
     "read.glasses",
     "control.glasses",
