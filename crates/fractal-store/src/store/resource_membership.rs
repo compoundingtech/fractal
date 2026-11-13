@@ -768,7 +768,13 @@ mod tests {
         let child = "mission-run/linked-child";
         store.attach_resource_child(&current, &holder.owner, child).unwrap();
         store.connection.write().execute(
-            "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES('linked-child','generation','working','running')", [],
+            "INSERT INTO mission_runs(
+                id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
+                workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms
+             ) VALUES(
+                'linked-child','resource-child','revision','generation','revision','linked-child',
+                ?1,'person/operator','{}','run','running','working','1','1'
+             )", [root.path().to_string_lossy().as_ref()],
         ).unwrap();
         let (retired, reads) = smallclaims::touched::record(|| {
             store.retire_resource_membership(&current, &holder.owner, &runtime, 2).unwrap()
