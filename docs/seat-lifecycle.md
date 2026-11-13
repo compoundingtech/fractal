@@ -205,8 +205,10 @@ downstream of this channel hook, so exact native-input capture there remains
 unsupported/unknown rather than substituting a raw mailbox body. Transcript
 and provider response binding require their own native session evidence.
 The POST accepts only the authenticated agent named by the receipt, and requires
-the exact receipt incarnation and message `event_key`. A message tag, candidate
-incarnation, current session or owning-person identity cannot authorize capture.
+the exact receipt incarnation and message `event_key`. That key must resolve to
+an actual message addressed to the agent and tagged with this invocation.
+Non-message lifecycle keys, a tag alone, candidate incarnations, current sessions
+and owning-person identities cannot authorize capture.
 Retries preserve the first capture's metadata; a different envelope for the same
 invocation message conflicts.
 
@@ -232,6 +234,9 @@ shared content hash keeps newer references readable without extending an older
 reference's expiry. Durable metadata survives expiry and deletion.
 `GET /v1/client/invocation-artifacts/{sha256}?invocation=...&kind=input|transcript`
 requires `read.projections` and the artifact's agent or configured owning person.
+Unix harness reads use the serving boundary's actual agent/native-peer binding,
+not the claimed identity header. Bound runs, unverifiable ancestry and mismatched
+agents cannot read private bytes by naming the artifact's agent or owning person.
 `DELETE` at the same route also requires `control.runtimes` and revokes only that
 reference, not another invocation's shared bytes. Reads are private/no-store;
 deleted or expired references return Gone.
