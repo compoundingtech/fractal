@@ -22,11 +22,16 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   private let submits: [String: Submit]
   /// Snooze and dismiss outcomes by attention ID; seen always commits.
   private let controls: [String: Submit]
+  /// Each card's page by attention ID: its detail, its asker's conversation; attachments by SHA.
+  private let contexts: [String: AttentionContext]
+  private let excerpts: [String: ConversationExcerpt]
+  private let attachments: [String: Data]
   private var failure: String?
 
   init(
     page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
-    submits: [String: Submit] = [:], controls: [String: Submit] = [:]
+    submits: [String: Submit] = [:], controls: [String: Submit] = [:], contexts: [String: AttentionContext] = [:],
+    excerpts: [String: ConversationExcerpt] = [:], attachments: [String: Data] = [:]
   ) {
     self.page = page
     self.slo = slo
@@ -34,6 +39,9 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
     self.availability = availability
     self.submits = submits
     self.controls = controls
+    self.contexts = contexts
+    self.excerpts = excerpts
+    self.attachments = attachments
   }
 
   /// Every later read fails with this reason; the model keeps its last data, marked stale.
@@ -64,6 +72,19 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   func control(_ submission: AttentionControlSubmission) async throws {
     guard submission.control != .seen else { return }
     try await settle(controls[submission.attentionID])
+  }
+
+  func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
+    try serve(contexts[record.id] ?? AttentionContext(detail: record.detail.isEmpty ? nil : record.detail, request: nil))
+  }
+
+  func readExcerpt(_ record: AttentionRecord) async throws -> ConversationExcerpt? { try serve(excerpts[record.id]) }
+
+  func readAttachment(_ attachment: AttachmentRef) async throws -> Data {
+    guard let data = attachments[attachment.sha256] else {
+      throw FixtureFailure(description: "blob-expired: the attachment is past its retention (blob-expired)")
+    }
+    return try serve(data)
   }
 
   private func settle(_ outcome: Submit?) async throws {

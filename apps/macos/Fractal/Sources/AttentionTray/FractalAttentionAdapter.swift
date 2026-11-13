@@ -303,7 +303,8 @@ actor FractalAttentionAdapter: AttentionAdapter {
       update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary, speech: $0.speech) },
       workDoneDefaults: Self.workDoneDefaults(parameters["work.done"]),
       url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef), isUrgent: item.urgent == true,
-      seenAt: item.seenAt.flatMap(Self.date(iso:)), snoozedUntil: item.snoozedUntil.flatMap(Self.date(iso:)))
+      seenAt: item.seenAt.flatMap(Self.date(iso:)), snoozedUntil: item.snoozedUntil.flatMap(Self.date(iso:)),
+      conversationID: agentRef)
   }
 
   /// The server-filled `work.done` summary and answer (an update's `Read` / `{id: read}`).
@@ -325,7 +326,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
       runsOutAt: row.runsOutAtUnixMS.flatMap(date(ms:)))
   }
 
-  private static func date(ms: UInt64) -> Date? {
+  static func date(ms: UInt64) -> Date? {
     ms == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
   }
 
