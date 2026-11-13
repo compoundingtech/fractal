@@ -768,8 +768,28 @@ public struct MissionResource: Codable, Sendable { public let id, kind, revision
 public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let startedAt, completedAt: UInt64?; public let generationID, retryOf, supersedes, supersededBy, supersessionFault, revision, lastProgress, after, deadline: String?; public let retriedBy: [String]?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker, eta: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", generationID = "generation_id", retryOf = "retry_of", retriedBy = "retried_by", supersedes, supersededBy = "superseded_by", supersessionFault = "supersession_fault", revision, requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, eta, after, deadline, steps } }
 public struct MissionRunOutcome: Codable, Sendable { public let status, reason, actor, at: String; public let previousStatus: String?; enum CodingKeys: String, CodingKey { case status, previousStatus = "previous_status", reason, actor, at } }
 /// Assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
-public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
-    public let program: MissionStepProgram?; public let attempts: [MissionStepAttempt]?; public let waits: [MissionStepWait]?; public let transitions: [MissionStepTransition]?; public let historyComplete: Bool?; public let eta: MissionStepEta? }
+public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, executions, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
+    public let program: MissionStepProgram?; public let attempts: [MissionStepAttempt]?; public let executions: [StepExecution]?; public let waits: [MissionStepWait]?; public let transitions: [MissionStepTransition]?; public let historyComplete: Bool?; public let eta: MissionStepEta? }
+public struct StepExecution: Codable, Sendable {
+    public let id, stepSubject, agent: String
+    public let attempt: UInt
+    public let incarnationID, declaredModel: String?
+    public let observedModels: [String]
+    public let fallback: Bool?
+    public let startedAtUnixMS: UInt64
+    public let endedAtUnixMS, durationMS: UInt64?
+    public let status, traceID, exitEvidence: String?
+    public let usage: StepExecutionUsage?
+    enum CodingKeys: String, CodingKey {
+        case id, stepSubject = "step_subject", attempt, agent, incarnationID = "incarnation_id", declaredModel = "declared_model", observedModels = "observed_models", fallback, startedAtUnixMS = "started_at_unix_ms", endedAtUnixMS = "ended_at_unix_ms", durationMS = "duration_ms", status, traceID = "trace_id", exitEvidence = "exit_evidence", usage
+    }
+}
+public struct StepExecutionUsage: Codable, Sendable {
+    public let inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, totalTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens"
+    }
+}
 /// A program step's current attempt journal: each key's latest entry, its innermost open key and open fault.
 public struct MissionStepProgram: Codable, Sendable { public let openKey, lastEntryAt: String?; public let entries: [MissionStepProgramEntry]; public let truncated: Bool; public let stalledAfterMS: UInt64; public let fault: MissionStepProgramFault?; enum CodingKeys: String, CodingKey { case openKey = "open_key", entries, truncated, lastEntryAt = "last_entry_at", stalledAfterMS = "stalled_after_ms", fault } }
 public struct MissionStepProgramEntry: Codable, Sendable { public let key, status: String; public let startedAt, endedAt, error, child: String?; public let ms: UInt64?; enum CodingKeys: String, CodingKey { case key, status, startedAt = "started_at", endedAt = "ended_at", ms, error, child } }
@@ -1669,6 +1689,7 @@ public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalO
 public enum AssistantScope: String, Codable, Sendable {
     case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal", slo = "read.assistant.slo"
     case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
+    case availability = "read.assistant.availability"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String; public let minimalReadMode: AssistantMinimalReadMode?

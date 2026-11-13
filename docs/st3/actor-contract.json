@@ -408,6 +408,51 @@
         "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
+      "st availability": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st availability clear": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st availability presence": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st availability set": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st availability show": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st backup create": {
         "actor": "none",
         "accepts_person": false,

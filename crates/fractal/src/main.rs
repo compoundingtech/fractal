@@ -79,6 +79,7 @@ mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
+mod availability;
 mod directive_note;
 mod completion;
 mod doctor_cli;
@@ -330,6 +331,8 @@ enum Command {
     Now(NowArgs),
     /// Read current person notes; notes inform but never assign work or grant authority.
     Note(directive_note::NoteArgs),
+    /// Read or set a person's status, interruptions and deadline clock; it informs, never grants.
+    Availability(availability::AvailabilityArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// List every objective and budget with its target, current value and what is left, and
@@ -6277,6 +6280,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
         Command::Note(args) => {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
+        Command::Availability(args) => {
+            availability::run(&endpoint, config.person.as_deref(), args, cli.json).await
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,

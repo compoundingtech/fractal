@@ -2584,6 +2584,45 @@ export const MissionWake = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionWake = typeof MissionWake.Type
 export type MissionWakeEncoded = typeof MissionWake.Encoded
 
+export const StepExecutionUsage = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "StepExecutionUsage" }))()
+export type StepExecutionUsage = typeof StepExecutionUsage.Type
+export type StepExecutionUsageEncoded = typeof StepExecutionUsage.Encoded
+
+export const StepExecution = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": Schema.String,
+  "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  /** Declaration captured at claim time, never the seat's current declaration. */
+  "declared_model": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Declaration captured at claim time, never the seat's current declaration." }),
+  "duration_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "ended_at_unix_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Runtime observation claim ID retaining exit evidence for this incarnation. */
+  "exit_evidence": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Runtime observation claim ID retaining exit evidence for this incarnation." }),
+  /** Explicit fallback evidence; model mismatch alone does not establish fallback. */
+  "fallback": Schema.OptionFromNullOr(Schema.Boolean).annotate({ description: "Explicit fallback evidence; model mismatch alone does not establish fallback." }),
+  /** Durable work.claimed claim ID; invocation identity, not the logical attempt. */
+  "id": Schema.String.annotate({ description: "Durable work.claimed claim ID; invocation identity, not the logical attempt." }),
+  "incarnation_id": Schema.OptionFromNullOr(Schema.String),
+  "observed_models": Schema.Array(Schema.String),
+  "started_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "status": Schema.OptionFromNullOr(Schema.String),
+  "step_subject": Schema.String,
+  /** Actual trace correlation when recorded; unknown without tracing evidence. */
+  "trace_id": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Actual trace correlation when recorded; unknown without tracing evidence." }),
+  "usage": Schema.OptionFromNullOr(StepExecutionUsage)
+}).annotate({ identifier: "StepExecution" }))()
+export type StepExecution = typeof StepExecution.Type
+export type StepExecutionEncoded = typeof StepExecution.Encoded
+
 export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
@@ -2598,6 +2637,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "eta": optionalKey(MissionStepEta),
+  /** Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons. */
+  "executions": optionalKey(Schema.Array(StepExecution)).annotate({ description: "Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons." }),
   "goals": optionalKey(Schema.Array(Schema.String)),
   /** Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history. */
   "history_complete": optionalKey(Schema.Boolean).annotate({ description: "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." }),

@@ -283,6 +283,11 @@ routes. See the [read fixture](fixtures/person-availability.json), the
 [presence fixture](fixtures/presence-report.json) with its
 [result](fixtures/presence-report-result.json).
 
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
@@ -385,6 +390,15 @@ and lifts the timing and enrichment bound for that one run only (its `started_at
 (Rust `missions_get_run`); `missionsGet(id)` keeps its signature and never sends `run`. Lists,
 pages and collection windows never carry these fields, and other runs' steps omit them: absence is
 not proof of a single attempt or no waits.
+
+Detail steps also expose `executions[]`, the generic claim-backed agent invocation records.
+They distinguish an invocation from its logical attempt (a reclaim can create another invocation).
+The record joins historical declared/observed models, nullable fallback evidence, response-attributed
+token and micro-USD usage, elapsed time, trace correlation and an incarnation-matched exit receipt.
+Missing usage is unknown, not zero; a changed model does not by itself prove fallback. Older records
+can lack captured metadata. See [the execution contract](../program-engine.md#6-linked-child-runs-worker-turns-and-asks).
+The native `GET /v1/mission-runs/{run}` detail and `fractal missions show mission-run/... --json`
+carry the same per-step `executions` projection; lean work reads omit it.
 
 - `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
   opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
@@ -2140,6 +2154,16 @@ filtering before offset selection and byte packing. Continuations bind the exact
 grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
+
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note, directive_note_truncated}`: the grant
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. The availability fields are never cut. The note text (up to 4096 UTF-8
+bytes) is cut on a character boundary to what `max_response_bytes` leaves after the whole
+envelope, measured with the delivery codec, so the read never fails its budget for the note;
+`directive_note_truncated` is then true (false when the note is whole or absent). Read again
+with a larger `max_response_bytes`, up to 16384, for the whole note. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,

@@ -4444,6 +4444,12 @@
         "immutable": false,
         "reference": false
       },
+      "execution_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "host": {
         "value_type": "string",
         "required": false,
@@ -10516,8 +10522,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10571,6 +10589,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -10635,8 +10659,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10690,6 +10726,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -10754,8 +10796,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10809,6 +10863,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -11342,8 +11402,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11397,6 +11469,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -11461,8 +11539,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11516,6 +11606,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -11580,8 +11676,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11635,6 +11743,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -11699,8 +11813,20 @@
         "immutable": false,
         "reference": false
       },
+      "declared_model": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "extend_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fallback": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11760,6 +11886,12 @@
         "reference": false
       },
       "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "trace_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,

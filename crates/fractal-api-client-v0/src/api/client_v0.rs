@@ -236,6 +236,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -3434,6 +3435,13 @@ fn mission_resources_filtered(
                     } else {
                         BTreeMap::new()
                     };
+                    let executions = if selected_id.is_some() {
+                        run.steps.iter().map(|step| {
+                            Ok((step.subject.as_str(), store.step_executions(&step.subject)?))
+                        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3490,6 +3498,9 @@ fn mission_resources_filtered(
                                     value["waits"] = json!(history.waits);
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
+                                }
+                                if let Some(executions) = executions.get(step.subject.as_str()) {
+                                    value["executions"] = json!(executions);
                                 }
                                 // Detail reads that enrich the run (`Store::mission_run`) carry
                                 // its program steps' journals.
