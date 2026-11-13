@@ -8,15 +8,19 @@ public enum ConnectionState: Sendable, Equatable {
   case stale(lastSuccess: Date?, reason: String)
 }
 
-/// Every open attention card (all pages), and whether this device may answer.
+/// Every open attention card (all pages), and what this device may do with them.
 public struct AttentionPage: Sendable, Equatable {
   public let records: [AttentionRecord]
   /// The device's session is granted `work.done` (scope `control.attention`).
   public let canAnswer: Bool
+  /// The session is granted the person's own controls (`attention.seen`, `attention.snooze`,
+  /// `attention.dismiss`); a daemon that predates them grants none.
+  public let canControl: Bool
 
-  public init(records: [AttentionRecord], canAnswer: Bool) {
+  public init(records: [AttentionRecord], canAnswer: Bool, canControl: Bool = false) {
     self.records = records
     self.canAnswer = canAnswer
+    self.canControl = canControl
   }
 }
 
@@ -32,6 +36,8 @@ public protocol AttentionAdapter: Sendable {
   func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory
   /// Returns only once Fractal committed the answer; throws `AnswerRefused` otherwise.
   func submit(_ submission: WorkDoneSubmission) async throws
+  /// Returns only once Fractal committed the control; throws `AnswerRefused` otherwise.
+  func control(_ submission: AttentionControlSubmission) async throws
 }
 
 /// One independently refreshed section: a failure keeps its last value and never blanks another.
@@ -58,6 +64,16 @@ public enum AnswerState: Sendable, Equatable {
   /// The panel's latest availability or note change: sending, committed or Fractal's refusal.
   public internal(set) var availabilityWrite: AnswerState?
   public private(set) var answers: [String: AnswerState] = [:]
+  /// Snooze and dismiss by attention ID, shown as answers are: sending, committed or Fractal's
+  /// refusal verbatim.
+  public internal(set) var controls: [String: AnswerState] = [:]
+  /// `id#revision` this process told Fractal (or is telling it) the person saw.
+  var seenMarked: Set<String> = []
+  /// Snoozes are judged against this: the last attention read, moved on at each snooze's end.
+  public internal(set) var snoozeClock = Date.distantPast
+  /// When the earliest snooze still ahead ends; the panel re-renders then.
+  public internal(set) var nextSnoozeEnd: Date?
+  var snoozeWake: Task<Void, Never>?
   /// Unsent answers by attention ID, and the note being edited. The window-style panel closes
   /// on any click outside it, so typed text lives here rather than in its views. A committed
   /// answer and a card that left Fractal drop their draft.
@@ -73,7 +89,7 @@ public enum AnswerState: Sendable, Equatable {
   /// Speaks urgent asks the speech gate allows; nil when no speech service is configured.
   public let speech: SpeechCoordinator?
   public let configurationError: String?
-  private let adapter: (any AttentionAdapter)?
+  let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
   private var refreshAgain = false
 
@@ -104,9 +120,13 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  public var asks: [AttentionRecord] { records { if case .ask = $0.role { true } else { false } } }
+  /// Open asks, without the ones the person snoozed (Fractal still lists those).
+  public var asks: [AttentionRecord] { shown { if case .ask = $0.role { true } else { false } } }
 
-  public var updates: [AttentionRecord] { records { $0.role == .update } }
+  public var updates: [AttentionRecord] { shown { $0.role == .update } }
+
+  /// Asks and updates hidden until their snooze ends.
+  public var snoozed: [AttentionRecord] { records { $0.role != .ignored && $0.isSnoozed(at: snoozeClock) } }
 
   /// The menu bar count: asks waiting on the person. Updates ask nothing.
   public var openAskCount: Int { asks.count }
@@ -114,6 +134,12 @@ public enum AnswerState: Sendable, Equatable {
   public var sloBoard: SloBoard? { slo.value.map { SloBoard($0.rows) } }
 
   public var canAnswer: Bool { attention.value?.canAnswer ?? false }
+
+  public var canControl: Bool { attention.value?.canControl ?? false }
+
+  private func shown(where keep: (AttentionRecord) -> Bool) -> [AttentionRecord] {
+    records { keep($0) && !$0.isSnoozed(at: snoozeClock) }
+  }
 
   private func records(where keep: (AttentionRecord) -> Bool) -> [AttentionRecord] {
     (attention.value?.records ?? []).filter(keep)
@@ -166,7 +192,10 @@ public enum AnswerState: Sendable, Equatable {
   private func readAttention(from adapter: any AttentionAdapter, now: Date?) async {
     let result = await Self.capture { try await adapter.readAttention() }
     Self.apply(result, to: &attention, now: now ?? .now)
-    if case .success(let page) = result { prune(page) }
+    guard case .success(let page) = result else { return }
+    snoozeClock = now ?? .now
+    prune(page)
+    scheduleSnoozeEnd()
   }
 
   /// Histories follow the rows: when the rows cannot be read, neither section is current.
@@ -226,7 +255,8 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  /// Drop answer states and drafts of cards Fractal no longer holds open.
+  /// Drop answer states and drafts of cards Fractal no longer holds open, and control states of
+  /// cards no longer shown (closed, or snoozed: one that returns starts clean).
   private func prune(_ page: AttentionPage) {
     let open = Set(page.records.map(\.id))
     answers = answers.filter { id, state in
@@ -235,6 +265,11 @@ public enum AnswerState: Sendable, Equatable {
     }
     answerDrafts = answerDrafts.filter { open.contains($0.key) }
     if let focused = focusedInput, focused != Self.noteInput, !open.contains(focused) { focusedInput = nil }
+    let shown = Set(page.records.filter { !$0.isSnoozed(at: snoozeClock) }.map(\.id))
+    controls = controls.filter { id, state in
+      if case .sending = state { return true }
+      return shown.contains(id)
+    }
   }
 
   /// Whether the person has typed or picked anything not yet sent, or is typing now: the

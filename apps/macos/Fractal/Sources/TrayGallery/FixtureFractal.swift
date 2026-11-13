@@ -20,17 +20,20 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   private let histories: [String: [Double?]]
   private let availability: AvailabilitySnapshot
   private let submits: [String: Submit]
+  /// Snooze and dismiss outcomes by attention ID; seen always commits.
+  private let controls: [String: Submit]
   private var failure: String?
 
   init(
     page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
-    submits: [String: Submit] = [:]
+    submits: [String: Submit] = [:], controls: [String: Submit] = [:]
   ) {
     self.page = page
     self.slo = slo
     self.histories = histories
     self.availability = availability
     self.submits = submits
+    self.controls = controls
   }
 
   /// Every later read fails with this reason; the model keeps its last data, marked stale.
@@ -55,7 +58,16 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   func readAvailability() async throws -> AvailabilitySnapshot { try serve(availability) }
 
   func submit(_ submission: WorkDoneSubmission) async throws {
-    switch submits[submission.attentionID] ?? .commit {
+    try await settle(submits[submission.attentionID])
+  }
+
+  func control(_ submission: AttentionControlSubmission) async throws {
+    guard submission.control != .seen else { return }
+    try await settle(controls[submission.attentionID])
+  }
+
+  private func settle(_ outcome: Submit?) async throws {
+    switch outcome ?? .commit {
     case .commit: return
     case .hang: try await Task.sleep(for: .seconds(3600))
     case .refuse(let reason): throw AnswerRefused(reason)
