@@ -77,6 +77,7 @@ test('fallback guard incidence on existing Markdown and scenario transcript mess
   const root = new URL('../../../../../fixtures/scenarios/', import.meta.url)
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
+    if (!(await readdir(new URL(`${entry.name}/`, root))).includes('conversation.json')) continue
     const conversation = JSON.parse(await readFile(new URL(`${entry.name}/conversation.json`, root), 'utf8'))
     const pending = [{ value: conversation, path: entry.name }]
     while (pending.length > 0) {
