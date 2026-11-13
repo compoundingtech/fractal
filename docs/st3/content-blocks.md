@@ -89,6 +89,14 @@ Hunks address the original pinned file. `start_byte` is a nonnegative safe integ
 
 Sender input cannot supply `check`, observations, completed blob descriptors, provider facts or arbitrary server metadata. The daemon completes held uploads after ownership and magic-byte checks, canonicalizes once, and stores only immutable intent/completed image references in `work.person-asked`. It never embeds binary bytes. Derived checks are not authored fields and do not rewrite signed historical claims. Timestamps are UTC RFC 3339 strings; digests are lowercase hex SHA-256.
 
+### Secret hygiene and disclosure
+
+The existing shared text policy is `fractal_runtime::transcript::normalize_conversation_text` in `crates/fractal-runtime/src/transcript.rs`, used by native driver content publication in `crates/fractal-drivers/src/harness_timeline.rs` and by terminal exit evidence. It detects sensitive token/credential forms and reports redacted byte counts while returning normalized, bounded text. This is not an established universal scanner on ask prose or arbitrary claim admission; the current structured-request parser and person-ask persistence path do not call it.
+
+At admission, before durable persistence or external disclosure, apply that same detector to every `text_change` hunk's `before` and `after`, every block fallback, and all block/hunk labels. On a match, refuse the ask/update with a clear field-specific secret-detected validation error that does not echo the matched text. Never store a redacted or truncated copy: the authored hunks must match file bytes exactly and approval must retain exactly those hunks. P2 must expose/reuse one shared detection implementation from the existing transcript policy if its normalizing API is not suitable; do not create a per-feature regex/pattern list. Scan the complete admitted fields, without adopting the normalizer's truncation as a way to omit unscanned text.
+
+Authorized pinned/current-file reads may inspect bounded file bytes internally for checks but must not expose file content beyond the authored hunk spans in projections, errors, logs or retained approval evidence. Do not publish whole resolved files or extra context from those reads. Retained answer records, including exact hunks and check provenance, follow the carrier's retention policy; a content digest is not permission to retain a separate perpetual copy.
+
 Read decoders dispatch on the pair `(kind, version)`. Unknown pairs retain the common envelope and show fallback with “Rich content not rendered”; they never discard the whole structured request. Malformed known data is visibly unavailable and cannot be marked checked or accepted. Unknown data is untrusted, non-executable and available for inspection only under carrier disclosure permissions.
 
 ## Limits and admission
