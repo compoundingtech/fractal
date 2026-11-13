@@ -6129,6 +6129,12 @@
         "immutable": false,
         "reference": false
       },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
       "until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -6173,6 +6179,12 @@
         "immutable": false,
         "reference": false
       },
+      "source": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "text": {
         "value_type": "string",
         "required": true,
@@ -6204,6 +6216,12 @@
         "immutable": false,
         "reference": false
       },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
       "until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -6223,26 +6241,33 @@
       "person"
     ],
     "fields": {
+      "last_input_at_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "observed_at_unix_ms": {
         "value_type": "integer",
         "required": true,
         "immutable": false,
         "reference": false
       },
-      "presence": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "present",
-          "idle",
-          "locked"
-        ],
-        "immutable": false,
-        "reference": false
-      },
       "source": {
         "value_type": "string",
         "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "active",
+          "inactive",
+          "locked",
+          "sleeping"
+        ],
         "immutable": false,
         "reference": false
       }
@@ -6290,6 +6315,12 @@
       "person"
     ],
     "fields": {
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
       "status": {
         "value_type": "string",
         "required": true,
@@ -10792,6 +10823,18 @@
         "required": false,
         "immutable": false,
         "reference": true
+      },
+      "priority": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "critical",
+          "high",
+          "normal",
+          "low"
+        ],
+        "immutable": false,
+        "reference": false
       },
       "reason": {
         "value_type": "string",
