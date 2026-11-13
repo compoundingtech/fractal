@@ -1,3 +1,5 @@
+import { markdownInline } from '@fractal/client/markdown'
+import { InlineMarkdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { MissionEtaLabel, formatMissionEta } from '@fractal/ui/assistant-ui/shell'
 import type * as Fractal from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
@@ -81,7 +83,7 @@ export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
                             {ago(DateTime.formatIso(mission.updated_at), now)}
                           </span>
                         </Aria.Button>
-                        {presentation.last_progress && !expanded ? <div {...stylex.props(styles.progress)}>{presentation.last_progress}</div> : null}
+                        {presentation.last_progress && !expanded ? <div {...stylex.props(styles.progress)}><InlineMarkdown text={markdownInline(presentation.last_progress)} /></div> : null}
                         {expanded ? <MissionDetail mission={mission} presentation={presentation} onOpenAgent={onOpenAgent} onOpenSource={setSource} /> : null}
                       </li>
                     )
@@ -105,7 +107,7 @@ const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenSource }: { r
           Stuck at {presentation.stuck.step.split('/').pop()}{presentation.stuck.attempts > 1 ? ` after ${presentation.stuck.attempts} attempts` : ''}; its seat {presentation.stuck.agent.label} is {presentation.stuck.agent.state}.
         </div>
       ) : null}
-      {presentation.last_progress ? <div {...stylex.props(styles.progress)}>Last progress: {presentation.last_progress}</div> : null}
+      {presentation.last_progress ? <div {...stylex.props(styles.progress)}>Last progress: <InlineMarkdown text={markdownInline(presentation.last_progress)} /></div> : null}
       {presentation.steps.length === 0 ? <p {...stylex.props(styles.notice)}>st did not send this mission's steps.</p> : (
         <ol {...stylex.props(styles.steps)}>
           {presentation.steps.map((step) => <StepRow key={step.id} mission={mission.id} step={step} onOpenAgent={onOpenAgent} onOpenSource={onOpenSource} />)}

@@ -1,3 +1,4 @@
+import { markdownSource, optionalSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useMemo, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, useWindowDimensions, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -65,21 +66,21 @@ export function AlertBody({ item, from, seats }: { item: KeptAttention; from: st
   // A new prompt or revision behind the same alert starts with nothing chosen.
   if (prompt) return <PromptAnswerView key={promptAlertKey(item)} item={item} />;
   if (item.attention_kind === 'harness-prompt') return <View style={{ gap: 6 }}>
-    {item.detail ? <Markdown text={spaced(cleanMessageText(item.detail))} color={theme.text} /> : null}
+    {item.detail ? <Markdown text={spaced(cleanMessageText(markdownSource(item.detail)))} color={theme.text} /> : null}
     <Note>This prompt is answered in the agent's terminal.</Note>
   </View>;
   if (item.attention_kind === 'harness-login') return <View style={{ gap: 6 }}>
-    {item.detail ? <Markdown text={spaced(cleanMessageText(item.detail))} color={theme.text} /> : null}
+    {item.detail ? <Markdown text={spaced(cleanMessageText(markdownSource(item.detail)))} color={theme.text} /> : null}
     {seats.length ? <T dim>One sign-in clears it for {seats.join(', ')} too.</T> : null}
   </View>;
   if (isRequest(item.attention_kind) && item.actions.includes('work.done')) {
     return item.request
       ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => {}} />
-      : <View style={{ gap: 8 }}><RequestQuestion text={cleanMessageText(item.detail ?? '')} /><RequestAnswers item={item} from={from} onAnswered={() => {}} /></View>;
+      : <View style={{ gap: 8 }}><RequestQuestion text={cleanMessageText(optionalSource(item.detail) ?? '')} /><RequestAnswers item={item} from={from} onAnswered={() => {}} /></View>;
   }
   return <View style={{ gap: 6 }}>
-    {item.detail ? <Markdown text={spaced(cleanMessageText(item.detail))} color={theme.subtext0} /> : null}
-    {item.because ? <T soft>because {item.because}</T> : null}
+    {item.detail ? <Markdown text={spaced(cleanMessageText(markdownSource(item.detail)))} color={theme.subtext0} /> : null}
+    {item.because ? <T soft>because {markdownSource(item.because)}</T> : null}
   </View>;
 }
 
@@ -117,7 +118,7 @@ function PromptAnswerView({ item }: { item: KeptAttention }) {
     ]);
   };
   return <View style={{ gap: 8 }}>
-    {item.detail ? <T selectable>{cleanMessageText(item.detail)}</T> : null}
+    {item.detail ? <T selectable>{cleanMessageText(markdownSource(item.detail))}</T> : null}
     {questions ? questions.map((question, index) => <View key={index} style={{ gap: 4 }}>
       <T bold>{question.header ? `${question.header} · ` : ''}{question.question}{question.multiSelect ? '  (choose any)' : ''}</T>
       <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
@@ -165,9 +166,9 @@ export function StructuredRequestView({ item, request, from, onAnswered }: { ite
   const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) void actions.done(item, text.trim()).then(done => { if (done) onAnswered(); }); });
   return <View style={{ gap: 8 }}>
     {request.recommendation ? <T><T dim>recommends  </T><T bold color={theme.green}>{label(request.recommendation.answer)}</T><T soft>  {request.recommendation.reason}</T></T> : null}
-    <RequestQuestion text={request.question} />
-    {request.summary ? <Markdown text={spaced(request.summary)} color={theme.subtext0} /> : null}
-    {request.reasons?.length ? <View style={{ gap: 2 }}>{request.reasons.map((reason, index) => <T key={index}><T color={theme.lavender}>•  </T>{reason}</T>)}</View> : null}
+    <RequestQuestion text={markdownSource(request.question)} />
+    {request.summary ? <Markdown text={spaced(markdownSource(request.summary))} color={theme.subtext0} /> : null}
+    {request.reasons?.length ? <View style={{ gap: 2 }}>{request.reasons.map((reason, index) => <T key={index}><T color={theme.lavender}>•  </T>{markdownSource(reason)}</T>)}</View> : null}
     {images.length ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>{images.map(image => <MailImageView key={image.sha256} image={image} viewport={viewport} />)}</View> : null}
     {request.subjects?.map((subject, index) => subject.url
       ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
@@ -179,7 +180,7 @@ export function StructuredRequestView({ item, request, from, onAnswered }: { ite
       <T dim>{answer.consequence}</T>
     </Pressable>)}
     {request.custom ? <Button label="Answer in words" disabled={disabled} onPress={words} /> : null}
-    {request.why_person ? <T dim>Why you: {request.why_person}</T> : null}
+    {request.why_person ? <T dim>Why you: {markdownSource(request.why_person)}</T> : null}
   </View>;
 }
 

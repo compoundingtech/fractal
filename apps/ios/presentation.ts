@@ -1,3 +1,4 @@
+import { markdownSource, type MarkdownInline } from '../../clients/typescript/fractal-client/markdown-text';
 import { ago, alertsHeading } from '@fractal/views';
 export { ago } from '@fractal/views';
 import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep } from '../../clients/typescript/fractal-client';
@@ -99,9 +100,9 @@ export function deviceDetail(device: DeviceView, now = Date.now()): string {
 }
 
 // The mission step waiting on an ask a mission step made, and what it is for.
-export function blockedLine(item: { blocked?: { step: string; goal: string } | null }): string | null {
+export function blockedLine(item: { blocked?: { step: string; goal: MarkdownInline } | null }): string | null {
   if (!item.blocked) return null;
-  const goal = item.blocked.goal.trim();
+  const goal = markdownSource(item.blocked.goal).trim();
   return `waits ${item.blocked.step}${goal ? ` · ${goal}` : ''} — it continues once you answer`;
 }
 

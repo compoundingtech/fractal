@@ -1,3 +1,4 @@
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -23,7 +24,7 @@ const MissionListRow = ({ row, now, current }: { readonly row: MissionRow; reado
   const facts = [
     presentation.who.kind === 'nobody' ? undefined : presentation.who.label,
     presentation.progress.total > 0 ? `${presentation.progress.done}/${presentation.progress.total}` : undefined,
-    presentation.last_progress ?? undefined,
+    presentation.last_progress === null ? undefined : markdownPlainText(presentation.last_progress),
   ].filter(fact => fact !== undefined)
   return <Aria.GridListItem id={mission.id} textValue={title} aria-label={`${title}, ${word.name}`} data-mission-row={mission.id} data-current={current || undefined} {...stylex.props(styles.row, narrow && styles.rowTouch, current && styles.current)} style={{ height: sidebarRowSize }}>
     <span {...stylex.props(styles.line)}>

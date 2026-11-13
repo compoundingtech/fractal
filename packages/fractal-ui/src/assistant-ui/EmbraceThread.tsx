@@ -1,3 +1,4 @@
+import { markdownBlock } from './composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import {
@@ -62,7 +63,7 @@ function Attachment() {
 }
 function TextPart({ text }: { text: string }) {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined
-  return <Markdown text={text} streaming={item?._tag === 'Text' && item.streaming} />
+  return <Markdown text={markdownBlock(text)} streaming={item?._tag === 'Text' && item.streaming} />
 }
 function ReasoningPart({ text }: { text: string }) {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined

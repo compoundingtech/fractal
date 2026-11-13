@@ -2,6 +2,9 @@
 // Source: docs/st3/client-v0/schemas/client-v0.schema.json
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 
+import type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+export type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+
 export const API_VERSION = 'st3.client.v0' as const;
 
 /** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
@@ -282,7 +285,7 @@ export type AgentPresentation = {
 };
 
 export type AgentPresentationNow = AgentPresentationWork & {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   since: Timestamp;
 };
@@ -1026,7 +1029,7 @@ export type Attention = ResourceHeader & {
   | "harness-prompt"
   | "model-drift"
  | string);
-  because?: string;
+  because?: MarkdownInline;
   blocked?: AttentionBlocked;
   conversation_id?: Id;
   conversation_ids?: Array<Id>;
@@ -1035,7 +1038,7 @@ export type Attention = ResourceHeader & {
 };
   deadline_at?: Timestamp;
   default_answer?: AskDefaultAnswer;
-  detail: string;
+  detail: MarkdownBlock;
   episode?: string;
   fix?: {
 
@@ -1073,7 +1076,7 @@ export type AttentionActor = {
 
 export type AttentionBlocked = {
   attempt: number;
-  goal: string;
+  goal: MarkdownInline;
   step: string;
   step_run_id: Id;
 };
@@ -1122,7 +1125,7 @@ export type AttentionLaunchAssignee = {
 export type AttentionLaunchPreview = {
   agents: Array<AttentionLaunchAgent>;
   asks_you: number;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   steps: Array<AttentionLaunchStep>;
   variant: string;
 };
@@ -1183,7 +1186,7 @@ export type AttentionPromptCall = {
 export type AttentionRevision = {
   from_revision: string;
   lines: Array<AttentionRevisionLine>;
-  reason: string;
+  reason: MarkdownInline;
   to_revision: string;
   truncated: boolean;
 };
@@ -2605,11 +2608,11 @@ export type LaunchApproval = ResourceHeader & {
 
 export type LaunchDecision = ResourceHeader & {
   decision_type: "boolean" | "single-choice" | "multiple-choice" | "rank";
-  explanation?: string | null;
+  explanation?: MarkdownBlock | null;
   kind: "launch-decision";
   launch_id: Id;
   options: Array<DecisionOption>;
-  question: string;
+  question: MarkdownBlock;
   requested_at: Timestamp;
   response?: (DecisionResponse | null);
   state: "open" | "answered" | "withdrawn";
@@ -2627,8 +2630,8 @@ export type LaunchPreview = {
   automated: number;
   human: number;
 };
-  goal: string;
-  request_excerpt: string;
+  goal: MarkdownInline;
+  request_excerpt: MarkdownBlock;
   steps: Array<{
   assignee?: string | null;
   depends: Array<string>;
@@ -2692,7 +2695,7 @@ export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
   body_bytes?: number;
   body_ref?: string;
-  content: string;
+  content: MarkdownBlock;
   from: Id;
   in_reply_to?: (Id | null);
   kind: "message";
@@ -2709,7 +2712,7 @@ export type MessageBody = {
   bytes: number;
   complete?: boolean;
   message: string;
-  text: string;
+  text: MarkdownBlock;
 };
 
 export type MessageProvenance = {
@@ -2792,7 +2795,7 @@ export type MissionId = string;
 export type MissionPresentation = {
   actions: Array<MissionActionOffer>;
   card: ("what-you-can-do" | "nothing-to-do" | null);
-  last_progress: string | null;
+  last_progress: MarkdownInline | null;
   progress: {
   done: number;
   total: number;
@@ -2868,7 +2871,7 @@ export type MissionRunSummary = {
 });
   generation_id?: RunGenerationId;
   id: MissionRunId;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   must_act: MustAct;
   outcome?: (MissionRunOutcome | null);
   phase: string;
@@ -2910,13 +2913,13 @@ export type MissionStep = {
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
   completed_at?: number | null;
-  constraints?: Array<string>;
+  constraints?: Array<MarkdownInline>;
   eta?: MissionStepEta;
-  goals?: Array<string>;
+  goals?: Array<MarkdownInline>;
   history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
   loop_round?: number | null;
@@ -3491,7 +3494,7 @@ export type PersonStepParameters = {
 export type PersonUpdate = {
   about: Id;
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "update";
   version: 1;
 };
@@ -3555,7 +3558,7 @@ export type PrivateNotesAction = {
 
 export type PrivateNotesData = {
   fence: PrivateNotesFence;
-  markdown: string;
+  markdown: MarkdownBlock;
   uri: PrivateNotesUri;
 };
 
@@ -3823,7 +3826,9 @@ export type Runtime = ResourceHeader & {
   | "unreachable"
 ;
   terminal_access?: {
-
+  input: "granted" | "ungranted" | "unavailable";
+  read: "granted" | "ungranted" | "unavailable";
+  resize: "granted" | "ungranted" | "unavailable";
 } | null;
   terminal_id?: (Id | null);
   terminal_sequence?: number | null;
@@ -4078,17 +4083,17 @@ export type StructuredRequest = {
   answers?: Array<RequestAnswerOption>;
   attachments?: Array<Attachment>;
   custom?: boolean;
-  question: string;
-  reasons?: Array<string>;
+  question: MarkdownBlock;
+  reasons?: Array<MarkdownInline>;
   recommendation?: {
   answer: string;
   reason: string;
 };
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "decision" | "choice" | "feedback";
   version: 1;
-  why_person: string;
+  why_person: MarkdownInline;
 };
 
 export type SubagentSummary = {
@@ -4102,7 +4107,7 @@ export type SubagentSummary = {
   name?: string;
   requests?: number;
   status: string;
-  task?: string;
+  task?: MarkdownBlock;
   tokens?: number;
   tool_count?: number;
 };
@@ -4323,7 +4328,7 @@ export type TimelineAskQuestion = {
   description?: string;
   label: string;
 }>;
-  question: string;
+  question: MarkdownBlock;
   recommended?: number;
 };
 
@@ -4345,7 +4350,7 @@ export type TimelineContentBody = {
   blocks?: Array<TimelineBlock>;
   media_type: string;
   message_id?: string;
-  text?: string;
+  text?: MarkdownBlock;
 } & (unknown | unknown);
 
 export type TimelineDelta = {
@@ -4552,8 +4557,8 @@ export type TimelineViewBash = {
 
 export type TimelineViewCompaction = {
   method?: string;
-  short_summary?: string;
-  summary?: string;
+  short_summary?: MarkdownInline;
+  summary?: MarkdownBlock;
   tokens_after?: number;
   tokens_before?: number;
   type: "compaction";
@@ -4604,7 +4609,7 @@ export type TimelineViewHub = {
   intent?: string;
   is_error?: boolean;
   jobs?: Array<JobSummary>;
-  message?: string;
+  message?: MarkdownBlock;
   name?: string;
   op: string;
   state?: string;
@@ -4617,7 +4622,7 @@ export type TimelineViewHub = {
 
 export type TimelineViewIrc = {
   from: string;
-  message: string;
+  message: MarkdownBlock;
   message_id: string;
   reply_to?: string;
   type: "irc";
@@ -4695,13 +4700,13 @@ export type TimelineViewTask = {
   agents?: Array<SubagentSummary>;
   async?: boolean;
   call_id?: string;
-  context?: string;
+  context?: MarkdownBlock;
   intent?: string;
   is_error?: boolean;
   tasks?: Array<{
   agent?: string;
   name?: string;
-  task: string;
+  task: MarkdownBlock;
 }>;
   tool: string;
   total_ms?: number;
@@ -4896,14 +4901,14 @@ export type UsageSummary = {
 export type Value = unknown;
 
 export type Visualization = {
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   decisions: Array<LaunchDecision>;
   diffs: Array<StructuredDiff>;
   edges: Array<VisualizationEdge>;
   gates: Array<{
 
 }>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   groups: Array<VisualizationGroup>;
   live_progress: {
 
@@ -4949,9 +4954,9 @@ export type VisualizationGroup = {
 
 export type VisualizationNode = {
   assignment?: unknown;
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   gates?: Array<unknown>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   id: string;
   kind: string;
   label: string;
@@ -4977,7 +4982,7 @@ export type Work = ResourceHeader & {
   claim_expires_at_unix_ms?: number | null;
   claim_incarnation?: string | null;
   claimant?: (Id | null);
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
@@ -4994,9 +4999,9 @@ export type Work = ResourceHeader & {
   | null
 ;
   generation_id: Id;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   kind: "work";
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
   nudged_at_unix_ms?: number | null;
@@ -5013,7 +5018,7 @@ export type Work = ResourceHeader & {
 };
 
 export type WorkLabel = {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;

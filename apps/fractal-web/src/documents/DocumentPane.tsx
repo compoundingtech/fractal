@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -63,7 +64,7 @@ export const DocumentPane = ({
         ) : state._tag === 'Binary' ? (
           <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with fractal documents get {state.reference}.</p>
         ) : (
-          <div {...stylex.props(styles.column)}><Markdown text={state.text} renderInlineReference={reference} /></div>
+          <div {...stylex.props(styles.column)}><Markdown text={markdownBlock(state.text)} renderInlineReference={reference} /></div>
         )}
       </div>
     </article>

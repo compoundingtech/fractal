@@ -152,6 +152,8 @@ stream_kit() {
       lane "UI kit CPU budget contracts" node --test packages/fractal-ui/scripts/kit-play-budget.node-test.mjs packages/fractal-ui/scripts/kit-play-cpu.node-test.mjs
       lane "UI kit story play helpers" node --test --test-force-exit packages/fractal-ui/src/story-play.unit.test.mjs
       lane "UI kit Markdown streaming tail" node --test --test-force-exit packages/fractal-ui/src/assistant-ui/composition/Markdown.unit.test.mjs
+      lane "Markdown template splices" node packages/fractal-ui/scripts/check-markdown-templates.mjs
+      lane "Markdown template guard contracts" node --test packages/fractal-ui/scripts/check-markdown-templates.node-test.mjs
       ;;
     false)
       printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"

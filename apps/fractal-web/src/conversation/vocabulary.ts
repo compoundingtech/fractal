@@ -1,3 +1,4 @@
+import { markdownSource, optionalSource } from '@fractal/client/markdown'
 import type { TimelineBlock, TimelineEntry, TimelineView, UnknownCase } from '@fractal/client/schema'
 import { Match } from 'effect'
 import type { ConversationItem, HarnessNotice } from './model.ts'
@@ -75,11 +76,11 @@ export const viewCases = {
   },
   irc: (view, ctx) => {
     const parsed = stopgap(ctx)
-    return parsed?._tag === 'Event' && parsed.notice?._tag === 'Irc' ? item(parsed) : item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'irc', title: `Message from ${view.from}`, text: view.message, sender: { kind: 'agent', label: view.from }, data: {}, notice: { _tag: 'Irc', from: view.from, payload: view.message, raw: '', ...(view.reply_to === undefined ? {} : { replyTo: view.reply_to }) } })
+    return parsed?._tag === 'Event' && parsed.notice?._tag === 'Irc' ? item(parsed) : item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'irc', title: `Message from ${view.from}`, text: markdownSource(view.message), sender: { kind: 'agent', label: view.from }, data: {}, notice: { _tag: 'Irc', from: view.from, payload: markdownSource(view.message), raw: '', ...(view.reply_to === undefined ? {} : { replyTo: view.reply_to }) } })
   },
   compaction: (view, ctx) => {
     const parsed = stopgap(ctx)
-    const payload = view.summary ?? view.short_summary ?? ''
+    const payload = optionalSource(view.summary) ?? optionalSource(view.short_summary) ?? ''
     return parsed?._tag === 'Event' && parsed.notice?._tag === 'Compaction' ? item(parsed) : item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'compaction', title: 'Conversation compacted', text: payload, sender: sender(ctx), data: {}, notice: { _tag: 'Compaction', payload, raw: '' } })
   },
   assistant_error: (view, ctx) => view.presentation === 'none' ? drop() : item({ _tag: 'Notice', id: ctx.id, at: ctx.at, kind: view.status === 'failed' ? 'error' : 'event', text: view.label, detail: view.message }),
