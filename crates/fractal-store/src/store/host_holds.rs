@@ -40,7 +40,7 @@ pub struct ReleaseHostHold {
 }
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS local_host_holds (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha677d62abc9d owner=fractal_store::store::host_holds TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_host_holds (
         id TEXT PRIMARY KEY, host TEXT NOT NULL, owner TEXT NOT NULL,
         revision INTEGER NOT NULL, body TEXT NOT NULL, released INTEGER NOT NULL DEFAULT 0
     ); CREATE INDEX IF NOT EXISTS local_host_holds_active ON local_host_holds(host,released,id);")?;
@@ -142,7 +142,7 @@ impl Store {
         };
         let mut writer = self.connection.write();
         let transaction = writer.transaction().map_err(internal)?;
-        transaction.execute("INSERT INTO local_host_holds(id,host,owner,revision,body) VALUES(?1,?2,?3,?4,?5)",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h93ce54913c6d owner=fractal_store::store::host_holds TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_host_holds(id,host,owner,revision,body) VALUES(?1,?2,?3,?4,?5)",
             params![hold.id, hold.host, hold.owner, hold.revision, serde_json::to_string(&hold).map_err(internal)?]).map_err(internal)?;
         smallclaims::touched::note_wrote(|| dependency(&hold.host));
         smallclaims::touched::note_wrote(|| "host-holds".into());
@@ -177,7 +177,7 @@ impl Store {
         hold.revision += 1;
         hold.released_at_unix_ms = Some(u64::try_from(now_ms()).unwrap_or(u64::MAX));
         hold.resolution = Some(request.resolution.clone());
-        transaction.execute("UPDATE local_host_holds SET revision=?2,body=?3,released=1 WHERE id=?1",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h16424da0718d owner=fractal_store::store::host_holds TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_host_holds SET revision=?2,body=?3,released=1 WHERE id=?1",
             params![hold.id, hold.revision, serde_json::to_string(&hold).map_err(internal)?]).map_err(internal)?;
         smallclaims::touched::note_wrote(|| dependency(&hold.host));
         smallclaims::touched::note_wrote(|| "host-holds".into());
@@ -195,6 +195,21 @@ impl Store {
 mod tests {
     use super::*;
     fn request() -> PlaceHostHold { PlaceHostHold { actor: "person/operator".into(), host: "host-a".into(), reason: "Investigate activation".into(), operations: vec!["activation".into()], originating_run: Some("mission-run/terminal".into()), receipt: Some("receipt/failure".into()) } }
+    #[test]
+    fn alternate_store_constructors_initialize_host_resource_schemas() {
+        let root = tempfile::tempdir().unwrap();
+        let views = std::sync::Arc::new(smallclaims::ivm::Views::new(vec![]).unwrap());
+        let stores = [
+            Store::open_shared_memory("host-a").unwrap(),
+            Store::open_with_ivm_views(&root.path().join("graph.db"), "host-a", views).unwrap(),
+        ];
+        for store in stores {
+            assert!(store.host_holds(None, false).unwrap().is_empty());
+            assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
+            let hold = store.place_host_hold("person/operator", &request()).unwrap();
+            assert_eq!(store.host_holds(None, false).unwrap(), vec![hold]);
+        }
+    }
     #[test]
     fn owner_and_revision_fence_release_without_occupying_capacity() {
         let store = Store::open_memory("host-a").unwrap();

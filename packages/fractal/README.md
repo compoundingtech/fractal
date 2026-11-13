@@ -196,6 +196,8 @@ this context rather than silently escaping containment.
 `ResourceError.code` distinguishes `admission-expired`, `unsupported-coverage`,
 `impossible-capacity`, `clock-uncertain`, `execution-timeout` and exact-generation
 retirement/cancellation outcomes. Queue expiry is not a failed payload execution.
+The tagged failure retains both `code` and the host's `message` through program-result
+encoding, so admission diagnostics remain available to callers and on replay.
 
 Each acquisition reattaches and validates with the owning host even when a journal contains a
 grant-shaped result. Keep acquisition outside journaled `Fractal.step` bodies. Scope closure

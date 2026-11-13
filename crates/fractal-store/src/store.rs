@@ -2900,6 +2900,8 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
+        resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2932,6 +2934,8 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
+        resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;

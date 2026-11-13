@@ -132,7 +132,7 @@ impl From<&ExecGeneration> for ExecutionIdentity {
 pub fn dependency(host: &str, lane: &str) -> String { format!("resource-membership/{host}/{lane}") }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb7bab5eb8be2 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
         host TEXT PRIMARY KEY, epoch TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS resource_lane_policies_v1 (
         host TEXT NOT NULL, lane TEXT NOT NULL, policy TEXT NOT NULL, PRIMARY KEY(host,lane));
@@ -151,7 +151,7 @@ fn read(connection: &Connection, id: &str) -> Result<Membership> {
 }
 
 fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
-    let changed = connection.execute("INSERT INTO resource_memberships_v1(id,host,lane,state,queued_at,memory,body)
+    let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h15191adeac97 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_memberships_v1(id,host,lane,state,queued_at,memory,body)
         VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body
         WHERE resource_memberships_v1.body<>excluded.body",
         rusqlite::params![member.request.id,member.request.host,member.request.name,member.state,member.queued_at,
@@ -236,7 +236,7 @@ impl Store {
         member.child_runs.push(child.into());
         // Child context is metadata, not an admission/fit transition. Its publication/state
         // events wake readers; emitting a lane event here self-wakes a capacity-refused parent.
-        transaction.execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h32081bb17f3d owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
             rusqlite::params![member.request.id,serde_json::to_string(&member)?])?;
         transaction.commit()?;
         Ok(())
@@ -254,7 +254,7 @@ impl Store {
             [child.strip_prefix("mission-run/").unwrap_or(child)], |row| row.get(0))?;
         anyhow::ensure!(!exists, "a created child retains its resource context");
         member.child_runs.retain(|run| run != child);
-        transaction.execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hbb24831194f3 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
             rusqlite::params![member.request.id,serde_json::to_string(&member)?])?;
         transaction.commit()?;
         Ok(())
@@ -279,7 +279,7 @@ impl Store {
         anyhow::ensure!(!host.is_empty() && !epoch.is_empty(), "empty resource authority identity");
         anyhow::ensure!(host == self.origin, "only the execution host may own resource authority");
         let connection = self.connection.write();
-        connection.execute("INSERT INTO resource_authorities_v1 VALUES(?1,?2)
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
         Ok(())
     }
@@ -363,7 +363,7 @@ impl Store {
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
-        transaction.execute("INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
             rusqlite::params![request.host,request.name,policy])?;
         let installed: String = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
             rusqlite::params![request.host,request.name], |row| row.get(0))?;

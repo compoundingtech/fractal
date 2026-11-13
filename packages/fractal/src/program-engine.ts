@@ -44,14 +44,15 @@ export const CommandResultSchema = Schema.Struct({
 })
 
 /** Admission failures are distinct from a command's exit status or a child run's failure. */
-export class ResourceError extends Schema.TaggedError<ResourceError>()('ResourceError', {
+export const ResourceError = Schema.TaggedStruct('ResourceError', {
   code: Schema.Literals([
     'admission-expired', 'unsupported-coverage', 'impossible-capacity', 'clock-uncertain',
     'cancelled', 'retired', 'retiring', 'uncertain', 'invalid-state',
     'resource-operation-refused', 'execution-timeout', 'stale-membership', 'execution-refused',
   ]),
   message: Schema.String,
-}) {}
+})
+export type ResourceError = typeof ResourceError.Type
 
 /** A step's result as the bundle hands it to the daemon to journal. */
 export interface JournalEntry {

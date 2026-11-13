@@ -94,6 +94,32 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Resource lanes and host holds inventory (PR #6511)
+
+For [resource lanes](https://github.com/compoundingtech/fractal/pull/6511),
+the `fractal_store::store::host_holds` maintainer owns schema site
+`lv-ha677d62abc9d` and mutation sites `lv-h93ce54913c6d` and
+`lv-h16424da0718d`. The host-local hold table stores identifier, host and owner
+TEXT plus the serialized hold body, including the reason, operations, originating
+run, receipt and resolution. Its active index retains host and hold identifiers.
+Placement and revision-fenced release keep the body inline so the host writer
+atomically updates the durable admission predicate and its observation. These
+strings and bodies have no proven physical size bound; the next representation
+step must bound or reference their values and account for release/reclamation.
+
+The `fractal_store::store::resource_membership` maintainer owns schema site
+`lv-hb7bab5eb8be2` and mutation sites `lv-h15191adeac97`,
+`lv-h32081bb17f3d`, `lv-hbb24831194f3`, `lv-h466c8225b3a9` and
+`lv-hacf1fd1c6d10`. Host/epoch and host/lane/policy TEXT record the authority
+fence and installed policy; membership identifier, host, lane, state and JSON body
+record execution custody, grants, child runs and runtime roots. The queue index
+retains host, lane, state and membership identifier keys. Inline updates preserve
+one transaction for policy, admission, child attachment and retirement decisions.
+The schema TODO is to chunk or reference variable columns and keys; the mutation
+TODO is to bound or reference bodies and account for their cleanup without
+weakening fencing or releasing uncertain execution custody. Neither queue order,
+capacity counts nor the host-local authority proves value sizes.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
