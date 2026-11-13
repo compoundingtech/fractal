@@ -168,7 +168,7 @@ final class LocalSocketTests: XCTestCase {
     }
 
     func testHeadersCannotSmuggleALineBreak() async throws {
-        let client = FractalClient(localSocketPath: "/tmp/unused.sock", person: "person/ada\r\nx-st3-person: person/eve")
+        let client = FractalClient(localSocketPath: "/tmp/unused.sock", person: "person/ada\r\nx-st3-person: person/intruder")
         do {
             _ = try await client.capabilities()
             XCTFail("a header with a line break must not be sent")
