@@ -79,7 +79,7 @@ fn nobody_reporting_reads_available_and_unreported() {
     let nobody = store.person_availability(ADA, T0).unwrap();
     assert_eq!(
         (nobody.status, nobody.status_source, nobody.presence, nobody.presence_observed_at),
-        (Status::Available, StatusSource::Unreported, Some(Presence::Unknown), None)
+        (Status::Available, StatusSource::Unreported, Some(Presence::Unreported), None)
     );
     report(&store, "mac", DeviceState::Active, T0);
     let present = store.person_availability(ADA, T0 + PRESENCE_IDLE_MS - 1).unwrap();
@@ -93,7 +93,7 @@ fn nobody_reporting_reads_available_and_unreported() {
     let late = store.person_availability(ADA, T0 + PRESENCE_COUNTS_MS - 1).unwrap();
     assert_eq!((late.status, late.status_source), (Status::Away, StatusSource::Presence));
     let gone = store.person_availability(ADA, T0 + PRESENCE_COUNTS_MS).unwrap();
-    assert_eq!((gone.status, gone.status_source, gone.presence), (Status::Available, StatusSource::Unreported, Some(Presence::Unknown)));
+    assert_eq!((gone.status, gone.status_source, gone.presence), (Status::Available, StatusSource::Unreported, Some(Presence::Unreported)));
     // An override still wins over an unreported person.
     let away = set(&store, AvailabilityChange::Status(Some(Status::Away), None), T0 + PRESENCE_COUNTS_MS);
     assert_eq!((away.status, away.status_source), (Status::Away, StatusSource::Override));
