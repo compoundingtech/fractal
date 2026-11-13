@@ -38,7 +38,25 @@ test('the defaults: status follows presence, everything may ask, the clock runs,
     'Deadline clock: running | Ask deadlines run as set',
     'No note | A note tells agents what matters to you now',
   ]);
-  assert.equal(availabilityRows({ ...base, status: 'away', presence: 'unknown' }, null, now)[0].context, 'From your devices: no recent report');
+  assert.equal(availabilityRows({ ...base, status: 'away', presence: 'unreported' }, null, now)[0].context, 'From your devices: no recent report');
+  assert.equal(availabilityRows({ ...base, status: 'away', presence: 'idle', presence_observed_at: at(12, 13) }, null, now)[0].context, 'From your devices: idle, reported 1h ago');
+});
+
+test('with no device reporting the person reads as available, never away', () => {
+  const unreported = { ...base, status: 'available', status_source: 'unreported', presence: 'unreported', presence_observed_at: null };
+  assert.deepEqual(availabilityRows(unreported, null, now)[0], { key: 'status', title: 'Available', context: 'No device reporting · agents ask as usual' });
+});
+
+test('a word this build does not know reads as itself on every axis', () => {
+  const later = { ...base, status: 'busy', interruptions: 'family', deadline_clock: 'hold-weekend', deadline_clock_since: at(12, 13), presence: 'driving' };
+  assert.deepEqual(titles(availabilityRows(later, null, now)), [
+    'Status: busy | From your devices: driving, reported 3m ago',
+    'Interruptions: family | A setting this version of the app does not describe',
+    'Deadline clock: hold-weekend | A setting this version of the app does not describe · since 13:00',
+    'No note | A note tells agents what matters to you now',
+  ]);
+  assert.equal(availabilityRows({ ...base, status_source: 'calendar', status_until: at(12, 18) }, null, now)[0].context, 'Source: calendar · until 18:00');
+  assert.equal(availabilityRows({ ...base, interruptions: 'constructor', deadline_clock: 'toString' }, null, now)[1].title, 'Interruptions: constructor', 'a word never reads an object property');
 });
 
 test('overrides name their source, start and end', () => {
