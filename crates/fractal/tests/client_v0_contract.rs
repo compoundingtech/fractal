@@ -1040,11 +1040,13 @@ fn availability_fixtures_conform_and_refuse_identity_and_unknown_values() {
     let reported = json(asset_root().join("fixtures/presence-report-result.json"));
     assert_conforms(&contract_validator("Envelope"), "presence result", &reported);
     assert_conforms(&contract_validator("PresenceReportResult"), "presence result", &reported["value"]);
-    // Response words are open: a word a later daemon adds still conforms.
+    // Response words are open: a word a later daemon adds still conforms for a consumer, while
+    // this daemon may emit only the declared words.
     let mut future = written["value"].clone();
     future["status_source"] = serde_json::json!("calendar");
     future["presence"] = serde_json::json!("in-call");
-    assert!(person.is_valid(&future));
+    assert!(consumer_validator("PersonAvailability").is_valid(&future));
+    assert!(!person.is_valid(&future));
 }
 
 #[tokio::test]
