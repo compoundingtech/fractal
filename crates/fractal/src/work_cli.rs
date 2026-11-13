@@ -187,7 +187,10 @@ pub(super) async fn run_work(
                 value["urgent"] = urgent.into();
                 if let Some(availability) = &availability {
                     value["person_availability"] = serde_json::to_value(availability)?;
-                    value["deadline_held"] = availability::holds_deadline(availability, urgent).into();
+                    // Only an ask that named `--deadline` is known to have one to hold.
+                    if deadline_ms.is_some() {
+                        value["deadline_held"] = availability::holds_deadline(availability, urgent).into();
+                    }
                 }
                 return print_value(&value, true);
             }
@@ -195,7 +198,7 @@ pub(super) async fn run_work(
             if let Some(availability) = &availability {
                 println!("{}", availability::summary_line(availability));
             }
-            println!("{}", availability::ask_line(urgent, availability.as_ref()));
+            println!("{}", availability::ask_line(urgent, deadline_ms.is_some(), availability.as_ref()));
             Ok(())
         }
         WorkCommand::Update(args) => {
