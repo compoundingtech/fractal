@@ -5475,6 +5475,8 @@ pub enum AssistantScope {
     Conversation,
     #[serde(rename = "read.assistant.terminal")]
     Terminal,
+    #[serde(rename = "read.assistant.slo")]
+    Slo,
     #[serde(rename = "write.assistant.messages")]
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]
