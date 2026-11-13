@@ -133,6 +133,27 @@ actor FractalAttentionAdapter: AttentionAdapter {
     }
   }
 
+  func readSloHistory(_ request: SloHistoryRequest) async throws -> AttentionCore.SloHistory {
+    do {
+      return Self.history(
+        try await client.sloHistory(
+          id: request.id, sinceMS: Self.unixMS(request.since), untilMS: Self.unixMS(request.until),
+          steps: request.steps
+        ).value)
+    } catch {
+      throw ReadFailure(error)
+    }
+  }
+
+  static func history(_ value: WireSloHistory) -> AttentionCore.SloHistory {
+    AttentionCore.SloHistory(
+      id: value.id, since: Date(timeIntervalSince1970: TimeInterval(value.sinceMS) / 1000),
+      until: Date(timeIntervalSince1970: TimeInterval(value.untilMS) / 1000), samples: Int(value.samples),
+      steps: value.steps)
+  }
+
+  static func unixMS(_ date: Date) -> UInt64 { UInt64(max(0, date.timeIntervalSince1970 * 1000).rounded(.down)) }
+
   /// Mirrors Fractal web `alert-action-port.ts`: read the card again, require it still open,
   /// still offering `work.done` and at the revision the person read; then submit once,
   /// fenced on that read. A failure is never retried here: the person sees why.

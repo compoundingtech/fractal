@@ -112,6 +112,29 @@ private struct Content {
       ])
   }
 
+  /// 24 hourly steps, oldest first, from `start` to `end`.
+  private func steps(_ start: Double, _ end: Double) -> [Double?] {
+    (0..<SloHistoryRequest.steps).map { start + (end - start) * Double($0) / Double(SloHistoryRequest.steps - 1) }
+  }
+
+  /// The urgent-asks objective holds, then misses the last four hours; the error budget burns
+  /// down to 8%; flakes were never measured; merge latency has a gap of two unmeasured hours.
+  var strainedHistories: [String: [Double?]] {
+    var latency = steps(70, 55)
+    latency[9] = nil
+    latency[10] = nil
+    return [
+      "asks-answered": Array(steps(90, 60).prefix(20)) + [0, 0, 0, 0],
+      "fractal/merge-latency/p95": latency,
+      "ci-green": steps(98, 96),
+      "error-budget": steps(100, 8),
+    ]
+  }
+
+  var calmHistories: [String: [Double?]] {
+    ["asks-answered": steps(100, 100), "ci-green": steps(99, 97), "error-budget": steps(100, 69)]
+  }
+
   var present: AvailabilitySnapshot {
     AvailabilitySnapshot(
       availability: Availability(
@@ -155,7 +178,7 @@ let scenarios: [Scenario] = [
     let content = Content(now: now)
     let fractal = FixtureFractal(
       page: AttentionPage(records: content.asks + [content.update], canAnswer: true), slo: content.strainedSlo,
-      availability: content.present)
+      histories: content.strainedHistories, availability: content.present)
     let model = model(fractal, speech: SpeechCoordinator(output: FixtureSpeech(), log: { _ in }))
     model.macPresence = .present
     await model.refresh()
@@ -170,7 +193,8 @@ let scenarios: [Scenario] = [
     let content = Content(now: now)
     let asks = Array(content.asks.prefix(3))
     let fractal = FixtureFractal(
-      page: AttentionPage(records: asks, canAnswer: true), slo: content.calmSlo, availability: content.present,
+      page: AttentionPage(records: asks, canAnswer: true), slo: content.calmSlo, histories: content.calmHistories,
+      availability: content.present,
       submits: [
         asks[0].id: .hang, asks[1].id: .commit,
         asks[2].id: .refuse("This changed since you read it. Read it again before answering."),
@@ -190,7 +214,8 @@ let scenarios: [Scenario] = [
     let content = Content(now: now)
     let model = model(
       FixtureFractal(
-        page: AttentionPage(records: [], canAnswer: true), slo: content.calmSlo, availability: content.away))
+        page: AttentionPage(records: [], canAnswer: true), slo: content.calmSlo, histories: content.calmHistories,
+        availability: content.away))
     await model.refresh()
     return model
   },
@@ -203,7 +228,7 @@ let scenarios: [Scenario] = [
     let model = model(
       FixtureFractal(
         page: AttentionPage(records: content.asks, canAnswer: false), slo: content.calmSlo,
-        availability: content.present))
+        histories: content.calmHistories, availability: content.present))
     await model.refresh()
     return model
   },
@@ -215,7 +240,7 @@ let scenarios: [Scenario] = [
     let content = Content(now: now)
     let fractal = FixtureFractal(
       page: AttentionPage(records: content.asks + [content.update], canAnswer: true), slo: content.strainedSlo,
-      availability: content.present)
+      histories: content.strainedHistories, availability: content.present)
     let model = model(fractal)
     await model.refresh()
     await fractal.fail("The Fractal member did not answer: connection refused")

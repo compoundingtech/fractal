@@ -27,6 +27,13 @@ collection, but `FractalClient` has no typed attention or availability stream.
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   The menu bar adds a gauge when any objective is missed or budget nearly spent.
+- **Objective history** (`GET v1/client/slo/history`): for every listed row,
+  what was left over the last 24 hours in 24 hourly steps (Fractal's default
+  period; a row's `window` is display text and is not parsed). Each step holds
+  its lowest reading; an unmeasured step stays empty, never spent. A row's
+  history is read after its rows, again only when the row changes or an hour has
+  passed, and is its own section: a failed history read keeps the last one and
+  marks only that section stale.
 - **Availability** (`GET v1/client/availability`, `GET v1/client/notes`): status
   (available or away, by hand or from device presence; "no device reporting"
   when Fractal reads it as `unreported`), interruptions (all, urgent only, none)

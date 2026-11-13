@@ -29,6 +29,7 @@ public struct AnswerRefused: Error, Sendable, Equatable, CustomStringConvertible
 public protocol AttentionAdapter: Sendable {
   func readAttention() async throws -> AttentionPage
   func readSlo() async throws -> SloSnapshot
+  func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory
   /// Returns only once Fractal committed the answer; throws `AnswerRefused` otherwise.
   func submit(_ submission: WorkDoneSubmission) async throws
 }
@@ -49,6 +50,9 @@ public enum AnswerState: Sendable, Equatable {
 @MainActor @Observable public final class AttentionModel {
   public private(set) var attention = LiveSection<AttentionPage>()
   public private(set) var slo = LiveSection<SloSnapshot>()
+  /// Each listed row's history by `SloEntry.id`, read after the rows it belongs to.
+  public private(set) var sloHistory = LiveSection<[String: SloHistory]>()
+  private var sloHistoryCache = SloHistoryCache()
   /// The person's availability and directive note.
   public internal(set) var availability = LiveSection<AvailabilitySnapshot>()
   /// The panel's latest availability or note change: sending, committed or Fractal's refusal.
@@ -153,9 +157,41 @@ public enum AnswerState: Sendable, Equatable {
     if case .success(let page) = result { prune(page) }
   }
 
+  /// Histories follow the rows: when the rows cannot be read, neither section is current.
   private func readSlo(from adapter: any AttentionAdapter, now: Date?) async {
     let result = await Self.capture { try await adapter.readSlo() }
     Self.apply(result, to: &slo, now: now ?? .now)
+    switch result {
+    case .success(let snapshot): await readSloHistory(snapshot.rows, from: adapter, now: now)
+    case .failure(let error): Self.apply(Result<[String: SloHistory], Error>.failure(error), to: &sloHistory, now: now ?? .now)
+    }
+  }
+
+  /// Reads the histories that are due concurrently and keeps the rest. A failed row keeps its
+  /// last history and marks the section stale with its reason; the next refresh retries it.
+  private func readSloHistory(_ rows: [SloEntry], from adapter: any AttentionAdapter, now: Date?) async {
+    let started = now ?? .now
+    sloHistoryCache.keep(rows)
+    let listed = Set(rows.map(\.id))
+    var histories = (sloHistory.value ?? [:]).filter { listed.contains($0.key) }
+    var failure: Error?
+    await withTaskGroup(of: (SloEntry, Result<SloHistory, Error>).self) { group in
+      for row in sloHistoryCache.due(rows, now: started) {
+        let request = SloHistoryRequest(id: row.id, until: started)
+        group.addTask { (row, await Self.capture { try await adapter.readSloHistory(request) }) }
+      }
+      for await (row, result) in group {
+        switch result {
+        case .success(let history):
+          histories[row.id] = history
+          sloHistoryCache.read(row, at: started)
+        case .failure(let error):
+          failure = failure ?? error
+        }
+      }
+    }
+    sloHistory.value = histories
+    Self.apply(failure.map { .failure($0) } ?? .success(histories), to: &sloHistory, now: now ?? .now)
   }
 
   nonisolated static func capture<T: Sendable>(_ read: @Sendable () async throws -> T) async -> Result<T, Error> {
