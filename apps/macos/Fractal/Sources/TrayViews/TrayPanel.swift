@@ -9,12 +9,17 @@ extension EnvironmentValues {
   @Entry var panelMaxHeight: CGFloat = 620
 }
 
-struct TrayPanel: View {
+public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
   @Environment(\.panelMaxHeight) private var maxHeight
 
-  var body: some View {
+  public init(model: AttentionModel, build: BuildIdentity) {
+    self.model = model
+    self.build = build
+  }
+
+  public var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       HeaderView(model: model)
       Divider()

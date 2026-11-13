@@ -90,9 +90,10 @@ to, and builds only once that source carries the same API.
 
 The bundle carries `Contents/Resources/nix-build-stamp.json` (`type`, `version`,
 `rev`, `dirty`, `fractalClientRev`). Its `rev` is `src.<hash>` of the tray's own
-sources plus the FractalClient revision, so unrelated repository commits neither
-rebuild nor restart the tray; the footer shows `machineVersion`
-(`0.2.0+src.<hash>`) with the FractalClient revision on hover.
+Swift package (`Package.swift`, `Sources/`, `Tests/`) plus the FractalClient
+revision, so unrelated repository commits, docs and design renders neither rebuild nor
+restart the tray; the footer shows `machineVersion` (`0.2.0+src.<hash>`) with the
+FractalClient revision on hover.
 
 Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
 The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
@@ -181,6 +182,20 @@ AppleEvents or Developer Tools permission and needs no entitlements. A local
 ad-hoc signature is sufficient. If UserNotifications or another TCC API is
 added, migrate to the governed stable-app signing identity before rollout.
 No keychain unlock or op-proxy panel is needed for this tray installation.
+
+## Design gallery
+
+The panel's views live in the `TrayViews` target and read only `AttentionCore`.
+`TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
+answering, quiet, read-only, degraded, unconfigured) and renders the real panel
+in light and dark to `@2x` PNGs plus `manifest.json`, for the design Storybook in
+`design/`. `devenv tasks run attention-tray:gallery` regenerates
+`design/renders/` from the Nix-built gallery (`nix run
+./flakes/attention-tray#gallery -- <dir> [scenario…]`); the manifest records the
+source rev. Rendering needs a Mac with a login session. The renders use the same
+`NSHostingView` + `cacheDisplay` path as snapshot mode, so window-server
+materials (the menu-bar window's glass) are not captured; judge those on the
+running panel.
 
 ## review-host rollout: root agent and Ada only
 

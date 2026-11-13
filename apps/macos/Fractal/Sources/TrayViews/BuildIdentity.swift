@@ -4,13 +4,20 @@ import Foundation
 /// `nix-build-stamp.json`; Swift cannot reuse the TypeScript resolver, so this mirrors its
 /// `machineVersion` rule. `rev` names the tray's source closure (see flake.nix), so unrelated
 /// repository commits neither rebuild nor restart the tray.
-struct BuildIdentity: Sendable {
+public struct BuildIdentity: Sendable {
   let baseVersion: String
   let rev: String?
   let dirty: Bool
   let fractalClientRev: String?
 
-  var machineVersion: String {
+  public init(baseVersion: String, rev: String?, dirty: Bool, fractalClientRev: String?) {
+    self.baseVersion = baseVersion
+    self.rev = rev
+    self.dirty = dirty
+    self.fractalClientRev = fractalClientRev
+  }
+
+  public var machineVersion: String {
     guard let rev else { return "\(baseVersion)+local" }
     return "\(baseVersion)+\(rev)\(dirty ? "-dirty" : "")"
   }
@@ -22,7 +29,7 @@ struct BuildIdentity: Sendable {
     ].joined(separator: "\n")
   }
 
-  static func bundled(_ bundle: Bundle = .main) -> Self {
+  public static func bundled(_ bundle: Bundle = .main) -> Self {
     let base = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     guard let url = bundle.url(forResource: "nix-build-stamp", withExtension: "json"),
       let data = try? Data(contentsOf: url),
