@@ -131,6 +131,9 @@ export class Program extends Context.Service<
   }
 >()('fractal/Program') {}
 
+/** Native resource requests inside a replayable activity use its identity, not global call order. */
+export class ResourceCommandScope extends Context.Service<ResourceCommandScope, string>()('fractal/ResourceCommandScope') {}
+
 /** What a program body may require: the attempt and the workflow it runs as. */
 export type ProgramServices =
   | Program

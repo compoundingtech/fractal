@@ -1,7 +1,7 @@
-import { Effect, Schema, type Scope } from 'effect'
+import { Effect, Option, Schema, type Scope } from 'effect'
 
 import { ChildFailed, ChildRun } from './program.ts'
-import { CommandResultSchema, keyed, Program, ResourceError, type CommandOptions, type CommandResult, type ResourceRequest } from './program-engine.ts'
+import { CommandResultSchema, keyed, Program, ResourceCommandScope, ResourceError, type CommandOptions, type CommandResult, type ResourceRequest } from './program-engine.ts'
 import { normalizeDuration, type DurationInput } from './values.ts'
 
 export const LaneMembership = Schema.Struct({
@@ -47,12 +47,18 @@ const invoke = <TValue>(
  * Acquire a host-local lane in the caller's scope. Every evaluation reattaches/revalidates the
  * exact request at the native boundary, including replay. Closing the scope awaits retirement;
  * a process exit or a journaled success does not itself free host capacity.
+ * Within a durable activity, request identities belong to that activity; the physical lane name
+ * remains shared policy. Repeated acquisitions in the same scope use successive occurrence keys.
  */
 export const lane = (
   name: string,
   options: LaneOptions,
 ): Effect.Effect<Lane, ResourceError, Program | Scope.Scope> =>
-  keyed(`resource.lane/${name}`, (key, program) =>
+  Effect.flatMap(Effect.serviceOption(ResourceCommandScope), (scope) =>
+    keyed(Option.match(scope, {
+      onNone: () => `resource.lane/${name}`,
+      onSome: (activity) => `${activity}/resource.lane/${name}`,
+    }), (key, program) =>
     Effect.map(Effect.acquireRelease(
       invoke(program, {
         key,
@@ -95,6 +101,7 @@ export const lane = (
           : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(Schema.Union([ResourceError, ChildFailed]))(exit.error)), Effect.fail)),
       ),
     })),
+    ),
   ).pipe(Effect.withSpan('Fractal.resources.lane'))
 
 /** Host-native resource capabilities; Effect owns scope and control flow. */

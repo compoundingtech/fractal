@@ -2,7 +2,7 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect, Schema } from 'effect'
 
 import { Fractal, type ProgramExit, type ResourceRequest } from './effect.ts'
-import { fakeHost, start } from './program-host.fixture.ts'
+import { fakeHost, journalOf, start } from './program-host.fixture.ts'
 
 const membership = { membershipId: 'membership/check', authorityEpoch: 'epoch/1', generation: 'generation/1', coverage: 'logical' } as const
 const meta = { url: 'file:///tree/check/mission.ts' }
@@ -71,6 +71,132 @@ describe('scoped native resource lanes', () => {
     } })
     expect((yield* start(program, host))._tag).toBe('Failure')
     expect(operations.at(-1)).toMatchObject({ operation: 'resource.lane.release', payload: { membership } })
+  }))
+
+  it.effect('resumes the second activity membership after the completed first activity is skipped', () => Effect.gen(function* () {
+    const initialRequests: ResourceRequest[] = []
+    const program = Fractal.mission(intent, () => Effect.gen(function* () {
+      for (const id of ['first', 'second']) {
+        yield* Fractal.step({ id }, Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })))
+      }
+    }))
+    const initial = fakeHost({ resource: (request, signal) => {
+      initialRequests.push(request)
+      if (request.key === 'second/resource.lane/checks') {
+        const { promise, resolve } = Promise.withResolvers<ProgramExit>()
+        signal?.addEventListener('abort', () => resolve({
+          _tag: 'Failure', error: { _tag: 'ResourceError', code: 'cancelled', message: 'Request withdrawn.' },
+        }), { once: true })
+        initial.cancel()
+        return promise
+      }
+      return Promise.resolve({ _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null })
+    } })
+    expect(yield* start(program, initial)).toMatchObject({ _tag: 'Failure', error: { _tag: 'Interrupted' } })
+    expect(initial.recorded.map((entry) => entry.key)).toEqual(['first'])
+    const replayRequests: ResourceRequest[] = []
+    const replay = fakeHost({
+      journal: journalOf(initial.recorded),
+      resource: async (request) => {
+        replayRequests.push(request)
+        if (request.key === 'first/resource.lane/checks') {
+          return { _tag: 'Failure', error: { _tag: 'ResourceError', code: 'retired', message: 'The first activity retired.' } }
+        }
+        return { _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null }
+      },
+    })
+    expect((yield* start(program, replay))._tag).toBe('Success')
+    expect(initialRequests.filter((request) => request.operation === 'resource.lane.acquire').map((request) => request.key)).toEqual([
+      'first/resource.lane/checks', 'second/resource.lane/checks',
+    ])
+    expect(replayRequests.map((request) => request.key)).toEqual([
+      'second/resource.lane/checks', 'second/resource.lane/checks/release',
+    ])
+    expect(replay.started).toEqual(['second'])
+  }))
+
+  it.effect('lets concurrent durable activities contend for the same physical lane at the host boundary', () => Effect.gen(function* () {
+    const program = Fractal.mission(intent, () => Effect.all(
+      ['first', 'second'].map((id) => Fractal.step({ id }, Effect.scoped(Effect.gen(function* () {
+        const lane = yield* Fractal.resources.lane('checks', { host: 'executor', maxMembers: 1 })
+        yield* lane.exec('check', ['check'])
+      })))),
+      { concurrency: 'unbounded' },
+    ).pipe(Effect.asVoid))
+    const attemptKeys: string[][] = []
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const requests: ResourceRequest[] = []
+      const bothRequested = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      let acquisitions = 0
+      let occupant: string | undefined
+      const host = fakeHost({ resource: async (request) => {
+        requests.push(request)
+        switch (request.operation) {
+          case 'resource.lane.acquire': {
+            acquisitions++
+            if (acquisitions === 2) {
+              bothRequested.resolve()
+              await released.promise
+            }
+            expect(occupant).toBeUndefined()
+            occupant = request.key
+            return { _tag: 'Success', value: { ...membership, membershipId: request.key } }
+          }
+          case 'resource.lane.exec':
+            await bothRequested.promise
+            return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
+          case 'resource.lane.release':
+            expect(request.payload).toEqual({ membership: { ...membership, membershipId: occupant } })
+            occupant = undefined
+            released.resolve()
+            return { _tag: 'Success', value: null }
+          default: throw new Error('unexpected child run')
+        }
+      } })
+      expect((yield* start(program, host))._tag).toBe('Success')
+      const acquisitionsMade = requests.filter((request) => request.operation === 'resource.lane.acquire')
+      expect(acquisitionsMade.map((request) => request.payload)).toEqual([
+        { name: 'checks', host: 'executor', maxMembers: 1, coverage: 'logical' },
+        { name: 'checks', host: 'executor', maxMembers: 1, coverage: 'logical' },
+      ])
+      attemptKeys.push(acquisitionsMade.map((request) => request.key).sort())
+      expect(occupant).toBeUndefined()
+    }
+    expect(attemptKeys).toEqual([
+      ['first/resource.lane/checks', 'second/resource.lane/checks'],
+      ['first/resource.lane/checks', 'second/resource.lane/checks'],
+    ])
+  }))
+
+  it.effect('preserves successive acquisitions within one durable activity', () => Effect.gen(function* () {
+    const keys: string[] = []
+    const program = Fractal.mission(intent, () => Fractal.step({ id: 'checks' }, Effect.gen(function* () {
+      yield* Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' }))
+      yield* Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' }))
+    })))
+    const host = fakeHost({ resource: async (request) => {
+      keys.push(request.key)
+      return { _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null }
+    } })
+    expect((yield* start(program, host))._tag).toBe('Success')
+    expect(keys).toEqual([
+      'checks/resource.lane/checks', 'checks/resource.lane/checks/release',
+      'checks/resource.lane/checks#2', 'checks/resource.lane/checks#2/release',
+    ])
+  }))
+
+  it.effect('still rejects duplicate lane identities across fibers inside one durable activity', () => Effect.gen(function* () {
+    const program = Fractal.mission(intent, () => Fractal.step({ id: 'checks' }, Effect.all([
+      Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })),
+      Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })),
+    ], { concurrency: 'unbounded' }).pipe(Effect.asVoid)))
+    const host = fakeHost({ resource: async (request) => ({
+      _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null,
+    }) })
+    const exit = yield* start(program, host)
+    expect(exit).toMatchObject({ _tag: 'Failure', error: { _tag: 'Defect' } })
+    expect(JSON.stringify(exit)).toContain('steps in concurrent branches share the id `checks/resource.lane/checks`')
   }))
 })
 

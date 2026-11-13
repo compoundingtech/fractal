@@ -13,6 +13,7 @@ import {
   keyed,
   CommandResultSchema,
   ResourceError,
+  ResourceCommandScope,
   Program,
   programEntry,
   ProgramEntry,
@@ -200,8 +201,6 @@ const child = (id: string, mission: string, input: Readonly<Record<string, strin
   })
 
 const noInterruptRetry = Schedule.recurs(0)
-/** Native commands inside a replayable step use that step's identity, not global call order. */
-class ResourceCommandScope extends Context.Service<ResourceCommandScope, string>()('fractal/ResourceCommandScope') {}
 
 export interface StepOptions {
   readonly id: string

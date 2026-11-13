@@ -61,6 +61,12 @@ Effect code inside the scope does not move its processes into the lane or fence 
 
 Acquisition crosses `resource.lane.acquire` on every evaluation, including replay; it is not an
 ordinary replayed Activity result. The host reattaches/validates the exact request and generation.
+Inside a durable `Fractal.step` activity, acquisition request keys are scoped by that activity's
+durable identity, independently of the physical lane policy name. Skipping a completed activity
+on replay cannot renumber another activity's membership, and distinct concurrent activities
+request separate memberships of the same lane, contending at the host admission boundary.
+Successive acquisitions in one durable scope retain occurrence keys; sharing the same acquisition
+identity across fibers within that scope remains a duplicate-ID defect.
 Execution uses `resource.lane.exec` or `resource.lane.run`. Scope finalization sends
 `resource.lane.release` and awaits retirement; JavaScript interruption is not physical release.
 Expected native failures use `ResourceError` with a distinct `code`, separate from payload exit
