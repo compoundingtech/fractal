@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v23.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v24.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1854,22 +1854,29 @@ fn generated_source_maps_are_admitted_and_replicate_with_their_texts() {
 }
 
 #[test]
-fn generated_retry_links_are_admitted_and_replicate() {
-    let mut world = World::new(1, Sabotage::None);
-    let kind = "mission-run.retry-linked";
-    let input = world.claim_of(&corpus()[kind], 0).unwrap();
-    assert_eq!(input.kind, kind);
-    assert!(input.subject.starts_with("mission-run/"));
-    for field in ["source", "retry"] {
-        assert!(input.fields[field].as_str().unwrap().starts_with("mission-run/"));
+fn generated_run_lineage_links_are_admitted_and_replicate() {
+    for (kind, target) in [
+        ("mission-run.retry-linked", "retry"),
+        ("mission-run.supersede-linked", "replacement"),
+    ] {
+        let mut world = World::new(1, Sabotage::None);
+        let input = world.claim_of(&corpus()[kind], 0).unwrap();
+        assert_eq!(input.kind, kind);
+        assert!(input.subject.starts_with("mission-run/"));
+        for field in ["source", target] {
+            assert!(input.fields[field].as_str().unwrap().starts_with("mission-run/"));
+        }
+        if target == "replacement" {
+            assert!(!input.fields["publication"].as_str().unwrap().is_empty());
+        }
+        fractal_schema::registry()
+            .validate_claim(&input.subject, kind, &input.fields)
+            .unwrap();
+        let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+        world.tap(0);
+        assert!(claims(&world.oracle).contains_key(&claim.id));
+        assert!(world.failures.is_empty(), "{}", world.report());
     }
-    fractal_schema::registry()
-        .validate_claim(&input.subject, kind, &input.fields)
-        .unwrap();
-    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
-    world.tap(0);
-    assert!(claims(&world.oracle).contains_key(&claim.id));
-    assert!(world.failures.is_empty(), "{}", world.report());
 }
 
 #[test]
@@ -1987,15 +1994,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Every fixed seed converges and trims a checkpoint with corpus v23.
-/// Retry lineage shifts the RNG schedule; v22's non-trimming seed is no exception here.
+/// Every fixed seed must converge and trim a checkpoint with corpus v24.
+/// A new kind-selection schedule must earn its own checkpoint coverage.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v23 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v24 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
-    assert!(outcome.trimmed, "corpus v23 seed {seed} did not trim a checkpoint");
+    assert!(outcome.trimmed, "corpus v24 seed {seed} did not trim a checkpoint");
 }
 
 /// The seeds are independent, so each is its own test and the test runner spreads them over its
@@ -2206,7 +2213,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v23.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v24.json"
         }))
         .unwrap(),
     )
