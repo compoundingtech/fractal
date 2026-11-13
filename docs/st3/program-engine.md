@@ -457,7 +457,8 @@ Worker turns can request `Fractal.step({ id, success, execution: true })` to ret
 `{ value, executions }` instead of the decoded product alone. `value` remains domain data;
 `executions` contains the child's claim-backed agent invocations, across its steps and attempts.
 The child result and `ChildFailed` also carry `executions`, so failed execution can still report
-spend. Older journal entries omit it: `undefined` means unknown, not zero. Replay returns the
+spend. Older journal entries omit it: `undefined` means unknown, not zero. Mission output
+schemas must allow an absent `executions` key when replaying those entries. Replay returns the
 journaled execution snapshot without consulting a seat's current model or running the child again.
 Each execution identifies its work claim, step, attempt, actor and harness incarnation, with the
 declared model captured at claim time, observed models, nullable fallback evidence, response token

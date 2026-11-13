@@ -28,7 +28,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         series_sql(), observed_sql()
     ))?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3686c9ce2155 owner=fractal_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_rollup_index")?;
-    connection.execute_batch("DROP INDEX IF EXISTS claims_usage_period_boundary_index")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2f4f49b6bb1e owner=fractal_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_period_boundary_index")?;
     Ok(())
 }
 
