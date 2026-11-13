@@ -1967,9 +1967,10 @@
       "command": "st now",
       "description": "Understand what needs action now",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart",
+        "crates/fractal/tests/client_v0_cli.rs::availability_surfaces_to_an_asking_agent_in_ask_and_now"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+      "verification": "real CLI over private Unix socket; disk store reopened between actions; availability lines lead for a person reader and for an agent reader"
     },
     {
       "command": "st persons rename",
@@ -2807,9 +2808,10 @@
       "command": "st work ask",
       "description": "Ask a person independently, or block specific work with --step",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart",
+        "crates/fractal/tests/client_v0_cli.rs::availability_surfaces_to_an_asking_agent_in_ask_and_now"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+      "verification": "real CLI over private Unix socket; disk store reopened between actions; the asked person's availability follows the result in human and JSON output"
     },
     {
       "command": "st work cancel-ask",
