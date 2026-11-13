@@ -4448,6 +4448,13 @@ export type TimelinePage = {
   session_id: Id;
 };
 
+export type TimelineProviderQuota = {
+  quantity: number;
+  unit: TimelineProviderQuotaUnit;
+};
+
+export type TimelineProviderQuotaUnit = "premium_requests";
+
 export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
@@ -4455,6 +4462,13 @@ export type TimelineRedactionBody = {
   reason: string;
   withheld_bytes: number;
   withheld_items?: number;
+};
+
+export type TimelineResponseCostComponents = {
+  cache_read?: number;
+  cache_write?: number;
+  input?: number;
+  output?: number;
 };
 
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
@@ -4494,6 +4508,8 @@ export type TimelineTruncationBody = {
 };
 
 export type TimelineUsageBody = {
+  account?: string;
+  api?: string;
   attribution: {
   agent_id: Id;
   generation_id?: string | null;
@@ -4501,22 +4517,33 @@ export type TimelineUsageBody = {
   step_id?: string | null;
 };
   blocks?: Array<TimelineBlock>;
+  cache_write_1h_tokens?: number;
   cache_write_tokens?: number;
   cached_tokens?: number;
   compactions?: number;
+  completed_at_unix_ms?: number;
   context_used_percent?: number;
   context_used_tokens?: number;
   context_window_tokens?: number;
   cost?: number;
+  cost_components?: TimelineResponseCostComponents;
   currency?: string;
   driver: string;
+  duration_ms?: number;
   input_tokens?: number;
   last_compaction_ms?: number;
   last_compaction_trigger?: "manual" | "auto" | "threshold" | "overflow" | "idle" | "unknown";
   model?: string;
   output_tokens?: number;
+  provider?: string;
+  provider_quota?: TimelineProviderQuota;
+  reasoning_tokens?: number;
+  response_id?: string;
   semantics: "context_occupancy" | "session_cumulative" | "response";
+  started_at_unix_ms?: number;
+  stop_reason?: string;
   total_tokens?: number;
+  ttft_ms?: number;
   turn_id?: string;
 };
 
