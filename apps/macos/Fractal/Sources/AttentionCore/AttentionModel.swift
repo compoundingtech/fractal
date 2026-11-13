@@ -148,7 +148,7 @@ public enum AnswerState: Sendable, Equatable {
   /// Speech acts only on a read that just succeeded, never on stale asks or availability.
   private func considerSpeech(now: Date) {
     guard let speech, case .fresh = attention.state, let page = attention.value else { return }
-    speech.consider(asks, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
+    speech.consider(asks + updates, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
   }
 
   /// The open card with this attention ID, at its latest read revision.

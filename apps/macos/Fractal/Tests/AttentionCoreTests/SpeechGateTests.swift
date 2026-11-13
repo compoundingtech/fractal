@@ -10,12 +10,19 @@ final class SpeechGateTests: XCTestCase {
 
   func ask(
     id: String = "attention/one", revision: String = "claim/1", from: String = "release-captain",
-    deadline: TimeInterval? = 30 * 60
+    urgent: Bool = true, deadline: TimeInterval? = nil
   ) -> AttentionRecord {
     let asked = now.addingTimeInterval(-5 * 60)
     return Fixture.record(
       id: id, revision: revision, title: "  Release train is blocked \n", from: from, requestedAt: asked,
-      deadlineAt: deadline.map { asked.addingTimeInterval($0) })
+      deadlineAt: deadline.map { asked.addingTimeInterval($0) }, urgent: urgent)
+  }
+
+  /// An update; `speech` is present only when the person asked to be told.
+  func update(speech: String? = nil) -> AttentionRecord {
+    Fixture.record(
+      id: "attention/landed", title: "Release landed", update: UpdateNote(about: "run/1", summary: nil, speech: speech),
+      from: "release-captain")
   }
 
   func availability(
@@ -26,10 +33,12 @@ final class SpeechGateTests: XCTestCase {
       presenceObservedAt: now.addingTimeInterval(-60), interruptions: interruptions, deadlineClock: .run)
   }
 
-  func testUrgentMeansAnExplicitDeadlineOfAtMostAnHour() {
-    XCTAssertTrue(ask(deadline: 60 * 60).isUrgent)
-    XCTAssertFalse(ask(deadline: 60 * 60 + 1).isUrgent)
-    XCTAssertFalse(ask(deadline: nil).isUrgent, "no deadline is never urgent")
+  func testFractalAloneDecidesUrgencyAndAnUpdateIsSpokenOnlyWithItsSpeech() {
+    XCTAssertTrue(ask(urgent: true).isSpokenUnasked)
+    XCTAssertFalse(ask(urgent: false, deadline: 60).isSpokenUnasked, "a deadline a minute away is not urgent")
+    XCTAssertTrue(update(speech: "Release landed on dev5").isSpokenUnasked)
+    XCTAssertFalse(update().isSpokenUnasked, "an update the person did not ask to be told is only shown")
+    XCTAssertFalse(update(speech: "  \n").isSpokenUnasked)
   }
 
   func context(
@@ -47,7 +56,7 @@ final class SpeechGateTests: XCTestCase {
     let gate = SpeechGate()
     let endOfToday = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now))
     var cases = 0
-    for urgent in [true, false] {
+    for item in ["urgent", "update", "plain"] {
       for readAloud in [true, false] {
         for interruptions in Availability.Interruptions.known + [.unknown("quiet")] {
           for status in Availability.Status.known + [.unknown("dnd")] {
@@ -65,19 +74,21 @@ final class SpeechGateTests: XCTestCase {
                         if mutedAgent { mutes.mute("release-captain", .endOfToday, now: now) }
                         mutes.mute("someone-else", .indefinitely, now: now)
                         let verdict = gate.verdict(
-                          ask(deadline: urgent ? 30 * 60 : 24 * 3600), readAloud: readAloud,
+                          item == "update" ? update(speech: "Release landed") : ask(urgent: item == "urgent"),
+                          readAloud: readAloud,
                           context(
                             availability(interruptions, status: status), mac: mac,
                             call: call, mutes: mutes))
+                        let unasked = item != "plain"
                         let delivered =
-                          (urgent || readAloud) && (interruptions == .all || (interruptions == .urgent && urgent))
+                          (unasked || readAloud) && (interruptions == .all || (interruptions == .urgent && unasked))
                           && status == .available && mac == .present
                         let held: SpeechHeld? =
                           mutedAll
                           ? .muted(until: now + 3600)
                           : mutedAgent ? .agentMuted(until: endOfToday) : inCall && !allowCall ? .inCall : nil
                         let label =
-                          "urgent \(urgent) readAloud \(readAloud) \(interruptions) \(status) mac \(String(describing: mac)) call \(inCall)/\(allowCall) muted \(mutedAll)/\(mutedAgent)"
+                          "\(item) readAloud \(readAloud) \(interruptions) \(status) mac \(String(describing: mac)) call \(inCall)/\(allowCall) muted \(mutedAll)/\(mutedAgent)"
                         if delivered {
                           XCTAssertEqual(verdict, held.map { .banner($0) } ?? .speak, label)
                         } else if case .quiet = verdict {
@@ -95,7 +106,7 @@ final class SpeechGateTests: XCTestCase {
         }
       }
     }
-    XCTAssertEqual(cases, 2 * 2 * 4 * 3 * 4 * 2 * 2 * 2 * 2)
+    XCTAssertEqual(cases, 3 * 2 * 4 * 3 * 4 * 2 * 2 * 2 * 2)
   }
 
   func testQuietReasonsNameTheFirstFailingRule() {
@@ -103,11 +114,13 @@ final class SpeechGateTests: XCTestCase {
     func verdict(
       _ record: AttentionRecord, readAloud: Bool = false, _ availability: Availability?, mac: PresenceState? = .present
     ) -> SpeechVerdict { gate.verdict(record, readAloud: readAloud, context(availability, mac: mac)) }
-    XCTAssertEqual(verdict(ask(deadline: nil), availability()), .quiet(.notUrgent))
+    XCTAssertEqual(verdict(ask(urgent: false), availability()), .quiet(.notUrgent))
+    XCTAssertEqual(verdict(update(), availability()), .quiet(.notUrgent))
     XCTAssertEqual(verdict(ask(), nil), .quiet(.noAvailability))
     XCTAssertEqual(verdict(ask(), readAloud: true, availability(.none)), .quiet(.interruptionsNone), "never when none")
-    XCTAssertEqual(verdict(ask(deadline: nil), readAloud: true, availability(.urgent)), .quiet(.urgentOnly))
+    XCTAssertEqual(verdict(ask(urgent: false), readAloud: true, availability(.urgent)), .quiet(.urgentOnly))
     XCTAssertEqual(verdict(ask(), availability(.urgent)), .speak)
+    XCTAssertEqual(verdict(update(speech: "Release landed"), availability(.urgent)), .speak, "the person asked")
     XCTAssertEqual(verdict(ask(), availability(.unknown("quiet"))), .quiet(.interruptionsUnknown))
     XCTAssertEqual(verdict(ask(), availability(status: .away)), .quiet(.notAvailable))
     XCTAssertEqual(verdict(ask(), availability(), mac: .locked), .quiet(.macNotPresent))
@@ -164,8 +177,10 @@ final class SpeechGateTests: XCTestCase {
     XCTAssertEqual(gate, SpeechGate(), "closed revisions and expired rate windows are forgotten")
   }
 
-  func testSpokenTextIsTheTrimmedTitleOnly() {
+  func testSpokenTextIsTheUpdatesSpeechOrElseTheTrimmedTitle() {
     XCTAssertEqual(SpeechGate.text(ask()), "Release train is blocked")
+    XCTAssertEqual(SpeechGate.text(update(speech: " Release landed on dev5 ")), "Release landed on dev5")
+    XCTAssertEqual(SpeechGate.text(update()), "Release landed")
   }
 }
 

@@ -1,16 +1,16 @@
 import Foundation
 
 extension AttentionRecord {
-  /// Fractal's urgent ask: an explicit asker deadline of at most an hour (`urgent_ask`,
-  /// `URGENT_ASK_DEADLINE_MS`). Attention carries neither that flag nor `deadline_ms`, so this
-  /// reads `deadline_at - requested_at`, which equals it while the clock runs; held time only
-  /// lengthens the span, erring quiet. With `[asks] deadlines` on, Fractal also stamps
-  /// `deadline_at` on asks that name no deadline, from `[asks] default_deadline` (24 h unless
-  /// configured), so this matches Fractal's rule only while that default exceeds an hour; a
-  /// shorter default makes every ask urgent here.
-  public var isUrgent: Bool {
-    guard let requestedAt, let deadlineAt else { return false }
-    return deadlineAt.timeIntervalSince(requestedAt) <= SpeechGate.urgentDeadline
+  /// Delivered without the person pressing Read Aloud: Fractal's urgent ask, or an update the
+  /// person asked to be told (`update.speech`). Both pass interruptions `urgent`.
+  public var isSpokenUnasked: Bool { isUrgent || speechWords != nil }
+
+  /// The update's own words to say, when it carries them.
+  var speechWords: String? {
+    guard let words = update?.speech?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else {
+      return nil
+    }
+    return words
   }
 }
 
@@ -76,14 +76,14 @@ public struct SpeechContext: Sendable, Equatable {
 }
 
 /// The tray's delivery policy; the speech service only decides how, never whether. An item is
-/// delivered only if it is urgent or the person asked to hear it, the person is available and
-/// this Mac is present as Fractal derives it, and interruptions allow it (`all`, or `urgent` for
-/// an urgent item; never `none` or a word this tray does not know). Each revision is delivered once. A delivery is a banner, and
-/// speech too unless speech is muted (all or this requester), the Mac is in a call the person
-/// has not allowed speech for, or the requester spoke within 10 minutes. Reading aloud on
-/// request skips the once-per-revision and per-requester limits; the person is asking now.
+/// delivered only if Fractal marks it urgent, it is an update the person asked to be told, or
+/// the person pressed Read Aloud; the person is available and this Mac is present as Fractal
+/// derives it; and interruptions allow it (`all`, or `urgent` for an item spoken unasked; never
+/// `none` or a word this tray does not know). Each revision is delivered once. A delivery is a
+/// banner, and speech too unless speech is muted (all or this requester), the Mac is in a call
+/// the person has not allowed speech for, or the requester spoke within 10 minutes. Reading
+/// aloud on request skips the once-per-revision and per-requester limits; the person is asking now.
 public struct SpeechGate: Sendable, Equatable {
-  public static let urgentDeadline: TimeInterval = 60 * 60
   public static let perRequester: TimeInterval = 10 * 60
 
   /// `attention-id#revision` → when it was delivered.
@@ -99,13 +99,13 @@ public struct SpeechGate: Sendable, Equatable {
   public static func key(_ record: AttentionRecord) -> String { "\(record.id)#\(record.revision)" }
 
   public func verdict(_ record: AttentionRecord, readAloud: Bool, _ context: SpeechContext) -> SpeechVerdict {
-    let urgent = record.isUrgent
-    guard urgent || readAloud else { return .quiet(.notUrgent) }
+    let unasked = record.isSpokenUnasked
+    guard unasked || readAloud else { return .quiet(.notUrgent) }
     guard let availability = context.availability else { return .quiet(.noAvailability) }
     switch availability.interruptions {
     case .none: return .quiet(.interruptionsNone)
     case .unknown: return .quiet(.interruptionsUnknown)
-    case .urgent where !urgent: return .quiet(.urgentOnly)
+    case .urgent where !unasked: return .quiet(.urgentOnly)
     case .urgent, .all: break
     }
     guard availability.status == .available else { return .quiet(.notAvailable) }
@@ -143,8 +143,8 @@ public struct SpeechGate: Sendable, Equatable {
     lastByRequester = lastByRequester.filter { now.timeIntervalSince($0.value) < Self.perRequester }
   }
 
-  /// The words spoken: the item's title only.
+  /// The words spoken: an update's own `speech` when it carries them, otherwise the title only.
   public static func text(_ record: AttentionRecord) -> String {
-    String(record.title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+    String((record.speechWords ?? record.title.trimmingCharacters(in: .whitespacesAndNewlines)).prefix(300))
   }
 }

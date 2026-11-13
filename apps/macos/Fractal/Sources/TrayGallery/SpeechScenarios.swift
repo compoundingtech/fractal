@@ -14,7 +14,7 @@ private struct SpeechContent {
       id: "attention/\(id)", revision: "claim/1", kind: "person-step", state: "open", sourceID: "work/\(id)",
       episode: "claim/1", title: title, detail: "", from: from, requestedAt: now - askedAgo,
       deadlineAt: now - askedAgo + (urgent ? 45 * 60 : 24 * 3600), defaultAnswerLabel: nil, actions: ["work.done"],
-      promptAnswers: [], request: request, update: nil, workDoneDefaults: nil, url: url)
+      promptAnswers: [], request: request, update: nil, workDoneDefaults: nil, url: url, isUrgent: urgent)
   }
 
   var rollback: AttentionRecord {

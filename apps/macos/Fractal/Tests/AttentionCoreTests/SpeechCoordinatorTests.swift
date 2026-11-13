@@ -8,10 +8,9 @@ final class SpeechCoordinatorTests: XCTestCase {
   let now = Date(timeIntervalSince1970: 1_792_411_200)
 
   func urgent(_ id: String, from: String, title: String = "Release train is blocked") -> AttentionRecord {
-    let asked = now.addingTimeInterval(-60)
-    return Fixture.record(
-      id: "attention/\(id)", title: title, request: Fixture.decision(), from: from, requestedAt: asked,
-      deadlineAt: asked.addingTimeInterval(1800))
+    Fixture.record(
+      id: "attention/\(id)", title: title, request: Fixture.decision(), from: from,
+      requestedAt: now.addingTimeInterval(-60), urgent: true)
   }
 
   var available: Availability {
@@ -195,6 +194,24 @@ final class SpeechCoordinatorTests: XCTestCase {
         "speech attention/one#claim/1 from release-captain: spoken",
         "speech attention/one#claim/1 from release-captain: quiet (already delivered at this revision)",
       ])
+  }
+
+  func testAnUpdateThePersonAskedToBeToldIsSpokenInItsOwnWords() async {
+    let output = ScriptedSpeech()
+    let lines = Lines()
+    let (speech, deliveries) = coordinator(output, lines: lines)
+    let told = Fixture.record(
+      id: "attention/landed", title: "Release landed",
+      update: UpdateNote(about: "run/1", summary: "Merged", speech: "The release landed on dev5"), from: "release-captain")
+    let shown = Fixture.record(
+      id: "attention/merged", title: "PR merged", update: UpdateNote(about: "run/2", summary: nil), from: "janitor")
+    consider(speech, [told, shown])
+    await output.waitForRequests(1)
+    let requests = await output.requests
+    XCTAssertEqual(
+      requests, [.init(id: "attention/landed#claim/1", text: "The release landed on dev5", source: "release-captain")])
+    XCTAssertEqual(deliveries.shown.map(\.id), [told.id], "an update without speech is only shown in the panel")
+    XCTAssertEqual(lines.all.first, "speech attention/landed#claim/1 from release-captain: asked to be told, queued")
   }
 
   func until(_ condition: @escaping () -> Bool) async {

@@ -19,14 +19,15 @@ private struct Content {
   func record(
     _ id: String, title: String, detail: String = "", from: String, kind: String = "person-step",
     actions: [String] = ["work.done"], request: RequestForm? = nil, update: UpdateNote? = nil,
-    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil
+    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false
   ) -> AttentionRecord {
     AttentionRecord(
       id: "attention/\(id)", revision: "claim/1", kind: kind, state: "open", sourceID: "work/\(id)",
       episode: "claim/1", title: title, detail: detail, from: from, requestedAt: now - askedAgo,
       deadlineAt: deadlineIn.map { now + $0 }, defaultAnswerLabel: nil, actions: actions,
       promptAnswers: [], request: request, update: update,
-      workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url)
+      workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url,
+      isUrgent: urgent)
   }
 
   var shipDecision: RequestForm {
@@ -50,12 +51,12 @@ private struct Content {
       custom: true, recommendedAnswerID: "local")
   }
 
-  /// A decision due within the hour (urgent), a yes/no question, a form answered in Fractal.
+  /// A critical decision (urgent), a choice, a yes/no question, a form answered in Fractal.
   var asks: [AttentionRecord] {
     [
       record(
         "ship-tray", title: "Ship attention-tray 0.3", detail: "The stack is green; the rollout touches only review-host.",
-        from: "agent/LandDotfiles", request: shipDecision, askedAgo: 4 * 60, deadlineIn: 50 * 60),
+        from: "agent/LandDotfiles", request: shipDecision, askedAgo: 4 * 60, deadlineIn: 50 * 60, urgent: true),
       record(
         "speech-region", title: "Where should speech run?", from: "agent/SpeechService",
         request: regionChoice, askedAgo: 18 * 60),
@@ -174,7 +175,7 @@ let scenarios: [Scenario] = [
   Scenario(
     id: "busy", title: "Busy inbox",
     description:
-      "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent."
+      "An urgent decision (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent."
   ) { now in
     let content = Content(now: now)
     let fractal = FixtureFractal(
@@ -290,7 +291,7 @@ let scenarios: [Scenario] = [
       }
     }),
   Scenario(
-    id: "urgent", title: "Urgent", description: "Four asks, one due within the hour; an objective missed.",
+    id: "urgent", title: "Urgent", description: "Four asks, one urgent; an objective missed.",
     prepare: menuBarModel(\.asks, slo: \.strainedSlo)),
   Scenario(
     id: "offline", title: "Offline", description: "Fractal unreachable: the last count stays; the symbol says the refresh failed.",

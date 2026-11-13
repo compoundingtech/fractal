@@ -240,9 +240,9 @@ actor FractalAttentionAdapter: AttentionAdapter {
           },
           custom: $0.custom ?? false, recommendedAnswerID: $0.recommendation?.answer)
       },
-      update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary) },
+      update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary, speech: $0.speech) },
       workDoneDefaults: Self.workDoneDefaults(parameters["work.done"]),
-      url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef))
+      url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef), isUrgent: item.urgent == true)
   }
 
   /// The server-filled `work.done` summary and answer (an update's `Read` / `{id: read}`).

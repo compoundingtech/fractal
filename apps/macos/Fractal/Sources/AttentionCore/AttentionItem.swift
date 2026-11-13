@@ -27,12 +27,16 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   public let workDoneDefaults: WorkDoneAnswer?
   /// Where this card is answered in Fractal web.
   public let url: URL
+  /// Fractal's `urgent`, its one urgency rule (an ask its asker gave priority `critical`); never
+  /// derived from a deadline here. A daemon that predates the field omits it: not urgent.
+  public let isUrgent: Bool
 
   public init(
     id: String, revision: String, kind: String, state: String, sourceID: String,
     episode: String?, title: String, detail: String, from: String, requestedAt: Date?,
     deadlineAt: Date?, defaultAnswerLabel: String?, actions: [String], promptAnswers: [String],
-    request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL
+    request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL,
+    isUrgent: Bool = false
   ) {
     self.id = id
     self.revision = revision
@@ -52,6 +56,7 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     self.update = update
     self.workDoneDefaults = workDoneDefaults
     self.url = url
+    self.isUrgent = isUrgent
   }
 
   /// What the tray does with this card. Mirrors Fractal web `data/attention.ts`
@@ -121,10 +126,14 @@ public struct RequestAnswer: Sendable, Equatable {
 public struct UpdateNote: Sendable, Equatable {
   public let about: String
   public let summary: String?
+  /// `update.speech`: the words to say, present only when the person asked to be told this
+  /// outcome. An update without it is shown, never spoken unasked.
+  public let speech: String?
 
-  public init(about: String, summary: String?) {
+  public init(about: String, summary: String?, speech: String? = nil) {
     self.about = about
     self.summary = summary
+    self.speech = speech
   }
 }
 
