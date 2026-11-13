@@ -7,7 +7,7 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, DirectiveNoteSet, DirectiveNoteSetResult,
+    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -477,9 +477,9 @@ export class FractalClient {
         return this.request<PersonAvailability>('PUT', '/v1/client/availability', request, undefined, undefined, requestOptions);
     }
 
-    /** Report one device's presence for the session person; the daemon assigns the source. Requires write.presence. */
-    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailability>> {
-        return this.request<PersonAvailability>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
+    /** Report one device's raw state for the session person, on every state change and again at report_again_at; the daemon derives presence and assigns the source. Requires write.presence. */
+    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PresenceReportResult>> {
+        return this.request<PresenceReportResult>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
     }
 
     /** Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused. */

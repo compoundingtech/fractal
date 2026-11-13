@@ -41,7 +41,7 @@ export default Fractal.mission({
 })
 ```
 
-An objective (`docs/st3/objectives.md`) is a target over something Fractal measures. A fleet declares intervals over claims, named `NAMESPACE/NAME` by their directory; `objective.ts` needs no `meta` because nothing references an objective, and a `name`, if given, must equal the path ID.
+An objective (`docs/st3/objectives.md`) is a target over something Fractal measures. A fleet declares intervals and counts over claims, named `NAMESPACE/NAME` by their directory; `objective.ts` needs no `meta` because nothing references an objective, and a `name`, if given, must equal the path ID.
 
 ```ts
 // ops/change-rollout/objective.ts
@@ -67,6 +67,8 @@ export default Fractal.objective({
   onBreach: Fractal.response.fault({ owner: releaseManager, condition: 'change-rollout-slo-missed' }),
 })
 ```
+
+A count takes one `per-hour` target with `min` or `max`: `Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' }, labels: ['repository'] })` with `window: { span: '24h' }` and `targets: [{ stat: 'per-hour', min: 10 }]`. Only the count's own row is judged against the target; each label row is a part of it, shown without a verdict.
 
 `Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`, `ciDuration`, `ciCount`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
 
