@@ -12,15 +12,19 @@ import {
 const meta = {
   title: 'AttentionTray/Panel',
   component: RenderedPanel,
-  args: { scenario: 'busy', appearance: 'light' },
+  args: { scenario: 'busy' },
   argTypes: {
     scenario: { control: 'select', options: availableScenarioIds },
-    appearance: { control: 'inline-radio', options: appearances },
+    appearance: { control: false },
+    panel: { control: false },
+    page: { control: false },
+    title: { control: false },
   },
   parameters: {
     docs: {
       description: {
-        component: `Real SwiftUI renders of the Attention tray panel, produced by ${manifest?.generator ?? 'TrayGallery'} (\`${manifest?.command ?? 'devenv tasks run attention-tray:gallery'}\`). Window-server materials are not captured.`,
+        component:
+          'The panel the running tray ships, in every fixture scenario. Each image is a real window-server capture (Liquid Glass, the status item) when TrayGallery --capture has one, else the flat cacheDisplay render, labelled as such. Appearance follows macOS; override it in the toolbar.',
       },
     },
   },
@@ -74,6 +78,7 @@ export const AllStates: Story = {
           </section>
         )
       })}
+      {manifest === undefined ? <p>renders/manifest.json is missing.</p> : null}
     </div>
   ),
 }

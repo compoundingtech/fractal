@@ -1,61 +1,105 @@
-import { manifest, renderScale, resolveRender, scenarioById, type Appearance } from './renders.ts'
+import { useAppearance } from './appearance.tsx'
+import {
+  captureManifest,
+  manifest,
+  regenerateCommand,
+  resolvePanel,
+  scenarioById,
+  type Appearance,
+  type ImageSource,
+  type ResolvedImage,
+} from './renders.ts'
 
-/** Point size used for the placeholder when the manifest has no dimensions for a render. */
+/** Point size used for the placeholder when no manifest has dimensions for an image. */
 const placeholderSize = { width: 400, height: 320 }
 
-const missingReason = ({ file }: { file: string | undefined }): string => {
-  if (manifest === undefined) return 'renders/manifest.json is missing.'
-  if (file === undefined) return 'The manifest lists no render for this scenario and appearance.'
-  return `renders/${file} is missing.`
+const sourceLabel: Record<ImageSource, string> = {
+  capture: 'Real capture · window server, Liquid Glass',
+  fallback: 'Fallback · cacheDisplay, no materials, controls drawn inactive',
+}
+
+/** Props of {@link RenderFigure}. */
+export interface RenderFigureProps {
+  readonly image: ResolvedImage | undefined
+  readonly title: string
+  readonly appearance: Appearance
+  /** What is missing when there is no image, e.g. `busy-dark`. */
+  readonly missing: string
+}
+
+/**
+ * One generated image at point size on the window background of its appearance, captioned with
+ * its title, appearance and source (real capture or flat fallback). A missing image shows a
+ * labelled placeholder of the same footprint with the command that regenerates it.
+ */
+export const RenderFigure = ({ image, title, appearance, missing }: RenderFigureProps) => {
+  const size = image ?? placeholderSize
+  const rev = image?.source === 'capture' ? captureManifest?.trayRev : manifest?.trayRev
+  return (
+    <figure className="at-panel" data-appearance={appearance} data-source={image?.source}>
+      {image?.url === undefined ? (
+        <div
+          className="at-placeholder"
+          role="img"
+          aria-label={`Missing render: ${missing}`}
+          style={{ width: size.width, height: size.height }}
+        >
+          <strong>No render for {missing}</strong>
+          <span>
+            {image === undefined
+              ? 'No manifest lists it yet.'
+              : `renders/${image.file} is not on disk.`}
+          </span>
+          <code>{regenerateCommand(image?.source ?? 'fallback')}</code>
+        </div>
+      ) : (
+        <img
+          className="at-render"
+          src={image.url}
+          alt={`${title} (${appearance})`}
+          width={image.width}
+          height={image.height}
+        />
+      )}
+      <figcaption className="at-caption" style={{ maxWidth: Math.max(size.width, 320) }}>
+        <span className="at-caption-title">{title}</span>
+        <span>{appearance}</span>
+        {image === undefined ? null : (
+          <span className="at-source" data-source={image.source}>
+            {sourceLabel[image.source]}
+          </span>
+        )}
+        <span>{rev ?? 'unversioned source'}</span>
+      </figcaption>
+    </figure>
+  )
 }
 
 /** Props of {@link RenderedPanel}. */
 export interface RenderedPanelProps {
   /** Scenario id from the render manifest (`busy`, `quiet`, …). */
   readonly scenario: string
-  readonly appearance: Appearance
+  /** Forced appearance; by default the Storybook appearance (macOS unless overridden). */
+  readonly appearance?: Appearance
+  /** Design combination (`L1-A2-H3-S1`); the current design by default. */
+  readonly panel?: string
+  /** Page of the segmented layout. */
+  readonly page?: string | null
+  /** Caption title; the scenario title by default. */
+  readonly title?: string
 }
 
-/**
- * One TrayGallery render at point size (pixel size / scale) on the macOS window background of its
- * appearance, captioned with scenario title, appearance and the tray source revision. A render the
- * manifest or disk does not have shows a labelled placeholder of the same footprint.
- */
-export const RenderedPanel = ({ scenario, appearance }: RenderedPanelProps) => {
-  const render = resolveRender({ scenario, appearance })
-  const title = scenarioById(scenario)?.title ?? scenario
-  const size =
-    render.entry === undefined
-      ? placeholderSize
-      : { width: render.entry.width / renderScale, height: render.entry.height / renderScale }
-
+/** The best image of a panel: the real capture when there is one, else the flat render. */
+export const RenderedPanel = ({ scenario, appearance, panel, page, title }: RenderedPanelProps) => {
+  const storyAppearance = useAppearance()
+  const resolvedAppearance = appearance ?? storyAppearance
+  const image = resolvePanel({ panel, page, scenario, appearance: resolvedAppearance })
   return (
-    <figure className="at-panel" data-appearance={appearance}>
-      {render.url === undefined ? (
-        <div
-          className="at-placeholder"
-          role="img"
-          aria-label={`Missing render: ${scenario} ${appearance}`}
-          style={{ width: size.width, height: size.height }}
-        >
-          <strong>No render for {`${scenario}-${appearance}`}</strong>
-          <span>{missingReason({ file: render.entry?.file })}</span>
-          <code>{manifest?.command ?? 'devenv tasks run attention-tray:gallery'}</code>
-        </div>
-      ) : (
-        <img
-          className="at-render"
-          src={render.url}
-          alt={`${title} (${appearance})`}
-          width={size.width}
-          height={size.height}
-        />
-      )}
-      <figcaption className="at-caption" style={{ maxWidth: size.width }}>
-        <span className="at-caption-title">{title}</span>
-        <span>{appearance}</span>
-        <span>{manifest?.trayRev ?? 'unversioned source'}</span>
-      </figcaption>
-    </figure>
+    <RenderFigure
+      image={image}
+      title={title ?? scenarioById(scenario)?.title ?? scenario}
+      appearance={resolvedAppearance}
+      missing={[panel, page, scenario, resolvedAppearance].filter(Boolean).join('-')}
+    />
   )
 }

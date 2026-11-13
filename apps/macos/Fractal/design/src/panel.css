@@ -115,3 +115,154 @@
   align-items: flex-start;
   gap: 16px;
 }
+
+/* The canvas follows the resolved appearance (macOS, or the toolbar override). */
+html[data-appearance='light'] body {
+  background: #f5f5f7;
+  color: rgb(0 0 0 / 85%);
+}
+
+html[data-appearance='dark'] body {
+  background: #1e1e1e;
+  color: rgb(255 255 255 / 85%);
+}
+
+.at-panel[data-source='capture'] {
+  /* Captures carry their own backdrop: no window-color frame around them. */
+  padding: 12px 0;
+  background: transparent;
+}
+
+.at-source[data-source='capture'] {
+  color: #30a46c;
+}
+
+.at-source[data-source='fallback'] {
+  color: #d97706;
+}
+
+.at-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.at-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 980px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgb(127 127 127 / 10%);
+}
+
+.at-picker-label {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.at-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.at-segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgb(127 127 127 / 18%);
+}
+
+.at-segmented button {
+  position: relative;
+  min-width: 44px;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.at-segmented button[aria-pressed='true'] {
+  background: rgb(255 255 255 / 90%);
+  color: #111;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
+}
+
+.at-segmented button:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 1px;
+}
+
+.at-current-dot {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #0a84ff;
+}
+
+.at-review-pick {
+  margin-left: 3px;
+  font-size: 10px;
+  color: #b8860b;
+}
+
+.at-picker-description {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.at-compare,
+.at-selection {
+  margin: 0;
+  font-size: 12px;
+}
+
+.at-checklist {
+  border-collapse: collapse;
+  max-width: 980px;
+  font-size: 12px;
+}
+
+.at-checklist th,
+.at-checklist td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgb(127 127 127 / 25%);
+  text-align: left;
+  vertical-align: top;
+}
+
+.at-verdict[data-verdict='pass'] {
+  color: #30a46c;
+  font-weight: 600;
+}
+
+.at-verdict[data-verdict='fail'] {
+  color: #e5484d;
+  font-weight: 600;
+}
+
+.at-verdict[data-verdict='partial'] {
+  color: #d97706;
+  font-weight: 600;
+}
+
+.at-sources {
+  max-width: 980px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.at-sources a {
+  color: #0a84ff;
+}

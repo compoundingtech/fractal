@@ -1,25 +1,41 @@
 # Attention tray design Storybook
 
-Storybook over real SwiftUI renders of the Attention tray panel. Nothing here re-creates the UI in
-HTML: the stories frame PNGs that the `TrayGallery` executable produces from fixture adapters by
-rendering the actual panel views into an `NSHostingView` and capturing it with `cacheDisplay`.
+Storybook over real SwiftUI renders of the Attention tray. Nothing here re-creates the UI in HTML:
+the stories frame PNGs that the `TrayGallery` executable produces from fixture adapters
+(`../README.md`, Design gallery).
 
-That capture path draws the view hierarchy only. Window-server effects (vibrancy, materials,
-Liquid Glass, the menu-bar attachment) are not captured, so translucent surfaces appear flat. Judge
-those on a running tray, not here.
+Every image is labelled with its source:
+
+- **Real capture**: the actual `MenuBarExtra` window and status item captured by ScreenCaptureKit,
+  so Liquid Glass, vibrancy and the menu-bar attachment are real.
+- **Fallback · no materials**: the panel views drawn by `cacheDisplay`; layout, type and symbols are
+  exact, translucent surfaces are flat and controls draw in their inactive look (the default
+  button is not tinted). The status item's fallback is its template image tinted on a flat bar.
+
+Stories follow the viewer's macOS appearance (manager and canvas switch live); the toolbar's
+Appearance menu forces Light or Dark.
+
+## Stories
+
+- `AttentionTray/Panel`: the shipped design per scenario, plus `AllStates` (light and dark).
+- `AttentionTray/MenuBar`: the status item per variant (M1–M3) and state.
+- `AttentionTray/V2`: `Exploration` (the locked decisions K1–K12, then pick L/A/H/S/M by ID and a
+  scenario; a dot marks the shipped option, ★ the HIG review's pick) and `Current`.
+- `AttentionTray/Guidelines`: the HIG/WWDC sources the design follows, first-party benchmarks and a
+  pass/partial/fail checklist for the shipped design.
 
 ## Renders
 
-`renders/` holds `<scenario>-<appearance>.png` (@2x, `light`/`dark`) and `manifest.json` (generator,
-command, tray source revision, scale, scenario titles/descriptions, per-render pixel sizes). Both are
-generated; regenerate on a Mac:
+`renders/` holds three generated sets, each with its manifest:
 
-```sh
-devenv tasks run attention-tray:gallery
-```
+| Set                      | Files                                                           | Committed | Regenerate (on a Mac)                                                                                    |
+| ------------------------ | --------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| Fallback, shipped design | `<scenario>-<appearance>.png`, `menubar-*.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                |
+| Real captures            | `capture/*.png`, `capture.json`                                 | yes       | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
+| Exploration              | `explore/*.png`, `explore.json`                                 | no        | `devenv tasks run attention-tray:gallery-explore`                                                        |
 
-A render missing from the manifest or from disk shows a labelled placeholder instead of failing the
-build.
+A render missing from a manifest or from disk shows a labelled placeholder instead of failing the
+build; without `explore/` the Exploration story says how to generate it.
 
 ## Run
 
