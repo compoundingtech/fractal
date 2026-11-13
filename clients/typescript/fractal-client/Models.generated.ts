@@ -940,6 +940,7 @@ export type AssistantScope =
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
   | "write.assistant.answers"
+  | "read.assistant.availability"
 ;
 
 export type AssistantSenderClass = "external-assistant";

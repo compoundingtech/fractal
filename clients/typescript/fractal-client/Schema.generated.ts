@@ -506,7 +506,8 @@ export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals([
   "read.assistant.slo",
   "write.assistant.messages",
   "write.assistant.custom-reply",
-  "write.assistant.answers"
+  "write.assistant.answers",
+  "read.assistant.availability"
 ]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
