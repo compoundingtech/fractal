@@ -3871,12 +3871,13 @@ impl Client {
             .await
     }
 
-    /// Report one device's presence for the session person; the daemon assigns the source.
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
     /// Requires `write.presence`; agent sessions are refused.
     pub async fn presence_report(
         &self,
         report: &PresenceReport,
-    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
         self.post("/v1/client/presence", report).await
     }
 

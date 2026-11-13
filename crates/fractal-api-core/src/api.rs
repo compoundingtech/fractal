@@ -995,6 +995,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(runs::get_run_revision_proposal),
         )
         .route("/v1/mission-runs/{run}/revision", post(runs::revise_mission_run))
+        .route("/v1/mission-runs/{run}/retry", post(runs::retry_mission_run))
         .route(
             "/v1/mission-runs/{run}/outcome",
             post(runs::set_mission_run_outcome),
@@ -12623,9 +12624,15 @@ fn cached_revision_submission(
         .revision_proposal(&cached.id)
         .map_err(ApiError::internal)?
         .unwrap_or(cached);
+    let successor = if let Some(generation) = proposal.successor_generation.as_deref() {
+        Some(state.store.run_generation(generation).map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("the proposal successor generation is unavailable"))?)
+    } else {
+        None
+    };
     let mission_run = state
         .store
-        .mission_run(&proposal.run)
+        .mission_run(successor.as_ref().map_or(proposal.run.as_str(), |generation| generation.run.as_str()))
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("the proposal mission run is unavailable"))?;
     let mut result = RevisionSubmissionView {
