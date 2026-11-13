@@ -148,7 +148,7 @@ const checklist: readonly Check[] = [
     item: 'Status never carried by color alone',
     verdict: 'pass',
     evidence:
-      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; offline swaps the menu-bar glyph. Histogram hours without a bar differ in shape (spent: cross, unmeasured: ring), named in a key under the chart; the nearly-spent zone is a dashed rule.',
+      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; offline swaps the menu-bar glyph. Histogram hours without a bar differ in shape (spent: cross, unmeasured: ring); a key under the chart names them and the dashed nearly-spent rule.',
   },
   {
     item: 'SF Symbols chosen per job; system symbols only',

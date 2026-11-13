@@ -45,9 +45,9 @@ struct AsksSection: View {
 }
 
 /// One ask: a compact row whose disclosure opens the detail and the inline answer. The first ask
-/// starts open, and so does any ask the person has started answering. Every control inside is in
-/// the view hierarchy from the start (nothing waits for a hover), so the keyboard and VoiceOver
-/// reach all of them.
+/// and the ask whose answer leads start open, and so does any ask the person has started
+/// answering. An open row's controls are always present (nothing waits for a hover); a closed
+/// row opens from its disclosure button, so the keyboard and VoiceOver reach every control.
 private struct AskRow: View {
   let record: AttentionRecord
   let model: AttentionModel
@@ -63,8 +63,8 @@ private struct AskRow: View {
   private var draft: AnswerDraft { model.answerDrafts[record.id] ?? AnswerDraft() }
   private var words: String { draft.words }
   private var selected: String? { draft.selected }
-  /// The person has started answering: never hide what they typed or picked.
-  private var inProgress: Bool { editing || !draft.isEmpty || state != nil }
+  /// The person has started answering and not yet committed: never hide what they typed or picked.
+  private var inProgress: Bool { editing || !draft.isEmpty || (state != nil && !committed) }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -91,7 +91,13 @@ private struct AskRow: View {
   }
 
   private var disclosure: some View {
-    let open = Binding(get: { expanded ?? (isFirst || inProgress) }, set: { expanded = $0 })
+    let open = Binding(
+      get: { expanded ?? (isFirst || leads || inProgress) },
+      set: { isOpen in
+        expanded = isOpen
+        // Collapsing removes the focused field without reporting the blur.
+        if !isOpen, model.focusedInput == record.id { model.focusedInput = nil }
+      })
     return DisclosureGroup(isExpanded: open) {
       VStack(alignment: .leading, spacing: 6) {
         if !record.detail.isEmpty, record.detail != record.title {
@@ -272,7 +278,7 @@ private struct AskSymbol: View {
       .symbolRenderingMode(record.isUrgent ? .monochrome : .hierarchical)
       .foregroundStyle(record.isUrgent ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
       .frame(width: Self.width)
-      .accessibilityLabel(record.isUrgent ? "Urgent" : "Ask")
+      .accessibilityLabel(record.isUrgent ? "Urgent, \(kind)" : kind)
   }
 
   private var symbol: String {
@@ -283,6 +289,17 @@ private struct AskSymbol: View {
     case "choice": return "list.bullet.circle"
     case "feedback": return "text.bubble"
     default: return "questionmark.bubble"
+    }
+  }
+
+  /// What the symbol shows, for VoiceOver.
+  private var kind: String {
+    if record.role == .ask(.inFractal) { return "Answer in Fractal" }
+    switch record.request?.type {
+    case "decision": return "Decision"
+    case "choice": return "Choice"
+    case "feedback": return "Feedback"
+    default: return "Question"
     }
   }
 }

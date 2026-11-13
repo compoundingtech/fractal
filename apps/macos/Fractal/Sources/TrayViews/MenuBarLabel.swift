@@ -50,7 +50,7 @@ public struct MenuBarState: Equatable, Sendable {
     if health == .unconfigured { return "Attention: configuration needed" }
     return [
       asks == 1 ? "Attention: 1 open ask" : "Attention: \(asks) open asks",
-      urgent ? "one is urgent" : nil,
+      urgent ? (asks == 1 ? "urgent" : "including urgent") : nil,
       health == .offline ? "offline, showing the last update" : nil,
     ]
     .compactMap { $0 }.joined(separator: ", ")

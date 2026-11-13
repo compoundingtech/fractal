@@ -186,13 +186,14 @@ private struct StatusStrip: View {
     if let availability = model.availability.value?.availability {
       StatusChip(id: .availability, help: "Availability", detail: detail) {
         Label(AvailabilitySection.summary(availability), systemImage: AxisRows.symbol(availability.status))
+          .accessibilityLabel("Availability: \(AvailabilitySection.summary(availability))")
       }
     }
     if let board = model.sloBoard {
       StatusChip(id: .objectives, help: "Objectives", detail: detail) {
-        Label(
-          board.needsAttention > 0 ? "\(board.needsAttention) need attention" : "Objectives met",
-          systemImage: board.needsAttention > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle")
+        let summary = board.needsAttention > 0 ? "\(board.needsAttention) need attention" : "Objectives met"
+        Label(summary, systemImage: board.needsAttention > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle")
+          .accessibilityLabel("Objectives and budgets: \(summary)")
       }
     }
   }

@@ -17,7 +17,7 @@ const picks: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'A3',
-    text: 'Each ask is a compact row (kind or urgency symbol, title, asker, age, deadline) with a trailing disclosure that opens its detail and inline answers. The first ask starts open, and so does any ask the person has started answering.',
+    text: 'Each ask is a compact row (kind or urgency symbol, title, asker, age, deadline) with a trailing disclosure that opens its detail and inline answers. The first ask and the ask whose answer leads (K4) start open, and so does any ask the person has started answering; a committed ask stays closed.',
   },
   {
     id: 'H3',
@@ -25,7 +25,7 @@ const picks: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'S2',
-    text: 'Objectives and budgets are compact rows; a disclosure opens the full 24-hour histogram with hour and percent axes. The worst row that is not met starts open.',
+    text: 'Objectives and budgets are compact rows; a disclosure opens the full 24-hour histogram with hour and percent axes. In each section the worst row that is not met starts open.',
   },
   {
     id: 'M3',
@@ -81,7 +81,7 @@ const locked: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'K12',
-    text: 'Histograms: Swift Charts bars per hour; an hour without a bar carries a baseline mark that differs in shape, not only color (spent: red cross, unmeasured: grey ring), named in a key under the chart; the nearly-spent zone is a dashed rule.',
+    text: 'Histograms: Swift Charts bars per hour; an hour without a bar carries a baseline mark that differs in shape, not only color (spent: red cross, unmeasured: grey ring); the nearly-spent zone is a dashed rule; a key under the chart names the rule and the marks.',
   },
 ]
 
