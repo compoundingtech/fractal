@@ -68,6 +68,8 @@ struct ModuleTile: View {
   var symbolTint: Color?
   var toggleHelp = ""
   var toggle: () -> Void = {}
+  /// The person just went back from this module's page: VoiceOver returns here.
+  var returnsFocus = false
   let open: () -> Void
 
   var body: some View {
@@ -98,6 +100,7 @@ struct ModuleTile: View {
       .help("\(title): \(value). Open for more")
       .accessibilityLabel("\(title), \(value)")
       .accessibilityHint("Opens its page")
+      .focusOnArrival(returnsFocus)
     }
     .padding(5)
     .padding(.trailing, 3)
@@ -119,6 +122,7 @@ private struct AvailabilityTile: View {
       isOn: availability == nil ? nil : available,
       toggleHelp: available ? "Set Away until you change it" : "Set Available",
       toggle: { if let availability { AvailabilitySwitch.flip(availability, model) } },
+      returnsFocus: model.backFrom == .availability,
       open: { open(.availability) }
     )
     .disabled(model.isWritingAvailability)
@@ -156,6 +160,7 @@ private struct SpeechTile: View {
       toggle: {
         if muted { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
       },
+      returnsFocus: model.backFrom == .speech,
       open: { PanelMotion.open(.speech, in: model) }
     )
   }
@@ -184,6 +189,7 @@ private struct ObjectivesTile: View {
       symbol: missed > 0 ? "xmark.octagon.fill" : strained > 0 ? "exclamationmark.triangle.fill" : "checkmark.seal",
       isOn: nil,
       symbolTint: missed > 0 ? .red : strained > 0 ? .orange : nil,
+      returnsFocus: model.backFrom == .objectives,
       open: { PanelMotion.open(.objectives, in: model) }
     )
   }
@@ -232,12 +238,14 @@ private struct InboxList: View {
 }
 
 /// One card: urgency or kind symbol · title · asker · age · chevron, on one line. A card with
-/// an unsent draft or a write in flight says so with a symbol before the asker.
+/// an unsent draft or a write in flight says so with a symbol before the asker; one Fractal
+/// refused says so in a word.
 struct InboxRow: View {
   let record: AttentionRecord
   let model: AttentionModel
 
   var body: some View {
+    let write = WriteMark.state(record, model)
     Button {
       PanelMotion.open(.attention(record.id), in: model)
     } label: {
@@ -249,7 +257,7 @@ struct InboxRow: View {
           .truncationMode(.tail)
         Spacer(minLength: 4)
         HStack(spacing: 5) {
-          WriteMark(record: record, model: model)
+          WriteMark(state: write)
           Text(Self.short(record.from))
           if let asked = record.requestedAt {
             ShortAge(date: asked).foregroundStyle(.tertiary)
@@ -266,15 +274,31 @@ struct InboxRow: View {
       }
     }
     .buttonStyle(.panelRow)
-    .help(record.title)
-    .accessibilityLabel(accessibilityLabel)
+    .help(help(write))
+    .accessibilityLabel(accessibilityLabel(write))
     .accessibilityHint("Opens the ask")
+    .focusOnArrival(model.backFrom == .attention(record.id))
     .modifier(MarksSeen(record: record, model: model))
   }
 
-  private var accessibilityLabel: String {
+  /// The row replaces its children's labels, so it carries what they show: the age and the
+  /// write state.
+  private func accessibilityLabel(_ write: WriteMark.State?) -> String {
     let kind = record.update != nil ? "Update" : RecordSymbol.kind(record)
-    return "\(record.isUrgent ? "Urgent " : "")\(kind): \(record.title), from \(record.from)"
+    var label = "\(record.isUrgent ? "Urgent " : "")\(kind): \(record.title), from \(record.from)"
+    if let asked = record.requestedAt {
+      let age = asked.formatted(.relative(presentation: .named, unitsStyle: .wide))
+      label += ", \(record.update == nil ? "asked" : "posted") \(age)"
+    }
+    if let write { label += ", \(write.rawValue)" }
+    return label
+  }
+
+  private func help(_ write: WriteMark.State?) -> String {
+    guard write == .refused, case .refused(let reason) = model.answers[record.id] ?? model.controls[record.id] else {
+      return record.title
+    }
+    return "\(record.title)\nRefused: \(reason)"
   }
 
   /// Long names keep their start and end: `TrayStac…r2.FastTop`.
@@ -283,18 +307,33 @@ struct InboxRow: View {
   }
 }
 
-/// A draft not yet sent, an answer or control in flight, or one Fractal refused.
+/// A draft not yet sent, an answer or control in flight, or one Fractal refused: a refusal is
+/// a word beside its triangle, not color alone.
 private struct WriteMark: View {
-  let record: AttentionRecord
-  let model: AttentionModel
+  enum State: String {
+    case sending = "Sending"
+    case refused = "Refused"
+    case draft = "Draft"
+  }
+
+  let state: State?
+
+  static func state(_ record: AttentionRecord, _ model: AttentionModel) -> State? {
+    if model.isSending(record) { return .sending }
+    if case .refused = model.answers[record.id] ?? model.controls[record.id] { return .refused }
+    return model.answerDrafts[record.id] != nil ? .draft : nil
+  }
 
   var body: some View {
-    if model.isSending(record) {
-      ProgressView().controlSize(.mini).accessibilityLabel("Sending")
-    } else if case .refused = model.answers[record.id] ?? model.controls[record.id] {
-      Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).accessibilityLabel("Refused")
-    } else if model.answerDrafts[record.id] != nil {
-      Image(systemName: "pencil").accessibilityLabel("Draft")
+    switch state {
+    case .sending: ProgressView().controlSize(.mini)
+    case .refused:
+      HStack(spacing: 3) {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        Text("Refused")
+      }
+    case .draft: Image(systemName: "pencil")
+    case nil: EmptyView()
     }
   }
 }
@@ -337,6 +376,8 @@ private struct ReceiptRow: View {
     .frame(minHeight: PanelMetrics.rowHeight)
     .help("\(receipt.outcome) — committed in Fractal")
     .accessibilityElement(children: .combine)
+    // A commit on a page returns here: VoiceOver lands on what was committed.
+    .focusOnArrival(true)
   }
 }
 
