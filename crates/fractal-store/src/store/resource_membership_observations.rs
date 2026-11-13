@@ -88,7 +88,9 @@ impl Store {
     /// Called with the SQLite writer still held, after commit, preserving observation order.
     pub(super) fn observe_resource_transition(&self, connection: &rusqlite::Connection, member: &Membership, previous: Option<&str>, now_ms: u64, recovered: bool) {
         // Timeout anchors are maintained even when every telemetry exporter is disabled.
-        if member.state != "queued" { self.finish_resource_admission_clock(&member.request.id); }
+        if member.payload_released_at.is_some() || matches!(member.state.as_str(), "retired" | "refused") {
+            self.finish_resource_admission_clock(&member.request.id);
+        }
         for root in &member.roots {
             if let Some(at) = root.payload_released_at {
                 if root.execution_ended_at.is_some() || matches!(member.state.as_str(), "retired" | "refused") {
