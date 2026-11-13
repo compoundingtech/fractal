@@ -904,6 +904,18 @@ A mechanical gate requires `exec`, `host`, and `workspace`. `env` is optional. `
 
 The command runs through the supervised exec runtime. Its result is attempt-bound and durable.
 
+For a mission run, the declared `host` executes the probe even when another member owns the
+run. The origin records a durable dispatch request; replication wakes the executor, and its
+durable result wakes the origin. Only the origin advances the step. Workspace paths, shell
+environment, report files and command output belong to the executor, not the origin. The probe's
+time limit begins when the executor admits it. Cancellation or generation retirement prevents
+an unstarted probe from launching and stops an already started probe on its executor.
+The dispatch request must come from the run's origin. Before admission, the executor reconstructs
+the gate from the run's pinned revision and current attempt, including variable expansion, and
+requires the command, host, workspace, environment and time limit to match. Dispatch and executor
+admission have separate subjects and writers. A step retry retires the previous attempt's queued
+and running probes; merely reusing its step subject does not authorize an obsolete dispatch.
+
 The command's exit status is its answer:
 
 | Exit | Answer | What Fractal does |

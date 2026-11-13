@@ -3604,6 +3604,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("step_definition", string()),
             ("attempt", integer()),
             ("runner", string()),
+            ("host", string()),
+            ("dispatch", object()),
             ("model", string()),
             ("token_budget", integer()),
             ("tools", array()),
