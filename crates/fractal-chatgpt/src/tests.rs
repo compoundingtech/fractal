@@ -656,7 +656,8 @@ fn chatgpt_discovery_matches_main_golden() {
     // Run `cargo test -p fractal-chatgpt capture_main_chatgpt_tools_golden`,
     // copy those bytes here, then discard the temporary test.
     // Adding fractal_availability_get inserted its definition after
-    // fractal_agents_list; the other entries are unchanged.
+    // fractal_agents_list; the other entries are unchanged. Its description
+    // later gained the note-truncation sentences, edited in place.
     // Adding fractal_slo_list and fractal_slo_history appended their two
     // definitions at the end.
     let result = ListToolsResult {
@@ -693,7 +694,7 @@ fn all_fourteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
         (ALERT_ANSWER, Some("action-result"), vec!["kind","action_id","status"]),
         (MISSIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (AGENTS_LIST, Some("page"), vec!["kind","items","page"]),
-        (AVAILABILITY_GET, Some("person-availability"), vec!["kind","availability","directive_note"]),
+        (AVAILABILITY_GET, Some("person-availability"), vec!["kind","availability","directive_note","directive_note_truncated"]),
         (CONVERSATIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (CONVERSATION_DETAIL, Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
         (CONVERSATION_TIMELINE, Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
@@ -909,7 +910,8 @@ fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
     let tool = serde_json::to_value(tool_definitions(Profile::Mcp).into_iter()
         .find(|tool| tool.name == AVAILABILITY_GET).unwrap()).unwrap();
     let description = tool["description"].as_str().unwrap();
-    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note", "unreported"] {
+    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note", "unreported",
+        "directive_note_truncated", "max_response_bytes (up to 16384)"] {
         assert!(description.contains(phrase), "{phrase}: {description}");
     }
     assert_eq!(tool["inputSchema"]["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["max_response_bytes"]);
@@ -923,6 +925,7 @@ fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
     assert_eq!(availability["properties"]["deadline_clock"], json!({"enum":["run","hold-routine","hold-all"]}));
     assert_eq!(availability["required"].as_array().unwrap().len(), 11);
     assert_eq!(value["properties"]["directive_note"]["type"], json!(["object","null"]));
+    assert_eq!(value["properties"]["directive_note_truncated"], json!({"type":"boolean"}));
 }
 
 #[tokio::test]
