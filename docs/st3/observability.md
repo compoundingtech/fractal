@@ -1387,3 +1387,55 @@ share coverage or vocabulary remains a design question.
 The daemon has no SIGTERM flush handler. A service stop can therefore lose its last
 buffered telemetry batch; the five-second budget bounds an invoked shutdown, rather
 than promising that SIGTERM invokes one. The lifecycle policy remains open.
+
+## Program attempt correlation
+
+Program launches use the existing daemon OTel provider and exporter; they do not
+install another SDK or sampler. `st.mission.run` is a short root identifying a
+mission run. Each `st.program.attempt` is a new root with links to that run and,
+when present, the previous launch of the same step (including host replacement),
+or the matching step of the run named by `retry_of` / `supersedes`. Retries never
+form an indefinitely nested parent chain. The attempt span closes when the engine
+forgets that exact attempt: completion, failure, cancellation, or host loss.
+The roots retain `st.run`, `st.step`, and integer `st.attempt` as span-only
+attributes, never metric labels; `span.label` is a concise attempt label.
+
+The daemon persists the W3C `{traceparent,tracestate?}` object in durable,
+system-only `mission.run.trace` and append-only `program.attempt.trace` claims.
+Every new program journal/result claim references its exact launch's
+`program.attempt.trace` claim ID in the existing `evidence[]` envelope field;
+the `program.step` fields keep their old shape, with no inline trace object.
+These records are independent of collector sampling and backend retention.
+With export disabled, fresh valid IDs still exist, with the sampled flag clear;
+this is correlation evidence, not a claim that an exported span exists.
+Historical journal entries without trace evidence remain valid. Older readers
+admit the unchanged journal shape and retain the unknown standalone trace claim
+kinds, so this correlation change does not require a reader-first deployment.
+New root carriers use `tracestate=st=c`, retaining the collector-owned sampling
+marker used by Fractal's other propagation surfaces.
+
+The start frame carries `TRACEPARENT` and `TRACESTATE` in its per-attempt
+environment. The host passes these into the isolated worker and each exec,
+without mutating its shared environment. Exec options cannot replace this
+correlation with an unrelated parent. An absent tracestate explicitly clears
+any inherited value. Concurrent workers therefore cannot leak context.
+
+Harness support, inventoried against upstream interfaces:
+
+- [Claude Code monitoring](https://code.claude.com/docs/en/monitoring-usage#traces-beta)
+  documents inbound `TRACEPARENT` / `TRACESTATE` for Agent SDK and `claude -p`
+  interactions (not interactive sessions). Native traces require its documented
+  telemetry/beta tracing settings; event logs can carry inbound IDs without a
+  traces exporter. Fractal does not override the user's exporter settings.
+- [Codex's trace context module](https://github.com/openai/codex/blob/main/codex-rs/otel/src/trace_context.rs)
+  reads and validates these exact environment variables using W3C extraction.
+- [OMP's agent telemetry](https://github.com/can1357/oh-my-pi/blob/main/packages/agent/src/telemetry.ts)
+  supports an active OTel context and its worker telemetry bridge preserves it;
+  its CLI does not currently expose a `TRACEPARENT` environment extractor.
+  Fractal delivers context but does not assert native OMP span continuity or
+  invent an unsupported flag.
+
+The durable invocation receipt is the authoritative join to harness response
+evidence; a reused harness process needs a new per-turn invocation receipt rather
+than reusing its launch environment as turn identity.
+
