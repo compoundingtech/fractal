@@ -4214,7 +4214,8 @@
       "read.assistant.slo",
       "write.assistant.messages",
       "write.assistant.custom-reply",
-      "write.assistant.answers"
+      "write.assistant.answers",
+      "read.assistant.availability"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
