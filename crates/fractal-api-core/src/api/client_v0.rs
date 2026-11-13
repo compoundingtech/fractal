@@ -1145,8 +1145,10 @@ pub fn mission_list_cards_with(
                 "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
             });
-            if run["retry_of"].is_string() {
-                value["retry_of"] = run["retry_of"].clone();
+            for field in ["retry_of", "supersedes", "superseded_by", "supersession_fault"] {
+                if run[field].is_string() {
+                    value[field] = run[field].clone();
+                }
             }
             Ok::<Value,anyhow::Error>(value)
         }).collect::<anyhow::Result<Vec<_>>>()?;

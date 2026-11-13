@@ -500,6 +500,61 @@ fn asks_are_answered_defaulted_or_withdrawn_and_their_answers_replay() {
     assert_eq!(value["asks"][2], json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": withdrawn.as_str()}}));
 }
 
+fn publish_child_replacement(fixture: &Fixture) {
+    apply_source(&fixture.store, r#"version 2
+mission "program-child" state="ready" {
+  goal "Publish the corrected head."
+  concurrent-runs max=1
+  input "head" kind="text"
+  step "publish" {
+    assigned-to "agent/publisher"
+    produces { resource "mission-run/${ST_MISSION_RUN}/published" { kind "custom.st3.program-test" } }
+  }
+}"#, "superseding-child");
+}
+
+#[test]
+fn a_program_waits_for_its_superseding_child_instead_of_failing_on_source_cancellation() {
+    let fixture = fixture();
+    let parent = fixture.start("superseding-child", "child");
+    fixture.until("the child starts", || fixture.child(&parent.step, "publish", 1).is_some());
+    let child = fixture.child(&parent.step, "publish", 1).unwrap();
+    publish_child_replacement(&fixture);
+    let source = fixture.store.mission_run(&child).unwrap().unwrap();
+    let successor = source.superseded_by.clone().unwrap_or_else(|| panic!(
+        "child publication did not supersede {} (status={}, phase={}, fault={:?})",
+        source.subject, source.status, source.phase, source.supersession_fault,
+    ));
+    fixture.until("the replacement is admitted", || fixture.store.mission_run(&successor).unwrap().unwrap().phase == "normal");
+    assert_eq!(fixture.run_status(&child), "cancelled");
+    assert_eq!(fixture.run_status(&parent.run), "running");
+    assert_eq!(fixture.result(&parent.step, "publish", 1), None);
+    fixture.complete_child(&successor);
+    fixture.until("the child result resolves", || fixture.result(&parent.step, "publish", 1).is_some());
+    let (status, result) = fixture.result(&parent.step, "publish", 1).unwrap();
+    assert_eq!(status, "completed");
+    assert_eq!(result["run"], successor);
+    std::fs::write(&parent.gate, "").unwrap();
+    fixture.until("the parent program completes", || fixture.status(&parent.step) == "completed");
+}
+
+#[test]
+fn a_cancelled_program_step_cancels_the_latest_superseding_child() {
+    let fixture = fixture();
+    let parent = fixture.start("cancel-superseding-child", "child");
+    fixture.until("the child starts", || fixture.child(&parent.step, "publish", 1).is_some());
+    let child = fixture.child(&parent.step, "publish", 1).unwrap();
+    publish_child_replacement(&fixture);
+    let source = fixture.store.mission_run(&child).unwrap().unwrap();
+    let successor = source.superseded_by.clone().unwrap_or_else(|| panic!(
+        "child publication did not supersede {} (status={}, phase={}, fault={:?})",
+        source.subject, source.status, source.phase, source.supersession_fault,
+    ));
+    fixture.store.set_step_state(&parent.step, "cancelled", Some("the work is withdrawn")).unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    fixture.until("the replacement child is cancelled", || fixture.run_status(&successor) == "cancelled");
+}
+
 #[test]
 fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     let fixture = fixture();

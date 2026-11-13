@@ -6,6 +6,168 @@
 //! `daemon.started`, as the standby barrier reads `schedule_standby`.
 use super::*;
 
+/// Transactionally maintained admission membership: population and the strictest
+/// pinned limit are indexed, rather than re-decoding every active definition.
+/// Invalid source remains writable for downstream diagnostics, but projects to
+/// the refusing sentinel (-1). Each CASE must validate before calling JSON
+/// accessors: SQLite also rejects otherwise valid JSON beyond its depth limit.
+pub(super) fn install_run_capacity_schema(connection: &Connection) -> Result<(), FractalError> {
+    let installed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='mission_run_capacity_v1_bootstrapped' AND value='1')
+           AND (SELECT COUNT(*) FROM sqlite_schema WHERE type='table'
+                AND name IN ('mission_run_capacity_v1','mission_run_capacity_totals_v1'))=2",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h2e817e64343d owner=fractal_store::store::mission_capacity TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS mission_run_capacity_v1 (
+             run_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, revision TEXT NOT NULL, run_limit INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS mission_run_capacity_limit_v1
+         ON mission_run_capacity_v1(mission_id,run_limit,run_id);
+         CREATE INDEX IF NOT EXISTS mission_run_capacity_revision_v1
+         ON mission_run_capacity_v1(mission_id,revision);
+         CREATE TABLE IF NOT EXISTS mission_run_capacity_totals_v1 (
+             mission_id TEXT PRIMARY KEY, active_count INTEGER NOT NULL
+         );
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_add_v1
+         AFTER INSERT ON mission_run_capacity_v1 BEGIN
+             INSERT INTO mission_run_capacity_totals_v1 VALUES(NEW.mission_id,1)
+             ON CONFLICT(mission_id) DO UPDATE SET active_count=active_count+1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_remove_v1
+         AFTER DELETE ON mission_run_capacity_v1 BEGIN
+             UPDATE mission_run_capacity_totals_v1 SET active_count=active_count-1
+             WHERE mission_id=OLD.mission_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_insert_v1
+         AFTER INSERT ON mission_runs BEGIN
+             INSERT INTO mission_run_capacity_v1
+             SELECT NEW.id,NEW.mission_id,g.revision,
+                    CASE WHEN json_valid(d.body) IS NOT 1 THEN -1
+                         WHEN json_type(d.body)<>'object' THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM run_generations g LEFT JOIN mission_revisions d
+               ON d.mission_id=NEW.mission_id AND d.revision=g.revision
+             WHERE g.id=NEW.current_generation_id
+               AND NEW.status IN ('running','standing','blocked')
+               AND NEW.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_update_v1
+         AFTER UPDATE OF status,phase,current_generation_id,mission_id ON mission_runs BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.id;
+             INSERT INTO mission_run_capacity_v1
+             SELECT NEW.id,NEW.mission_id,g.revision,
+                    CASE WHEN json_valid(d.body) IS NOT 1 THEN -1
+                         WHEN json_type(d.body)<>'object' THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM run_generations g LEFT JOIN mission_revisions d
+               ON d.mission_id=NEW.mission_id AND d.revision=g.revision
+             WHERE g.id=NEW.current_generation_id
+               AND NEW.status IN ('running','standing','blocked')
+               AND NEW.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_delete_v1
+         AFTER DELETE ON mission_runs BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_v1
+         AFTER INSERT ON run_generations BEGIN
+             INSERT OR IGNORE INTO mission_run_capacity_v1
+             SELECT r.id,r.mission_id,NEW.revision,
+                    CASE WHEN json_valid(d.body) IS NOT 1 THEN -1
+                         WHEN json_type(d.body)<>'object' THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM mission_runs r LEFT JOIN mission_revisions d
+               ON d.mission_id=r.mission_id AND d.revision=NEW.revision
+             WHERE r.id=NEW.run_id AND r.current_generation_id=NEW.id
+               AND r.status IN ('running','standing','blocked')
+               AND r.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_delete_v1
+         AFTER DELETE ON run_generations BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.run_id
+               AND EXISTS(SELECT 1 FROM mission_runs r WHERE r.id=OLD.run_id AND r.current_generation_id=OLD.id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_update_v1
+         AFTER UPDATE OF revision ON run_generations BEGIN
+             UPDATE mission_runs SET current_generation_id=current_generation_id
+             WHERE id=NEW.run_id AND current_generation_id=NEW.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_insert_v1
+         AFTER INSERT ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=
+                 CASE WHEN json_valid(NEW.body) IS NOT 1 THEN -1
+                      WHEN json_type(NEW.body)<>'object' THEN -1
+                      WHEN json_type(NEW.body,'$.max_active_runs') IS NULL THEN 1
+                      WHEN json_type(NEW.body,'$.max_active_runs')='null' THEN NULL
+                      WHEN json_type(NEW.body,'$.max_active_runs')='integer'
+                        AND json_extract(NEW.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                        THEN json_extract(NEW.body,'$.max_active_runs') ELSE -1 END
+             WHERE mission_id=NEW.mission_id AND revision=NEW.revision;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_update_v1
+         AFTER UPDATE OF body ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=
+                 CASE WHEN json_valid(NEW.body) IS NOT 1 THEN -1
+                      WHEN json_type(NEW.body)<>'object' THEN -1
+                      WHEN json_type(NEW.body,'$.max_active_runs') IS NULL THEN 1
+                      WHEN json_type(NEW.body,'$.max_active_runs')='null' THEN NULL
+                      WHEN json_type(NEW.body,'$.max_active_runs')='integer'
+                        AND json_extract(NEW.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                        THEN json_extract(NEW.body,'$.max_active_runs') ELSE -1 END
+             WHERE mission_id=NEW.mission_id AND revision=NEW.revision;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_delete_v1
+         AFTER DELETE ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=-1
+             WHERE mission_id=OLD.mission_id AND revision=OLD.revision;
+         END;"
+    ).map_err(internal)?;
+    if !installed {
+        let bootstrap = |connection: &Connection| -> Result<(), FractalError> {
+            connection.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hca0d0145f4ce owner=fractal_store::store::mission_capacity TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_capacity_v1;
+                 DELETE FROM mission_run_capacity_totals_v1;
+                 INSERT INTO mission_run_capacity_v1
+                 SELECT r.id,r.mission_id,g.revision,
+                        CASE WHEN json_valid(d.body) IS NOT 1 THEN -1
+                             WHEN json_type(d.body)<>'object' THEN -1
+                             WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                             WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                             WHEN json_type(d.body,'$.max_active_runs')='integer'
+                               AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                               THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+                 FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id
+                 LEFT JOIN mission_revisions d ON d.mission_id=r.mission_id AND d.revision=g.revision
+                 WHERE r.status IN ('running','standing','blocked')
+                   AND r.phase NOT IN ('final-cancelled','cleanup-cancelled');
+                 INSERT INTO meta(key,value) VALUES('mission_run_capacity_v1_bootstrapped','1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+            ).map_err(internal)
+        };
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction().map_err(internal)?;
+            bootstrap(&transaction)?;
+            transaction.commit().map_err(internal)?;
+        } else {
+            bootstrap(connection)?;
+        }
+    }
+    Ok(())
+}
+
 /// The `daemon.started` feature of a build that reads mission and step capacity.
 pub const FEATURE: &str = "mission_capacity";
 /// The `daemon.started` feature of a build that reads a mission's run `authority`.
@@ -208,6 +370,133 @@ mission "plain" state="ready" {
         started(&peer, false);
         sync(&peer, &store);
         (store, peer)
+    }
+
+    #[test]
+    fn capacity_projection_preserves_invalid_source_and_refuses_admission() {
+        let store = Store::open_memory("fixture").unwrap();
+        publish(&store, PLAIN, "capacity-fixture").unwrap();
+        let mut requested = store.mission_spec("plain", None).unwrap().unwrap();
+        // An unlimited new revision must still respect a pinned source's limit.
+        requested.max_active_runs = None;
+        let connection = store.connection.lock().unwrap();
+        let (revision, state, claim_id, created_index): (String, String, String, i64) = connection
+            .query_row(
+                "SELECT revision,state,claim_id,created_index FROM mission_revisions WHERE mission_id='plain'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+             VALUES('capacity-run','plain',?1,'capacity-generation',?1,'capacity-run','/workspace','person/example','{}','normal','running','active','1','1')",
+            [&revision],
+        ).unwrap();
+        let insert_generation = || {
+            connection.execute(
+                "INSERT INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+                 VALUES('capacity-generation','capacity-run',?1,'running','person/example','fixture','1','1')",
+                [&revision],
+            ).unwrap();
+        };
+        insert_generation();
+        let assert_capacity = |expected: Option<i64>| {
+            let actual: Option<i64> = connection.query_row(
+                "SELECT run_limit FROM mission_run_capacity_v1 WHERE run_id='capacity-run'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(actual, expected);
+            let count: i64 = connection.query_row(
+                "SELECT active_count FROM mission_run_capacity_totals_v1 WHERE mission_id='plain'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 1);
+            match expected {
+                Some(-1) => assert_eq!(
+                    enforce_mission_run_capacity(&connection, &requested).unwrap_err().code,
+                    "missing-mission-revision",
+                ),
+                Some(0 | 1) => assert_eq!(
+                    enforce_mission_run_capacity(&connection, &requested).unwrap_err().code,
+                    "mission-run-capacity",
+                ),
+                _ => enforce_mission_run_capacity(&connection, &requested).unwrap(),
+            }
+        };
+        let too_deep = format!("{{\"nested\":{}0{}}}", "[".repeat(1100), "]".repeat(1100));
+        let cases = [
+            ("{", Some(-1)),
+            (too_deep.as_str(), Some(-1)),
+            ("null", Some(-1)),
+            ("[]", Some(-1)),
+            ("1", Some(-1)),
+            (r#""source""#, Some(-1)),
+            (r#"{"max_active_runs":"2"}"#, Some(-1)),
+            (r#"{"max_active_runs":true}"#, Some(-1)),
+            (r#"{"max_active_runs":[]}"#, Some(-1)),
+            (r#"{"max_active_runs":{}}"#, Some(-1)),
+            (r#"{"max_active_runs":1.5}"#, Some(-1)),
+            (r#"{"max_active_runs":-1}"#, Some(-1)),
+            (r#"{"max_active_runs":4294967296}"#, Some(-1)),
+            ("{}", Some(1)),
+            (r#"{"max_active_runs":0}"#, Some(0)),
+            (r#"{"max_active_runs":2}"#, Some(2)),
+            (r#"{"max_active_runs":4294967295}"#, Some(4294967295)),
+            (r#"{"max_active_runs":null}"#, None),
+        ];
+        for (body, expected) in cases {
+            // Preserve canonical bad source for downstream readers to diagnose.
+            connection.execute(
+                "UPDATE mission_revisions SET body=?1 WHERE mission_id='plain' AND revision=?2",
+                params![body, revision],
+            ).unwrap();
+            assert_capacity(expected);
+            connection.execute(
+                "UPDATE mission_runs SET phase=phase WHERE id='capacity-run'", [],
+            ).unwrap();
+            assert_capacity(expected);
+            connection.execute(
+                "UPDATE run_generations SET revision=revision WHERE id='capacity-generation'", [],
+            ).unwrap();
+            assert_capacity(expected);
+            connection.execute(
+                "DELETE FROM run_generations WHERE id='capacity-generation'", [],
+            ).unwrap();
+            insert_generation();
+            assert_capacity(expected);
+            connection.execute(
+                "DELETE FROM mission_revisions WHERE mission_id='plain' AND revision=?1", [&revision],
+            ).unwrap();
+            assert_capacity(Some(-1));
+            connection.execute(
+                "INSERT INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
+                 VALUES('plain',?1,?2,?3,?4,?5)",
+                params![revision, state, body, claim_id, created_index],
+            ).unwrap();
+            assert_capacity(expected);
+            connection.execute(
+                "DELETE FROM meta WHERE key='mission_run_capacity_v1_bootstrapped'", [],
+            ).unwrap();
+            install_run_capacity_schema(&connection).unwrap();
+            assert_capacity(expected);
+            let persisted: String = connection.query_row(
+                "SELECT body FROM mission_revisions WHERE mission_id='plain' AND revision=?1",
+                [&revision], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(persisted, body);
+        }
+        connection.execute(
+            "DELETE FROM mission_revisions WHERE mission_id='plain' AND revision=?1", [&revision],
+        ).unwrap();
+        connection.execute(
+            "DELETE FROM meta WHERE key='mission_run_capacity_v1_bootstrapped'", [],
+        ).unwrap();
+        install_run_capacity_schema(&connection).unwrap();
+        assert_capacity(Some(-1));
+        let changes = connection.total_changes();
+        install_run_capacity_schema(&connection).unwrap();
+        assert_eq!(connection.total_changes(), changes);
+        assert_capacity(Some(-1));
     }
 
     #[test]
