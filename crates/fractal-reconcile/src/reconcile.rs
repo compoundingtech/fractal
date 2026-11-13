@@ -560,7 +560,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
     }
-    fn retire_resource_lane(&self, _store: &Store, _request: &fractal_store::store::resource_membership::LaneRequest) -> Result<bool> {
+    fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         anyhow::bail!("runtime does not support finite resource retirement")
     }
     fn recover_resource_lanes(&self, _store: &Store, _host: &str, _now_ms: u64) -> Result<usize> {
@@ -575,7 +575,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
         anyhow::bail!("runtime does not support generation-fenced execution status")
     }
-    fn retire_resource_exec(&self, _store: &Store, _request: &fractal_store::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
+    fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
     fn launch_contract(
@@ -968,7 +968,7 @@ impl RuntimeControl for NativeRuntime {
         let mut backend_entered = false;
         self.start_checked_inner(member, Some(guard), &mut backend_entered, Some((store, &request)))
     }
-    fn retire_resource_lane(&self, store: &Store, request: &fractal_store::store::resource_membership::LaneRequest) -> Result<bool> {
+    fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         let record = store.resource_membership_record(&request.id, &request.owner)?;
         match record.state.as_str() {
@@ -1009,7 +1009,7 @@ impl RuntimeControl for NativeRuntime {
             _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
         }
     }
-    fn retire_resource_exec(&self, store: &Store, request: &fractal_store::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
+    fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
         let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
         let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
@@ -1160,7 +1160,7 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
-        resource: Option<(&Store, &fractal_store::store::resource_membership::LaneRequest)>,
+        resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let mut environment =
@@ -1265,7 +1265,7 @@ impl NativeRuntime {
             }
         } else {
             if let Some((store, request)) = resource {
-                use fractal_store::store::resource_membership::{Admission, Coverage};
+                use crate::store::resource_membership::{Admission, Coverage};
                 let now = || u64::try_from(now_ms()).unwrap_or(u64::MAX);
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
                     anyhow::bail!("finite execution membership is not admitted");
@@ -15166,7 +15166,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         mission: &str,
         input: &BTreeMap<String, String>,
         idempotency_key: String,
-        resource: Option<&fractal_store::store::resource_membership::Membership>,
+        resource: Option<&crate::store::resource_membership::Membership>,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
         let inherited = if resource.is_none() {
             self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?

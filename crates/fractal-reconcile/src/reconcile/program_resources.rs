@@ -1,6 +1,6 @@
 //! Effect resource calls lower to the same host membership and execution adapters as data steps.
 use super::*;
-use fractal_store::store::resource_membership::{Admission, Coverage, Grant, LaneRequest, Membership, Owner};
+use crate::store::resource_membership::{Admission, Coverage, Grant, LaneRequest, Membership, Owner};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -82,7 +82,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn resource_changed(&self, membership: &LaneRequest) {
-        self.incremental.touch(&fractal_store::store::resource_membership::dependency(&membership.host, &membership.name));
+        self.incremental.touch(&crate::store::resource_membership::dependency(&membership.host, &membership.name));
         self.incremental.touch("seat-admission");
         self.signal_changed();
     }
@@ -338,7 +338,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_store::store::resource_membership::Fit;
+    use crate::store::resource_membership::Fit;
 
     #[test]
     fn scope_release_awaits_child_cancellation_and_reacts_to_terminal_run() {

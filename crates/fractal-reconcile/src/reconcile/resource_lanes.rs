@@ -1,6 +1,6 @@
 //! Data DSL lanes lower to the host's native finite-execution membership boundary.
 use super::*;
-use fractal_store::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
 
 use crate::model::RESOURCE_LANE_REQUEST_TAG as REQUEST_TAG;
 
@@ -52,7 +52,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Unknown retirement retains custody; native events or explicit recovery wake it.
             return Ok(false);
         }
-        self.incremental.touch(&fractal_store::store::resource_membership::dependency(&request.host, &request.name));
+        self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
         self.incremental.touch("seat-admission");
         self.signal_changed();
         Ok(true)
@@ -96,7 +96,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             });
             if retained && active { continue; }
             if self.runtime.retire_resource_lane(&self.store, &record.request)? {
-                self.incremental.touch(&fractal_store::store::resource_membership::dependency(&record.request.host, &record.request.name));
+                self.incremental.touch(&crate::store::resource_membership::dependency(&record.request.host, &record.request.name));
                 self.incremental.touch("seat-admission");
                 self.signal_changed();
             }
@@ -144,7 +144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.store.resource_context_for_run(run)?.is_some_and(|context| context.request == request)
         } else { false };
         anyhow::ensure!(direct || inherited, "resource context must belong to the actual execution owner");
-        smallclaims::touched::note_read(|| fractal_store::store::resource_membership::dependency(&request.host, &request.name));
+        smallclaims::touched::note_read(|| crate::store::resource_membership::dependency(&request.host, &request.name));
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         let fit = self.resource_lane_fit(&request.id, request.capacity)?;
         let prior = self.store.resource_memberships_for_host(&self.host)?.into_iter()
@@ -152,7 +152,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let admission = self.store.request_resource_membership(&request, fit, now)?;
         let current = self.store.resource_membership_record(&request.id, &request.owner)?;
         if prior.as_deref() != Some(current.state.as_str()) {
-            self.incremental.touch(&fractal_store::store::resource_membership::dependency(&request.host, &request.name));
+            self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
             self.signal_changed();
         }
