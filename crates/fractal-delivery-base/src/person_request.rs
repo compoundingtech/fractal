@@ -22,7 +22,8 @@ const MAX_REASONS: usize = 8;
 const MAX_SUBJECTS: usize = 12;
 const MAX_CONDITIONS: usize = 6;
 const MAX_LINE: usize = 600;
-const MAX_TEXT: usize = 8_000;
+/// The longest answer text a person may give, in characters.
+pub const MAX_TEXT: usize = 8_000;
 const SUBJECT_KINDS: &[&str] = &[
     "pull_request",
     "issue",

@@ -509,6 +509,9 @@ impl Runtime for FractalRuntime {
         } else if kind == read_positions::KIND {
             // A retracted advance can lower a maximum: refold every unrepaired advance.
             read_positions::repair_frontier(transaction)?;
+        } else if fractal_schema::attention_controls::KINDS.contains(&kind.as_str()) {
+            // A retracted control can move seen later or bring back an older snooze.
+            attention_controls::rebuild(transaction)?;
         } else {
             ordered_membership::member_repaired(transaction, &subject)?;
         }
@@ -800,6 +803,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcbab08c75150 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hc85e78595758 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(&transaction)?;
@@ -810,6 +814,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2eda34b01b09 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9d92a9b287c2 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(connection)?;
