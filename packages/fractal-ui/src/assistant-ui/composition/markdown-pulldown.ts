@@ -71,6 +71,9 @@ const PHRASING = new Set(['text', 'emphasis', 'strong', 'delete', 'inlineCode', 
 
 /** The mdast tree remark would build for `source`, from pulldown-cmark's events. */
 export function pulldownTree(source: string): MdastNode {
+  // CommonMark §2.3: normalize before either parser pass so all UTF-8 source offsets
+  // refer to the same replacement bytes, including literal-URL source rewrites.
+  source = source.replace(/\0/g, '\uFFFD')
   const root: MdastNode = { type: 'root', children: [] }
   const stack: MdastNode[] = [root]
   const top = () => stack.at(-1)!

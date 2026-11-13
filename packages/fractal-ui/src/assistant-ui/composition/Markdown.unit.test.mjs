@@ -616,6 +616,34 @@ test('HTML closing-tag whitespace has identical raw and policy-filtered mdast on
   assert.equal(pulldown.pulldownReady(), usePulldown)
 })
 
+test('NUL in tag names, text and code matches original GFM replacement characters', async () => {
+  const parse = (source, plugins) => {
+    let tree
+    const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+    const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+    return { tree, html }
+  }
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    for (const source of [
+      '<scr\0ipt>visible</scr\0ipt>',
+      'before\0after',
+      '`before\0after`',
+      '```\nbefore\0after\n```',
+      'before\0 https://example.test/a*b*c',
+      'https://example.test/a\0b*c*d',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      assert.ok(JSON.stringify(expected.tree).includes('\uFFFD'), JSON.stringify(source))
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, JSON.stringify(source))
+      }
+    }
+  } finally { await isolated.close() }
+})
+
 test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
   const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
   try {
