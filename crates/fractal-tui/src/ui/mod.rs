@@ -439,8 +439,8 @@ pub struct Ui {
     replies: HashMap<String, String>,
     /// A menu owns its press through release, even after an action closes it.
     context_button: Option<MouseButton>,
-    /// The tab owning a middle-button press until release.
-    middle_tab: Option<(usize, usize)>,
+    /// The closable target owning a middle-button press until release.
+    middle_close: Option<clickable::CloseTarget>,
     dragging: bool,
     demo: Option<Demo>,
     quit: bool,
@@ -883,7 +883,7 @@ impl Ui {
             sidebar_width: None,
             replies: HashMap::new(),
             context_button: None,
-            middle_tab: None,
+            middle_close: None,
             dragging: false,
             demo: None,
             quit: false,
@@ -4064,6 +4064,10 @@ impl Ui {
     /// The focused Home item's structured request (#1010), with the item's id.
     fn structured_request(&self) -> Option<(String, Box<fractal_client::StructuredRequest>)> {
         let id = self.attention_focus()?;
+        self.structured_request_id(id)
+    }
+
+    fn structured_request_id(&self, id: String) -> Option<(String, Box<fractal_client::StructuredRequest>)> {
         let item = self
             .world
             .attention
@@ -4298,7 +4302,7 @@ impl Ui {
             self.hover.clear();
             self.hover.pressed.set(false);
             self.dragging = false;
-            self.middle_tab = None;
+            self.middle_close = None;
             self.terminal_selecting = false;
             self.cancel_drag();
         }
@@ -6007,16 +6011,21 @@ impl Ui {
         let Some(id) = self.attention_focus() else {
             return;
         };
-        if self
-            .current_item()
-            .is_some_and(|item| item.actions.iter().any(|a| a == "custom.reply"))
-        {
+        self.act_attention(id, action);
+    }
+
+    fn act_attention(&mut self, id: String, action: char) {
+        let Some(item) = self.world.attention.items().iter().find(|item| item.id == id) else {
+            return;
+        };
+        if item.actions.iter().any(|a| a == "custom.reply") {
             return;
         }
-        if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
+        let kind = item.kind.word();
+        if matches!(action, 'y' | 'n' | 'r') && kind == "request" {
             // r closes a request that needs nothing from the person; the step continues. A
             // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let request = if action == 'r' { self.structured_request() } else { None };
+            let request = if action == 'r' { self.structured_request_id(id.clone()) } else { None };
             let named = request.as_ref().is_some_and(|(_, request)| !request.answers.is_empty());
             let chosen = request.as_ref()
                 .and_then(|(_, request)| request.answers.iter().find(|answer| answer.id == "dismiss"))
@@ -6047,7 +6056,6 @@ impl Ui {
             return;
         }
         if self.live {
-            let kind = self.current_kind().unwrap_or("");
             let name = match (kind, action) {
                 ("review", 'a') => "review.approve",
                 ("launch", 'a') => "launch.approve",
@@ -6221,38 +6229,26 @@ impl Ui {
             });
             self.focus_terminal_details(focused);
         }
-        // Tabs own a middle press through release, even when released outside the strip.
-        if mouse.kind == MouseEventKind::Drag(MouseButton::Middle) && self.middle_tab.is_some() {
-            return;
-        }
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.middle_tab = None;
-        }
-        if matches!(
+        let target = if matches!(
             mouse.kind,
             MouseEventKind::Down(MouseButton::Middle) | MouseEventKind::Up(MouseButton::Middle)
-        ) {
-            let tab = self
-                .frame
-                .borrow()
-                .hits
-                .iter()
-                .rev()
-                .find(|(rect, _)| contains(*rect, mouse.column, mouse.row))
-                .and_then(|(_, hit)| match hit {
-                    Hit::GlassTab(group, tab) => Some((*group, *tab)),
-                    _ => None,
-                });
-            if mouse.kind == MouseEventKind::Down(MouseButton::Middle) {
-                if self.popover.is_none() && !self.home_open() && !self.palette_open() {
-                    self.middle_tab = tab;
-                    if tab.is_some() {
-                        return;
+        ) && (mouse.kind == MouseEventKind::Up(MouseButton::Middle)
+            || (self.popover.is_none() && !self.home_open() && !self.palette_open())) {
+            self.close_target(mouse.column, mouse.row)
+        } else {
+            None
+        };
+        match clickable::middle_close(&mut self.middle_close, mouse.kind, target) {
+            clickable::MiddleClose::Ignored => {}
+            clickable::MiddleClose::Consumed => return,
+            clickable::MiddleClose::Released(target) => {
+                match target {
+                    clickable::CloseTarget::Tab(group, tab) => {
+                        self.run_menu_action(glass::MenuAction::CloseTab(group, tab));
                     }
-                }
-            } else if let Some(pressed) = self.middle_tab.take() {
-                if tab == Some(pressed) {
-                    self.run_menu_action(glass::MenuAction::CloseTab(pressed.0, pressed.1));
+                    clickable::CloseTarget::InboxRow(id) | clickable::CloseTarget::InboxCard(id) => {
+                        self.dismiss_inbox(id);
+                    }
                 }
                 return;
             }

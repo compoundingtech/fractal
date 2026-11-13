@@ -61,6 +61,12 @@ between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split righ
 close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox tab; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+Middle-click an Inbox row or its card's `[x]` button to dismiss that item, pressing and
+releasing over the same target. Requests are dismissed immediately without confirmation;
+keyboard `x` still asks for `y`. Updates and messages are marked read, and Recently closed
+items are cleared locally. Decisions and faults refuse dismissal just as `x` does.
+In the TUI, middle-click closes or dismisses items in closable lists; destructive actions
+and answering decisions are excluded.
 
 Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
 **Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
