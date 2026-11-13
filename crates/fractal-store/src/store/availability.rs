@@ -1,33 +1,44 @@
 //! Person availability, folded at read time from the person's claims. Claims remain
-//! authoritative: each axis is its kind's canonical latest claim, presence is each source's
-//! newest fresh report, and the deadline-clock history is the record of held time.
+//! authoritative: each axis is its kind's canonical latest claim, presence is derived from each
+//! device's newest raw state, and the deadline-clock history is the record of held time.
 use super::*;
 use fractal_schema::availability::{
     DEADLINE_CLOCK_KIND, INTERRUPTIONS_KIND, PRESENCE_KIND, STATUS_KIND,
 };
 
-/// A report older than this no longer says anything about the person.
-pub const PRESENCE_STALE_MS: u128 = 15 * 60_000;
-/// An unchanged report from one source is recorded again only after this long, so a client
-/// may report on every change and as a heartbeat without one claim per heartbeat.
+/// An `active` device is present until this long after its last input, then idle. Every
+/// device gets the same threshold; Boss used ten minutes of HID idle time.
+pub const PRESENCE_IDLE_MS: u128 = 10 * 60_000;
+/// A device's newest state counts for this long after it was observed. When no device's does,
+/// the person is unreported: available, so agents ask as usual.
+pub const PRESENCE_COUNTS_MS: u128 = 24 * 60 * 60_000;
+/// An active device's unchanged report is recorded again only once it moves the last input
+/// forward by this much, so frequent reports do not grow the log.
 pub const PRESENCE_REFRESH_MS: u128 = 5 * 60_000;
+/// A report must have been observed within this long of arriving.
+pub const PRESENCE_REPORT_MAX_AGE_MS: u128 = 15 * 60_000;
 /// Client clocks may run ahead of this member's by at most this much.
 pub const PRESENCE_FUTURE_SKEW_MS: u128 = 2 * 60_000;
-/// An ask is urgent when its asker named an explicit deadline of at most this long.
-/// `hold-routine` leaves urgent asks' clocks running.
-pub const URGENT_ASK_DEADLINE_MS: u64 = 60 * 60_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status { Available, Away }
 
+/// Where the status comes from: an override the person set, their devices' presence, or neither
+/// (no device has reported within [`PRESENCE_COUNTS_MS`]), which reads as available.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StatusSource { Override, Presence }
+pub enum StatusSource { Override, Presence, Unreported }
 
+/// Presence the daemon derives from device states; ordered so the first wins a fold.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Presence { Present, Idle, Locked, Unknown }
+
+/// A device's raw state, as the device reports it. It applies no thresholds of its own.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceState { Active, Inactive, Locked, Sleeping }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -44,8 +55,8 @@ pub struct PersonAvailability {
     pub status: Status,
     pub status_source: StatusSource,
     pub status_until: Option<String>,
-    /// The folded device presence, for the person's own reads. Other readers get `None`:
-    /// they see the effective status, never raw presence.
+    /// The presence derived from the person's devices, for the person's own reads. Other
+    /// readers get `None`: they see the effective status, never presence.
     pub presence: Option<Presence>,
     pub presence_observed_at: Option<String>,
     pub interruptions: Interruptions,
@@ -70,6 +81,71 @@ pub enum AvailabilityChange {
     Status(Option<Status>, Option<u128>),
     Interruptions(Interruptions, Option<u128>),
     DeadlineClock(DeadlineClock, Option<u128>),
+}
+
+/// One device's raw state as reported: when it was observed and, for input, when the person
+/// last touched it. Times are this member's Unix milliseconds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceReport {
+    pub state: DeviceState,
+    pub last_input_at: Option<u128>,
+    pub observed_at: u128,
+}
+
+impl DeviceReport {
+    /// A recorded report, observed no later than it was accepted.
+    fn from_claim(claim: &ClaimRecord) -> Option<Self> {
+        let fields = &claim.body["fields"];
+        let observed_at = fields["observed_at_unix_ms"].as_u64().map_or(0, u128::from).min(claim.accepted_at_unix_ms);
+        Some(Self {
+            state: parse(fields.get("state"))?,
+            last_input_at: fields["last_input_at_unix_ms"].as_u64().map(|at| u128::from(at).min(observed_at)),
+            observed_at,
+        })
+    }
+
+    /// When an active device's person last acted on it: its last input, else when it was observed.
+    fn last_input(&self) -> u128 {
+        self.last_input_at.unwrap_or(self.observed_at)
+    }
+
+    /// The presence this report gives at `now`, or `None` once it no longer counts.
+    pub fn presence_at(&self, now: u128) -> Option<Presence> {
+        if now.saturating_sub(self.observed_at) >= PRESENCE_COUNTS_MS {
+            return None;
+        }
+        Some(match self.state {
+            DeviceState::Active if now.saturating_sub(self.last_input()) < PRESENCE_IDLE_MS => Presence::Present,
+            DeviceState::Active | DeviceState::Inactive => Presence::Idle,
+            DeviceState::Locked | DeviceState::Sleeping => Presence::Locked,
+        })
+    }
+
+    /// When a device that is present at `now` turns idle unless it reports newer input.
+    pub fn idle_at(&self, now: u128) -> Option<u128> {
+        (self.presence_at(now) == Some(Presence::Present)).then(|| self.last_input() + PRESENCE_IDLE_MS)
+    }
+}
+
+/// The presence folded over a person's devices at one instant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FoldedPresence {
+    pub presence: Presence,
+    /// When the device that gives `presence` was observed.
+    pub observed_at: Option<u128>,
+    /// Whether any device's state still counts; without one the person is unreported.
+    pub reported: bool,
+}
+
+/// What a presence report returns: the person's availability, and when the reporting device
+/// should report again even if its state has not changed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PresenceReported {
+    pub availability: PersonAvailability,
+    /// While the device is present: the instant it turns idle unless it reports newer input,
+    /// so it reports then with its current last input. `None`: report on the next state change
+    /// or the next input.
+    pub report_again_at: Option<String>,
 }
 
 /// An interval during which a person's deadline clock was held; `end` is `None` while open.
@@ -103,9 +179,10 @@ fn active(claim: Option<ClaimRecord>, now: u128) -> Option<ClaimRecord> {
     claim.filter(|claim| until(claim).is_none_or(|until| now < until))
 }
 
-/// An ask is urgent when its asker named an explicit deadline of at most an hour.
+/// An ask is urgent when its asker gave it priority `critical`; see
+/// [`fractal_schema::availability::urgent_priority`].
 pub fn urgent_ask(ask_fields: &Value) -> bool {
-    ask_fields["deadline_ms"].as_u64().is_some_and(|ms| ms <= URGENT_ASK_DEADLINE_MS)
+    fractal_schema::availability::urgent_priority(ask_fields["priority"].as_str())
 }
 
 /// The deadline an ask asked at `asked_at` with stored `deadline` really has: the stored
@@ -154,33 +231,33 @@ pub fn clock_holds(newest_first: &[ClaimRecord], since: u128) -> Vec<ClockHold> 
     holds
 }
 
-/// Each source's newest report, folded: any fresh `present` wins, then `idle`, then `locked`.
-/// Returns the folded presence and the observation time of the newest report that has it.
-pub fn fold_presence(newest_first: &[ClaimRecord], now: u128) -> (Presence, Option<u128>) {
+/// Each device's newest report, folded at `now`: `present` anywhere wins, then `idle`, then
+/// `locked`. A device whose newest report no longer counts says nothing, and older reports from
+/// it never speak for it.
+pub fn fold_presence(newest_first: &[ClaimRecord], now: u128) -> FoldedPresence {
     let mut seen = BTreeSet::new();
-    let mut best: (Presence, Option<u128>) = (Presence::Unknown, None);
+    let mut folded = FoldedPresence { presence: Presence::Unknown, observed_at: None, reported: false };
     for claim in newest_first {
-        let fields = &claim.body["fields"];
-        let Some(source) = fields["source"].as_str() else { continue };
+        let Some(source) = claim.body["fields"]["source"].as_str() else { continue };
         if !seen.insert(source.to_owned()) {
             continue;
         }
-        let observed = fields["observed_at_unix_ms"].as_u64().map_or(0, u128::from).min(claim.accepted_at_unix_ms);
-        let Some(presence) = parse::<Presence>(fields.get("presence")) else { continue };
-        if now.saturating_sub(observed) >= PRESENCE_STALE_MS {
-            continue;
-        }
-        if presence < best.0 || (presence == best.0 && best.1.is_none_or(|at| observed > at)) {
-            best = (presence, Some(observed));
+        let Some(report) = DeviceReport::from_claim(claim) else { continue };
+        let Some(presence) = report.presence_at(now) else { continue };
+        folded.reported = true;
+        if presence < folded.presence || (presence == folded.presence && folded.observed_at.is_none_or(|at| report.observed_at > at)) {
+            folded.presence = presence;
+            folded.observed_at = Some(report.observed_at);
         }
     }
-    best
+    folded
 }
 
 pub trait AvailabilityStore {
     fn person_availability(&self, person: &str, now: u128) -> Result<PersonAvailability, FractalError>;
-    fn set_person_availability(&self, person: &str, changes: &[AvailabilityChange], now: u128) -> Result<PersonAvailability, FractalError>;
-    fn report_person_presence(&self, person: &str, source: &str, presence: Presence, observed_at: u128, now: u128) -> Result<PersonAvailability, FractalError>;
+    /// Each change becomes one claim naming `source`, the daemon-assigned writer.
+    fn set_person_availability(&self, person: &str, source: &str, changes: &[AvailabilityChange], now: u128) -> Result<PersonAvailability, FractalError>;
+    fn report_person_presence(&self, person: &str, source: &str, report: DeviceReport, now: u128) -> Result<PresenceReported, FractalError>;
     fn deadline_clock_holds(&self, person: &str, since: u128) -> Result<Vec<ClockHold>>;
 }
 
@@ -190,10 +267,12 @@ fn person_subject(person: &str) -> Result<(), FractalError> {
 }
 
 impl Store {
-    fn recent_presence(&self, person: &str, window: u128, now: u128) -> Result<Vec<ClaimRecord>> {
+    /// The person's device reports accepted within the last [`PRESENCE_COUNTS_MS`], newest
+    /// first: every report that can still count, since one is observed no later than accepted.
+    fn counting_presence(&self, person: &str, now: u128) -> Result<Vec<ClaimRecord>> {
         let mut claims = Vec::new();
         self.claims_in_order(person, PRESENCE_KIND, true, |claim| {
-            let recent = now.saturating_sub(claim.accepted_at_unix_ms) < window;
+            let recent = now.saturating_sub(claim.accepted_at_unix_ms) < PRESENCE_COUNTS_MS;
             if recent {
                 claims.push(claim.clone());
             }
@@ -212,15 +291,21 @@ impl AvailabilityStore for Store {
             let interruptions = active(self.latest_claim(person, Some(INTERRUPTIONS_KIND))?, now);
             let clock = active(self.latest_claim(person, Some(DEADLINE_CLOCK_KIND))?, now)
                 .filter(|claim| claim.body["fields"]["deadline_clock"] != "run");
-            let (presence, observed) = fold_presence(&self.recent_presence(person, PRESENCE_STALE_MS, now)?, now);
-            let derived = if presence == Presence::Present { Status::Available } else { Status::Away };
+            let folded = fold_presence(&self.counting_presence(person, now)?, now);
+            // Nobody reporting is not evidence of absence: an unreported person reads available.
+            let (derived, derived_source) = match folded {
+                FoldedPresence { reported: false, .. } => (Status::Available, StatusSource::Unreported),
+                FoldedPresence { presence: Presence::Present, .. } => (Status::Available, StatusSource::Presence),
+                _ => (Status::Away, StatusSource::Presence),
+            };
+            let status_override = status.as_ref().and_then(|claim| parse::<Status>(claim.body["fields"].get("status")));
             Ok(PersonAvailability {
                 person: person.to_owned(),
-                status: status.as_ref().and_then(|claim| parse(claim.body["fields"].get("status"))).unwrap_or(derived),
-                status_source: if status.is_some() { StatusSource::Override } else { StatusSource::Presence },
+                status: status_override.unwrap_or(derived),
+                status_source: if status_override.is_some() { StatusSource::Override } else { derived_source },
                 status_until: status.as_ref().and_then(until).and_then(rfc3339),
-                presence: Some(presence),
-                presence_observed_at: observed.and_then(rfc3339),
+                presence: Some(folded.presence),
+                presence_observed_at: folded.observed_at.and_then(rfc3339),
                 interruptions: interruptions.as_ref()
                     .and_then(|claim| parse(claim.body["fields"].get("interruptions")))
                     .unwrap_or(Interruptions::All),
@@ -234,7 +319,7 @@ impl AvailabilityStore for Store {
         }).map_err(internal)
     }
 
-    fn set_person_availability(&self, person: &str, changes: &[AvailabilityChange], now: u128) -> Result<PersonAvailability, FractalError> {
+    fn set_person_availability(&self, person: &str, source: &str, changes: &[AvailabilityChange], now: u128) -> Result<PersonAvailability, FractalError> {
         person_subject(person)?;
         if changes.is_empty() {
             return Err(FractalError::new("invalid-availability", "name at least one of status, interruptions or deadline_clock"));
@@ -249,7 +334,7 @@ impl AvailabilityStore for Store {
             if until.is_some_and(|until| until <= now) {
                 return Err(FractalError::new("invalid-availability", format!("{name} until must be in the future")));
             }
-            let mut fields = BTreeMap::from([(name.to_owned(), json!(value))]);
+            let mut fields = BTreeMap::from([(name.to_owned(), json!(value)), ("source".to_owned(), json!(source))]);
             if let Some(until) = until {
                 fields.insert("until_unix_ms".into(), json!(until));
             }
@@ -264,38 +349,45 @@ impl AvailabilityStore for Store {
         self.person_availability(person, now)
     }
 
-    fn report_person_presence(&self, person: &str, source: &str, presence: Presence, observed_at: u128, now: u128) -> Result<PersonAvailability, FractalError> {
+    fn report_person_presence(&self, person: &str, source: &str, report: DeviceReport, now: u128) -> Result<PresenceReported, FractalError> {
         person_subject(person)?;
-        if presence == Presence::Unknown {
-            return Err(FractalError::new("invalid-presence", "report present, idle or locked"));
-        }
-        if observed_at > now + PRESENCE_FUTURE_SKEW_MS || now.saturating_sub(observed_at) >= PRESENCE_STALE_MS {
+        if report.observed_at > now + PRESENCE_FUTURE_SKEW_MS || now.saturating_sub(report.observed_at) >= PRESENCE_REPORT_MAX_AGE_MS {
             return Err(FractalError::new("invalid-presence", "observed_at must be within the last 15 minutes and at most 2 minutes ahead of this member's clock"));
         }
-        // Unchanged only when the recorded report is still fresh by the fold's own measure,
-        // min(observed_at, accepted_at); an old-observed report must not swallow a fresh one.
-        let unchanged = self.recent_presence(person, PRESENCE_REFRESH_MS, now).map_err(internal)?
-            .into_iter()
+        if report.last_input_at.is_some_and(|at| at == 0 || at > report.observed_at) {
+            return Err(FractalError::new("invalid-presence", "last_input_at must be positive and no later than observed_at"));
+        }
+        // Record transitions only: a new state, a different derived presence, or an active
+        // device's input moving forward far enough to matter. Anything else repeats the record.
+        let recorded = self.counting_presence(person, now).map_err(internal)?
+            .iter()
             .find(|claim| claim.body["fields"]["source"] == source)
-            .is_some_and(|claim| {
-                let fields = &claim.body["fields"];
-                let recorded = fields["observed_at_unix_ms"].as_u64().map_or(0, u128::from).min(claim.accepted_at_unix_ms);
-                fields["presence"] == word(presence) && now.saturating_sub(recorded) < PRESENCE_REFRESH_MS
-            });
-        if !unchanged {
+            .and_then(DeviceReport::from_claim);
+        let changes = recorded.is_none_or(|recorded| {
+            recorded.state != report.state
+                || recorded.presence_at(now) != report.presence_at(now)
+                || (report.state == DeviceState::Active
+                    && report.last_input().saturating_sub(recorded.last_input()) >= PRESENCE_REFRESH_MS)
+        });
+        if changes {
+            let mut fields = BTreeMap::from([
+                ("state".into(), json!(word(report.state))),
+                ("source".into(), json!(source)),
+                ("observed_at_unix_ms".into(), json!(report.observed_at)),
+            ]);
+            if let Some(at) = report.last_input_at {
+                fields.insert("last_input_at_unix_ms".into(), json!(at));
+            }
             self.append_claim(&ClaimInput {
-                subject: person.into(),
-                kind: PRESENCE_KIND.into(),
-                actor: Some(person.into()),
-                fields: BTreeMap::from([
-                    ("presence".into(), json!(word(presence))),
-                    ("source".into(), json!(source)),
-                    ("observed_at_unix_ms".into(), json!(observed_at)),
-                ]),
+                subject: person.into(), kind: PRESENCE_KIND.into(), actor: Some(person.into()), fields,
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             })?;
         }
-        self.person_availability(person, now)
+        let effective = if changes { Some(report) } else { recorded };
+        Ok(PresenceReported {
+            availability: self.person_availability(person, now)?,
+            report_again_at: effective.and_then(|report| report.idle_at(now)).and_then(rfc3339),
+        })
     }
 
     fn deadline_clock_holds(&self, person: &str, since: u128) -> Result<Vec<ClockHold>> {

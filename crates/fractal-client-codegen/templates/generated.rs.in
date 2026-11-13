@@ -1755,6 +1755,21 @@ pub struct Mission {
 pub struct MissionRunSummary {
     pub id: String,
     pub generation_id: Option<String>,
+    /// Source run for a new-run retry; absent for an ordinary start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// New runs created by retrying this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// Predecessor replaced by this fresh run after publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Fresh replacement created after a newer revision was published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Replacement admission refusal; the source remains active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     /// The mission revision the run is pinned to; absent on older daemons.
     #[serde(default)]
     pub revision: Option<String>,

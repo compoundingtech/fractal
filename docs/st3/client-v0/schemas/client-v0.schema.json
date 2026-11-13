@@ -2025,6 +2025,11 @@
       "properties": {
         "id": { "$ref": "#/$defs/MissionRunId" },
         "generation_id": { "$ref": "#/$defs/RunGenerationId" },
+        "retry_of": { "$ref": "#/$defs/MissionRunId", "description": "Source run for this new-run retry; omitted for an ordinary start." },
+        "retried_by": { "type": "array", "items": { "$ref": "#/$defs/MissionRunId" }, "description": "New runs created by retrying this run; omitted when empty." },
+        "supersedes": { "$ref": "#/$defs/MissionRunId", "description": "Predecessor replaced by this fresh run after publication; omitted when absent." },
+        "superseded_by": { "$ref": "#/$defs/MissionRunId", "description": "Fresh replacement created after a newer revision was published; omitted when absent." },
+        "supersession_fault": { "type": "string", "description": "Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent." },
         "revision": { "$ref": "#/$defs/Revision", "description": "The mission revision this run is pinned to. Older daemons omit it." },
         "requester": { "$ref": "#/$defs/ActorRef" },
         "status": { "type": "string" },

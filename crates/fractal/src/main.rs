@@ -1346,6 +1346,11 @@ enum MissionViewCommand {
     /// Publication and preview do not start a run. Claim its ready steps, verify the result
     /// and record evidence before review. Recording work does not widen its authorization.
     Start(MissionRunStartArgs),
+    /// Start a new run from a failed terminal run's exact inputs and workspace.
+    ///
+    /// Uses the latest published revision unless --same-revision is set. The source run
+    /// and its history remain unchanged; incompatible latest inputs are refused.
+    Retry(MissionRunRetryArgs),
     /// Cancel one exact running mission and stop its owned work and runtimes.
     Cancel(MissionCancelArgs),
     /// Change who a running run tells when it fails, is cancelled or stalls, or clear it.
@@ -1527,6 +1532,22 @@ struct MissionRunStartArgs {
     /// Print the exact mission-run KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
+}
+
+#[derive(Args)]
+struct MissionRunRetryArgs {
+    /// Exact failed terminal mission run to retry.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: false })))]
+    run: String,
+    /// Use the source run's current revision instead of the latest published revision.
+    #[arg(long)]
+    same_revision: bool,
+    /// Why a new run is needed.
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -6529,6 +6550,7 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),

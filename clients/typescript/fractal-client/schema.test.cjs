@@ -42,6 +42,43 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
+test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        id: 'mission-run/example/current', requester: 'person/operator',
+        status: 'running', phase: 'normal', must_act: 'system',
+        state_since: '2026-11-12T12:00:00.000Z',
+        progress: { done: 0, total: 1 }, current_steps: [],
+        retry_of: 'mission-run/example/failed', retried_by: ['mission-run/example/retry'],
+    };
+    const lineage = {
+        supersedes: 'mission-run/example/previous',
+        superseded_by: 'mission-run/example/replacement',
+        supersession_fault: 'revision old -> new: missing [replacement]; extra [value]',
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.MissionRunSummary, mode);
+        const legacy = Schema.encodeSync(Rich.MissionRunSummary)(decode(wire));
+        for (const field of Object.keys(lineage)) {
+            assert.equal(Object.hasOwn(legacy, field), false);
+        }
+        const encoded = Schema.encodeSync(Rich.MissionRunSummary)(decode({ ...wire, ...lineage }));
+        for (const [field, value] of Object.entries(lineage)) {
+            assert.equal(encoded[field], value);
+        }
+        assert.equal(encoded.retry_of, wire.retry_of);
+        assert.deepEqual(encoded.retried_by, wire.retried_by);
+    }
+    const strict = Rich.decodeUnknownSync(Rich.MissionRunSummary, 'strict');
+    for (const field of Object.keys(lineage)) {
+        assert.throws(() => strict({ ...wire, [field]: null }));
+        assert.throws(() => strict({ ...wire, [field]: 42 }));
+    }
+    for (const field of ['supersedes', 'superseded_by']) {
+        assert.throws(() => strict({ ...wire, [field]: 'step-run/example/wrong-kind' }));
+    }
+});
+
 test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
     const [{ Schema }, Rich] = await modules;
     const name = Rich.decodeUnknownSync(Rich.ArrangementName, 'strict');
