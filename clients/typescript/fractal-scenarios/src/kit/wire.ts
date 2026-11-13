@@ -14,6 +14,8 @@ export type WireDefinition =
   | 'Work'
   | 'Attention'
   | 'Message'
+  | 'ThreadSummary'
+  | 'ThreadTimelineEvent'
   | 'Resource'
   | 'TimelineEntry'
   | 'TerminalScreen'
@@ -62,6 +64,11 @@ export const wireValues = (slice: AnySlice): WireValue[] => {
       list('/state/attention', slice.state.attention, 'Attention')
       list('/state/resources', slice.state.resources ?? [], 'Resource')
       list('/state/messages', slice.state.messages, 'Message')
+      slice.state.topic_threads?.forEach((thread, index) => {
+        const base = `/state/topic_threads/${index}`
+        out.push({ pointer: `${base}/summary`, definition: 'ThreadSummary', value: thread.summary })
+        list(`${base}/events`, thread.events, 'ThreadTimelineEvent')
+      })
       break
     case 'conversation':
       slice.state.threads.forEach((thread, index) => list(`/state/threads/${index}/items`, thread.items, 'TimelineEntry'))

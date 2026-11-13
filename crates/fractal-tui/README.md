@@ -25,6 +25,26 @@ are explicitly unavailable because the kit does not model them (the live graph a
 has no worktree collection). Clients and Usage remain loading: these screens do not
 yet have a scenario-backed projection.
 
+### Durable thread preview (fixture/preliminary)
+
+`fractal tui --demo` also hydrates the existing world's optional attention
+`topic_threads` inventory into the ordinary native thread windows. Open Inbox's
+**Worker typecheck fails after the rename** item to see several threads on one
+item. Expand a thread's row or use its **Open in tab** action to inspect the
+same durable resource. The inventory includes open and closed history, a
+read-only discussion, and replies whose authoritative server order differs
+from timestamp order. The renderer never sorts those replies by clock.
+
+These are **fixture/preliminary**, not connected-daemon evidence. The whole
+demo uses `ThreadAccess::default()`, so histories and navigation work but no
+thread mutations are enabled or sent. The writable composer, reply and
+lifecycle controls are deliberately not demonstrated: those require the live
+client's mutation receipt driver. Closed history remains readable.
+
+Thread summaries and timeline events share the attention slice's existing
+strict decoding and timestamp-pointer rebasing. No separate runtime world or
+feature-specific renderer is used.
+
 `fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
 Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
 `FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.

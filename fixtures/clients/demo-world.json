@@ -140,9 +140,11 @@
           "custom.reply"
         ],
         "age": "1m",
-        "agent": null,
+        "agent": "agent/example/atlas/builder",
         "blocked": null,
-        "conversations": [],
+        "conversations": [
+          "agent/example/atlas/builder"
+        ],
         "deadline": null,
         "id": "attention/scenario-fleet-mid-refactor-worker-typecheck",
         "kind": {

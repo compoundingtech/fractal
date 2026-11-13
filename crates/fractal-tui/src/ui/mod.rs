@@ -6916,6 +6916,7 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     let mut ui = Ui::new(demo::loading_from(generated.world.clone()));
     ui.keyboard_enhanced = _guard.enhanced;
     ui.resource_sidebar.arrangements = generated.arrangements;
+    ui.threads = generated.threads;
     ui.load_prefs();
     // The demo keeps its spaces in memory only, and shows the sidebar as a new device does.
     ui.glasses = glass::Glasses::open(space_request(args), None);
@@ -6972,6 +6973,7 @@ fn dump(args: &[String]) -> Result<()> {
         generated.world
     });
     ui.resource_sidebar.arrangements = generated.arrangements;
+    ui.threads = generated.threads;
     ui.glasses = glass::Glasses::open(space_request(args), None);
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     // Keys: each character is a key; "\n" is Enter, "<esc>", "<end>", "<pgdn>", "<pgup>", "<down>";

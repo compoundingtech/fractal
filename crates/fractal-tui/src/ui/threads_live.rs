@@ -383,6 +383,62 @@ pub(super) struct Threads {
 }
 
 impl Threads {
+    /// Hydrate the ordinary native windows from the shared demo world, without a transport.
+    /// Access stays read-only: demo mode has no thread mutation receipt driver.
+    pub(super) fn demo_windows(
+        &mut self,
+        model: &Model,
+        snapshot: &Snapshot,
+        rows: Vec<super::demo::TopicThread>,
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.enable(true);
+        self.set_access(ThreadAccess::default());
+        self.model(model);
+        let mut contexts: BTreeMap<ThreadInterest, Vec<ThreadSummary>> = BTreeMap::new();
+        for row in rows {
+            let origin = self.origins.get(&row.origin_attention_id).ok_or_else(|| {
+                anyhow::anyhow!("Demo thread {} has no readable Inbox origin {}", row.summary.id, row.origin_attention_id)
+            })?;
+            anyhow::ensure!(
+                origin.agent == row.summary.agent_id,
+                "Demo thread {} and its Inbox origin have different conversations",
+                row.summary.id
+            );
+            for context in [
+                origin.context.clone(),
+                ThreadInterest::Agent(row.summary.agent_id.clone()),
+            ] {
+                contexts.entry(context).or_default().push(row.summary.clone());
+            }
+            let order = row.events.iter().map(|event| event.id.clone()).collect();
+            self.window(
+                ThreadInterest::Timeline(row.summary.id.clone()),
+                snapshot.clone(),
+                true,
+                ThreadCollectionRows::Timeline(row.events),
+                vec![],
+                order,
+                false,
+            );
+        }
+        for (context, summaries) in contexts {
+            let order = summaries.iter().map(|summary| summary.id.clone()).collect();
+            self.window(
+                context,
+                snapshot.clone(),
+                true,
+                ThreadCollectionRows::Summaries(summaries),
+                vec![],
+                order,
+                false,
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn enable(&mut self, available: bool) {
         self.available = available;
         if !available {
