@@ -8,7 +8,7 @@ version 2
 //
 // Schedules belong to a mission run. A mission with no step would complete at once and stop its
 // schedule, so `retire` keeps this run open until the operator approves it in
-// `st attention ls --as person/operator`, or cancels the run. The seat is durable and belongs to
+// `fractal alerts ls --as person/operator`, or cancels the run. The seat is durable and belongs to
 // neither mission.
 //
 //   st apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator

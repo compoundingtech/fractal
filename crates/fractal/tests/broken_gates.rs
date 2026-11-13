@@ -193,7 +193,7 @@ impl Daemon {
     }
 
     fn attention(&self) -> Vec<Value> {
-        self.command(&["attention", "ls", "--as", PUBLISHER])["value"]["items"]
+        self.command(&["alerts", "ls", "--as", PUBLISHER])["value"]["items"]
             .as_array()
             .cloned()
             .unwrap_or_default()
@@ -1725,7 +1725,7 @@ fn publishing_fixed_or_removed_steps_never_runs_the_parked_broken_step() {
         assert!(!fixture.root.path().join("replacement-executions").exists());
         // The person's old approval cannot resurrect work from the retired revision.
         let approved = fixture.daemon.run_cli(&[
-            "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+            "alerts", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
         ]);
         assert!(!approved.status.success(), "{approved:?}");
         fixture.release_cleanup();
@@ -1880,7 +1880,7 @@ mission-run "dependent" {{
     assert_eq!(fixture.view(dependency_subject)["status"], "cancelled");
     let review = fixture.wait_for_review(dependency_replacement);
     fixture.daemon.command(&[
-        "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+        "alerts", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
     ]);
     fixture.complete(replacement);
     assert_eq!(fixture.view(dependency_replacement)["status"], "completed");
@@ -1931,7 +1931,7 @@ fn publication_supersedes_immediately_even_with_more_than_two_pages_of_head_back
     fixture.assert_cleanup_wait(replacement);
     assert!(!fixture.root.path().join("broken-ran").exists());
     let approved = fixture.daemon.run_cli(&[
-        "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+        "alerts", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
     ]);
     assert!(!approved.status.success(), "{approved:?}");
     fixture.release_cleanup();

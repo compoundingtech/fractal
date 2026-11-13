@@ -19,7 +19,7 @@ version 2
 //
 // The observer and subscriptions belong to the intake run and stop when it ends. A mission with
 // no step would complete at once and stop them, so `retire` keeps the run open until the operator
-// approves it in `st attention ls --as person/operator`, or cancels the run:
+// approves it in `fractal alerts ls --as person/operator`, or cancels the run:
 //
 //   st missions cancel mission-run/example/app/intake/main \
 //     --reason "the project moved to another repository" --as person/operator
