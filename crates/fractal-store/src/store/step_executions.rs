@@ -8,6 +8,7 @@ pub(super) fn accumulate_response(
     buckets: [u64; 9], at: u128,
 ) -> Result<()> {
     connection.execute(
+        /* sqlite-large-value: allow-for-now lv-ha2dcdd19ebd4 owner=fractal_store::store::step_executions TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_step_execution_spend(execution_id,model,account,host,input_tokens,output_tokens,
          cache_write_tokens,cache_write_1h_tokens,cached_tokens,total_tokens,cost_microusd,
          reported_cost_microusd,unpriced_tokens,observed_at_unix_ms)
@@ -60,6 +61,7 @@ pub(super) fn response_execution(connection: &Connection, agent: &str, incarnati
 {
     if incarnation.is_empty() { return Ok(None); }
     let candidate: Option<(String, String, String)> = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h1055a5212a66 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT id, subject, body FROM claims INDEXED BY claims_execution_actor_index
          WHERE actor=?1 AND kind='work.claimed'
            AND json_extract(body, '$.fields.claim_incarnation')=?2
@@ -72,6 +74,7 @@ pub(super) fn response_execution(connection: &Connection, agent: &str, incarnati
     let body: Value = serde_json::from_str(&body)?;
     let attempt = body["fields"]["attempt"].as_u64().unwrap_or(0);
     let ended: bool = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h175197c65d8e owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
         &format!("SELECT EXISTS(SELECT 1 FROM claims JOIN claims claimed ON claimed.id=?3
          WHERE claims.subject=?1
            AND claims.kind IN ('work.submitted','work.failed','work.released','step-run.state')
@@ -101,7 +104,7 @@ impl Store {
     pub fn step_executions(&self, step_subject: &str) -> Result<Vec<StepExecution>> {
         smallclaims::touched::note_read(|| step_subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0d0d4dd29070 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id, kind, actor, body, accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND (kind LIKE 'work.%' OR kind='step-run.state') ORDER BY CANONICAL_ASC(claims)",
         ))?;
@@ -147,7 +150,7 @@ impl Store {
             }
         }
         for execution in &mut executions {
-            let mut statement = connection.prepare(&canonical_sql(
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h04350d02a7bb owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT body FROM claims WHERE subject=?1 AND kind='harness.usage'
                    AND json_extract(body,'$.fields.execution_id')=?2 ORDER BY CANONICAL_ASC(claims)",
             ))?;
@@ -185,6 +188,7 @@ impl Store {
             }
             if let Some(incarnation) = &execution.incarnation_id {
                 let runtime: Option<(String, String, String)> = connection.query_row(
+                    /* sqlite-large-value: allow-for-now lv-hd667855ddda0 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
                     &canonical_sql("SELECT id, body, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='runtime.observed'
                      AND json_extract(body,'$.fields.incarnation_id')=?2
                      AND CAST(accepted_at_unix_ms AS INTEGER)>=?3

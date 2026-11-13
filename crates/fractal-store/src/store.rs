@@ -821,7 +821,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0f50685697d0 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
