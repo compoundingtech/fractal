@@ -323,10 +323,10 @@ fn liveness_termination_fences_publication_until_the_native_worker_exits() {
     // Observe the host fault without evaluating the run: publication must encounter
     // a still-active source whose worker has already entered asynchronous termination.
     fixture.without_passes("the native worker misses its liveness deadline", || {
-        fixture.engine.host_fault(&old.step, 1).is_some()
+        fixture.engine.host_fault(&old.step, 1).is_some() && fixture.status(&old.step) == "failed"
     });
     assert!(task.exists(), "liveness reporting must not wait for native I/O to exit");
-    assert_eq!(fixture.status(&old.step), "running");
+    assert_eq!(fixture.store.mission_run(&old.run).unwrap().unwrap().phase, "normal");
     let host = fixture.engine.host_pid();
     let journal = fixture.journal(&old.step);
     fixture.publish("program-test", REPLACEMENT_BUNDLE, "liveness-publication");
