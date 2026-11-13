@@ -1,5 +1,6 @@
 import AppKit
 import AttentionCore
+import BuildIdentity
 import SwiftUI
 import TrayViews
 
@@ -74,7 +75,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   private var lastLogged: String?
 
   override init() {
-    let build = BuildIdentity.bundled()
+    let build = BuildIdentity.tray
     self.build = build
     do {
       let configuration = try TrayConfiguration.load(

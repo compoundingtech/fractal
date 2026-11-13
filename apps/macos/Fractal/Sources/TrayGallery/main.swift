@@ -1,5 +1,6 @@
 import AppKit
 import AttentionCore
+import BuildIdentity
 import CoreGraphics
 import Foundation
 import TrayViews
@@ -14,7 +15,7 @@ import TrayViews
 //                                       capture.json
 //
 // cacheDisplay renders have no window-server materials (no glass); captures do.
-// `TRAY_GALLERY_REV` names the source the renders came from (recorded in each manifest).
+// Each manifest's `trayRev` is the `machineVersion` of the gallery build the renders came from.
 
 struct Manifest: Encodable {
   struct Entry: Encodable {
@@ -59,9 +60,11 @@ struct Manifest: Encodable {
   }
 }
 
+/// The gallery's own build identity: the footers render it, the manifests record its
+/// `machineVersion`.
 enum GalleryBuild {
-  static let rev = ProcessInfo.processInfo.environment["TRAY_GALLERY_REV"].flatMap { $0.isEmpty ? nil : $0 }
-  static let identity = BuildIdentity(baseVersion: "0.2.0", rev: rev, dirty: false, fractalClientRev: nil)
+  static let identity = BuildIdentity.tray
+  static let rev: String? = identity.machineVersion
 }
 
 func fail(_ message: String, code: Int32) -> Never {

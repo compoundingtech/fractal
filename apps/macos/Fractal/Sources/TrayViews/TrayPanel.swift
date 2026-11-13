@@ -1,5 +1,6 @@
 import AppKit
 import AttentionCore
+import BuildIdentity
 import SwiftUI
 
 /// The menu-bar panel as a Control Center module: the top level (tiles, the inbox as one-line

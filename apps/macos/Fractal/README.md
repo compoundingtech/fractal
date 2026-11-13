@@ -168,12 +168,37 @@ Fractal revision carrying the availability API (`availabilityList`,
 root Fractal source, so the deployed tray uses the client of the daemon it talks
 to, and builds only once that source carries the same API.
 
-The bundle carries `Contents/Resources/nix-build-stamp.json` (`type`, `version`,
-`rev`, `dirty`, `fractalClientRev`). Its `rev` is `src.<hash>` of the tray's own
-Swift package (`Package.swift`, `Sources/`, `Tests/`) plus the FractalClient
-revision, so unrelated repository commits, docs and design renders neither rebuild nor
-restart the tray; the footer shows `machineVersion` (`0.2.0+src.<hash>`) with the
-FractalClient revision on hover.
+The tray carries the canonical build identity (effect-utils
+`context/builds/01-identity`) through the shared Swift reader
+`flakes/swift-shared/build-identity`. The Nix build compiles exactly the
+`flakes/attention-tray` closure in `nix/buck2-products/source-paths.json` (its
+Swift package and the shared reader) and embeds that closure's NixStamp: `rev`
+and `commitTs` name the commit that produced it
+(`nix/buck2-products/product-revs/flakes/attention-tray.json`), so unrelated
+repository commits, docs and design renders neither rebuild nor restart the
+tray. `baseVersion` in `Sources/TrayViews/Build.swift` is the one version
+literal (also `CFBundleShortVersionString`). Fractal sees the tray as
+`attention-tray <machineVersion>`.
+
+The footer follows the identity spec's UI modality, refreshed each minute:
+
+- A Nix build abbreviates to the base version and the shared short form
+  (revision, `*` iff dirty, compact commit age): `0.2.0 · 2c3b5d7 · 2h`.
+- A source run or dev build keeps the spec's local prose, so it never passes
+  for a release:
+  `0.2.0 — running from local source (d7a78aea1b, committed 2 hours ago)`.
+- Its hover lists `displayVersion`, `machineVersion` (`0.2.0+2c3b5d77c917`,
+  `0.2.0+local.d7a78aea1b`), the absolute commit time (and a dev build's start
+  time) and the FractalClient revision (`FractalClientRevision` in
+  `Info.plist`).
+
+A build that does not run `flake.nix` (the dev channel, `swift run`) leaves the
+`__CLI_BUILD_STAMP__` placeholder in `Build.swift` and must pass a LocalStamp in
+the tray process's `CLI_BUILD_STAMP` environment variable (effect-utils
+`cliBuildStamp`'s shape, timestamps in Unix seconds):
+`{"type":"local","rev":"<git rev-parse --short HEAD>","ts":<start>,"commitTs":<git log -1 --format=%ct HEAD>,"dirty":<false|true>}`.
+Without it the footer shows only `0.2.0`. `Contents/Resources/nix-build-stamp.json`
+is no longer read.
 
 Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
 The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
@@ -255,13 +280,15 @@ notification still lands in Notification Center.
 
 ## Design gallery
 
-The panel's views live in the `TrayViews` target and read only `AttentionCore`.
+The panel's views live in the `TrayViews` target and read only `AttentionCore`
+and the build identity.
 `TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
 answering, snooze and dismiss, quiet, read-only, degraded, unconfigured;
 speech: speaking, in a call, muted) for the design Storybook in `design/`, from
 the Nix-built gallery (`nix run ./flakes/attention-tray#gallery -- <dir> …`).
-Every manifest records the source rev. It needs a Mac with a login session and
-has these outputs:
+Every manifest's `trayRev` records the gallery build's `machineVersion`, and
+the footers show its build identity at render time. It needs a Mac with a login
+session and has these outputs:
 
 - `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
   as `@2x` PNGs, and the status item in every state, plus `manifest.json`,
