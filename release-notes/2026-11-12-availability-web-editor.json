@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal web Settings sets and clears status, interruptions, the deadline clock and the directive note, with preset or custom ends",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim or client API change; the app uses the existing client-v0 availability operations."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change. Each write (PUT /v1/client/availability, PUT /v1/client/notes) shows the state Fractal answers with."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A pairing without write.availability or write.notes keeps the summary and is told to pair again."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Clear the change in Settings, or let its end pass."
+  }
+}
