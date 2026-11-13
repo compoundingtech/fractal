@@ -131,6 +131,7 @@ fn mission_detail_folds_each_attempt_wait_and_transition_of_a_step() {
     let ask = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Which target?".into(),
@@ -286,6 +287,7 @@ fn person_responses_close_waits_and_emit_terminal_transitions() {
         let subject = if cancel {
             act(&state, origin, "claim", None, "claim-before-ask");
             state.store.ask_person(&PersonAskRequest {
+                priority: None,
                 legacy_request: None,
                 person: "person/ada".into(),
                 title: "Which target?".into(),

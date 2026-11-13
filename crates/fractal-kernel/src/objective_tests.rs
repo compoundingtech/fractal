@@ -91,7 +91,7 @@ fn a_nonsensical_objective_is_refused_never_defaulted() {
         (interval("    label \"class\"\n", "    label \"class\"\n    color \"red\"\n"), "unknown child `color`"),
         (interval("about \"A change, from ready to served by every member\"", "about \" \""), "`about` is empty"),
         ("objective \"cpu\" { about \"x\"; indicator \"cpu\" { idle-min-minutes 10; load-max-cores 2.0 }; target \"cores\" max=1.0 }".into(), "needs target `idle-cores`"),
-        ("objective \"db\" { about \"x\"; indicator \"database\"; target \"live-gb\" max=1.0; target \"growth-mb-per-day\" max=1; window \"1d\" }".into(), "only an interval takes a `window`"),
+        ("objective \"db\" { about \"x\"; indicator \"database\"; target \"live-gb\" max=1.0; target \"growth-mb-per-day\" max=1; window \"1d\" }".into(), "only an interval or a count takes a `window`"),
         ("objective \"r\" { about \"x\"; indicator \"latency\" { path \"GET /v1/x\" }; target \"p99\" within=\"300ms\"; target \"p99\" within=\"200ms\" scope=\"remote\" }".into(), "remote latency is below"),
         ("objective \"Bad\" { about \"x\" }".into(), "lowercase words"),
         ("objective \"ops//x\" { about \"x\" }".into(), "lowercase words"),
@@ -101,4 +101,67 @@ fn a_nonsensical_objective_is_refused_never_defaulted() {
     }
     assert!(parse_document(&format!("version 2\n{INTERVAL}\n{INTERVAL}")).unwrap_err().message.contains("declared twice"));
     assert!(!one(&INTERVAL.replace("ops/change-rollout", "change-rollout")).unwrap().declarable());
+}
+
+const COUNT: &str = r#"objective "factory/work-throughput" {
+  about "Factory-authored pull requests merged into the roster's default branches"
+  indicator "count" {
+    subject-prefix "custom/factory/merged-pr/"
+    event "custom.factory.pr-merged" at="merged_at"
+    label "repository"
+    exclude "author" "renovate" "dependabot"
+  }
+  window "24h"
+  target "per-hour" min=10
+  on-breach "fault" owner="agent/factory/manager" condition="work-throughput-low"
+}"#;
+
+#[test]
+fn a_count_reads_its_event() {
+    let objective = one(COUNT).unwrap();
+    assert!(objective.declarable());
+    assert_eq!(objective.indicator.kind(), "count");
+    assert_eq!(objective.window, Some(Window { ms: 86_400_000, min_samples: 1 }));
+    let Indicator::Count(count) = &objective.indicator else { panic!() };
+    assert_eq!(count.subject_prefix, "custom/factory/merged-pr/");
+    assert_eq!((count.event.as_str(), count.at.as_str()), ("custom.factory.pr-merged", "merged_at"));
+    assert_eq!(count.labels, ["repository"]);
+    assert_eq!(count.excludes, [Exclude { field: "author".into(), values: vec!["renovate".into(), "dependabot".into()] }]);
+    assert_eq!(objective.target("per-hour", false).map(|target| target.bound), Some(Bound::Min(10.0)));
+    let flakes = one(&COUNT.replace("min=10", "max=0.5")).unwrap();
+    assert_eq!(flakes.target("per-hour", false).map(|target| target.bound), Some(Bound::Max(0.5)));
+}
+
+#[test]
+fn a_nonsensical_count_is_refused_never_defaulted() {
+    let count = |replace: &str, with: &str| {
+        assert!(COUNT.contains(replace), "{replace}");
+        COUNT.replace(replace, with)
+    };
+    for (text, says) in [
+        (count(" at=\"merged_at\"", ""), "`event` needs `at=FIELD`"),
+        (count("min=10", "min=10 max=20"), "needs one bound"),
+        (count("min=10", ""), "needs one bound"),
+        (count("min=10", "min=0"), "no target `per-hour`"),
+        (count("min=10", "min=-1"), "no target `per-hour`"),
+        (count("min=10", "max=-1"), "no target `per-hour`"),
+        (count("min=10", "min-percent=10"), "no target `per-hour`"),
+        (count("min=10", "within=\"1h\""), "no target `per-hour`"),
+        (count("target \"per-hour\"", "target \"p95\""), "no target `p95`"),
+        (count("min=10", "min=10\n  target \"per-hour\" max=20"), "repeats target"),
+        (count("  window \"24h\"\n", ""), "a `count` indicator needs a `window`"),
+        (count("window \"24h\"", "window \"24h\" min-samples=5"), "takes no `min-samples`"),
+        (count("    subject-prefix \"custom/factory/merged-pr/\"\n", ""), "needs `subject-prefix`"),
+        (count("subject-prefix \"custom/factory/merged-pr/\"", "subject-prefix \"custom/factory/merged-pr\""), "end with `/`"),
+        (count("    event \"custom.factory.pr-merged\" at=\"merged_at\"\n", ""), "needs `event`"),
+        (count("event \"custom.factory.pr-merged\" at=\"merged_at\"", "event \"custom.factory.pr-merged\" at=\"merged_at\"\n    event \"custom.factory.pr-closed\" at=\"closed_at\""), "repeats `event`"),
+        (count("at=\"merged_at\"", "at=\"merged_at\" set=\"hosts\""), "set"),
+        (count("    label \"repository\"\n", "    label \"repository\"\n    label \"repository\"\n"), "is repeated"),
+        (count("exclude \"author\" \"renovate\" \"dependabot\"", "exclude \"author\""), "`exclude` needs a field"),
+        (count("    label \"repository\"\n", "    start \"custom.factory.pr-opened\"\n"), "unknown child `start`"),
+    ] {
+        let message = one(&text).unwrap_err().message;
+        assert!(message.contains(says), "{says:?} not in {message:?}");
+    }
+    assert!(!one(&COUNT.replace("factory/work-throughput", "throughput")).unwrap().declarable());
 }

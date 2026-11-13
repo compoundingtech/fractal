@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print a checksum-verified previous-release st3 path, without installing it.
+"""Print a checksum-verified compatibility baseline binary path, without installing it.
 
 COMPAT_BASELINE_ARCHIVE names a local copy of the pinned bundle (a Nix build has no network and
 supplies it as a fixed-output fetch). It is read in place of the download and held to the same
@@ -131,6 +131,8 @@ def main():
         parser.error("no native release bundle for this platform")
     pin = json.loads((REPO / f".github/{args.baseline}-compat-baseline.json").read_text())
     bundle = pin["bundles"][target]
+    print(f"compat-baseline: {args.baseline} source={pin['commit']} tag={pin['tag']} target={target}",
+          file=sys.stderr)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Each immutable archive has a separate directory. Concurrent tests may safely

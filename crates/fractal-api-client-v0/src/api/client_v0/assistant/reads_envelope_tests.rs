@@ -85,3 +85,49 @@ async fn rich_source_pages_resume_after_the_last_delivered_item_without_loss() {
         }
     }
 }
+
+/// The default budget pages the live objective list instead of refusing it, and following
+/// cursors yields every row exactly once.
+#[tokio::test]
+async fn assistant_slo_pages_fit_the_default_budget_and_resume_without_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let rows = fractal_api_core::api::operations::current_slo_rows(&state.store, &state.state_dir).unwrap();
+    let ids = rows.iter().map(|row| row["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let admitted = new_client_snapshot(&state);
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, local_only_response: false,
+        request_id: "request/00000000-0000-0000-0000-000000000000".into(),
+        client_snapshot: Some(admitted.clone()), server: None, roster: false,
+    };
+    let (_, whole) = project_with_context(&state, &admitted, "slo", &params(&[("limit", "100")]),
+        MAX_RESPONSE_BYTES, "slo-source:1", &context).await.unwrap();
+    assert!(serde_json::to_vec(&whole["items"]).unwrap().len() > DEFAULT_RESPONSE_BYTES,
+        "the fixture list must exceed one default page: {whole}");
+    let (mut snapshot, mut page) = project_with_context(&state, &admitted, "slo", &params(&[]),
+        DEFAULT_RESPONSE_BYTES, "slo-source:1", &context).await.unwrap();
+    assert!(page["page"]["next_cursor"].is_string(), "{page}");
+    let mut delivered = Vec::new();
+    loop {
+        let bytes = serde_json::to_vec(&json!({
+            "api_version": CLIENT_API_VERSION, "request_id": context.request_id,
+            "snapshot": snapshot, "value": page
+        })).unwrap().len();
+        assert!(bytes <= DEFAULT_RESPONSE_BYTES, "{bytes} > {DEFAULT_RESPONSE_BYTES}");
+        let items = page["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        for item in items {
+            assert!(item.get("explain").is_none(), "{item}");
+            delivered.push(item["id"].as_str().unwrap().to_owned());
+        }
+        let Some(cursor) = page["page"]["next_cursor"].as_str() else { break };
+        (snapshot, page) = project_with_context(&state, &snapshot, "slo",
+            &params(&[("cursor", cursor)]), DEFAULT_RESPONSE_BYTES, "slo-source:1", &context)
+            .await.unwrap();
+    }
+    assert_eq!(delivered, ids);
+    let error = project_with_context(&state, &admitted, "slo", &params(&[]), 1, "slo-source:1", &context)
+        .await.unwrap_err();
+    assert_eq!((error.status, error.code.as_str()), (StatusCode::PAYLOAD_TOO_LARGE, "response-budget-exceeded"));
+    assert!(error.message.contains(&ids[0]), "{}", error.message);
+}

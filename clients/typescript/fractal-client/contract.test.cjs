@@ -457,6 +457,7 @@ test('availability reads select a person and writes send the session person noth
     const written = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json');
     const set = require('../../../docs/st3/client-v0/fixtures/availability-set.json');
     const report = require('../../../docs/st3/client-v0/fixtures/presence-report.json');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json');
     const calls = [];
     const client = new FractalClient({
         baseUrl: 'https://example.test',
@@ -464,13 +465,13 @@ test('availability reads select a person and writes send the session person noth
         fetchImpl: async (url, init) => {
             calls.push([String(url), init]);
             if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
-            return response(init.method === 'GET' ? read : written);
+            return response(init.method === 'GET' ? read : init.method === 'POST' ? reported : written);
         },
     });
     assert.deepEqual(await client.availabilityList(), read);
     assert.deepEqual(await client.availabilityList('person/ada'), read);
     assert.deepEqual(await client.availabilitySet(set), written);
-    assert.deepEqual(await client.presenceReport(report), written);
+    assert.deepEqual(await client.presenceReport(report), reported);
     const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
     assert.deepEqual(sent.map(([url, init]) => [init.method, url]), [
         ['GET', 'https://example.test/v1/client/availability'],
