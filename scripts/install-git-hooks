@@ -71,8 +71,8 @@ work=$(mktemp -d 2>/dev/null) || exit 1
 trap 'rm -rf "$work"' EXIT
 # Save all ref updates: both guards consume the same pre-push protocol.
 cat > "$work/updates"
-if ! git show "$base:scripts/check-public-repo" > "$work/check-public-repo"; then
-  echo "public repository guard: accepted base has no content scanner" >&2
+if ! GIT_NO_LAZY_FETCH=1 git show "$base:scripts/check-public-repo" > "$work/check-public-repo"; then
+  echo "public repository guard: accepted content scanner is unavailable; hydrate missing Git objects outside the guard and retry (no lazy fetching)" >&2
   exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then

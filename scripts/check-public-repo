@@ -111,9 +111,10 @@ def findings(path, content):
 
 def git(repo, *args):
     # Replacement objects must not hide the objects that will actually be published.
+    # Promised objects must be hydrated outside this no-network content guard.
     return subprocess.check_output(
         ["git", "--no-replace-objects", "-C", str(repo), *args],
-        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"},
     )
 
 
@@ -191,6 +192,7 @@ def main():
             return check_checkout()
     except (subprocess.CalledProcessError, OSError, ValueError) as error:
         print(f"public repository history check could not complete: {error}", file=sys.stderr)
+        print("No lazy fetching is allowed; hydrate missing Git objects outside the guard and retry.", file=sys.stderr)
         return 1
     return report(errors)
 

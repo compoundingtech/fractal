@@ -3,7 +3,7 @@
   "summary": "The ordinary public-repo-history check scans every introduced commit, including merge commits and recursively merged side histories. Cleaning the final tree no longer hides dirty intermediate commits. The accepted-main content-only pre-push guard runs before unchanged evidence signing. Forgery-proof hosted enforcement is not activated: the workflow is prepared for a future trusted organization required-workflow rule, while the organization-plan versus dedicated producer App decision remains separate. An ordinary candidate workflow can change its own scanner and is not a trust anchor. The separate landing-signing transition is unchanged.",
   "replay": {
     "status": "none",
-    "detail": "No runtime replay or stored data change. The guard reads Git commit history."
+    "detail": "No runtime replay or stored data change. The guard reads Git commit history without lazy fetching. Missing promised objects, including the accepted scanner, block publication; hydrate them outside the guard before retrying."
   },
   "schema": {
     "status": "none",
