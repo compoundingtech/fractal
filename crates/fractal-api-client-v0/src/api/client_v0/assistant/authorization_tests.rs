@@ -1205,6 +1205,7 @@ async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant
     assert_eq!(read["directive_note"]["person"], OWNER);
     assert_eq!(read["directive_note"]["text"], "Hold routine asks until the review lands");
     assert!(!value.to_string().contains("person/ada"), "{value}");
+    assert_eq!(read["directive_note_truncated"], false);
 
     for query in ["?person=person%2Fada", "?actor=person%2Fada"] {
         let payload = granted.payload("availability", query);
@@ -1220,4 +1221,42 @@ async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant
         Some(&without.header(&payload, &without.attestor))).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
     assert!(value.get("value").is_none());
+}
+
+#[tokio::test]
+async fn assistant_availability_cuts_the_note_to_the_response_budget_and_says_so() {
+    use fractal_api_core::DirectiveNotesStore as _;
+    let granted = fixture(SCOPES, true).await;
+    let store = &granted.state.store;
+    fractal_store::store::directive_notes::tests_shared_seats::enable(store);
+    // A largest note whose escapes and multibyte characters make its encoding longer than its bytes.
+    let line = "Hold \"routine\" asks — für später\n";
+    let mut note = String::new();
+    while note.len() + line.len() <= fractal_schema::directive_notes::MAX_TEXT_BYTES {
+        note.push_str(line);
+    }
+    note.extend(std::iter::repeat_n('x', fractal_schema::directive_notes::MAX_TEXT_BYTES - note.len()));
+    store.set_directive_note(OWNER, OWNER, "host/example", Some(note.as_str()), None).unwrap();
+
+    // The default budget holds the whole response; the note is cut on a character boundary.
+    let payload = granted.payload("availability", "");
+    let (status, value, bytes) = granted.request("/v1/client/assistant/availability",
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= DEFAULT_RESPONSE_BYTES && bytes > DEFAULT_RESPONSE_BYTES - 8, "{bytes}");
+    let read = &value["value"];
+    assert_eq!(read["directive_note_truncated"], true);
+    assert_eq!(read["availability"]["person"], OWNER);
+    let cut = read["directive_note"]["text"].as_str().unwrap();
+    assert!(!cut.is_empty() && cut.len() < note.len() && note.starts_with(cut), "{cut}");
+
+    // The largest budget returns the whole note.
+    let query = "?max_response_bytes=16384";
+    let payload = granted.payload("availability", query);
+    let (status, value, bytes) = granted.request(&format!("/v1/client/assistant/availability{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= MAX_RESPONSE_BYTES, "{bytes}");
+    assert_eq!(value["value"]["directive_note_truncated"], false);
+    assert_eq!(value["value"]["directive_note"]["text"], note.as_str());
 }
