@@ -310,3 +310,14 @@ Adding this kind changes the shared random schedule. Hosted
 exercised every fixed seed: all trimmed, including seed 34. Therefore v23 requires actual
 checkpoint trimming for every fixed seed; v22's negative seed-34 expectation is not carried
 forward. Convergence and checkpoint checks remain mandatory.
+
+`claims-v24.json` adds the durable, system-written `mission-run.supersede-linked` kind and
+the optional run-admission and fault-publication metadata from `fractal_schema::registry()`.
+Versions 1 through 23 stay frozen. Generate the complete current snapshot with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v24.json`;
+do not hand-edit it. The simulation and audit reports select v24. Supersession uses required
+`source` and `replacement` mission-run references and a required publication string. The
+focused lineage regression validates, admits, and replicates both retry and supersession
+inputs through the existing generic paths. No old-build admission or checkpoint comparison
+exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
+every fixed seed must converge and trim, without inheriting v22's negative exception.

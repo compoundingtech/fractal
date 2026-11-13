@@ -82,6 +82,13 @@ mission "protected-note" state="ready" revisions="human-only" revision-reviewer=
     let applied = store.approve_revision_proposal(&proposal.id, "person/avery", proposal.preview_hash.as_deref().unwrap(), "real-approval").unwrap();
     assert_eq!(applied.status, "applied");
     assert_ne!(applied.mission_run.generation, run.generation);
+    assert_ne!(applied.mission_run.subject, run.subject);
+    assert_eq!(applied.mission_run.revision, next.revision);
+    assert_eq!(applied.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+    let original = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(original.generation, run.generation);
+    assert_eq!(original.revision, run.revision);
+    assert_eq!(original.superseded_by.as_deref(), Some(applied.mission_run.subject.as_str()));
 }
 
 #[test]
