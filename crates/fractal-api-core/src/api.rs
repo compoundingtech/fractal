@@ -777,6 +777,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/lane/burst", post(agents::hold_lane_burst).delete(agents::release_lane_burst))
         .route("/v1/hosts/holds", get(host_holds::list).post(host_holds::place))
         .route("/v1/hosts/holds/release", post(host_holds::release))
+        .route("/v1/hosts/holds/recover", post(host_holds::recover))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
