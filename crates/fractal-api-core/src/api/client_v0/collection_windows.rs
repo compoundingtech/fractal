@@ -321,13 +321,15 @@ impl Windows {
         {
             return json!({"node":state.node, "fleet":state.fleet_id,
                 "collection":"attention", "person":person,
-                "custom_forms":session.custom_forms}).to_string();
+                "custom_forms":session.custom_forms,
+                "model_drift_attention":session.model_drift_attention}).to_string();
         }
         json!({
             "node":state.node, "fleet":state.fleet_id,
             "actor":session.actor, "authority":session.authority_actor,
             "grant":session.pairing_grant, "transport":session.transport,
             "scopes":session.scopes, "custom_forms":session.custom_forms,
+            "model_drift_attention":session.model_drift_attention,
             "conversation_blocks":session.conversation_blocks,
             "collection":request.collection, "limit":request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS),
             "since_ms":request.since_ms, "until_ms":request.until_ms,

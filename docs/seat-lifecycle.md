@@ -228,7 +228,9 @@ usual lifecycle.
 `fractal agents start garden/interactive --as person/ada` restores the same declaration and native
 session. Explicit restart, launch-setting changes, and suspend/resume still work while the
 agent is live. A one-shot mission agent stays retired for its current generation until explicitly
-started; a later generation can declare it again.
+started, including agents declared inside a step. The retirement keeps the run, generation, and
+step ownership for history and failure evidence; later reconciliation or a daemon restart does
+not re-materialize that seat. A later generation can declare it again.
 
 A one-shot member of an owned set retires without changing its source bundle or ownership.
 Publish a new declaration through that set to start it again; ordinary `agents start` continues

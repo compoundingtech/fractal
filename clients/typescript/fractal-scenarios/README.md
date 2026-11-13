@@ -177,3 +177,7 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 | `pnpm --filter @fractal/scenarios decode` | strict-decodes every variant of every world |
 | `pnpm --filter @fractal/scenarios scan` | privacy gate |
 | `CI=1 pnpm --filter @fractal/scenarios test` | unit and property tests |
+
+Committed wire fixtures have independent test cases, each under the ordinary test deadline,
+so catalog growth does not combine every file into one wall-clock budget. The tests and CLI
+use the same strict per-file decoder; all non-underscore world directories and JSON files remain covered.

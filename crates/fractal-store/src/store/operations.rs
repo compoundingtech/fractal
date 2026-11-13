@@ -102,14 +102,16 @@ impl Store {
                     )
                     .optional()?
                     .flatten();
-                items.push(
-                    json!({"id": subject, "generation_id": format!("run-generation/{generation}"),
+                let mut item = json!({
+                    "id": subject, "generation_id": format!("run-generation/{generation}"),
                     "requester": short(&requester), "status": status, "phase": phase,
-                    "revision":revision,
+                    "revision": revision,
                     "created_at_unix_ms": created.parse::<u128>()?,
                     "updated_at_unix_ms": updated.parse::<u128>()?,
-                    "reason": reason.as_deref().map(short)}),
-                );
+                    "reason": reason.as_deref().map(short),
+                });
+                mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut item);
+                items.push(item);
             }
             previews.push(items);
         }
@@ -194,10 +196,13 @@ impl Store {
                 "assignee": assignee, "claimant": claimant,
             }));
         }
-        Ok(Some(json!({
-            "id": format!("mission-run/{run}"), "status": status,
+        let subject = format!("mission-run/{run}");
+        let mut metadata = json!({
+            "id": subject, "status": status,
             "progress": {"total": steps.len(), "done": done}, "steps": steps,
-        })))
+        });
+        mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut metadata);
+        Ok(Some(metadata))
     }
 
     /// A run card's progress counts cover every step; only its first twenty steps are hydrated.
@@ -360,6 +365,13 @@ impl Store {
     }
 
     /// Terminal transitions in a stable claim-index window. A retry does not erase a failure.
+    /// `mission` selects one mission's runs (identity- or canonical-named); `None` keeps the
+    /// fleet-wide page. Non-terminal runs never appear here: read `/v1/mission-runs?mission=`
+    /// for the running and waiting runs. A mission page is driven from that mission's rows in
+    /// `mission_runs` (a `mission_id` index search) plus their `step_runs`, and reaches claims
+    /// through the claims subject index, so it reads only that mission's claims, never every
+    /// terminal claim in the store.
+    #[allow(clippy::too_many_arguments)]
     pub fn outcome_history(
         &self,
         collection: &str,
@@ -367,6 +379,7 @@ impl Store {
         until: u128,
         status: Option<&str>,
         actor: Option<&str>,
+        mission: Option<&str>,
         before: u64,
         limit: usize,
     ) -> Result<Value> {
@@ -379,39 +392,10 @@ impl Store {
             "status must be failed, cancelled, timed-out, or completed"
         );
         let connection = self.readers.get();
-        let kinds = if collection == "missions" {
-            "c.kind='mission-run.state'"
-        } else {
-            "c.kind IN ('step-run.state','work.failed')"
-        };
-        let prior = canonical::after_sql("c", "p");
-        let reason_order = canonical::order_sql("p", true);
-        let reason = format!("COALESCE(json_extract(c.body,'$.fields.reason'), json_extract(c.body,'$.fields.summary'),
-            (SELECT COALESCE(json_extract(p.body,'$.fields.reason'),json_extract(p.body,'$.fields.summary'))
-             FROM claims p WHERE p.subject=c.subject AND p.kind=c.kind AND {prior}
-               AND COALESCE(json_extract(p.body,'$.fields.reason'),json_extract(p.body,'$.fields.summary')) IS NOT NULL
-               AND (json_extract(p.body,'$.fields.status')=json_extract(c.body,'$.fields.status')
-                    OR json_extract(p.body,'$.fields.phase') LIKE '%-' || json_extract(c.body,'$.fields.status'))
-             ORDER BY {reason_order} LIMIT 1))");
-        // The kind index bounds this to lifecycle claims even on graphs dominated by heartbeats.
-        let sql = format!(
-            "SELECT c.store_index, c.id, c.subject, c.actor, c.body, c.accepted_at_unix_ms,
-                    COALESCE(r.mission_id,sr.mission_id), s.run_id, {reason}
-             FROM claims c LEFT JOIN step_runs s ON s.subject=c.subject
-             LEFT JOIN mission_runs sr ON sr.id=s.run_id
-             LEFT JOIN mission_runs r ON r.id=substr(c.subject,13) AND c.subject LIKE 'mission-run/%'
-             WHERE c.kind IN ('mission-run.state','step-run.state','work.failed')
-               AND {kinds} AND c.store_index < ?1
-               AND CAST(c.accepted_at_unix_ms AS INTEGER)>=?2
-               AND CAST(c.accepted_at_unix_ms AS INTEGER)<=?3
-               AND json_extract(c.body,'$.fields.status') IN ('failed','cancelled','completed')
-               AND (?4 IS NULL OR json_extract(c.body,'$.fields.status')=?4
-                    OR (?4='timed-out' AND json_extract(c.body,'$.fields.status')='failed'
-                        AND (lower(COALESCE({reason},'')) LIKE '%timeout%'
-                          OR lower(COALESCE({reason},'')) LIKE '%timed out%')))
-               AND (?5 IS NULL OR c.actor=?5 OR s.assignee=?5 OR s.lease_owner=?5)
-             ORDER BY c.store_index DESC LIMIT ?6"
-        );
+        let storage_mission = mission
+            .map(|id| missions::mission_storage_id(&connection, id))
+            .transpose()?;
+        let sql = outcome_history_sql(collection, storage_mission.is_some());
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hae8b134e214e owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &sql)?;
         let rows = statement.query_map(
             params![
@@ -420,6 +404,7 @@ impl Store {
                 until.min(i64::MAX as u128) as i64,
                 status,
                 actor,
+                storage_mission.as_deref(),
                 limit.clamp(1, 200) + 1
             ],
             |row| {
@@ -452,10 +437,64 @@ impl Store {
         items.truncate(limit.clamp(1, 200));
         Ok(
             json!({"collection":collection, "since_unix_ms":since, "until_unix_ms":until,
-            "status":status, "items":items, "has_more":has_more,
+            "status":status, "mission":mission, "items":items, "has_more":has_more,
             "next_before":if has_more { items.last().and_then(|v| v["index"].as_u64()) } else {None}}),
         )
     }
+}
+
+/// The outcome-history page query; `scoped` binds `?6` to one mission's storage id.
+fn outcome_history_sql(collection: &str, scoped: bool) -> String {
+        let kinds = if collection == "missions" {
+            "c.kind='mission-run.state'"
+        } else {
+            "c.kind IN ('step-run.state','work.failed')"
+        };
+        let prior = canonical::after_sql("c", "p");
+        let reason_order = canonical::order_sql("p", true);
+        let reason = format!("COALESCE(json_extract(c.body,'$.fields.reason'), json_extract(c.body,'$.fields.summary'),
+            (SELECT COALESCE(json_extract(p.body,'$.fields.reason'),json_extract(p.body,'$.fields.summary'))
+             FROM claims p WHERE p.subject=c.subject AND p.kind=c.kind AND {prior}
+               AND COALESCE(json_extract(p.body,'$.fields.reason'),json_extract(p.body,'$.fields.summary')) IS NOT NULL
+               AND (json_extract(p.body,'$.fields.status')=json_extract(c.body,'$.fields.status')
+                    OR json_extract(p.body,'$.fields.phase') LIKE '%-' || json_extract(c.body,'$.fields.status'))
+             ORDER BY {reason_order} LIMIT 1))");
+        // Unfiltered pages walk the terminal-history index newest first. A mission page starts
+        // from that mission's subjects instead; CROSS JOIN pins that order so SQLite cannot
+        // fall back to scanning every terminal claim and filtering by mission afterwards.
+        // Keep this established covering driver independent of maintenance-only indexes.
+        let (scope, from) = if scoped {
+            (
+                "WITH scope(subject) AS (
+                   SELECT 'mission-run/' || m.id FROM mission_runs m INDEXED BY mission_runs_collection_latest_index WHERE m.mission_id=?6
+                   UNION ALL
+                   SELECT st.subject FROM mission_runs m INDEXED BY mission_runs_collection_latest_index JOIN step_runs st ON st.run_id=m.id
+                   WHERE m.mission_id=?6)",
+                "scope CROSS JOIN claims c ON c.subject=scope.subject",
+            )
+        } else {
+            ("", "claims c")
+        };
+        format!(
+            "{scope}
+             SELECT c.store_index, c.id, c.subject, c.actor, c.body, c.accepted_at_unix_ms,
+                    COALESCE(r.mission_id,sr.mission_id), s.run_id, {reason}
+             FROM {from} LEFT JOIN step_runs s ON s.subject=c.subject
+             LEFT JOIN mission_runs sr ON sr.id=s.run_id
+             LEFT JOIN mission_runs r ON r.id=substr(c.subject,13) AND c.subject LIKE 'mission-run/%'
+             WHERE c.kind IN ('mission-run.state','step-run.state','work.failed')
+               AND {kinds} AND c.store_index < ?1
+               AND CAST(c.accepted_at_unix_ms AS INTEGER)>=?2
+               AND CAST(c.accepted_at_unix_ms AS INTEGER)<=?3
+               AND json_extract(c.body,'$.fields.status') IN ('failed','cancelled','completed')
+               AND (?4 IS NULL OR json_extract(c.body,'$.fields.status')=?4
+                    OR (?4='timed-out' AND json_extract(c.body,'$.fields.status')='failed'
+                        AND (lower(COALESCE({reason},'')) LIKE '%timeout%'
+                          OR lower(COALESCE({reason},'')) LIKE '%timed out%')))
+               AND (?5 IS NULL OR c.actor=?5 OR s.assignee=?5 OR s.lease_owner=?5)
+               AND (?6 IS NULL OR COALESCE(r.mission_id,sr.mission_id)=?6)
+             ORDER BY c.store_index DESC LIMIT ?7"
+        )
 }
 
 #[cfg(test)]
@@ -479,7 +518,7 @@ mod tests {
             }
         }
         let history = store
-            .outcome_history("missions", 0, 100, None, None, u64::MAX, 10)
+            .outcome_history("missions", 0, 100, None, None, None, u64::MAX, 10)
             .unwrap();
         let cleanup = history["items"]
             .as_array()
@@ -489,7 +528,7 @@ mod tests {
             .unwrap();
         assert_eq!(cleanup["reason"], "newer timeout reason");
         let timed = store
-            .outcome_history("missions", 0, 100, Some("timed-out"), None, u64::MAX, 10)
+            .outcome_history("missions", 0, 100, Some("timed-out"), None, None, u64::MAX, 10)
             .unwrap();
         assert!(
             timed["items"]
@@ -498,6 +537,76 @@ mod tests {
                 .iter()
                 .any(|item| item["id"] == "cleanup")
         );
+    }
+
+    #[test]
+    fn outcome_history_mission_filter_pages_one_mission_only() {
+        let store = Store::open_memory("fixture").unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('mission-batch','fixture',1,'mission-hash','1')", []).unwrap();
+            let run = |id: &str| {
+                connection.execute(
+                    "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms) VALUES (?1, ?2, 'rev', 'gen', 'rev', ?1, '/tmp', 'person/example', '{}', 'normal', 'failed', 'terminal', '10', '10')",
+                    params![id, if id.starts_with("target") { "target" } else { "other" }],
+                ).unwrap();
+            };
+            for i in 0..5 {
+                let id = format!("target-{i:02}");
+                run(&id);
+                connection.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,'mission-batch',?2,'mission-run.state','fixture',?3,'[]',?4)",
+                    params![format!("claim-{id}"), format!("mission-run/{id}"), json!({"fields":{"status":"failed","phase":"terminal","reason":"target failed"}}).to_string(), format!("{}", 10 + i)]).unwrap();
+                let other = format!("other-{i:02}");
+                run(&other);
+                connection.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,'mission-batch',?2,'mission-run.state','fixture',?3,'[]',?4)",
+                    params![format!("claim-{other}"), format!("mission-run/{other}"), json!({"fields":{"status":"failed","phase":"terminal","reason":"other failed"}}).to_string(), format!("{}", 20 + i)]).unwrap();
+            }
+        }
+        let first = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/target"), u64::MAX, 3)
+            .unwrap();
+        assert_eq!(first["mission"], "mission/target");
+        assert_eq!(first["items"].as_array().unwrap().len(), 3);
+        assert!(first["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/target"));
+        assert_eq!(first["has_more"], true);
+        let second = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/target"), first["next_before"].as_u64().unwrap(), 3)
+            .unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+        assert!(second["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/target"));
+        assert_eq!(second["has_more"], false);
+        let bare = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("target"), u64::MAX, 10)
+            .unwrap();
+        assert_eq!(bare["items"].as_array().unwrap().len(), 5);
+        let missing = store
+            .outcome_history("missions", 0, 100, Some("failed"), None, Some("mission/absent"), u64::MAX, 10)
+            .unwrap();
+        assert!(missing["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn outcome_history_mission_page_is_driven_by_the_mission_index() {
+        let store = Store::open_memory("fixture").unwrap();
+        let connection = store.connection.lock().unwrap();
+        for collection in ["missions", "work"] {
+            let sql = outcome_history_sql(collection, true);
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let plan: Vec<String> = statement
+                .query_map(params![1, 0, 1, None::<String>, None::<String>, "m", 2], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let plan = plan.join("\n");
+            assert!(plan.contains("SEARCH m USING COVERING INDEX mission_runs_collection_latest_index (mission_id=?)"), "{plan}");
+            assert!(plan.contains("SEARCH c USING INDEX claims_subject_kind_index (subject=?"), "{plan}");
+            assert!(!plan.contains("claims_terminal_history_index"), "{plan}");
+            assert!(!plan.contains("SCAN c"), "{plan}");
+        }
     }
     #[test]
     fn mission_overview_missing_mission_is_not_found() {
