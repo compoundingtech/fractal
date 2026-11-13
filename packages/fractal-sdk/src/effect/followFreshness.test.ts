@@ -675,7 +675,7 @@ describe('follow freshness', () => {
         }
         const conversation = yield* mountConversation('agent/reviewer')
         const ask = { _tag: 'ThreadSummary', context: {
-          origin_ask: 'step-run/review', origin_ask_episode: 'claim/episode',
+          origin_source: 'step-run/review', origin_episode: 'claim/episode',
         }, limit: 40 } as const
         const recent = { _tag: 'ThreadSummary', context: { recently_closed: true }, limit: 10 } as const
         const timeline = { _tag: 'ThreadTimeline', thread: 'thread/review', limit: 40 } as const
