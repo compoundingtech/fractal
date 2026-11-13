@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The Swift client can talk to the member's trusted local Unix socket as the person, so a desktop app on the person's own Mac needs no pairing or bearer credential",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No database schema, version or stored data changes."},
+  "rules": {"status": "none", "detail": "No rules, digest or coordination changes; the daemon's local person trust is unchanged."},
+  "compatibility": {"status": "changed", "detail": "Additive Swift client API: FractalClient(localSocketPath:person:client:traceContext:messagesPaging:) carries every request and WebSocket stream over the local Unix socket with x-st3-person. The existing fabricLoopbackURL initializer and its URLSession behaviour are unchanged. The daemon already served /v1/client/ on fractal.sock to a local person, so every supported daemon works with it."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; apps can switch back to a paired fabricLoopbackURL client at any time."}
+}

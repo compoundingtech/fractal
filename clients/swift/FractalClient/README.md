@@ -27,6 +27,23 @@ container, which moves on edits outside the window too; `changedIndex` is an opa
 invalidation frontier scoped by `snapshot.hostID`, not a canonical revision or cross-host value.
 Existing v1 placements are not implicitly migrated.
 
+## The person's own Mac
+
+A desktop app the person runs on the host of a Fractal member skips pairing and talks to that
+member's trusted local Unix socket as the person:
+
+```swift
+let socket = NSString(string: "~/.local/state/st3/run/fractal.sock").expandingTildeInPath
+let client = FractalClient(localSocketPath: socket, person: "person/avery", client: "attention-tray 1.0 (7)")
+let attention = try await client.attentionList(limit: 50)
+```
+
+Every request and stream then uses HTTP/1.1 and RFC 6455 WebSockets over that socket and sends
+`x-st3-person` instead of a bearer credential. Below an agent seat the daemon binds the connection to
+that agent and refuses the person's writes, so launch the app from launchd (a login item or `open`).
+See "A person's desktop app on the local socket" in `docs/st3/client-v0/README.md`. A failed
+connection throws `URLError(.cannotConnectToHost)`; cancelling the calling task closes the socket.
+
 ## Trace context
 
 An iOS app can connect its tracing adapter to the client with an optional synchronous,
