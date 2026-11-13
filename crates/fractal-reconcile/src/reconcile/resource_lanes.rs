@@ -203,7 +203,8 @@ mod tests {
 
     #[test]
     fn data_and_program_requests_share_native_admission_and_queue_clocks() {
-        let source = r#"mission "test" state="ready" {
+        let source = r#"version 2
+        mission "test" state="ready" {
             goal "Verify."
             step "verify" {
                 agentless
