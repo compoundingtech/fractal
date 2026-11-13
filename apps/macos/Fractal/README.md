@@ -22,14 +22,17 @@ collection, but `FractalClient` has no typed attention or availability stream.
   granted them, on every open ask (and Snooze on updates), never as an answer.
   Snooze (1 hour, 4 hours, until tomorrow 9:00) hides the card on all the
   person's clients until then; its deadline still runs. Fractal still lists
-  snoozed rows: the tray leaves them out of the list, the count and speech, says
-  how many are snoozed and when the first returns, and re-renders when the
-  earliest snooze ends. Dismiss sets a person-step ask aside with Fractal's own
-  `dismissed` outcome, which its asker reads; Fractal refuses it for anything
-  else (`attention-dismiss-unsupported`) and the tray shows that refusal
-  verbatim. A card shown in the open panel is marked seen (`attention.seen`)
-  once per revision, unless Fractal already has it seen. Controls are fenced and
-  keyed exactly as answers are (below).
+  snoozed rows: the tray leaves them out of the list, the count and speech (a
+  snoozed item being spoken stops; a queued one is dropped), says how many are
+  snoozed and when the first returns, and re-renders when the earliest snooze
+  ends. Dismiss sets a person-step ask aside with Fractal's own `dismissed`
+  outcome, which its asker reads; Fractal refuses it for anything else
+  (`attention-dismiss-unsupported`) and the tray shows that refusal verbatim. A
+  card whose row is in the panel while the panel's window is on screen (its
+  occlusion state, not the row appearing: the closed window-style panel may keep
+  its rows) is marked seen (`attention.seen`) once per revision, unless Fractal
+  already has it seen. Controls are fenced and keyed exactly as answers are
+  (below).
 - Answers mirror Fractal web `alert-action-port.ts`: re-read the card, require it
   open, offering `work.done` and at the revision the person read, then submit
   one `work.done` fenced on that read. The action ID and idempotency key are

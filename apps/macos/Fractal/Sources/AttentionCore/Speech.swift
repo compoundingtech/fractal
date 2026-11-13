@@ -96,21 +96,22 @@ public enum SpeechStatus: Sendable, Equatable {
   }
 
   /// Deliver each shown item the gate speaks unasked (urgent asks, updates carrying `speech`).
-  /// `open` is every open card; the ledger, statuses and queue keep only cards still open, and
-  /// an item answered elsewhere stops being spoken.
+  /// `open` is every open card, snoozed ones too: the ledger keeps only those, so a snooze never
+  /// repeats a delivery. Statuses and the queue keep only shown cards: an item answered,
+  /// snoozed or dismissed (here or elsewhere) is dropped, or stopped if it is being spoken.
   public func consider(
     _ shown: [AttentionRecord], open: [AttentionRecord], availability: Availability?, macPresence: PresenceState?,
     now: Date
   ) {
     let before = gate
     gate.prune(open: open, now: now)
-    let ids = Set(open.map(\.id))
+    let ids = Set(shown.map(\.id))
     status = status.filter { ids.contains($0.key) }
     logged = logged.filter { key, _ in open.contains { SpeechGate.key($0) == key } }
     queue.removeAll { !ids.contains($0.id) }
     readAloud.formIntersection(ids)
     if let current, !ids.contains(current.id) { skip(current) }
-    deliveries?.retain(ids)
+    deliveries?.retain(Set(open.map(\.id)))
     var pruned = mutes
     pruned.prune(now: now)
     if pruned != mutes { updateMutes { $0 = pruned } }

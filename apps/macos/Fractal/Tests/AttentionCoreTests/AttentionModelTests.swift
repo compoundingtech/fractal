@@ -244,7 +244,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertNil(model.nextSnoozeEnd)
   }
 
-  func testSeenIsSentOncePerRevisionAndOnlyWhenFractalLacksIt() async {
+  func testSeenIsSentOnlyWhileThePanelIsVisibleOncePerRevisionAndOnlyWhenFractalLacksIt() async {
     let unseen = Fixture.record(id: "attention/unseen")
     let seen = Fixture.record(id: "attention/seen", seenAt: now - 60)
     let adapter = FakeAdapter(
@@ -252,19 +252,35 @@ final class AttentionModelTests: XCTestCase {
     let model = AttentionModel(adapter: adapter)
     await model.refresh(now: now)
 
-    await model.markSeen(unseen)
-    await model.markSeen(unseen)
-    await model.markSeen(seen)
+    await model.rowAppeared(unseen)
+    await model.rowAppeared(seen)
     var controlled = await adapter.controlled
-    XCTAssertEqual(controlled, [AttentionControlSubmission(record: unseen, control: .seen)])
+    XCTAssertEqual(controlled, [], "rows of a closed panel are nobody seeing them")
+
+    await model.setPanelVisible(true)
+    await model.rowAppeared(unseen)
+    controlled = await adapter.controlled
+    XCTAssertEqual(controlled, [AttentionControlSubmission(record: unseen, control: .seen)], "once, and not for seen")
+
+    await model.setPanelVisible(false)
+    let next = Fixture.record(id: "attention/unseen", revision: "claim/2")
+    await model.rowAppeared(next)
+    controlled = await adapter.controlled
+    XCTAssertEqual(controlled.count, 1, "a new revision while closed waits")
 
     await adapter.refuseSubmissions("Fractal is restarting.")
-    let next = Fixture.record(id: "attention/unseen", revision: "claim/2")
-    await model.markSeen(next)
+    await model.setPanelVisible(true)
     await adapter.acceptSubmissions()
-    await model.markSeen(next)
+    await model.setPanelVisible(true)
     controlled = await adapter.controlled
     XCTAssertEqual(controlled.dropFirst().map(\.revision), ["claim/2", "claim/2"], "a failed mark is tried again")
+
+    await model.setPanelVisible(false)
+    await model.rowAppeared(Fixture.record(id: "attention/unseen", revision: "claim/3"))
+    model.rowDisappeared("attention/unseen")
+    await model.setPanelVisible(true)
+    controlled = await adapter.controlled
+    XCTAssertEqual(controlled.count, 3, "a row that left the panel before it opened is not marked")
   }
 
   func testSnoozeAndDismissShowOnlyFractalsResultAndAreKeyedLikeAnswers() async throws {

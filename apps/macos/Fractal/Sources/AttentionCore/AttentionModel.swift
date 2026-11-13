@@ -69,6 +69,12 @@ public enum AnswerState: Sendable, Equatable {
   public internal(set) var controls: [String: AnswerState] = [:]
   /// `id#revision` this process told Fractal (or is telling it) the person saw.
   var seenMarked: Set<String> = []
+  /// Whether the menu-bar panel's window is on screen. Only the live panel reports it, so
+  /// snapshots and gallery renders never mark anything seen.
+  public internal(set) var isPanelVisible = false
+  /// Cards whose rows are in the panel's view hierarchy, which a closed window-style panel may
+  /// keep: a card counts as seen only while it is here and the panel is visible.
+  var rowsInPanel: [String: AttentionRecord] = [:]
   /// Snoozes are judged against this: the last attention read, moved on at each snooze's end.
   public internal(set) var snoozeClock = Date.distantPast
   /// When the earliest snooze still ahead ends; the panel re-renders then.
