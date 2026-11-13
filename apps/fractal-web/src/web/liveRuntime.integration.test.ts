@@ -94,8 +94,11 @@ it('exports to the explicitly configured traces endpoint', async () => {
   expect(errors).not.toHaveBeenCalled()
 })
 
-it('uses replay transports without early adoption and closes replay with the page source', async () => {
+it('uses replay transports without early adoption, drops the availability port, and closes replay with the page source', async () => {
   vi.stubGlobal('window', { location: { origin: 'https://example.test', search: '' } })
+  // The live source always carries an availability port; a replay has no person to show it for.
+  const withAvailability = { source: { availability: { read: vi.fn() } }, dispose: vi.fn(async () => {}) }
+  source.mockReturnValueOnce(withAvailability)
   const { createPageRuntime } = await import('./liveRuntime.ts')
   const replay = {
     socket: vi.fn(),
@@ -113,6 +116,7 @@ it('uses replay transports without early adoption and closes replay with the pag
       socket: replay.socket, fetch: replay.fetch,
     }),
   }))
+  expect(live.source.availability).toBeUndefined()
   const underlying = source.mock.results.at(-1)!.value!
   await live.dispose()
   expect(underlying.dispose).toHaveBeenCalledOnce()

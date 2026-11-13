@@ -61,7 +61,7 @@ const Section = ({ title, children }: { readonly title: string; readonly childre
   </section>
 }
 
-/** Present only where the source reaches a gateway; fixtures and replays have no person to show. */
+/** Present only where the source reaches a gateway for a person; fixture sources have no port and a replay page drops it. */
 const AvailabilitySection = () => {
   const port = useDataSource().availability
   return port === undefined ? null : <Section title="Availability"><AvailabilityPanel port={port} /></Section>
