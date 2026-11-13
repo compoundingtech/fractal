@@ -22,6 +22,138 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// A person's effective status. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatus: Codable, Sendable, Equatable {
+    case available, away
+    case unknown(String)
+    public init(word: String) { self = switch word { case "available": .available; case "away": .away; default: .unknown(word) } }
+    public var word: String { switch self { case .available: "available"; case .away: "away"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Where a status comes from; `unreported` when no device's state has counted for 24 hours (status then reads available). Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatusSource: Codable, Sendable, Equatable {
+    case override, presence, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "override": .override; case "presence": .presence; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .override: "override"; case .presence: "presence"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Presence the daemon derives from the person's device states. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityPresence: Codable, Sendable, Equatable {
+    case present, idle, locked, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "present": .present; case "idle": .idle; case "locked": .locked; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .present: "present"; case .idle: "idle"; case .locked: "locked"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Which attention may interrupt: all, only rows with `urgent` true, or none. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityInterruptions: Codable, Sendable, Equatable {
+    case all, urgent, none
+    case unknown(String)
+    public init(word: String) { self = switch word { case "all": .all; case "urgent": .urgent; case "none": .none; default: .unknown(word) } }
+    public var word: String { switch self { case .all: "all"; case .urgent: "urgent"; case .none: "none"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A hold pauses the deadline clock of asks that are not urgent, or of every ask. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityDeadlineClock: Codable, Sendable, Equatable {
+    case run, holdRoutine, holdAll
+    case unknown(String)
+    public init(word: String) { self = switch word { case "run": .run; case "hold-routine": .holdRoutine; case "hold-all": .holdAll; default: .unknown(word) } }
+    public var word: String { switch self { case .run: "run"; case .holdRoutine: "hold-routine"; case .holdAll: "hold-all"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
+public struct PersonAvailability: Codable, Sendable, Equatable {
+    public let person: String
+    public let status: AvailabilityStatus
+    public let statusSource: AvailabilityStatusSource
+    public let statusUntil: String?
+    public let presence: AvailabilityPresence?
+    public let presenceObservedAt: String?
+    public let interruptions: AvailabilityInterruptions
+    public let interruptionsUntil: String?
+    public let deadlineClock: AvailabilityDeadlineClock
+    public let deadlineClockSince: String?
+    public let deadlineClockUntil: String?
+    enum CodingKeys: String, CodingKey {
+        case person, status, presence, interruptions
+        case statusSource = "status_source", statusUntil = "status_until", presenceObservedAt = "presence_observed_at"
+        case interruptionsUntil = "interruptions_until", deadlineClock = "deadline_clock"
+        case deadlineClockSince = "deadline_clock_since", deadlineClockUntil = "deadline_clock_until"
+    }
+}
+
+public struct PersonAvailabilities: Codable, Sendable, Equatable {
+    public let people: [PersonAvailability]
+}
+
+/// A nil `value` clears the status override and takes no `until`; it is sent as `null`.
+public struct AvailabilityStatusChange: Codable, Sendable, Equatable {
+    public var value: String?
+    public var until: String?
+    enum CodingKeys: String, CodingKey { case value, until }
+    public init(value: String?, until: String? = nil) { self.value = value; self.until = until }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(value, forKey: .value)
+        try container.encodeIfPresent(until, forKey: .until)
+    }
+}
+
+public struct AvailabilityInterruptionsChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+public struct AvailabilityDeadlineClockChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+/// Changes to the session person's own availability; a nil axis is unchanged.
+public struct AvailabilitySet: Codable, Sendable, Equatable {
+    public var status: AvailabilityStatusChange?
+    public var interruptions: AvailabilityInterruptionsChange?
+    public var deadlineClock: AvailabilityDeadlineClockChange?
+    public init(status: AvailabilityStatusChange? = nil, interruptions: AvailabilityInterruptionsChange? = nil, deadlineClock: AvailabilityDeadlineClockChange? = nil) {
+        self.status = status; self.interruptions = interruptions; self.deadlineClock = deadlineClock
+    }
+    enum CodingKeys: String, CodingKey { case status, interruptions, deadlineClock = "deadline_clock" }
+}
+
+/// One device's raw state: `active`, `inactive`, `locked` or `sleeping`, sent on every change,
+/// with its last input. The daemon derives presence and assigns the source.
+public struct PresenceReport: Codable, Sendable, Equatable {
+    public var state: String
+    public var lastInputAt: String?
+    public var observedAt: String
+    public init(state: String, lastInputAt: String? = nil, observedAt: String) {
+        self.state = state; self.lastInputAt = lastInputAt; self.observedAt = observedAt
+    }
+    enum CodingKeys: String, CodingKey { case state, lastInputAt = "last_input_at", observedAt = "observed_at" }
+}
+
+/// The person's availability after a report, and when the device reports again although its
+/// state has not changed: while present, the instant it turns idle without newer input. Nil:
+/// report on the next state change or the next input.
+public struct PresenceReportResult: Codable, Sendable, Equatable {
+    public let availability: PersonAvailability
+    public let reportAgainAt: String?
+    enum CodingKeys: String, CodingKey { case availability, reportAgainAt = "report_again_at" }
+}
+
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
     public let apiVersion: String
     public let requestID: String
@@ -1313,7 +1445,7 @@ public struct ActionRequest: Codable, Sendable {
 public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }
 public struct PersonStepParameters: Codable, Sendable { public var targetID, summary, episode: String; public var evidence: [String]; public var answer: PersonAnswerInput?; public init(targetID: String, summary: String, episode: String, evidence: [String] = [], answer: PersonAnswerInput? = nil) { self.targetID = targetID; self.summary = summary; self.episode = episode; self.evidence = evidence; self.answer = answer }; enum CodingKeys: String, CodingKey { case targetID = "target_id", summary, episode, evidence, answer } }
 public struct StructuredRequest: Codable, Sendable { public var version: Int; public var type, question, whyPerson: String; public var summary: String?; public var reasons: [String]?; public var recommendation: RequestRecommendation?; public var subjects: [RequestSubject]?; public var answers: [RequestAnswerOption]?; public var custom: Bool?; public var attachments: [Attachment]?; enum CodingKeys: String, CodingKey { case version, type, question, whyPerson = "why_person", summary, reasons, recommendation, subjects, answers, custom, attachments } }
-public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var subjects: [RequestSubject]? }
+public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var speech: String?; public var subjects: [RequestSubject]? }
 public struct RequestRecommendation: Codable, Sendable { public var answer, reason: String }
 public struct RequestSubject: Codable, Sendable { public var kind, label: String; public var ref, url, revision: String? }
 public struct RequestAnswerOption: Codable, Sendable { public var id, label, consequence: String; public var outcome: String?; public var conditions: [String]? }

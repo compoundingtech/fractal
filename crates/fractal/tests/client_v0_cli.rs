@@ -2437,6 +2437,8 @@ mission "release-report" state="ready" {
                     "Release notes are ready",
                     "--body",
                     "The notes cover all three fixes.",
+                    "--speech",
+                    "Your release notes are ready.",
                     "--as",
                     &actor,
                     "--idempotency-key",
@@ -2460,6 +2462,7 @@ mission "release-report" state="ready" {
     // Not a request: clients that predate updates read it as a free-text card.
     assert!(item["request"].is_null(), "{item}");
     assert_eq!(item["update"]["about"], run.subject);
+    assert_eq!(item["update"]["speech"], "Your release notes are ready.");
     assert_eq!(
         item["action_parameters"]["work.done"]["answer"],
         serde_json::json!({"id": "read"})
@@ -2483,6 +2486,13 @@ mission "release-report" state="ready" {
     }
     let still_open = client.attention_list(None, None, false).await.unwrap();
     assert_eq!(still_open.value.items.len(), 1);
+    let fractal_client::Resource::Attention(card) = &still_open.value.items[0] else {
+        panic!("expected an attention card");
+    };
+    assert_eq!(
+        card.update.as_ref().and_then(|update| update.speech.as_deref()),
+        Some("Your release notes are ready.")
+    );
     assert_eq!(store.step_run(&subject).unwrap().unwrap().status, "ready");
 
     let opened = run_cli_human(
