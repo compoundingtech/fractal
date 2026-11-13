@@ -30900,6 +30900,12 @@ mission "proof" state="ready" {{
             assert_eq!(runner.environment["ST_MISSION_RUN"], run.id);
             assert_eq!(step_of(&executor.mission_run(&run.id).unwrap().unwrap(), "verify").status,
                 "working", "the executor must not advance the origin's run");
+            // A restarted executor adopts the persisted admission instead of launching twice.
+            drop(executor_reconciler);
+            let executor_reconciler = Reconciler::new(executor.clone(), executor_runtime.clone(),
+                "node".into(), Arc::new(Notify::new()));
+            executor_reconciler.reconcile_once().unwrap();
+            assert_eq!(gate_runners(&executor_runtime).len(), 1);
             exit_gate_runner(&executor_runtime, &runner, Some(code), "remote probe result\n");
             executor_reconciler.reconcile_once().unwrap();
             let result = executor.latest_claim(&gate_runner_subject(&runner), Some("gate.result"))
