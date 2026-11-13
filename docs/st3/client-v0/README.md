@@ -1379,6 +1379,11 @@ shows in, starting with `conversation_id`: a harness login alert is one alert pe
 and host, naming every seat that shares it, since one sign-in answers them all. Daemons that
 predate alerts omit these fields.
 
+`urgent` is the one server rule for urgency: an ask whose asker gave it priority `critical`
+(`work ask --priority critical`); every other row is not urgent. A client that honours
+interruptions `urgent`, speaks, or raises a banner decides from this field alone, never from a
+deadline. Daemons that predate it omit it, which reads as not urgent.
+
 A `model-drift` item tells a person that agents they own run on another model than they
 declare, usually because a harness fell back after provider rate limits. There is one per person,
 however many of their agents drift: its title counts them and names the declared and live model

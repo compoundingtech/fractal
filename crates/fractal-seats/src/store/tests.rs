@@ -1396,6 +1396,7 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
             .unwrap();
         controller
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
