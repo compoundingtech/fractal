@@ -28,6 +28,9 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   let build: BuildIdentity
   private let isConfigured: Bool
   private let presence: PresenceReporter?
+  private let notifications: SpeechNotifications?
+  private let calls: CallMonitor?
+  private let stopHotkey: StopHotkey?
   private var refreshLoop: Task<Void, Never>?
   private var lastLogged: String?
 
@@ -40,15 +43,24 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       let adapter = FractalAttentionAdapter(
         configuration: configuration, clientName: "attention-tray \(build.machineVersion)")
       let speech = configuration.speechSocket.map {
-        SpeechCoordinator(output: SpeechServiceClient(socketPath: $0), store: DefaultsSpeechLedger(), log: Self.log)
+        SpeechCoordinator(
+          output: SpeechServiceClient(socketPath: $0), store: DefaultsSpeechLedger(), muteStore: DefaultsSpeechMutes(),
+          log: Self.log)
       }
-      model = AttentionModel(adapter: adapter, availabilityAdapter: adapter, speech: speech)
+      let model = AttentionModel(adapter: adapter, availabilityAdapter: adapter, speech: speech)
+      self.model = model
       presence = PresenceReporter(adapter: adapter, model: model, log: Self.log)
+      notifications = speech.map { SpeechNotifications(model: model, speech: $0, log: Self.log) }
+      calls = speech.map { speech in CallMonitor(report: { speech.callDevices($0, now: .now) }, log: Self.log) }
+      stopHotkey = speech.map { speech in StopHotkey { speech.stopCurrent() } }
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
       model = AttentionModel(adapter: nil, configurationError: String(describing: error))
       presence = nil
+      notifications = nil
+      calls = nil
+      stopHotkey = nil
       isConfigured = false
     }
     super.init()
@@ -67,8 +79,15 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       Task { await snapshot(to: path) }
       return
     }
+    if ProcessInfo.processInfo.environment["ATTENTION_TRAY_NOTIFICATION_CHECK"] == "1" {
+      Task { await notificationCheck() }
+      return
+    }
     guard isConfigured, refreshLoop == nil else { return }
     presence?.start()
+    notifications?.start()
+    calls?.start()
+    if let reason = stopHotkey?.register() { Self.log("stop hotkey off: \(reason)") }
     let model = model
     refreshLoop = Task { [weak self] in
       while !Task.isCancelled {
@@ -83,6 +102,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     refreshLoop?.cancel()
     refreshLoop = nil
     presence?.stop()
+    calls?.stop()
+    stopHotkey?.unregister()
   }
 
   /// One line per change of outcome, never per poll, and never request content.
@@ -116,6 +137,32 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     let reveal = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT_REVEAL"] == "1"
     let png = await PanelSnapshot.png(model: model, build: build, reveal: reveal, appearance: .darkAqua)
     try? png?.write(to: URL(fileURLWithPath: path))
+    exit(0)
+  }
+
+  /// Verification: ask for notification permission as this bundle, show one fixture
+  /// notification through the real path (no speech, no Fractal), log what the person clicks,
+  /// and exit after a minute.
+  private func notificationCheck() async {
+    let speech = SpeechCoordinator(output: SpeechServiceClient(socketPath: "/nonexistent"), log: Self.log)
+    let notifications = SpeechNotifications(model: model, speech: speech, log: Self.log)
+    notifications.start()
+    guard await notifications.authorize() else { exit(1) }
+    let record = AttentionRecord(
+      id: "attention/notification-check", revision: "check/1", kind: "person-step", state: "open",
+      sourceID: "work/notification-check", episode: "check/1", title: "AttentionTray notification check",
+      detail: "", from: "agent/TraySpeechUX", requestedAt: .now, deadlineAt: nil, defaultAnswerLabel: nil,
+      actions: ["work.done"], promptAnswers: [],
+      request: RequestForm(
+        type: "decision", question: "Do the actions show? Nothing is sent to Fractal.",
+        answers: [
+          RequestAnswer(id: "yes", label: "They show", consequence: "", outcome: "accept"),
+          RequestAnswer(id: "no", label: "They don't", consequence: "", outcome: "decline"),
+          RequestAnswer(id: "changes", label: "Request changes", consequence: "", outcome: "request_changes"),
+        ], custom: false, recommendedAnswerID: "yes"),
+      update: nil, workDoneDefaults: nil, url: URL(string: "https://fractal.example/attention")!)
+    notifications.show(SpeechNotice(record: record, state: .speaking, canAnswer: true))
+    try? await Task.sleep(for: .seconds(60))
     exit(0)
   }
 }

@@ -154,6 +154,7 @@ public struct AvailabilitySnapshot: Sendable, Equatable {
 public enum Until: Sendable, Hashable, Identifiable {
   case indefinitely
   case hours(Int)
+  case endOfToday
   case tomorrowMorning
 
   public static let presets: [Until] = [.hours(1), .hours(4), .tomorrowMorning, .indefinitely]
@@ -165,6 +166,7 @@ public enum Until: Sendable, Hashable, Identifiable {
     case .indefinitely: "Until I change it"
     case .hours(1): "For 1 hour"
     case .hours(let hours): "For \(hours) hours"
+    case .endOfToday: "For today"
     case .tomorrowMorning: "Until tomorrow 9:00"
     }
   }
@@ -173,6 +175,9 @@ public enum Until: Sendable, Hashable, Identifiable {
     switch self {
     case .indefinitely: return nil
     case .hours(let hours): return now.addingTimeInterval(TimeInterval(hours) * 3600)
+    case .endOfToday:
+      let today = calendar.startOfDay(for: now)
+      return calendar.date(byAdding: .day, value: 1, to: today) ?? now
     case .tomorrowMorning:
       let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
       return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow

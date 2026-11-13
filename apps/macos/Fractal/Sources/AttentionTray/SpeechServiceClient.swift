@@ -27,12 +27,28 @@ struct SpeechServiceClient: SpeechOutput {
     return await Task.detached { Self.exchange(request, path: path, deadlines: deadlines) }.value
   }
 
+  /// `skip` answers `ok` at once; the skipped request's own connection then gets its `skipped`
+  /// result. A failure here leaves that request to end on its own.
+  func skip(id: String) async {
+    let request = Request(op: "skip", id: id, text: nil, source: nil)
+    let path = socketPath
+    _ = await Task.detached { Self.exchange(request, path: path) }.value
+  }
+
   struct Request: Encodable {
-    let op = "speak"
+    let op: String
     let id: String
-    let text: String
-    let language = "en"
-    let source: String
+    let text: String?
+    let language: String?
+    let source: String?
+
+    init(op: String = "speak", id: String, text: String?, source: String?) {
+      self.op = op
+      self.id = id
+      self.text = text
+      self.source = source
+      language = op == "speak" ? "en" : nil
+    }
   }
 
   struct Event: Decodable {

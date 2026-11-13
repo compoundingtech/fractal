@@ -59,26 +59,53 @@ collection, but `FractalClient` has no typed attention or availability stream.
   change.
 - **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what the local
   speech service (`flakes/speech-service`) says; the service only decides how.
-  An ask's title (nothing else) is spoken only if the ask is urgent (an explicit
-  deadline of at most an hour, read as `deadline_at - requested_at`) or the
-  person pressed Read aloud, **and** the person is available and this Mac is
-  present as Fractal derives it from the Mac's reports, **and** interruptions
-  are `all`, or `urgent` for an urgent ask; never with `none` or a word the tray
-  does not know. Attention carries no
-  urgent flag, and Fractal stamps `deadline_at` from `[asks] default_deadline`
-  on asks that name none, so urgency matches Fractal's `urgent_ask` only while
-  that default exceeds an hour (it is 24 hours unless configured). Speech is
-  decided after each refresh, so an urgent ask is spoken up to 30 seconds after
-  Fractal shows it. Each ask revision is spoken once and each requesting agent
-  at most every 10 minutes, counted per send whatever its outcome and kept
-  across restarts. Only freshly read asks and availability count. Each verdict
-  and outcome is logged once per ask
-  revision (`speech attention/…#rev from agent: urgent, sent`, then `spoken` or
-  the service's failure); spoken text never enters the log. The tray waits 30
-  seconds for `queued{position}`, then for the result one 60-second speaking
-  budget per request ahead plus its own and 30 seconds of margin; only a
-  service that overruns that logs `no outcome …`. Read aloud shows why an ask
-  stays quiet.
+  - **Delivery.** An item is delivered only if the ask is urgent (an explicit
+    deadline of at most an hour, read as `deadline_at - requested_at`) or the
+    person pressed Read aloud, **and** the person is available and this Mac is
+    present as Fractal derives it from the Mac's reports, **and** interruptions
+    are `all`, or `urgent` for an urgent ask; never with `none` or a word the
+    tray does not know. Attention carries no
+    urgent flag, and Fractal stamps `deadline_at` from `[asks] default_deadline`
+    on asks that name none, so urgency matches Fractal's `urgent_ask` only while
+    that default exceeds an hour (it is 24 hours unless configured). Outcomes the
+    person asked to hear (`work update`) are not eligible: attention rows carry
+    no flag for them yet. Delivery is decided after each refresh, so an urgent
+    ask is delivered up to 30 seconds after Fractal shows it; only freshly read
+    asks and availability count. Each revision is delivered once, kept across
+    restarts; Read aloud may repeat it.
+  - **Banner and speech.** A delivery is a native notification, and the title
+    (nothing else) is spoken too unless speech is muted (all, or this
+    requester), the Mac is in a call the person has not allowed speech for, or
+    the requester spoke within 10 minutes. Read aloud posts no banner and shows
+    in the panel why it stayed quiet.
+  - **Queue and controls.** The tray sends one item at a time and owns the
+    queue, so it knows what is being spoken. **Stop** (panel, notification, or
+    `⌃⌥⌘.` from any app via Carbon `RegisterEventHotKey`, no permission) ends
+    the current item and the queue goes on; **Skip** drops a queued item;
+    **Mute this agent** (1 hour or today) and **Mute speech** (1 hour, 4 hours,
+    until tomorrow 9:00, or until unmuted) drop what they hold and stop it if it
+    is speaking. Mutes are speech only, kept in the app's defaults across
+    restarts, and end on their own.
+  - **Calls.** A microphone in use by another process (Core Audio process
+    objects, `kAudioProcessPropertyIsRunningInput`, the menu bar indicator's
+    signal) or any camera running (`kCMIODevicePropertyDeviceIsRunningSomewhere`)
+    is a call: speech stops and items are banners only. Both are listeners, not
+    polls, and need no permission. **Allow speech during this call** in the
+    panel lifts that for the current call only; the call ends, and the override
+    resets, after 15 seconds without any microphone or camera in use.
+  - **Notification.** While an item is spoken (or held to a banner) the tray
+    shows a notification for it (`UNUserNotificationCenter`, one per item,
+    replaced as it changes) with Stop, its answers as buttons, a text reply for
+    feedback, custom answers and request changes, Mute this agent and Open in
+    Fractal. Answers go through the same `work.done` as the panel: the
+    notification says answered only once Fractal committed it and shows
+    Fractal's reason on refusal. Notifications of items closed elsewhere are
+    removed; an answered one stays as its receipt.
+  - **Log.** Each verdict and outcome is logged once per item revision
+    (`speech attention/…#rev from agent: urgent, queued`, `speaking`, then
+    `spoken`, `skipped` or the service's failure), plus mutes and call starts and
+    ends; spoken text never enters the log. The tray waits 30 seconds for
+    `queued`, then 60 seconds plus 30 seconds of margin for the result.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
@@ -184,19 +211,33 @@ block activation: an explicit launcher/readiness diagnostic identifies them.
 The web listener is not the paired API carrier: do not send the device bearer
 to the browser listener or forward the privileged daemon socket.
 
-The current tray requests no Notifications, Screen Recording, Accessibility,
-AppleEvents or Developer Tools permission and needs no entitlements. A local
-ad-hoc signature is sufficient. If UserNotifications or another TCC API is
-added, migrate to the governed stable-app signing identity before rollout.
-No keychain unlock or op-proxy panel is needed for this tray installation.
+The tray asks for one permission, Notifications (`UNUserNotificationCenter`,
+alerts only), on its first launch with a speech service; it needs no Screen
+Recording, Accessibility, Microphone, Camera, AppleEvents or Developer Tools
+permission and no entitlements (call detection reads only device and process
+state; the Stop hotkey is a Carbon hot key). Notifications need the bundle
+signature to bind `Info.plist`: Home Manager's ad-hoc bundle signing of
+`~/Applications/AttentionTray.app` does, the store bundle's linker-only
+signature does not (`UNErrorDomain` 1, no prompt). The permission is keyed by
+bundle identifier and stays granted when a rebuild changes the cdhash. No
+keychain unlock or op-proxy panel is needed for this tray installation.
+
+`ATTENTION_TRAY_NOTIFICATION_CHECK=1` verifies notifications: the tray asks for
+the permission, logs the result, shows one fixture notification through the
+real path (nothing is sent to Fractal or the speech service, clicked actions
+are logged) and exits after a minute. Focus suppresses banners; the
+notification still lands in Notification Center.
 
 ## Design gallery
 
 The panel's views live in the `TrayViews` target and read only `AttentionCore`.
 `TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
-answering, quiet, read-only, degraded, unconfigured) and renders the real panel
-in light and dark to `@2x` PNGs plus `manifest.json`, for the design Storybook in
-`design/`. `devenv tasks run attention-tray:gallery` regenerates
+answering, quiet, read-only, degraded, unconfigured; speech: speaking, in a
+call, muted) and renders the real panel in light and dark to `@2x` PNGs plus
+`manifest.json`, for the design Storybook in `design/`. The notification
+scenarios render its content model (`SpeechNoticeView`: text fields and
+actions), not macOS notification chrome, which only Notification Center draws.
+`devenv tasks run attention-tray:gallery` regenerates
 `design/renders/` from the Nix-built gallery (`nix run
 ./flakes/attention-tray#gallery -- <dir> [scenario…]`); the manifest records the
 source rev. Rendering needs a Mac with a login session. The renders use the same

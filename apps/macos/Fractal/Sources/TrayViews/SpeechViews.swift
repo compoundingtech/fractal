@@ -21,12 +21,18 @@ struct SpeechStatusView: View {
   var body: some View {
     Group {
       switch status {
+      case .queued:
+        Label("Waiting to be read aloud", systemImage: "speaker")
       case .speaking:
         Label("Speaking…", systemImage: "speaker.wave.2")
       case .finished(.spoken):
         Label("Read aloud", systemImage: "speaker.wave.2.fill")
+      case .finished(.skipped):
+        Label("Stopped", systemImage: "speaker.slash")
       case .finished(let outcome):
         Label("Not read aloud: \(outcome.description)", systemImage: "speaker.slash")
+      case .held(let held):
+        Label("Shown, not read aloud: \(SpeechText.held(held))", systemImage: "speaker.slash")
       case .quiet(let reason):
         Label("Not read aloud: \(reason.rawValue)", systemImage: "speaker.slash")
       }

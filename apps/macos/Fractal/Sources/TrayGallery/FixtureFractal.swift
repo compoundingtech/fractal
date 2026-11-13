@@ -79,4 +79,6 @@ struct FixtureSpeech: SpeechOutput {
     try? await Task.sleep(for: .seconds(3600))
     return .spoken
   }
+
+  func skip(id: String) async {}
 }
