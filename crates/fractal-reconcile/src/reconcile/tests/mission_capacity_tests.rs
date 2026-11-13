@@ -130,3 +130,74 @@ mission "orchid" state="ready" {
         "a nested mission declares its own lane, as publication checks it"
     );
 }
+
+#[test]
+fn uses_mission_capacity_waiters_follow_each_holder_without_full_passes() {
+    const CONTENDERS: usize = 8;
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, r#"version 2
+mission "serialized" state="ready" {
+  goal "Admit one child at a time."
+  concurrent-runs max=1
+  step "work" { agentless; keep-open }
+}"#, "serialized");
+    let revision = store.mission_spec("serialized", None).unwrap().unwrap().revision;
+    apply_source(&store, &format!(r#"version 2
+mission "contender" state="ready" {{
+  goal "Wait for shared child capacity."
+  concurrent-runs max={CONTENDERS}
+  step "use" {{ uses-mission "serialized@{revision}"; }}
+}}"#), "contender");
+    let parents = (0..CONTENDERS).map(|index| {
+        store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "contender".into(),
+            revision: None,
+            workspace: "/workspace".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: format!("capacity-contender-{index}"),
+        }).unwrap()
+    }).collect::<Vec<_>>();
+    let reconciler = Reconciler::new(
+        store.clone(),
+        Arc::new(FakeRuntime::default()),
+        "node".into(),
+        Arc::new(Notify::new()),
+    );
+    // Seed dependencies once. Only the post-commit follower may make progress afterwards:
+    // no timer, periodic/full reconcile pass, unrelated write or explicit touch hides a lost wake.
+    reconciler.evaluate_mission_runs().unwrap();
+    let settle_changes = || {
+        for _ in 0..64 {
+            if !reconciler.evaluate_changed_mission_runs().unwrap().1 {
+                return;
+            }
+        }
+        panic!("capacity handoffs did not settle within bounded reactive evaluations");
+    };
+    settle_changes();
+    for completed in 0..CONTENDERS {
+        let holders = store.active_mission_runs_for_mission("serialized").unwrap();
+        assert_eq!(holders.len(), 1, "one child must hold capacity after {completed} completions");
+        let holder = &holders[0];
+        for parent in &parents {
+            if store.mission_run_for_parent_step(&parent.steps[0].subject).unwrap().is_none() {
+                assert!(
+                    reconciler.incremental.reads_of(&parent.subject).contains(&holder.subject),
+                    "a capacity waiter must follow the current holder, including after a handoff",
+                );
+            }
+        }
+        store.set_step_state(&holder.steps[0].subject, "completed", None).unwrap();
+        settle_changes();
+        assert_eq!(
+            parents.iter().filter(|parent| {
+                store.mission_run_status(&parent.subject).unwrap().as_deref() == Some("completed")
+            }).count(),
+            completed + 1,
+            "releasing capacity must complete its parent and admit the next without a full pass",
+        );
+    }
+    assert!(store.active_mission_runs_for_mission("serialized").unwrap().is_empty());
+}

@@ -398,7 +398,7 @@ The default mission permits one nonterminal run. This default also lets `fractal
 
 Bare `concurrent-runs` permits unlimited nonterminal runs. `concurrent-runs max=N` sets a positive limit.
 
-The capacity check runs after the idempotency check. A child start waits when capacity is full, but a direct start returns `mission-run-capacity`.
+The capacity check runs after the idempotency check. A child start waits when capacity is full, but a direct start returns `mission-run-capacity`. A waiting `uses-mission` step follows the runs holding that capacity: when a holder ends or releases admission through cancellation, the parent is evaluated reactively and tries to start its child. Each handoff follows the new holder; it does not wait for a periodic full reconciliation pass.
 
 Missions and agents do not support in-place ownership changes. Publish a replacement mission and cancel the old run when ownership must change.
 
