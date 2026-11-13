@@ -4062,7 +4062,8 @@ mod tests {
         let mut messages: Vec<_> = [message.subject, ordinary.subject].iter()
             .map(|id| store.message(id).unwrap().unwrap()).collect();
         assert!(messages.iter().all(|message| message.delivery_thread.is_none()));
-        retain_live_mail(&store, &mut messages, 0, None, &mut Default::default()).unwrap();
+        // Exercise the delivery path, not the non-admitting policy preview.
+        retain_live_mail(&store, &mut messages, 0, None, &mut Default::default(), true).unwrap();
         assert_eq!(messages[0].delivery_thread.as_deref(), Some(thread));
         assert!(messages[1].delivery_thread.is_none());
     }
