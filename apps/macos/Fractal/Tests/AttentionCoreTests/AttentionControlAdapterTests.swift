@@ -110,6 +110,9 @@ final class AttentionControlAdapterTests: XCTestCase {
 final class ScriptedMember: URLProtocol, @unchecked Sendable {
   struct Request {
     let path: String
+    /// The path as sent, percent-escapes kept (`agent%2Fbuilder`).
+    let rawPath: String
+    let query: String?
     let body: Data
   }
 
@@ -140,7 +143,11 @@ final class ScriptedMember: URLProtocol, @unchecked Sendable {
       stream.close()
     }
     let (status, json): (Int, String) = Self.lock.withLock {
-      Self.requests.append(Request(path: request.url?.path ?? "", body: body))
+      let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+      Self.requests.append(
+        Request(
+          path: request.url?.path ?? "", rawPath: components?.percentEncodedPath ?? "", query: components?.query,
+          body: body))
       return Self.responses.isEmpty ? (500, "{}") : Self.responses.removeFirst()
     }
     let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!

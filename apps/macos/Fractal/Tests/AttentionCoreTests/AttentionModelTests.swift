@@ -335,7 +335,8 @@ final class AttentionModelTests: XCTestCase {
       conversationID: "agent/builder", turns: [ConversationTurn(id: "t", speaker: .asker, author: nil, text: "Asking", at: nil)],
       hasEarlier: false)
     let page = AttentionPage(records: [ask], canAnswer: true)
-    let adapter = FakeAdapter(attention: [.success(page), .success(page)], slo: [.success(slo), .success(slo)])
+    let adapter = FakeAdapter(
+      attention: [.success(page), .success(page), .success(page)], slo: [.success(slo), .success(slo), .success(slo)])
     await adapter.setContext(context)
     await adapter.setExcerpt(excerpt)
     await adapter.setAttachment("abc", Data([1, 2, 3]))
@@ -354,29 +355,70 @@ final class AttentionModelTests: XCTestCase {
 
     await adapter.failContext("member gone")
     await model.refresh(now: now + 30)
+    var reads = await adapter.contextReads
+    XCTAssertEqual(reads.count, 1, "a page the closed panel holds is not polled")
+
+    await model.setPanelVisible(true)
+    reads = await adapter.contextReads
+    XCTAssertEqual(reads.count, 2, "coming on screen re-reads the open page")
+    await model.refresh(now: now + 60)
+    reads = await adapter.contextReads
+    XCTAssertEqual(reads.count, 3, "a page on screen is re-read on every refresh")
     XCTAssertEqual(model.contexts[ask.id]?.value, context, "a failed reread keeps the last detail")
     XCTAssertEqual(model.contexts[ask.id]?.state, .stale(lastSuccess: now, reason: "member gone"))
-    XCTAssertEqual(model.excerpts[ask.id]?.state, .fresh(now + 30), "the conversation is read on its own")
+    XCTAssertEqual(model.excerpts[ask.id]?.state, .fresh(now + 60), "the conversation is read on its own")
     let imageReads = await adapter.attachmentReads
     XCTAssertEqual(imageReads, ["abc"], "an image is content-addressed: read once")
   }
 
+  func testBackRemembersThePageAndClosingThePanelReturnsToTheTopLevelKeepingDrafts() async {
+    let ask = Fixture.record(request: Fixture.decision())
+    let adapter = FakeAdapter(attention: [.success(.init(records: [ask], canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    await model.setPanelVisible(true)
+    model.open(.speech)
+    model.back()
+    XCTAssertEqual(model.route, .home)
+    XCTAssertEqual(model.backFrom, .speech, "focus returns to the tile that opened the page")
+
+    model.open(.attention(ask.id))
+    XCTAssertNil(model.backFrom, "a new page forgets the last one")
+    model.answerDrafts[ask.id] = AnswerDraft(words: "after the release")
+
+    await model.setPanelVisible(false)
+
+    XCTAssertEqual(model.route, .home, "the panel reopens at the top level, as Control Center does")
+    XCTAssertNil(model.backFrom, "closing is not Back")
+    XCTAssertEqual(model.answerDrafts[ask.id], AnswerDraft(words: "after the release"), "the draft waits for the page")
+  }
+
   func testAnsweringOnAPageReturnsToTheTopLevelWithAReceipt() async {
     let ask = Fixture.record(request: Fixture.decision())
+    let image = AttachmentRef(sha256: "abc", mediaType: "image/png", name: "shot.png", size: 3, message: "work/step-1")
     let adapter = FakeAdapter(
       attention: [.success(.init(records: [ask], canAnswer: true)), .success(.init(records: [], canAnswer: true))],
       slo: [.success(slo), .success(slo)])
+    await adapter.setContext(
+      AttentionContext(
+        detail: nil,
+        request: RequestContext(
+          question: "Ship?", whyPerson: nil, summary: nil, reasons: [], recommendation: nil, subjects: [],
+          attachments: [image])))
+    await adapter.setAttachment("abc", Data([1, 2, 3]))
     let model = AttentionModel(adapter: adapter)
     await model.refresh(now: now)
     model.open(.attention(ask.id))
     await model.readOpenPage(now: now)
     XCTAssertNotNil(model.contexts[ask.id])
+    XCTAssertNotNil(model.attachments["abc"])
 
     await model.answer(ask, with: WorkDoneAnswer(summary: "Ship", answerID: "ship"), label: "Ship")
 
     XCTAssertEqual(model.route, .home, "the card left Fractal, so its page closes")
     XCTAssertEqual(model.receipt, Receipt(title: "Ship it?", outcome: "Answered Ship"))
     XCTAssertNil(model.contexts[ask.id], "a closed card's page content is dropped")
+    XCTAssertTrue(model.attachments.isEmpty, "and so are the images only its page named")
     model.open(.objectives)
     XCTAssertNil(model.receipt, "moving on clears the receipt")
   }

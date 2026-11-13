@@ -104,13 +104,18 @@ public enum AnswerState: Sendable, Equatable {
   public let configurationError: String?
   let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
-  /// The page the panel shows; a page whose card left Fractal returns to the top level.
+  /// The page the panel shows; a page whose card left Fractal, and every page when the panel
+  /// closes, returns to the top level.
   public internal(set) var route: PanelRoute = .home
+  /// The page the person last went back from, so the top level returns VoiceOver focus to the
+  /// row or tile that opened it; nil once another page opens or the panel closes.
+  public internal(set) var backFrom: PanelRoute?
   /// Each open card's detail and its asker's conversation, read when its page opens and again
-  /// on every refresh while it is open; a failed read keeps the last one, marked stale.
+  /// on every refresh while it is open on screen; a failed read keeps the last one, marked stale.
   public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
   public internal(set) var excerpts: [String: LiveSection<ConversationExcerpt?>] = [:]
-  /// Image attachments by SHA-256; content-addressed, so read once.
+  /// Image attachments by SHA-256; content-addressed, so read once, and kept only while a
+  /// kept context still names them.
   public internal(set) var attachments: [String: LiveSection<Data>] = [:]
   /// What the last answer or control committed, shown on the top level after its card left.
   public internal(set) var receipt: Receipt?
@@ -191,7 +196,8 @@ public enum AnswerState: Sendable, Equatable {
         }
       }
     } while refreshAgain
-    await readOpenPage(now: now)
+    // A page nobody sees is not polled: the panel re-reads it when it comes on screen.
+    if isPanelVisible { await readOpenPage(now: now) }
     considerSpeech(now: now ?? .now)
   }
 
@@ -290,6 +296,8 @@ public enum AnswerState: Sendable, Equatable {
     answerDrafts = answerDrafts.filter { open.contains($0.key) }
     contexts = contexts.filter { open.contains($0.key) }
     excerpts = excerpts.filter { open.contains($0.key) }
+    let named = Set(contexts.values.flatMap { $0.value?.request?.attachments.map(\.sha256) ?? [] })
+    attachments = attachments.filter { named.contains($0.key) }
     if let focused = focusedInput, focused != Self.noteInput, !open.contains(focused) { focusedInput = nil }
     let shown = Set(page.records.filter { !$0.isSnoozed(at: snoozeClock) }.map(\.id))
     controls = controls.filter { id, state in

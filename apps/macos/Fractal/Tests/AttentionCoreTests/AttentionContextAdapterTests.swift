@@ -61,6 +61,104 @@ final class AttentionContextAdapterTests: XCTestCase {
     XCTAssertNotNil(context.workFailure)
   }
 
+  /// A row whose request is about one subject.
+  private func row(about subject: String) -> String {
+    controls.row(
+      extra: #","request":{"version":1,"type":"decision","question":"Ship?","why_person":"Your Mac.","subjects":[\#(subject)]}"#)
+  }
+
+  /// A member's error answer.
+  private func failure(_ code: String, _ message: String) -> String {
+    #"""
+    {"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"req/2",
+     "code":"\#(code)","message":"\#(message)","retryable":false,"details":{}}
+    """#
+  }
+
+  func testAPullRequestsStateIsReadThroughTheGitHubPlugin() async throws {
+    let subject = #"{"kind":"pull_request","label":"dotfiles#9344","url":"https://github.com/schickling/dotfiles/pull/9344","revision":"df686c"}"#
+    let plugin = #"{"status":"found","stale":false,"item":{"state":"open","draft":false,"head_sha":"0123abcd"}}"#
+    let adapter = controls.adapter([(200, controls.envelope(row(about: subject))), (200, controls.envelope(plugin))])
+
+    let context = try await adapter.readContext(Fixture.record())
+
+    XCTAssertEqual(
+      ScriptedMember.requests.map(\.path),
+      ["/v1/client/attention/attention/one", "/v1/client/plugins/github/schickling/dotfiles/pulls/9344"],
+      "a card that is not a step run reads no work step")
+    XCTAssertEqual(context.request?.subjects.first?.status, .state("open", headChanged: true))
+  }
+
+  func testAnIssueAnOlderMemberCannotReadShowsUnavailableAndKeepsTheRequest() async throws {
+    let subject = #"{"kind":"issue","label":"dotfiles#9358","ref":"resource/github/schickling/dotfiles/issue/9358"}"#
+    let adapter = controls.adapter([
+      (200, controls.envelope(row(about: subject))), (404, failure("not-found", "no route for plugins/github")),
+    ])
+
+    let context = try await adapter.readContext(Fixture.record())
+
+    XCTAssertEqual(ScriptedMember.requests.last?.path, "/v1/client/plugins/github/schickling/dotfiles/issues/9358")
+    XCTAssertEqual(context.request?.question, "Ship?", "the request shows without the subject's state")
+    XCTAssertEqual(
+      context.request?.subjects.first?.status, .unavailable("no route for plugins/github (not-found)"))
+  }
+
+  func testTheExcerptReadsTheAskersTimelineByItsSession() async throws {
+    let timeline = #"""
+      {"kind":"timeline","session_id":"session/agent/builder","items":[
+        {"id":"e1","sequence":1,"revision":1,"timestamp":"2026-10-19T11:50:00Z","role":"assistant","type":"content","final":true,
+         "body":{"media_type":"text/markdown","text":"Asking **Ada**."}}],
+       "page":{"limit":40,"has_more":true}}
+      """#
+    let adapter = controls.adapter([(200, controls.envelope(timeline))])
+
+    let excerpt = try await adapter.readExcerpt(Fixture.record(conversationID: "agent/builder"))
+
+    let sent = try XCTUnwrap(ScriptedMember.requests.first)
+    XCTAssertEqual(sent.rawPath, "/v1/client/sessions/agent%2Fbuilder/timeline", "the conversation is one path segment")
+    XCTAssertEqual(sent.query, "limit=\(FractalAttentionAdapter.timelineItems)")
+    XCTAssertEqual(excerpt?.conversationID, "agent/builder")
+    XCTAssertEqual(excerpt?.turns.map(\.text), ["Asking **Ada**."])
+  }
+
+  func testAnExcerptIsNilWithoutAConversationAndFailsWithTheMembersReason() async throws {
+    let none = controls.adapter([])
+    let nothing = try await none.readExcerpt(Fixture.record())
+    XCTAssertNil(nothing)
+    XCTAssertTrue(ScriptedMember.requests.isEmpty, "a card without a conversation reads none")
+
+    let older = controls.adapter([(404, failure("not-found", "no such session"))])
+    do {
+      _ = try await older.readExcerpt(Fixture.record(conversationID: "agent/builder"))
+      XCTFail("a missing timeline is a failure, not an empty conversation")
+    } catch {
+      XCTAssertEqual(String(describing: error), "no such session (not-found)")
+    }
+  }
+
+  func testAnAttachmentIsReadAsABlobByTheStepRunCarryingIt() async throws {
+    let chunk = #"{"sha256":"abc","data":"\#(Data([1, 2, 3]).base64EncodedString())","size":3,"offset":0}"#
+    let adapter = controls.adapter([(200, controls.envelope(chunk))])
+    let image = AttachmentRef(sha256: "abc", mediaType: "image/png", name: "shot.png", size: 3, message: "step-run/7")
+
+    let bytes = try await adapter.readAttachment(image)
+
+    XCTAssertEqual(bytes, Data([1, 2, 3]))
+    XCTAssertEqual(ScriptedMember.requests.map(\.path), ["/v1/client/blobs/abc/chunk"])
+    XCTAssertEqual(ScriptedMember.requests.first?.query, "offset=0&message=step-run/7")
+  }
+
+  func testAnAttachmentTheMemberNoLongerHoldsFailsWithItsReason() async {
+    let adapter = controls.adapter([(404, failure("not-found", "blob abc is not held here"))])
+    let image = AttachmentRef(sha256: "abc", mediaType: "image/png", name: nil, size: 3, message: "step-run/7")
+    do {
+      _ = try await adapter.readAttachment(image)
+      XCTFail("a missing blob is a failure")
+    } catch {
+      XCTAssertEqual(String(describing: error), "blob abc is not held here (not-found)")
+    }
+  }
+
   func testTheExcerptKeepsTheNewestProseTurnsWithTheirAuthors() throws {
     func entry(_ id: Int, role: String, type: String, body: String) -> String {
       #"{"id":"e\#(id)","sequence":\#(id),"revision":1,"timestamp":"2026-10-19T11:5\#(id % 10):00Z","role":"\#(role)","type":"\#(type)","final":true,"body":\#(body)}"#

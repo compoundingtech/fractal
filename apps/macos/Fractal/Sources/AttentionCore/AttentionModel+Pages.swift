@@ -20,10 +20,12 @@ extension AttentionModel {
   public func open(_ next: PanelRoute) {
     route = next
     receipt = nil
+    backFrom = nil
   }
 
-  /// Back to the top level.
+  /// Back to the top level (Back, Esc), which then returns focus to what opened the page.
   public func back() {
+    backFrom = route
     route = .home
   }
 
