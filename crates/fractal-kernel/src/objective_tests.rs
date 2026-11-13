@@ -1,7 +1,7 @@
 use super::*;
 
 const SHIPPED: &str = /* sqlite-large-value: allow-for-now lv-ha01213f3c4b5 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../slo/objectives.kdl");
-const FRACTAL_CI: &str = include_str!("../../../slo/fractal-ci.kdl");
+const FRACTAL_CI: &str = /* sqlite-large-value: allow-for-now lv-h44b5714bd710 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../slo/fractal-ci.kdl");
 
 fn one(text: &str) -> Result<Objective, FractalError> {
     parse_document(&format!("version 2\n{text}")).map(|mut objectives| objectives.remove(0))
