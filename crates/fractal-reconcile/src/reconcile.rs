@@ -11251,7 +11251,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.supersedes.is_some() && run.phase.starts_with("final-")
             && let Some(engine) = self.program_engine.get()
         {
-            match engine.fence_left_effects() {
+            match engine.fence_left_effects(run) {
                 Ok(false) => return Ok(false),
                 Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
                 Err(error) => {
@@ -11275,7 +11275,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     predecessor = view.supersedes;
                 }
                 if ready {
-                    match engine.fence_left_effects() {
+                    match engine.fence_left_effects(run) {
                         Ok(false) => return Ok(false),
                         Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
                         Err(error) => {

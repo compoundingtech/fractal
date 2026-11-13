@@ -145,12 +145,13 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
-| host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups; matched to the host incarnation and attempt, not another host's acknowledgement |
+| host → daemon | `ending` | `step`, `attempt` | this attempt began termination for any reason; precedes its terminal notification and is not proof of worker exit |
+| host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
-| host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and was terminated (DQ8) |
+| host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and began termination; the failure is visible before actual worker exit (DQ8) |
 | daemon → host / host → daemon | `ping` / `pong` | `seq` | host liveness (DQ8) |
 
 Both sides drop a message for another attempt than the one running, and the daemon drops messages
@@ -188,6 +189,20 @@ The host does not acknowledge a merely requested `Worker.terminate()`: it awaits
 worker's exit promise, including native I/O still in progress, while continuing to serve
 other programs. An ended attempt remains addressable until exit, so a late cancellation
 cannot confuse removal from the run map with quiescence.
+
+This lifecycle applies to normal completion, defects, unexpected worker exit, liveness
+failure, explicit cancellation, and same-step replacement. The host sends `ending` before
+`done` or `unresponsive`, then `cancelled` only after actual exit. The daemon retains
+every exact host-incarnation/step/attempt termination independently of its outcome:
+removing an attempt from the running map or failing its step cannot erase that fence.
+Workers may forward only `journal`, `run`, and `ask`; they cannot forge host lifecycle
+notifications.
+
+A replacement fences only its own supersession lineage: itself, every superseded
+predecessor, and their descendants across all generations. Both pending worker
+terminations and recorded effect groups use this scope. A cancellation belonging to an
+unrelated mission does not hold this replacement or its finalizers, even while that
+unrelated native worker is still terminating.
 
 ### 3. Declaration and authority
 

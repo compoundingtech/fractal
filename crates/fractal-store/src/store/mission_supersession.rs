@@ -402,6 +402,31 @@ impl Store {
         supersession_predecessors_terminal(&self.readers.get(), &run.subject)
     }
 
+    /// Step subjects owned by this run, its superseded ancestry, and their descendants.
+    /// Historical generations remain owners until their execution has actually ended.
+    pub fn mission_run_supersession_step_scope(
+        &self,
+        run: &MissionRunView,
+    ) -> Result<BTreeSet<String>, FractalError> {
+        let connection = self.readers.get();
+        let mut steps = BTreeSet::new();
+        for ancestor in supersession_ancestry(&connection, &run.subject)? {
+            for (id, _) in supersession_owned_runs(&connection, &ancestor)? {
+                let owner = format!("mission-run/{id}");
+                smallclaims::touched::note_read(|| owner.clone());
+                smallclaims::touched::note_read(|| format!("children:{owner}"));
+                let mut statement = connection.prepare_cached(
+                    "SELECT subject FROM step_runs WHERE run_id=?1",
+                ).map_err(internal)?;
+                let subjects = statement.query_map([id], |row| row.get::<_, String>(0)).map_err(internal)?;
+                for subject in subjects {
+                    steps.insert(subject.map_err(internal)?);
+                }
+            }
+        }
+        Ok(steps)
+    }
+
     /// A stop declaration is not confirmation; every observed incarnation must end.
     pub fn runtime_execution_quiescent(&self, subject: &str) -> Result<bool, FractalError> {
         runtime_execution_quiescent(&self.readers.get(), subject)
@@ -442,12 +467,9 @@ fn supersession_predecessors_terminal(
     connection: &Connection,
     subject: &str,
 ) -> Result<bool, FractalError> {
-    let mut seen = BTreeSet::from([subject.to_owned()]);
-    let mut predecessor = mission_run_lineage_tx(connection, subject).map_err(internal)?.supersedes;
-    let mut ready = predecessor.is_some();
-    while let Some(current) = predecessor {
-        if !seen.insert(current.clone()) { return Err(supersession_cycle(&current)) }
-        smallclaims::touched::note_read(|| current.clone());
+    let ancestry = supersession_ancestry(connection, subject)?;
+    let mut ready = ancestry.len() > 1;
+    for current in ancestry.into_iter().skip(1) {
         let terminal: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1 AND phase='terminal')",
             [current.strip_prefix("mission-run/").unwrap_or(&current)], |row| row.get(0),
@@ -455,19 +477,7 @@ fn supersession_predecessors_terminal(
         ready &= terminal;
         // Terminal is a bookkeeping state, not proof that cleanup stopped execution.
         // Include children of every generation, not just the predecessor's current one.
-        let mut statement = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h279700890c73 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ "WITH RECURSIVE owned_runs(id) AS (
-               SELECT id FROM mission_runs WHERE id=?1
-               UNION
-               SELECT child.id FROM mission_runs child
-               JOIN step_runs step ON step.subject=child.parent_step_run
-               JOIN owned_runs parent ON parent.id=step.run_id
-             ) SELECT id, phase FROM mission_runs WHERE id IN (SELECT id FROM owned_runs)",
-        ).map_err(internal)?;
-        let owners = statement.query_map(
-            [current.strip_prefix("mission-run/").unwrap_or(&current)],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        let owners = supersession_owned_runs(connection, &current)?;
         for (id, phase) in owners {
             let owner = format!("mission-run/{id}");
             smallclaims::touched::note_read(|| owner.clone());
@@ -498,10 +508,43 @@ fn supersession_predecessors_terminal(
                 ready &= runtime_execution_quiescent(connection, &runtime)?;
             }
         }
-        // Do not stop at a nonterminal node: each ancestor is a reactive dependency.
-        predecessor = mission_run_lineage_tx(connection, &current).map_err(internal)?.supersedes;
     }
     Ok(ready)
+}
+
+/// Canonical supersession edges, including the supplied run. Visit every ancestor
+/// even when an earlier one is nonterminal so reactive dependencies stay complete.
+fn supersession_ancestry(connection: &Connection, subject: &str) -> Result<Vec<String>, FractalError> {
+    let mut seen = BTreeSet::new();
+    let mut ancestry = Vec::new();
+    let mut current = Some(subject.to_owned());
+    while let Some(subject) = current {
+        if !seen.insert(subject.clone()) { return Err(supersession_cycle(&subject)) }
+        smallclaims::touched::note_read(|| subject.clone());
+        current = mission_run_lineage_tx(connection, &subject).map_err(internal)?.supersedes;
+        ancestry.push(subject);
+    }
+    Ok(ancestry)
+}
+
+fn supersession_owned_runs(connection: &Connection, subject: &str) -> Result<Vec<(String, String)>, FractalError> {
+    let mut statement = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h1c7ccc2f3123 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ "WITH RECURSIVE owned_runs(id) AS (
+           SELECT id FROM mission_runs WHERE id=?1
+           UNION
+           SELECT child.id FROM mission_runs child
+           JOIN step_runs step ON step.subject=child.parent_step_run
+           JOIN owned_runs parent ON parent.id=step.run_id
+         ) SELECT id, phase FROM mission_runs WHERE id IN (SELECT id FROM owned_runs)",
+    ).map_err(internal)?;
+    let owners = statement.query_map(
+        [subject.strip_prefix("mission-run/").unwrap_or(subject)],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+    if owners.is_empty() {
+        return Err(FractalError::new("missing-mission-run", "cannot establish supersession execution ownership"));
+    }
+    Ok(owners)
 }
 
 fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result<bool, FractalError> {

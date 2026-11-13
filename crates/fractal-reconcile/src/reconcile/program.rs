@@ -8,7 +8,7 @@
 //! can never journal anything.
 //!
 //! - daemon → host: `start`, `ack`, `nack`, `cancel`, `resolved`, `ping`.
-//! - host → daemon: `journal`, `run`, `ask`, `done`, `unresponsive`, `pong`.
+//! - host → daemon: `journal`, `run`, `ask`, `ending`, `done`, `unresponsive`, `cancelled`, `pong`.
 //!
 //! Every message after `start` names its step and attempt; both sides drop a message for an
 //! attempt or host generation they no longer run. Supervision: the engine pings the host and
@@ -16,7 +16,7 @@
 //! resume from their journals on the next host. Before it starts a host, the engine kills the
 //! effect process groups an earlier host recorded and never ended (DQ2).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -158,7 +158,8 @@ struct Inner {
     pings: u64,
     supervised: bool,
     running: HashMap<String, Running>,
-    cancelling: HashMap<String, (u32, u64)>,
+    /// Exact worker identities awaiting termination, independent of their recorded outcomes.
+    terminating: HashSet<(u64, String, u32)>,
     /// By step: the attempt and the last host or liveness failure that stopped it.
     faults: HashMap<String, (u32, String)>,
     /// By step: the attempt this engine ended itself (its program finished or its worker was
@@ -627,17 +628,20 @@ impl ProgramEngine {
         Ok(killed)
     }
 
-    /// Fence recorded effects before admitting a replacement. Sending `cancel`
-    /// alone is asynchronous: the host may not have processed it yet.
-    pub fn fence_left_effects(&self) -> Result<bool> {
+    /// Fence only this run's execution scope before admitting its replacement.
+    /// An outcome is not proof of worker termination: wait for the host's exact acknowledgement.
+    pub fn fence_left_effects(&self, run: &MissionRunView) -> Result<bool> {
         smallclaims::touched::note_read(|| "program-effects".to_owned());
-        if !self.lock().cancelling.is_empty() { return Ok(false); }
+        // Derive canonical Store ownership before acquiring the engine mutex.
+        let scope = self.store.mission_run_supersession_step_scope(run)?;
+        if self.lock().terminating.iter().any(|(_, step, _)| scope.contains(step)) { return Ok(false); }
         let dir = self.groups_dir();
         std::fs::create_dir_all(&dir)?;
         let boot = boot_id()?;
         for entry in std::fs::read_dir(dir)? {
             let record: Value = serde_json::from_slice(&std::fs::read(entry?.path())?)?;
             let step = record["step"].as_str().ok_or_else(|| anyhow!("effect group has no step identity"))?;
+            if !scope.contains(step) { continue; }
             let attempt = record["attempt"].as_u64().and_then(|value| u32::try_from(value).ok())
                 .ok_or_else(|| anyhow!("effect group has no attempt identity"))?;
             let recorded_boot = record["boot_id"].as_str().ok_or_else(|| anyhow!("effect group has no boot identity"))?;
@@ -697,29 +701,32 @@ impl ProgramEngine {
             return Ok(());
         }
         let step = message["step"].as_str().ok_or_else(|| anyhow!("message without a step"))?;
-        let attempt = message["attempt"].as_u64().ok_or_else(|| anyhow!("message without an attempt"))?;
-        if message["t"] == "cancelled" {
+        let attempt = message["attempt"].as_u64().and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| anyhow!("message without a valid attempt"))?;
+        if message["t"] == "ending" {
             let mut inner = self.lock();
-            if inner.cancelling.get(step).is_some_and(|&(expected, host)|
-                u64::from(expected) == attempt && host == generation)
+            if inner.running.get(step).is_some_and(|running|
+                running.dispatch.attempt == attempt && running.generation == generation)
             {
-                inner.cancelling.remove(step);
-                drop(inner);
-                (self.wake)("program-effects");
+                inner.terminating.insert((generation, step.to_owned(), attempt));
             }
+            return Ok(());
+        }
+        if message["t"] == "cancelled" {
+            let removed = self.lock().terminating.remove(&(generation, step.to_owned(), attempt));
+            if removed { (self.wake)("program-effects"); }
             return Ok(());
         }
         let program = {
             let inner = self.lock();
             match inner.running.get(step) {
                 // A message from an attempt or host this engine no longer runs changes nothing.
-                Some(running) if u64::from(running.dispatch.attempt) == attempt && running.generation == generation => {
+                Some(running) if running.dispatch.attempt == attempt && running.generation == generation => {
                     running.dispatch.program.bundle_hash.clone()
                 }
                 _ => return Ok(()),
             }
         };
-        let attempt = u32::try_from(attempt)?;
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
             Some("run" | "ask") => self.request(step, attempt, generation, &program, message),
@@ -971,28 +978,34 @@ impl ProgramEngine {
 
     /// A host that exits takes its programs with it; a new host resumes each from its journal.
     fn host_exited(self: Arc<Self>, generation: u64) {
-        let resume = {
+        let (resume, released) = {
             let mut inner = self.lock();
             if inner.host.as_ref().is_some_and(|host| host.generation == generation)
                 && let Some(mut host) = inner.host.take()
             {
                 let _ = host.child.kill();
-                let status = host.child.wait();
-                eprintln!("fractal: program host {generation} exited ({status:?})");
+                match host.child.wait() {
+                    Ok(status) => eprintln!("fractal: program host {generation} exited ({status:?})"),
+                    Err(error) => {
+                        eprintln!("fractal: cannot reap program host {generation}: {error}");
+                        inner.host = Some(host);
+                        return;
+                    }
+                }
             }
-            let cancelling = inner.cancelling.len();
-            inner.cancelling.retain(|_, (_, host)| *host != generation);
-            if inner.cancelling.len() != cancelling {
-                (self.wake)("program-effects");
-            }
+            let terminating = inner.terminating.len();
+            inner.terminating.retain(|(host, _, _)| *host != generation);
+            let released = inner.terminating.len() != terminating;
             let gone = inner
                 .running
                 .iter()
                 .filter(|(_, running)| running.generation == generation)
                 .map(|(step, _)| step.clone())
                 .collect::<Vec<_>>();
-            gone.iter().filter_map(|step| inner.running.remove(step)).map(|running| running.dispatch).collect::<Vec<_>>()
+            let resume = gone.iter().filter_map(|step| inner.running.remove(step)).map(|running| running.dispatch).collect::<Vec<_>>();
+            (resume, released)
         };
+        if released { (self.wake)("program-effects"); }
         if resume.is_empty() {
             return;
         }
@@ -1052,7 +1065,7 @@ fn send_to(inner: &Inner, generation: u64, message: &Value) {
 
 fn send_cancel(inner: &mut Inner, generation: u64, step: &str, attempt: u32, reason: &str) {
     if inner.host.as_ref().is_some_and(|host| host.generation == generation) {
-        inner.cancelling.insert(step.to_owned(), (attempt, generation));
+        inner.terminating.insert((generation, step.to_owned(), attempt));
         send_to(inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
     }
 }
