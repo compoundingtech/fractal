@@ -63,7 +63,7 @@ impl CustomStore for Store {
             let mut f=request.fields.clone();
             for(n,e)in &reply.bindings {f.insert(n.clone(),eval(e,&slots));}
             let input=ClaimInput{subject:request.subject.clone(),kind:reply.kind.clone(),actor:Some(request.actor.clone()),fields:f,evidence:vec![],expected_subject:None,idempotency_key:None};
-            let f=prepare(tx,&input)?.ok_or_else(||fail("registration disappeared"))?;
+            let f=prepare(tx,&self.origin,&input)?.ok_or_else(||fail("registration disappeared"))?;
             smallclaims::store::principals::rules_gate_tx(tx,&self.origin,&request.actor,&reply.kind,&request.subject).map_err(internal)?;
             let predecessor=latest_claim_id_tx(tx,&request.subject).map_err(internal)?.into_iter().collect::<Vec<_>>();
             let c=append_claim_tx(tx,&self.origin,&request.subject,&reply.kind,Some(&request.actor),&json!({"fields":f,"_custom_reply":{"revision":request.revision,"episode":request.episode,"key":key,"digest":digest}}),&predecessor,None).map_err(internal)?;

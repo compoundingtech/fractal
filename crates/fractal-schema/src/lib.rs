@@ -1217,6 +1217,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "notice-owner",
+            "notice-owner/fleet",
+            "The fleet's single notice owner: one admitted member incarnation, declared always on, whose daemon writes notice snapshots.",
+            false,
+        ),
+        (
             "owned-set",
             "owned-set/NAME",
             "A graph-owned set of declarations with source ordering and omission retirement.",
@@ -1636,6 +1642,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
                 "message",
                 "observer",
                 "objective",
+                "notice-owner",
                 "mission",
                 "mission-run",
                 "planning-session",
@@ -5120,7 +5127,9 @@ mod tests {
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
         current.subjects.remove("objective").unwrap();
-        current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
+        current.claims.get_mut("intent.desired").unwrap().source_kdl
+            .retain(|kind| kind != "objective" && kind != "notice-owner");
+        current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
         current.claims.remove("mission-run.retry-linked").unwrap();

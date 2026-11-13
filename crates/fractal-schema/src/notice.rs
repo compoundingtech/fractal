@@ -1,6 +1,7 @@
-//! Reviewed v1 registrations for the three notice authority domains.
-//! These manifests describe storage, not the joined NoticeSnapshot read model.
-//! Storage field bounds do not replace native lineage or typed view/action validation.
+//! Reviewed v2 registrations for the two notice authority domains: producer sources and the
+//! snapshots the notice owner's daemon writes. Person controls are native attention controls,
+//! not a notice family. These manifests describe storage, not the joined NoticeSnapshot read
+//! model. Storage field bounds do not replace native lineage or typed view/action validation.
 use crate::{ValidationError, custom, error};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -8,12 +9,17 @@ use std::{collections::BTreeMap, sync::LazyLock};
 
 pub const SOURCE_PREFIX: &str = "custom/attention/source/";
 pub const SNAPSHOT_PREFIX: &str = "custom/attention/snapshot/";
-pub const CONTROL_PREFIX: &str = "custom/attention/control/";
-pub const PREFIXES: [&str; 3] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, CONTROL_PREFIX];
-pub const HASHES: [&str; 3] = [
-    "7a9c67075779112dd117ea13a7cc6bb9535e9501beb2e1d683d1516c62d07b24",
-    "1f91f51979ce1b303c43453fa14fa8f0b2ec03fbb2304ff3b4a21ea99c30ff69",
-    "01e8f20112982c35e6f316a4c750e11cfc3f84129f1a266ea1d15f568e0a648e",
+/// The v1 control family's prefix stays reserved without a manifest, so generic rows written
+/// there before the namespace was reserved stay hidden and nothing can register it again.
+pub const RETIRED_CONTROL_PREFIX: &str = "custom/attention/control/";
+pub const PREFIXES: [&str; 3] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, RETIRED_CONTROL_PREFIX];
+pub const VERSION: u32 = 2;
+/// The actor every daemon writes snapshots as. It proves nothing alone: authority is the
+/// claim's origin member checked against the fleet's notice-owner binding.
+pub const RUNTIME_ACTOR: &str = "daemon/runtime";
+pub const HASHES: [&str; 2] = [
+    "96a618145580c78d6eedd1a9f14ef22adf04542b72cc719ac7d52e4a02cb69d4",
+    "041f279b64fd2da4884869edcffde8fb88096b80cd1ba8e7d65139c3310f4cf2",
 ];
 
 /// Includes exact roots and ancestors, so a broader registration cannot squat.
@@ -32,18 +38,16 @@ pub fn is_reserved_kind(kind: &str) -> bool {
         || kind == "attention.notice" || kind.starts_with("attention.notice-")
 }
 
-pub fn manifests() -> &'static [custom::Manifest; 3] {
-    static MANIFESTS: LazyLock<[custom::Manifest; 3]> = LazyLock::new(|| {
-        [build("source"), build("snapshot"), build("control")]
-    });
+pub fn manifests() -> &'static [custom::Manifest; 2] {
+    static MANIFESTS: LazyLock<[custom::Manifest; 2]> = LazyLock::new(|| [build("source"), build("snapshot")]);
     &MANIFESTS
 }
 
 /// A candidate identity selects a reviewed pin, never a caller-provided hash.
 pub fn pinned_hash(manifest: &custom::Manifest) -> Option<&'static str> {
-    ["attention.notice-source", "attention.notice-snapshot", "attention.notice-control"]
+    ["attention.notice-source", "attention.notice-snapshot"]
         .iter().position(|kind| manifest.kind == *kind)
-        .filter(|_| manifest.version == 1)
+        .filter(|_| manifest.version == VERSION)
         .map(|index| HASHES[index])
 }
 
@@ -59,7 +63,7 @@ pub fn validate_registration(manifest: &custom::Manifest, hash: &str) -> Result<
         return Ok(());
     }
     let expected = pinned_hash(manifest).ok_or_else(|| {
-        error("reserved-notice-registration", "notice namespace requires a reviewed v1 manifest")
+        error("reserved-notice-registration", "notice namespace requires a reviewed v2 manifest")
     })?;
     let bytes = serde_json::to_vec(manifest)
         .map_err(|err| error("reserved-notice-registration", err.to_string()))?;
@@ -99,21 +103,14 @@ fn build(family: &str) -> custom::Manifest {
         let mut claim = field("string", true, &[]);
         claim.pattern = Some("[0-9a-f]{64}".into());
         fields.insert("creation_claim".into(), claim);
-        if family == "snapshot" {
-            fields.insert("policy".into(), field("object", true, &[]));
-            let mut delivery = field("array", true, &[]);
-            delivery.max_items = 4;
-            fields.insert("delivery".into(), delivery);
-        } else {
-            for name in ["seen_at", "dismissed_at", "snoozed_until"] {
-                fields.insert(name.into(), field("any", true, &[]));
-            }
-        }
+        fields.insert("policy".into(), field("object", true, &[]));
+        let mut delivery = field("array", true, &[]);
+        delivery.max_items = 4;
+        fields.insert("delivery".into(), delivery);
+        // The owner member whose daemon wrote the snapshot; a handover rebuilds snapshots.
+        fields.insert("runtime".into(), field("subject-reference", true, &["host"]));
     }
-    for (name, families) in [
-        ("producer", &["agent", "person"][..]), ("recipient", &["person"][..]),
-        ("runtime", &["agent"][..]),
-    ] {
+    for (name, families) in [("producer", &["agent", "person"][..]), ("recipient", &["person"][..])] {
         fields.insert(name.into(), field("subject-reference", family != "source" || name == "recipient", families));
     }
     let creation_kind = format!("custom.attention.{}-created", if family == "source" { "notice" } else { family });
@@ -127,7 +124,7 @@ fn build(family: &str) -> custom::Manifest {
         authority: custom::Authority::Creator, fields, additional_fields: false,
     });
     custom::Manifest {
-        kind: format!("attention.notice-{family}"), namespace: "attention".into(), version: 1,
+        kind: format!("attention.notice-{family}"), namespace: "attention".into(), version: VERSION,
         language: custom::LANGUAGE.into(), subject_prefix: format!("custom/attention/{family}/"),
         slots: BTreeMap::from([("creation".into(), custom::Slot {
             kind: creation_kind.clone(), select: custom::Select::First,
@@ -145,6 +142,27 @@ mod tests {
         for (manifest, pin) in manifests().iter().zip(HASHES) {
             validate_registration(manifest, pin).unwrap();
         }
+    }
+
+    #[test]
+    fn notice_v2_drops_the_control_family_and_binds_snapshots_to_a_host() {
+        let [source, snapshot] = manifests();
+        assert!(!source.claims[&source.creation_kind].fields.contains_key("runtime"));
+        for kind in [&snapshot.creation_kind, "custom.attention.snapshot-updated"] {
+            assert_eq!(snapshot.claims[kind].fields["runtime"].reference_families, ["host"]);
+        }
+        for v1 in [source, snapshot] {
+            let mut v1 = v1.clone();
+            v1.version = 1;
+            let hash = hex::encode(Sha256::digest(serde_json::to_vec(&v1).unwrap()));
+            assert!(validate_registration(&v1, &hash).is_err(), "{}", v1.kind);
+        }
+        let mut control = snapshot.clone();
+        control.kind = "attention.notice-control".into();
+        control.subject_prefix = RETIRED_CONTROL_PREFIX.into();
+        let hash = hex::encode(Sha256::digest(serde_json::to_vec(&control).unwrap()));
+        assert!(validate_registration(&control, &hash).is_err());
+        assert!(is_reserved_subject("custom/attention/control/legacy"));
     }
 
     #[test]

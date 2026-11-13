@@ -8,6 +8,11 @@
         "person"
       ]
     },
+    "NoticeAgent": {
+      "pattern": "^(?:agent)/[^\\s]+$",
+      "type": "string",
+      "x-st-ref": "agent"
+    },
     "NoticeClaimId": {
       "pattern": "^[0-9a-f]{64}$",
       "type": "string",
@@ -404,11 +409,6 @@
       ],
       "type": "object"
     },
-    "NoticeRuntime": {
-      "pattern": "^(?:agent)/[^\\s]+$",
-      "type": "string",
-      "x-st-ref": "agent"
-    },
     "NoticeSeenParameters": {
       "additionalProperties": false,
       "properties": {
@@ -485,7 +485,9 @@
           "$ref": "#/$defs/Revision"
         },
         "runtime": {
-          "$ref": "#/$defs/NoticeRuntime"
+          "pattern": "^(?:host)/[^\\s]+$",
+          "type": "string",
+          "x-st-ref": "host"
         },
         "schema_version": {
           "const": 1
@@ -571,7 +573,7 @@
       "description": "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence.",
       "properties": {
         "agent": {
-          "$ref": "#/$defs/NoticeRuntime"
+          "$ref": "#/$defs/NoticeAgent"
         },
         "cwd": {
           "type": "string"

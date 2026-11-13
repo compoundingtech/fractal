@@ -39,6 +39,17 @@ public struct NoticeActor: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
 }
 
+public struct NoticeAgent: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^(?:agent)/[^\\s]+\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeAgent: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
 public struct NoticeClaimId: Codable, Sendable, Hashable {
     public let value: String
     private static let pattern = try! NSRegularExpression(pattern: "^[0-9a-f]{64}\\z")
@@ -848,17 +859,6 @@ public struct NoticePolicy: Codable, Sendable, Hashable {
     }
 }
 
-public struct NoticeRuntime: Codable, Sendable, Hashable {
-    public let value: String
-    private static let pattern = try! NSRegularExpression(pattern: "^(?:agent)/[^\\s]+\\z")
-    public init(_ value: String) throws {
-        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeRuntime: constraint violation") }
-        self.value = value
-    }
-    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
-    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
-}
-
 public typealias NoticeSeenParametersNoticeId = NoticeId
 
 public struct NoticeSeenParameters: Codable, Sendable, Hashable {
@@ -985,7 +985,16 @@ public typealias NoticeSnapshotProducer = NoticeActor
 
 public typealias NoticeSnapshotRevision = Revision
 
-public typealias NoticeSnapshotRuntime = NoticeRuntime
+public struct NoticeSnapshotRuntime: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^(?:host)/[^\\s]+\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSnapshotRuntime: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
 
 public struct NoticeSnapshotSchemaVersion: Codable, Sendable, Hashable {
     public let value: UInt64
@@ -1206,7 +1215,7 @@ public struct NoticeSnoozeParameters: Codable, Sendable, Hashable {
     }
 }
 
-public typealias NoticeSourceAgent = NoticeRuntime
+public typealias NoticeSourceAgent = NoticeAgent
 
 public struct NoticeSourceCwd: Codable, Sendable, Hashable {
     public let value: String
