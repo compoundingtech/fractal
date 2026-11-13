@@ -6,20 +6,44 @@ objectives every Fractal client reads. It reads only Fractal, through
 `FractalClient`, at launch and every 30 seconds; Fractal streams the attention
 collection, but `FractalClient` has no typed attention or availability stream.
 
+- **The panel** is a Control Center module: tiles for Availability, Speech and
+  Objectives (the circle toggles, the rest opens the module's page), the inbox
+  as one-line rows (symbol, title, asker, age; a draft, a write in flight or a
+  refusal is marked on the row), and the footer. A row or tile opens its page
+  within the panel, with a back chevron and Esc; with Reduce Motion pages
+  cross-fade instead of sliding, and VoiceOver focus moves to the page title
+  and back to the row or tile that opened it. Closing the panel returns it to
+  the top level.
 - **Asks** (all attention pages, classified as Fractal web's
-  `data/attention.ts` does) are answered in the panel: a decision's or choice's
-  named answers (recommended first; request-changes takes words), a choice's
-  custom words or feedback text, Yes/No for an untyped question, or Nothing to
-  Do when there are no named answers. Custom forms and harness prompts link to
-  Fractal. Every control is always in place, for the keyboard and VoiceOver as
-  much as the pointer. The first answerable ask's recommended answer (never a
-  decline) is the one prominent button while nothing is being typed; no answer
-  takes Return, since answers are irreversible.
-  Typed answers and the note draft live on the model, so closing the panel keeps
-  them.
+  `data/attention.ts` does) are answered on their page: a decision's or
+  choice's named answers (recommended first; request-changes takes words), a
+  choice's custom words or feedback text, Yes/No for an untyped question, or
+  Nothing to Do when there are no named answers. Custom forms and harness
+  prompts link to Fractal. Every control is always in place, for the keyboard
+  and VoiceOver as much as the pointer. Each page has at most one prominent
+  button: an ask's recommended answer (never a decline, never one that needs
+  words) while nothing is being typed, or an update's Mark Read; no answer
+  takes Return, since answers are irreversible. A committed answer or control
+  returns the panel to the top level with a receipt row. Typed answers and the
+  note draft live on the model, so closing the panel keeps them.
+- **Pages** show what the row cannot: the card read again with its whole
+  request (`attentionGet`: question, why the person, summary, reasons,
+  recommendation, subjects, attachments), its work step (`workGet` of the
+  step run: title, state, last progress), each GitHub pull request's and
+  issue's state through Fractal's GitHub plugin (with "New commits" when a
+  pull request's head moved since the ask), image attachments as blobs read by
+  the step run that carries them, and the asker's newest timeline page reduced
+  to its last 10 prose turns, each capped at six lines. These are projection
+  reads under the session's `read.projections` scope, like the inbox itself. A
+  page is read when it opens, again on every refresh while the panel is on
+  screen, and when the panel comes back on screen; a closed panel polls no
+  page. Each part keeps its last value when a read fails and says why; a
+  member that does not grant a read, or predates its route (404), leaves only
+  that part unread. A page's images leave memory with its card.
 - **Snooze and Dismiss** are the person's own attention controls
   (`attention.snooze`, `attention.dismiss`), offered when the session is
-  granted them, on every open ask (and Snooze on updates), never as an answer.
+  granted them, on every ask's page (and Snooze on an update's), never as an
+  answer.
   Snooze (1 hour, 4 hours, until tomorrow 9:00) hides the card on all the
   person's clients until then; its deadline still runs. Fractal still lists
   snoozed rows: the tray leaves them out of the list, the count and speech (a
@@ -127,10 +151,11 @@ collection, but `FractalClient` has no typed attention or availability stream.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
-  identity, Settings… and Quit; launch and each change of refresh outcome are
+  identity, refresh and Settings…; launch and each change of refresh outcome are
   logged to stderr.
-- Settings holds Show in Menu Bar (`MenuBarExtra(isInserted:)`). With the item
-  hidden the tray keeps running; opening AttentionTray again brings it back.
+- Settings holds Show in Menu Bar (`MenuBarExtra(isInserted:)`) and Quit. With
+  the item hidden the tray keeps running; opening AttentionTray again brings it
+  back.
 
 ## Packaging and configuration
 

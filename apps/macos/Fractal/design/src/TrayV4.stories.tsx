@@ -41,6 +41,7 @@ const round: readonly Decision[] = [
 const kept: readonly Decision[] = [
   { id: 'K1', text: 'No panel background: the menu-bar window’s glass is the surface; tiles and groups are content-layer fills, never glass on glass.' },
   { id: 'K2', text: 'Text styles only: one headline per page (its title), subheadline semibold secondary section labels, footnote metadata.' },
+  { id: 'K3', text: 'One leading edge, the 14 pt inset: the top level’s rows and section labels, an ask page’s labels and platters, and a module page’s groups, section labels and footers (not the grouped Form’s 20 pt groups and 30 pt labels).' },
   { id: 'K4', text: 'At most one prominent button per page: an ask’s recommended answer (never a decline, never one that needs words), while nothing is typed; an update’s Mark Read. No answer takes Return.' },
   { id: 'K5', text: 'No hover-only actions: rows highlight under the pointer as feedback, every action is in place on the page.' },
   { id: 'K7', text: 'Urgency is a symbol plus weight (urgent bubble, clock badge + semibold deadline), never color alone.' },
@@ -61,7 +62,7 @@ const benchmarks: readonly { readonly what: string; readonly native: string; rea
   { what: 'On state', native: 'white circle, tinted symbol', v4: 'same' },
   { what: 'Page header', native: '13 pt bold title, trailing switch, no back chevron', v4: 'same plus a back chevron (n1) and Esc' },
   { what: 'Trailing row', native: '“… Settings…” as a 22 pt text row', v4: 'Settings… with version and refresh' },
-  { what: 'Transition', native: 'undocumented; the panel resizes', v4: 'push: pages enter from and leave to the trailing edge, critically damped 0.32 s' },
+  { what: 'Transition', native: 'undocumented; the panel resizes', v4: 'push: pages enter from and leave to the trailing edge, critically damped 0.32 s; a cross-fade with Reduce Motion. VoiceOver moves to the page title, and back to the row or tile' },
 ]
 
 const sources = [
