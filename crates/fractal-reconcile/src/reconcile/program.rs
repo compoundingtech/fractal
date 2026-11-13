@@ -158,6 +158,7 @@ struct Inner {
     pings: u64,
     supervised: bool,
     running: HashMap<String, Running>,
+    cancelling: HashMap<String, (u32, u64)>,
     /// By step: the attempt and the last host or liveness failure that stopped it.
     faults: HashMap<String, (u32, String)>,
     /// By step: the attempt this engine ended itself (its program finished or its worker was
@@ -297,7 +298,7 @@ impl ProgramEngine {
             for (step, attempt, generation, reason) in &left {
                 inner.running.remove(step);
                 eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
-                send_to(&inner, *generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+                send_cancel(&mut inner, *generation, step, *attempt, reason);
             }
             left
         };
@@ -390,7 +391,7 @@ impl ProgramEngine {
         // Held as ended until its failure is written: a pass with a view read before then must
         // not start the attempt again.
         if let Some(generation) = generation.filter(|&generation| self.end(step, attempt, generation, None)) {
-            send_to(&self.lock(), generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            send_cancel(&mut self.lock(), generation, step, attempt, reason);
         }
         eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
         // The step's state first: a child started concurrently then sees it left (`waiting`).
@@ -416,6 +417,7 @@ impl ProgramEngine {
         let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
         for child in self.open_waits(step, attempt)? {
             if child.starts_with("mission-run/") {
+                let child = self.store.mission_run_supersession_successor(&child)?;
                 if !matches!(self.store.mission_run_status(&child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
                     self.store.request_mission_run_cancellation(&child, &reason)?;
                 }
@@ -625,6 +627,43 @@ impl ProgramEngine {
         Ok(killed)
     }
 
+    /// Fence recorded effects before admitting a replacement. Sending `cancel`
+    /// alone is asynchronous: the host may not have processed it yet.
+    pub fn fence_left_effects(&self) -> Result<bool> {
+        smallclaims::touched::note_read(|| "program-effects".to_owned());
+        if !self.lock().cancelling.is_empty() { return Ok(false); }
+        let dir = self.groups_dir();
+        std::fs::create_dir_all(&dir)?;
+        let boot = boot_id()?;
+        for entry in std::fs::read_dir(dir)? {
+            let record: Value = serde_json::from_slice(&std::fs::read(entry?.path())?)?;
+            let step = record["step"].as_str().ok_or_else(|| anyhow!("effect group has no step identity"))?;
+            let attempt = record["attempt"].as_u64().and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| anyhow!("effect group has no attempt identity"))?;
+            let recorded_boot = record["boot_id"].as_str().ok_or_else(|| anyhow!("effect group has no boot identity"))?;
+            if self.left(step, attempt)?.is_none() || recorded_boot != boot {
+                continue;
+            }
+            let pid = record["pid"].as_i64().and_then(|value| i32::try_from(value).ok())
+                .filter(|pid| *pid > 1).ok_or_else(|| anyhow!("effect group has no process identity"))?;
+            if !leader_gone(pid) {
+                let observed = start_time(pid).ok_or_else(|| anyhow!("cannot confirm effect group {pid} identity"))?;
+                let recorded = record["start_time"].as_str().ok_or_else(|| anyhow!("effect group {pid} has no start identity"))?;
+                if observed != recorded { continue; }
+            }
+            // SIGKILL is an execution fence, not merely desired cancellation.
+            // ESRCH confirms that this exact group has already ended.
+            // SAFETY: signalling a verified process group has no memory effects.
+            if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// The host process's pid, while one runs.
     pub fn host_pid(&self) -> Option<u32> {
         self.lock().host.as_ref().map(|host| host.child.id())
@@ -659,6 +698,17 @@ impl ProgramEngine {
         }
         let step = message["step"].as_str().ok_or_else(|| anyhow!("message without a step"))?;
         let attempt = message["attempt"].as_u64().ok_or_else(|| anyhow!("message without an attempt"))?;
+        if message["t"] == "cancelled" {
+            let mut inner = self.lock();
+            if inner.cancelling.get(step).is_some_and(|&(expected, host)|
+                u64::from(expected) == attempt && host == generation)
+            {
+                inner.cancelling.remove(step);
+                drop(inner);
+                (self.wake)("program-effects");
+            }
+            return Ok(());
+        }
         let program = {
             let inner = self.lock();
             match inner.running.get(step) {
@@ -736,7 +786,7 @@ impl ProgramEngine {
         {
             let mut inner = self.lock();
             if forget(&mut inner, step, attempt, generation) {
-                send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+                send_cancel(&mut inner, generation, step, attempt, &reason);
             }
         }
         self.cancel_waits(step, attempt, &reason)?;
@@ -930,6 +980,11 @@ impl ProgramEngine {
                 let status = host.child.wait();
                 eprintln!("fractal: program host {generation} exited ({status:?})");
             }
+            let cancelling = inner.cancelling.len();
+            inner.cancelling.retain(|_, (_, host)| *host != generation);
+            if inner.cancelling.len() != cancelling {
+                (self.wake)("program-effects");
+            }
             let gone = inner
                 .running
                 .iter()
@@ -992,6 +1047,13 @@ fn forget(inner: &mut Inner, step: &str, attempt: u32, generation: u64) -> bool 
 fn send_to(inner: &Inner, generation: u64, message: &Value) {
     if inner.host.as_ref().is_some_and(|host| host.generation == generation) {
         send(inner, message);
+    }
+}
+
+fn send_cancel(inner: &mut Inner, generation: u64, step: &str, attempt: u32, reason: &str) {
+    if inner.host.as_ref().is_some_and(|host| host.generation == generation) {
+        inner.cancelling.insert(step.to_owned(), (attempt, generation));
+        send_to(inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
     }
 }
 

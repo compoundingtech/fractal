@@ -135,6 +135,41 @@ fn recovery_intent_current(
     Ok(!changed)
 }
 
+// Publication work is deliberately paged. A source beyond the current page must
+// still lose admission to new effects, including a prepared start racing the
+// evaluator's publication check. Mechanical gates predate explicit owner_run
+// metadata, so resolve their canonical request's owner as well.
+fn mission_publication_current(
+    store: &Store,
+    connection: &Connection,
+    operation: &RuntimeStartOperation,
+) -> Result<bool> {
+    let prepared = &operation.body["subject"];
+    let declared_owner = prepared["owner_run"].as_str();
+    let gate_owner = if declared_owner.is_none() && prepared["kind"].as_str() == Some("gate") {
+        let owner: Option<String> = connection.query_row(
+            "SELECT json_extract(body,'$.fields.owner') FROM claims
+             WHERE subject=?1 AND kind='gate.requested' ORDER BY store_index DESC LIMIT 1",
+            [&operation.subject], |row| row.get(0),
+        ).optional()?.flatten();
+        match owner {
+            Some(owner) if owner.starts_with("mission-run/") => Some(owner),
+            Some(owner) => connection.query_row(
+                "SELECT run_id FROM step_runs WHERE subject=?1", [&owner], |row| row.get(0),
+            ).optional()?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let Some(owner) = declared_owner.or(gate_owner.as_deref()) else { return Ok(true); };
+    let run = fractal_store::store::mission_run_header_tx(
+        connection, owner.strip_prefix("mission-run/").unwrap_or(owner),
+    ).optional()?;
+    let Some(run) = run else { return Ok(false); };
+    Ok(!store.mission_run_supersession_pending_tx(connection, &run)?)
+}
+
 fn runtime_start_requests_retained(
     connection: &Connection,
     origin: &str,
@@ -682,7 +717,8 @@ impl RuntimeStartsStore for Store {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
             let selected = selected.map(|row| row.claim_id);
-            if !recovery_intent_current(tx, self.origin(), operation)? {
+            if !recovery_intent_current(tx, self.origin(), operation)?
+                || !mission_publication_current(self, tx, operation)? {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
             let superseded = operation.body["stale_failed_start"].as_str().map(str::to_owned);
@@ -798,7 +834,8 @@ impl RuntimeStartsStore for Store {
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if !recovery_intent_current(tx, self.origin(), &operation)? {
+            if !recovery_intent_current(tx, self.origin(), &operation)?
+                || !mission_publication_current(self, tx, &operation)? {
                 tx.execute(/* sqlite-large-value: allow-for-now lv-he8f98f77d11c owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,'restart-intent-superseded') WHERE id=?1", [id])?;
                 cancel_undispatched_runtime_start_tx(tx, self.origin(), id)?;
                 return Ok(false);
@@ -851,7 +888,8 @@ impl RuntimeStartsStore for Store {
     fn runtime_start_intent_current(&self, id: &str) -> Result<bool> {
         let connection = self.readers.get();
         let operation = connection.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-        recovery_intent_current(&connection, self.origin(), &operation)
+        Ok(recovery_intent_current(&connection, self.origin(), &operation)?
+            && mission_publication_current(self, &connection, &operation)?)
     }
 
     fn runtime_start_revoked(&self, id: &str) -> Result<bool> {
@@ -1133,8 +1171,66 @@ impl RuntimeStartsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn mission_publication_fences_unpaged_owned_and_legacy_gate_starts_at_every_boundary() {
+        for gate in [false, true] {
+            for boundary in ["admission", "dispatch", "physical-guard"] {
+                let store = Store::open_memory("node").unwrap();
+                let original = r#"version 2
+mission "launch-publication" state="ready" {
+  concurrent-runs
+  goal "Fence starts."
+  step "work" { goal "Do the work." }
+}"#;
+                publish(&store, original, "launch-original");
+                let runs: Vec<_> = (0..97).map(|index| {
+                    store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+                        mission: "launch-publication".into(), revision: None,
+                        workspace: "/work/launch".into(), requester: Some("person/operator".into()),
+                        mode: None, inputs: BTreeMap::new(),
+                        idempotency_key: format!("launch-run-{index}"),
+                    }).unwrap()
+                }).collect();
+                // The queue pages by run id. Choose a source outside the first page,
+                // not one whose immediate cancellation already revokes its starts.
+                let source = runs.iter().max_by(|left, right| left.id.cmp(&right.id)).unwrap();
+                let subject = if gate { "gate/publication-fence" } else { "agent/publication-fence" };
+                let mut start = operation("publication-start", subject, None);
+                if gate {
+                    start.body["subject"]["kind"] = Value::from("gate");
+                    store.append_claim(&ClaimInput {
+                        subject: subject.into(), kind: "gate.requested".into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("owner".into(), Value::from(source.steps[0].subject.clone())),
+                            ("runner".into(), Value::from("exec")),
+                        ]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some("publication-gate".into()),
+                    }).unwrap();
+                } else {
+                    start.body["subject"]["owner_run"] = Value::from(source.subject.clone());
+                }
+                if boundary != "admission" {
+                    assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+                }
+                if boundary == "physical-guard" {
+                    assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+                publish(&store, &original.replace("Fence starts.", "Fence revised starts."), "launch-revised");
+                assert!(store.mission_run(&source.subject).unwrap().unwrap().superseded_by.is_none());
+                match boundary {
+                    "admission" => assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded),
+                    "dispatch" => assert!(!store.dispatch_runtime_start(&start.id, 1).unwrap()),
+                    "physical-guard" => assert!(!store.runtime_start_intent_current(&start.id).unwrap()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
 
     #[test]
     fn stale_failed_start_recovery_fences_interleaved_controls_at_admission_and_dispatch() {
