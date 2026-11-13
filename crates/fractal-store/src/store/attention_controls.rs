@@ -5,7 +5,7 @@
 use super::*;
 use fractal_schema::attention_controls as schema;
 
-pub const SCHEMA: &str = r#"
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h52a7a69b0068 owner=fractal_store::store::attention_controls TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS person_attention_controls (
     person TEXT NOT NULL, attention_id TEXT NOT NULL,
     seen_at_ms INTEGER, seen_key BLOB,
@@ -37,7 +37,7 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     let at = i64::try_from(claim.accepted_at_unix_ms).unwrap_or(i64::MAX);
     if claim.kind == schema::SEEN_KIND {
         transaction.execute(
-            "INSERT INTO person_attention_controls(person,attention_id,seen_at_ms,seen_key) VALUES(?1,?2,?3,?4)
+            /* sqlite-large-value: allow-for-now lv-h26df6fe6c2de owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls(person,attention_id,seen_at_ms,seen_key) VALUES(?1,?2,?3,?4)
              ON CONFLICT(person,attention_id) DO UPDATE SET seen_at_ms=excluded.seen_at_ms,seen_key=excluded.seen_key
              WHERE person_attention_controls.seen_key IS NULL OR excluded.seen_key<person_attention_controls.seen_key",
             params![claim.subject, attention_id, at, key],
@@ -45,7 +45,7 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     } else {
         let until = fields.get("until_unix_ms").and_then(Value::as_u64).map(|until| until as i64);
         transaction.execute(
-            "INSERT INTO person_attention_controls(person,attention_id,snoozed_until_ms,snooze_key) VALUES(?1,?2,?3,?4)
+            /* sqlite-large-value: allow-for-now lv-h8d5946d600be owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls(person,attention_id,snoozed_until_ms,snooze_key) VALUES(?1,?2,?3,?4)
              ON CONFLICT(person,attention_id) DO UPDATE SET snoozed_until_ms=excluded.snoozed_until_ms,snooze_key=excluded.snooze_key
              WHERE person_attention_controls.snooze_key IS NULL OR excluded.snooze_key>person_attention_controls.snooze_key",
             params![claim.subject, attention_id, until, key],
@@ -69,7 +69,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     )?;
     if !ready {
         rebuild(transaction)?;
-        transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3c52da9f3dc3 owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
     }
     Ok(())
 }
@@ -77,7 +77,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 /// Replays every unrepaired control into an empty table. Each merge is order-free, so claim
 /// order does not matter; a repair that retracts a winner also rebuilds through here.
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute("DELETE FROM person_attention_controls", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf72fe838496c owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_attention_controls", [])?;
     let mut statement = transaction.prepare(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind IN ('person.attention-seen','person.attention-snoozed')",
     )?;
