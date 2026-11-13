@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Prepare canonical alerts and person-work callers.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or backfill."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or stored identity changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or fleet coordination rule changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional daemon startup work or service interruption; timings were not measured."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored-data conversion to undo; roll forward with canonical CLI callers."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "CLI examples and test callers use existing alerts and work ask commands; no protocol change."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Use alerts for alert commands and work ask for unexpected person decisions."
+  }
+}
