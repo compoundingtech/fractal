@@ -659,8 +659,11 @@ pub fn window(
             row.get::<_, String>(1).map(Some)
         }
     })?;
-    rows.filter_map(|row| row.transpose()).take(limit)
-        .map(|text| Ok(serde_json::from_str(&text?)?)).collect()
+    let mut rows = rows.filter_map(|row| row.transpose()).take(limit)
+        .map(|text| Ok(serde_json::from_str(&text?)?)).collect::<Result<Vec<Value>>>()?;
+    // The person's own controls are an overlay read in the same snapshot, not view state.
+    super::attention_controls::overlay(connection, &mut rows)?;
+    Ok(rows)
 }
 
 pub fn row(
@@ -693,8 +696,11 @@ pub fn row(
             },
         )
         .optional()?.flatten();
-    text.map(|text| serde_json::from_str(&text).map_err(Into::into))
-        .transpose()
+    let Some(text) = text else { return Ok(None) };
+    let mut rows = [serde_json::from_str::<Value>(&text)?];
+    super::attention_controls::overlay(connection, &mut rows)?;
+    let [row] = rows;
+    Ok(Some(row))
 }
 
 #[cfg(test)]

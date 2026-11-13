@@ -58,6 +58,7 @@ pub mod private_notes;
 pub mod quota;
 mod usage_hub;
 pub mod read_positions;
+pub mod attention_controls;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -9876,6 +9877,11 @@ async fn action_inner(
     } else {
         None
     };
+    let attention_control = if matches!(request.action_type.as_str(), "attention.seen" | "attention.snooze" | "attention.dismiss") {
+        Some(attention_controls::control(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9890,6 +9896,8 @@ async fn action_inner(
         vec![claim.subject.clone()]
     } else if let Some(advanced) = &read_position {
         vec![advanced.id.clone()]
+    } else if let Some(controlled) = &attention_control {
+        controlled.affected.clone()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9904,6 +9912,10 @@ async fn action_inner(
     if let Some(advanced) = &read_position {
         // The stored position after the merge, whether or not this advance appended a claim.
         result["read_position_at"] = json!(advanced.at);
+    }
+    if let Some(controls) = attention_control.and_then(|controlled| controlled.state) {
+        // The row's controls after the action, whether or not it appended a claim.
+        result["attention_control"] = controls;
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
