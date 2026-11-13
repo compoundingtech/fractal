@@ -1,0 +1,330 @@
+[
+  {
+    "isFramework" : true,
+    "moduleName" : "Combine",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Combine.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreFoundation",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreFoundation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Darwin",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Darwin.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Dispatch",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Dispatch.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Foundation",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Foundation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "IOKit",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/IOKit.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "ObjectiveC",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ObjectiveC.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Observation",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Observation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Swift",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Swift.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "SwiftOnoneSupport",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/SwiftOnoneSupport.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "System",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/System.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "XPC",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/XPC.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_Builtin_float",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_Builtin_float.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_Concurrency",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_Concurrency.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation1",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation1.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation2",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation2.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation3",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation3.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_StringProcessing",
+    "modulePath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_StringProcessing.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CFNetwork.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/CFNetwork-5UIMJ2LSZ545E2IQGTE5CFDQM.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CFNetwork"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreFoundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/CoreFoundation-DKW6Y8XTHQRO76Q4YD5X0COVK.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreFoundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreServices.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/CoreServices-9VXUPNQ3A7303GUC5IO2J75NW.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreServices"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/Darwin.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/Darwin-BZYXAXFLX7P6CPDK6HFJYWM97.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Darwin"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/DiskArbitration.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/DiskArbitration-901BWXSCJG45AMXF8RDNX6JPV.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "DiskArbitration"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/dispatch.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/Dispatch-59Q342OBLPYOWW1RIHQKJ3IRO.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Dispatch"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Foundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/Foundation-DP0V1P0FVD4CYELM0KPBL50Z1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Foundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/IOKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/IOKit-6RDBYWEJTX3UUMXH0LT7MGS24.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "IOKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinBasic.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/MachO-BD85XC2GSBUDJ7QJV0I8MJAE1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "MachO"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/ObjectiveC.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/ObjectiveC-8ZP6H9TNRZLQHRRRHNG6LWY4Z.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ObjectiveC"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Security.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/Security-474SONDK59714A8W90KWAP916.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Security"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftShims-1EPXZKN7O66H4CR2CXMFFXIPK.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "SwiftShims"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/xpc.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/XPC-7Z38ZITDR818ZX00SF3WT4OH5.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "XPC"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation1.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_AvailabilityInternal-2OX2KUNVT5PYKWTEZNNX061VJ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_AvailabilityInternal"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_float-EEFAD6942OSRHK9MAOTU94JRA.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_float"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_inttypes-16LXFU304B1K874PJPKXI0PED.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_inttypes"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_limits-DRO05IFWGJWD9LPJIRZAG0A7M.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_limits"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdarg-70VH32A7B95F7DGFS4QO0YK0S.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdarg"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdbool-52O05N2SRDXKHGYEBHS2OTAL9.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdbool"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stddef-4CJ6O15D62J567RZWFOQ8T4FY.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stddef"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdint-4ZH80EM9F8LEIFMXVDC5MV1JY.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdint"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation1.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation1-E0NLQVE8LNA4RF3EAJVPK982V.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation1"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation2.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation2-1HEFD9W0GZBE4XAXYUC9UA9PI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation2"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation3.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation3-AZ7MSRN499Y75Y5SZ7HLIO9KX.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation3"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/_SwiftConcurrencyShims-4316N2G9KKXEW2LOH5JJ5SIEY.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_SwiftConcurrencyShims"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/launch.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/launch-9ZSGOVAJIATT0MVKZWODEP2Q6.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "launch"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/libDER\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/libDER-15B2CYWZWGJPCCKBTP5AFUHR.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "libDER"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/libkern.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/libkern-7Z0D0GZ2U911Q5WGMHWNJQ26Z.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "libkern"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/os.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/os_object-707SBN2OP4DZY46SEW463P7IT.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "os_object"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/os.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/os_workgroup-2IQC0UPVKJ4S5K6ZDC9PVES3W.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "os_workgroup"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/ptrauth-7X8ZHK4QLRC7ZZE3GMRX7D0NA.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ptrauth"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/ptrcheck-7Z2FS88S06E439NQ2QFMW6G2M.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ptrcheck"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/c_standard_library.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/string_h-74VT0G5TEJ274QCQ1DK5KI62E.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "string_h"
+  },
+  {
+    "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation2.modulemap",
+    "clangModulePath" : "\/Users\/schickling\/.megarepo\/github.com\/compoundingtech\/fractal\/refs\/heads\/schickling-assistant\/2026-11-12-availability-client-api\/clients\/swift\/FractalClient\/.build\/out\/SDKExplicitPrecompiledModules\/sys_types-3X137DVR3QOZDSLULO7TH2Y95.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "sys_types"
+  }
+]
