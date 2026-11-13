@@ -1,130 +1,506 @@
 {
   "command" : "devenv tasks run attention-tray:gallery",
   "generator" : "TrayGallery",
+  "menuBar" : [
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-idle-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-idle-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-idle-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-idle-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-idle-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-idle-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "idle",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-one-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "one",
+      "width" : 116
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-one-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "one",
+      "width" : 116
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-one-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "one",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-one-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "one",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-one-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "one",
+      "width" : 104
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-one-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "one",
+      "width" : 104
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-several-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "several",
+      "width" : 116
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-several-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "several",
+      "width" : 116
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-several-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "several",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-several-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "several",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-several-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "several",
+      "width" : 104
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-several-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "several",
+      "width" : 104
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-many-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "many",
+      "width" : 130
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-many-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "many",
+      "width" : 130
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-many-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "many",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-many-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "many",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-many-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "many",
+      "width" : 120
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-many-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "many",
+      "width" : 120
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-urgent-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "urgent",
+      "width" : 116
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-urgent-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "urgent",
+      "width" : 116
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-urgent-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "urgent",
+      "width" : 80
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-urgent-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "urgent",
+      "width" : 80
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-urgent-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "urgent",
+      "width" : 104
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-urgent-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "urgent",
+      "width" : 104
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-offline-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "offline",
+      "width" : 104
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-offline-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "offline",
+      "width" : 104
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-offline-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "offline",
+      "width" : 68
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-offline-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "offline",
+      "width" : 68
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-offline-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "offline",
+      "width" : 92
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-offline-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "offline",
+      "width" : 92
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M1-unconfigured-light.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "unconfigured",
+      "width" : 72
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M1-unconfigured-dark.png",
+      "height" : 48,
+      "menuBar" : "M1",
+      "state" : "unconfigured",
+      "width" : 72
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M2-unconfigured-light.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "unconfigured",
+      "width" : 72
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M2-unconfigured-dark.png",
+      "height" : 48,
+      "menuBar" : "M2",
+      "state" : "unconfigured",
+      "width" : 72
+    },
+    {
+      "appearance" : "light",
+      "file" : "menubar-M3-unconfigured-light.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "unconfigured",
+      "width" : 72
+    },
+    {
+      "appearance" : "dark",
+      "file" : "menubar-M3-unconfigured-dark.png",
+      "height" : 48,
+      "menuBar" : "M3",
+      "state" : "unconfigured",
+      "width" : 72
+    }
+  ],
+  "menuBarStates" : [
+    {
+      "description" : "No open asks; objectives met.",
+      "id" : "idle",
+      "title" : "Idle"
+    },
+    {
+      "description" : "One routine ask.",
+      "id" : "one",
+      "title" : "One ask"
+    },
+    {
+      "description" : "Three routine asks.",
+      "id" : "several",
+      "title" : "Three asks"
+    },
+    {
+      "description" : "A backlog of twelve routine asks.",
+      "id" : "many",
+      "title" : "Twelve asks"
+    },
+    {
+      "description" : "Four asks, one due within the hour; an objective missed.",
+      "id" : "urgent",
+      "title" : "Urgent"
+    },
+    {
+      "description" : "Fractal unreachable: the last count stays; the symbol says the refresh failed.",
+      "id" : "offline",
+      "title" : "Offline"
+    },
+    {
+      "description" : "Started without its Fractal configuration.",
+      "id" : "unconfigured",
+      "title" : "Not configured"
+    }
+  ],
+  "panel" : "L1-A2-H3-S1",
   "renders" : [
     {
       "appearance" : "light",
       "file" : "busy-light.png",
-      "height" : 2798,
+      "height" : 2822,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "busy-dark.png",
-      "height" : 2798,
+      "height" : 2822,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "answering-light.png",
-      "height" : 1982,
+      "height" : 1280,
       "scenario" : "answering",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "answering-dark.png",
-      "height" : 1982,
+      "height" : 1280,
       "scenario" : "answering",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "quiet-light.png",
-      "height" : 1150,
+      "height" : 532,
       "scenario" : "quiet",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "quiet-dark.png",
-      "height" : 1150,
+      "height" : 532,
       "scenario" : "quiet",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "read-only-light.png",
-      "height" : 1922,
+      "height" : 1188,
       "scenario" : "read-only",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "read-only-dark.png",
-      "height" : 1922,
+      "height" : 1188,
       "scenario" : "read-only",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "degraded-light.png",
-      "height" : 2360,
+      "height" : 2756,
       "scenario" : "degraded",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "degraded-dark.png",
-      "height" : 2360,
+      "height" : 2756,
       "scenario" : "degraded",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "unconfigured-light.png",
-      "height" : 420,
+      "height" : 558,
       "scenario" : "unconfigured",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "unconfigured-dark.png",
-      "height" : 420,
+      "height" : 558,
       "scenario" : "unconfigured",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "speech-speaking-light.png",
-      "height" : 1364,
+      "height" : 1430,
       "scenario" : "speech-speaking",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-speaking-dark.png",
-      "height" : 1364,
+      "height" : 1430,
       "scenario" : "speech-speaking",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "speech-in-call-light.png",
-      "height" : 1158,
+      "height" : 1074,
       "scenario" : "speech-in-call",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-in-call-dark.png",
-      "height" : 1158,
+      "height" : 1074,
       "scenario" : "speech-in-call",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "speech-muted-light.png",
-      "height" : 1080,
+      "height" : 994,
       "scenario" : "speech-muted",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-muted-dark.png",
-      "height" : 1080,
+      "height" : 994,
       "scenario" : "speech-muted",
       "width" : 800
     },
@@ -233,5 +609,6 @@
       "id" : "notice-answered",
       "title" : "Answered from the notification"
     }
-  ]
+  ],
+  "trayRev" : "src.a8feb58"
 }
