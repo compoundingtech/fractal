@@ -295,9 +295,38 @@ With v22 every fixed seed converges; seed 34 is the exact never-trim set, observ
 linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
 cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).
 
-`claims-v23.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a
-completed Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md).
-Versions 1 through 22 stay frozen. Generate it with
+`claims-v23.json` adds the durable, system-written `mission-run.retry-linked` kind from
+`fractal_schema::registry()`. Versions 1 through 22 stay frozen. Generate the complete
+registry snapshot with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v23.json`;
-do not hand-edit it. The simulation selects v23; a draw writes the kind through the generic append
-path on a fresh run subject, as it does `github.event`.
+do not hand-edit it. The simulation and its audit reports select v23. The kind uses the generic
+draw and append paths: `source` and `retry` are required `mission-run` references, and `reason`
+is an optional string. The focused regression validates a generated input against the native
+registry, admits it, and replicates it to the oracle. Each revision still applies its own
+admission rules; old-build checkpoint and comparison semantics are unchanged.
+
+Adding this kind changes the shared random schedule. Hosted
+[run 43269741954](https://github.com/compoundingtech/fractal/actions/runs/43269741954)
+exercised every fixed seed: all trimmed, including seed 34. Therefore v23 requires actual
+checkpoint trimming for every fixed seed; v22's negative seed-34 expectation is not carried
+forward. Convergence and checkpoint checks remain mandatory.
+
+`claims-v24.json` adds the durable, system-written `mission-run.supersede-linked` kind and
+the optional run-admission and fault-publication metadata from `fractal_schema::registry()`.
+Versions 1 through 23 stay frozen. Generate the complete current snapshot with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v24.json`;
+do not hand-edit it. The simulation and audit reports select v24. Supersession uses required
+`source` and `replacement` mission-run references and a required publication string. The
+focused lineage regression validates, admits, and replicates both retry and supersession
+inputs through the existing generic paths. No old-build admission or checkpoint comparison
+exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
+every fixed seed must converge and trim, without inheriting v22's negative exception.
+
+`claims-v25.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a completed
+Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md), and carries the
+optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fields the registry has
+gained since v24. Versions 1 through 24 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
+do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`. As for v24, every fixed seed must converge
+and trim.

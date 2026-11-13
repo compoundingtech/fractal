@@ -1798,6 +1798,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "mission-run.retry-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.supersede-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
             "mission-run.state",
             &["mission-run"],
             WritePolicy::SystemOnly,
@@ -3394,6 +3412,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
             ("status", string()),
+            ("phase", string()),
+            ("admission_publication", string()),
             ("mission", reference()),
             ("revision", string()),
             ("generation", reference()),
@@ -3420,6 +3440,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("stalled_after_ms", integer()),
             ("report_stalls", boolean()),
             ("report_completed", boolean()),
+        ],
+        "mission-run.retry-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("retry", required_reference_to(&["mission-run"])),
+            ("reason", string()),
+        ],
+        "mission-run.supersede-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("replacement", required_reference_to(&["mission-run"])),
+            ("publication", required_string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3606,6 +3636,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("step_definition", string()),
             ("attempt", integer()),
             ("runner", string()),
+            ("host", string()),
+            ("dispatch", object()),
             ("model", string()),
             ("token_budget", integer()),
             ("tools", array()),
@@ -3978,6 +4010,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("scope", required_string()),
             ("status", required_enum(&["faulted", "recovered"])),
             ("reason", string()),
+            ("publication", string()),
         ],
         "record.repaired" => &[
             ("record", required_string()),
@@ -4003,6 +4036,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("signal", string()),
             ("reason", string()),
             ("fresh_session", boolean()),
+            ("from_stale_handoff", boolean()),
             ("ignore_fit", boolean()),
         ],
         "runtime.action.succeeded"
@@ -4038,6 +4072,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("exit_code", integer()),
             ("exit_signal", integer()),
+            ("exit_evidence", object()),
             ("incarnation_id", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
@@ -5094,7 +5129,7 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
+        // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
@@ -5104,11 +5139,24 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("mission-run.retry-linked").unwrap();
+        current.claims.remove("mission-run.supersede-linked").unwrap();
+        for field in ["phase", "admission_publication"] {
+            current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }
         current.claims.remove(github_plugin::WORKFLOW_RUN).unwrap();
         current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap()
+            .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.observed").unwrap()
+            .fields.remove("exit_evidence").unwrap();
+        for field in ["host", "dispatch"] {
+            current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

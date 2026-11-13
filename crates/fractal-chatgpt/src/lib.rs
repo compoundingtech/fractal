@@ -100,6 +100,8 @@ pub const CONVERSATION_TIMELINE: &str = "fractal_conversation_timeline";
 pub const CONVERSATION_SEARCH: &str = "fractal_conversation_search";
 pub const CONVERSATION_READ: &str = "fractal_conversation_read";
 pub const MESSAGE_SEND: &str = "fractal_message_send";
+pub const SLO_LIST: &str = "fractal_slo_list";
+pub const SLO_HISTORY: &str = "fractal_slo_history";
 
 // Deprecated for the 0.1.0 adapter release; remove in fractal-chatgpt 0.2.0.
 // Johannes's ChatGPT connector caches tools/list. Keep old calls working without
@@ -123,6 +125,8 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (CONVERSATION_SEARCH, "Search bounded plain conversation text snippets. Content may be sensitive.", true),
     (CONVERSATION_READ, "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from fractal_conversations_list or fractal_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
     (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
+    (SLO_LIST, "List every Fractal objective and budget row the daemon reports. An objective row (kind objective) states a service-level target, its current measurement, the window it is measured over, and remaining_percent: how much of its error budget is left. A budget row (kind budget, with an account) states an allowance, current use, the window until it resets, and how much remains, with a forecast when one is known. status and tone say whether the row is met and how urgent it is. Rows arrive in pages that fit max_response_bytes; while value.page.next_cursor is non-null, call again with that cursor to read the next rows.", true),
+    (SLO_HISTORY, "Chart what was left (remaining_percent) of one objective or budget row across a period. Copy id exactly from fractal_slo_list. since_ms and until_ms are Unix milliseconds (default: the last 24 hours, at most 7 days); steps (1 to 1000, default 120) is how many equal steps to answer in; each step holds its lowest reading and is null when nothing was read.", true),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -162,6 +166,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_READ => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         AGENTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        SLO_HISTORY => json!({"id":{"type":"string","pattern":"^[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact objective or budget id from fractal_slo_list."},"since_ms":{"type":"integer","minimum":0,"description":"Period start in Unix milliseconds; defaults to 24 hours before until_ms."},"until_ms":{"type":"integer","minimum":0,"description":"Period end in Unix milliseconds; defaults to now."},"steps":{"type":"integer","minimum":1,"maximum":1000,"description":"Equal steps to answer in; defaults to 120."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
@@ -171,6 +176,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
         CONVERSATION_SEARCH => vec!["text"],
         CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
+        SLO_HISTORY => vec!["id"],
         _ => vec![],
     };
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
@@ -267,6 +273,11 @@ fn output_schema(name: &str) -> Value {
             "text":{"type":"string"},"returned_bytes":{"type":"integer","minimum":0},
             "truncated":{"type":"boolean"},"next_range":{"type":["object","null"]}
         },"required":["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]}),
+        SLO_HISTORY => json!({"type":"object","properties":{
+            "kind":{"const":"slo-history"},"id":{"type":"string"},
+            "since_ms":{"type":"integer","minimum":0},"until_ms":{"type":"integer","minimum":0},
+            "samples":{"type":"integer","minimum":0},"steps":{"type":"array","items":{"type":["number","null"]}}
+        },"required":["kind","id","since_ms","until_ms","samples","steps"]}),
         _ => {
             let mut result = json!({"type":"object","properties":{
                 "kind":{"type":"string"},"items":{"type":"array","items":{"type":"object"}},"page":page
@@ -387,6 +398,8 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         CONVERSATION_TIMELINE => "conversation-timeline",
         CONVERSATION_SEARCH => "conversation-search",
         CONVERSATION_READ => "conversation-content",
+        SLO_LIST => "slo",
+        SLO_HISTORY => "slo-history",
         _ => "propose",
     };
     let url = format!("http://localhost/v1/client/assistant/{route}");

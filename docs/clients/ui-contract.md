@@ -650,7 +650,7 @@ Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedba
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
 carries an update; a launch approval is `today` · `launch`; a revision approval is `today` ·
 `revision`; a `custom.*` kind is `today` · `request`; a harness prompt is `stopped` · `prompt`;
-a harness login is `stopped` · `login`. A fault is a `fault` card with no tier: Fractal sends each
+a harness login is `stopped` · `login`; a model drift is `today` · `update`. A fault is a `fault` card with no tier: Fractal sends each
 fault to the agent that owns it, and neither client shows one on Now. An unread message has
 neither.
 
@@ -712,6 +712,31 @@ syntax with a `legacy loop shape` comment; the current parser still rejects thos
 the latest published revision; an unknown mission or revision returns not found. Reads never
 fall back from an unknown explicit revision to the latest. Clients show the served text, not
 a client-side serialization.
+
+### Source maps
+
+Two reads, not projections, with the same `read.declarations` grant as the declaration reads.
+A refusal reads "Fractal does not show this source to this device".
+
+`source-map.get`, `GET /v1/client/source-maps?subject=…`, with an optional `revision` (default:
+the subject's current revision), answers `{subject, revision, current?, map, kdl, revisions}` for
+an agent or mission. `map` is the `source.mapped` claim the revision's first mapped set
+publication recorded (`docs/st3/owned-sets.md`): repository, ref, sha, the contributing `files`
+with their sha256 `blob_hash`, the declaration file and import closure as indices, and `nodes`,
+each a KDL node path with its TS span and frames (declaration → helper → value; `precision:
+enclosing` is a range, not a point). `kdl` is that revision's canonical KDL with environment
+values redacted, and the node path is the join key with it: agent, mission, step and gate nodes
+by name, others by index among same-named siblings. Revisions here are subject revisions, which
+for agents differ from the declaration ids `agent-declaration.get` names; `current` is the
+subject's current revision, so a client marks the live one without comparing those ids.
+`revisions` lists every mapped revision of the subject, newest first. A revision without a map
+is not found; clients say the subject has no source map rather than guessing.
+
+`source-blob.get`, `GET /v1/client/source-blobs/{sha256}?subject=…&revision=…`, answers
+`{hash, text}`: one file version, only when that revision's map names the hash in its `files`;
+any other hash is not found, whatever else Fractal stores. Text is content-addressed and never
+changes. A mission run's pinned revision is `MissionRunSummary.revision`; clients open the map
+at that revision, not the mission's current one.
 
 ### Graph flags
 

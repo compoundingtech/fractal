@@ -183,9 +183,12 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `clippy`: checks all workspace targets and the standalone conversation model,
   applies the [warning ratchet](#clippy-warning-ratchet), and runs
   `cargo run --locked -p fractal-client-codegen -- --check`.
-- `fleet-compat`: tests against the previous-release native archive pinned in
-  `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and embedded
-  source/target metadata. It does not rebuild the baseline or its PTY dependency.
+- `fleet-compat`: tests against the oldest deployed source's native archive
+  pinned in `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and
+  embedded source/target metadata. It does not rebuild the baseline or its PTY
+  dependency. The log prints `compat-baseline: fleet source=SHA tag=fleet-SHA target=TARGET`,
+  including when the verified extracted binary is reused. See the
+  [deployment-pin update procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 - `mail-redelivery-canaries`: runs the explicit zero-retry regression selection
   used by the [daily mail canaries](#daily-mail-redelivery-canaries).
 - `conversation-model`: tests `fractal-conversation-ui` without default features
@@ -195,7 +198,7 @@ The `fleet-compat` stage also runs
 `deployed_pty_0_13_0_record_without_boot_id_binds_mailbox` through the production
 mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
 `daemonBootId` and a matching live process start token. The same test belongs to the
-normal Rust suite. The previous-release fleet test uses a stub PTY and covers
+normal Rust suite. The pinned-main fleet test uses a stub PTY and covers
 replication; the metadata fixture covers native channel admission even when the
 devShell PTY advances.
 
@@ -377,8 +380,8 @@ the default devShell supplies that `node`. See [the eval contract](../evals/frac
 
 ### Rolling compatibility baselines
 
-The fleet and messaging pins in `.github/*-compat-baseline.json` track the latest
-published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
+The fleet pin tracks the oldest deployed source; the messaging pin tracks
+the latest published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
 `why`, `exception_reason` (`null` ordinarily), and both native archive URLs and hex SHA256
 checksums. Fleet CI downloads, verifies and extracts the published native archive instead of
 rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
@@ -390,15 +393,15 @@ historical baseline flake input.
 
 The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
 PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release
-list and excludes drafts, prereleases and unpublished tags. A baseline more than one published
-stable release behind the newest publication fails unless `exception_reason` gives an explicit
+list and excludes drafts, prereleases and unpublished tags for the stable messaging baseline.
+A stable baseline more than one published stable release behind the newest publication fails unless `exception_reason` gives an explicit
 temporary older-hold reason. An ordinary policy `why` does not waive freshness; blank reasons
 are invalid. Holds should identify the boundary and the condition for removing them.
 Failures distinguish `baseline is stale` from `release API unreachable`; the latter means
 freshness could not be determined, not that a pin needs updating. Archive downloads have a
 60-second network timeout and still fail closed.
 
-Daily and tag publication verify that the candidate's unheld pins already name the latest
+Daily and tag publication verify that the candidate's unheld stable messaging pin names the latest
 published stable release. After publication, `compat-baseline-release advance TAG` verifies
 the published `RELEASE.json` source against the dereferenced Git tag, checks archive bytes
 against `SHA256SUMS` and embedded `BUILD.json`, and opens a labelled draft baseline maintenance PR with
@@ -408,6 +411,9 @@ The upstream maintainers own review and merge of these maintenance PRs before th
 release. No auto-merge or enrollment is enabled by publication. The next release waits until
 that PR lands, except for explicitly held pins. A baseline-only maintenance delta is not a new
 daily release candidate, avoiding an endless release/repin loop.
+The source-addressed fleet pin is preserved by stable repins and publication.
+Update it with `repin-fleet fleet-SHA` as part of the deployment pin's
+[rollout procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 
 The tag publisher's token needs only `contents: write`; daily publication also needs
 `actions: read` to retrieve verified workflow artifacts. Only the separate postpublish advance
@@ -878,37 +884,55 @@ story-identity checks, matrix size and job timeout are unchanged.
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
 out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
-**full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
-cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
-configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+**full** Storybook index, then assigns longest measured stories first to the least-loaded
+shard, breaking ties by story ID and shard index. The committed `kit-play-costs.json`
+beside the runner records full four-case story costs from hosted merge-group logs.
+New stories use the manifest's median story cost. Shard 0 starts with a reservation
+equal to 20% of total estimated play work for its non-play lanes. Assignment is
+independent of index ordering and runner speed; adding a story can rebalance existing
+stories. `kitShardCount` in `.github/workflows/workspace-ci.ts` configures N.
+`KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
 Every shard generates and checks the app changelog registry after the frozen install,
 before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
-assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
+assertions. A small index may leave a shard with no plays; its receipt still participates
+in exact full-index coverage. Shard 0 runs every
 stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
 Storybook build and their strict plays. Browser controls and Storybook wait for every
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
 
-The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
-exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
-spent about four minutes preparing the runner, six minutes installing and running
-the non-play streams, and two minutes on browser controls/builds before strict plays.
-Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
-shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
-story partition: shard 0 also owns the other lanes. Play speed varies too:
-[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
-took 20m39s for shard 1's same 1,265 cases, leaving little room even without
-the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
-took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
-EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
-contention on a local build host. Four shards halve each old parity partition while preserving
-the stable hash rule, all cases, axe and receipt coverage. A third shard would
-reduce plays by only about a third, leaving less headroom for shard 0's fixed work
-and the observed runner variation. Extra shards duplicate setup and the small
-Storybook build; they do not duplicate app tests or browser controls. These are
-historical timings, not a measured runtime guarantee for the four-shard workflow.
+The job timeout stays **25 minutes**. The ten most recent merge-group runs inspected
+on 2026-11-13 contained six executing web matrices, three skipped lanes and one matrix
+not yet scheduled. Job durations (minutes, including setup and cleanup) were:
+
+| Run | Shard 0 | Shard 1 | Shard 2 | Shard 3 |
+| --- | ---: | ---: | ---: | ---: |
+| [43382323570](https://github.com/compoundingtech/fractal/actions/runs/43382323570) | 25.53 cancelled | 16.73 | 10.48 | 10.50 |
+| [43344153135](https://github.com/compoundingtech/fractal/actions/runs/43344153135) | 24.05 | 17.28 | 9.22 | 14.48 |
+| [43343940579](https://github.com/compoundingtech/fractal/actions/runs/43343940579) | 0.55 failed before plays | 14.20 | 11.47 | 12.15 |
+| [43339162862](https://github.com/compoundingtech/fractal/actions/runs/43339162862) | 23.63 failed | 17.47 | 11.37 | 12.38 |
+| [43325952348](https://github.com/compoundingtech/fractal/actions/runs/43325952348) | 25.42 cancelled | 13.33 | 9.45 | 13.38 |
+| [43288610870](https://github.com/compoundingtech/fractal/actions/runs/43288610870) | 17.40 | 17.27 | 11.50 | 14.32 |
+
+The old equal-probability hash partition ignored both story cost and shard 0's other
+work. In run 43382323570, shard 0 reached strict plays only at 07:22:13Z after starting
+at 07:07:08Z, leaving under ten minutes for its unchanged story share. Reserving
+non-play work and distributing measured story costs addresses this structural skew
+without adding runners, increasing the timeout, or dropping stories or axe.
+The same shard-1 set took 13.63–14.24 play minutes on EPYC 7763 runners and
+10.53–10.56 on EPYC 9V74 runners in this sample. Runner speed contributes, but
+cannot explain away shard 0's fixed overhead. The longest measured individual
+case was `sidebar-tree--filter-keystroke-to-paint` (111–172 seconds); the scheduler
+spreads such expensive stories instead of treating them like static stories.
+The manifest uses the median of each story's complete observed case samples;
+partial story prefixes from cancelled jobs are excluded when a complete sample exists.
+Refresh it explicitly with `node packages/fractal-ui/scripts/kit-play-costs.mjs`
+followed by its `sourceJobs` IDs (or a newly reviewed sample). This fetches hosted
+logs; ordinary execution and CI remain offline with respect to the manifest.
+Manual `gh workflow run fleet.yml --ref BRANCH` forces all web inputs and selects
+the same full story/a11y matrix as merge groups; no trigger or label change is needed.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and

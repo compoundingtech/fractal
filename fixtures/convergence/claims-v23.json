@@ -3287,112 +3287,6 @@
     "projection": "subscriptions",
     "wakes_reconciler": true
   },
-  "github.workflow-run": {
-    "kind": "github.workflow-run",
-    "subjects": [
-      "github-workflow-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "completed_at": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "conclusion": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "created_at": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "duration_ms": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "event": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "flakes": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "flaky_tests": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "head_sha": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "observer": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "observer"
-        ]
-      },
-      "repository": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "run_id": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "started_at": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "version": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "workflow": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "once",
-    "projection": "resources",
-    "wakes_reconciler": true
-  },
   "glass.deleted": {
     "kind": "glass.deleted",
     "subjects": [
@@ -5514,6 +5408,43 @@
     "additional_fields": false,
     "write_policy": "system-only",
     "cardinality": "state-transition",
+    "projection": "mission-runs",
+    "wakes_reconciler": true
+  },
+  "mission-run.retry-linked": {
+    "kind": "mission-run.retry-linked",
+    "subjects": [
+      "mission-run"
+    ],
+    "fields": {
+      "reason": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "retry": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "mission-run"
+        ]
+      },
+      "source": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "mission-run"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
     "projection": "mission-runs",
     "wakes_reconciler": true
   },

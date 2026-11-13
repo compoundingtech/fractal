@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v23.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1855,6 +1855,32 @@ fn generated_source_maps_are_admitted_and_replicate_with_their_texts() {
 }
 
 #[test]
+fn generated_run_lineage_links_are_admitted_and_replicate() {
+    for (kind, target) in [
+        ("mission-run.retry-linked", "retry"),
+        ("mission-run.supersede-linked", "replacement"),
+    ] {
+        let mut world = World::new(1, Sabotage::None);
+        let input = world.claim_of(&corpus()[kind], 0).unwrap();
+        assert_eq!(input.kind, kind);
+        assert!(input.subject.starts_with("mission-run/"));
+        for field in ["source", target] {
+            assert!(input.fields[field].as_str().unwrap().starts_with("mission-run/"));
+        }
+        if target == "replacement" {
+            assert!(!input.fields["publication"].as_str().unwrap().is_empty());
+        }
+        fractal_schema::registry()
+            .validate_claim(&input.subject, kind, &input.fields)
+            .unwrap();
+        let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+        world.tap(0);
+        assert!(claims(&world.oracle).contains_key(&claim.id));
+        assert!(world.failures.is_empty(), "{}", world.report());
+    }
+}
+
+#[test]
 fn generated_mission_publications_replicate_as_canonical_missions() {
     let mut world = World::new(1, Sabotage::None);
     let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
@@ -1969,35 +1995,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v22 adds `source.mapped` to kind selection, shifting the shared RNG schedule; hosted
-/// linux-tests on the storage PR left seed 34 untrimmed. The never-trim set is characterized by
-/// hosted CI; a lightly loaded runner diverges from it (#6210).
-const NEVER_TRIMS: &[u64] = &[34];
-// Growth beyond three non-trimming seeds needs review.
-const _: () = assert!(NEVER_TRIMS.len() <= 3);
-
-/// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
+/// Every fixed seed must converge and trim a checkpoint with corpus v24.
+/// A new kind-selection schedule must earn its own checkpoint coverage.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v22 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v24 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
-    assert_eq!(
-        outcome.trimmed,
-        !NEVER_TRIMS.contains(&seed),
-        "seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
-        if outcome.trimmed {
-            "trimmed"
-        } else {
-            "did not trim"
-        },
-        if NEVER_TRIMS.contains(&seed) {
-            "one of"
-        } else {
-            "not one of"
-        }
-    );
+    assert!(outcome.trimmed, "corpus v24 seed {seed} did not trim a checkpoint");
 }
 
 /// The seeds are independent, so each is its own test and the test runner spreads them over its
@@ -2208,7 +2214,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v23.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
         }))
         .unwrap(),
     )
