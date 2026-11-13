@@ -2,8 +2,8 @@
   "version": 1,
   "summary": "Ask deadlines follow the asked person's deadline clock, and an ask's priority decides urgency: `work ask --priority`, and an `urgent` flag on attention rows",
   "replay": {
-    "status": "none",
-    "detail": "No projection changes. Effective deadlines are computed at read time from the ask and the person's person.deadline-clock-set claims; a person-step row's priority is read from its work.person-asked claim."
+    "status": "changed",
+    "detail": "The local person-step and custom attention IVM families rebuild under a new fingerprint so cached public rows include urgent, matching the full reader. Effective deadlines are computed at read time from the ask and the person's person.deadline-clock-set claims; a person-step row's priority is read from its work.person-asked claim."
   },
   "schema": {
     "status": "changed",
