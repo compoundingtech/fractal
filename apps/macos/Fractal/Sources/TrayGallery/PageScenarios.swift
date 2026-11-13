@@ -212,20 +212,3 @@ let pageScenarios: [Scenario] = [
     return await opened(model(content.fractal(content.asks)), .objectives)
   },
 ]
-
-/// The open design question: the decision page with its answers inline (D1) and pinned (D2),
-/// both at the live panel's scroll limit.
-let variantScenarios: [(scenario: Scenario, placement: AnswerPlacement)] = AnswerPlacement.allCases.map { placement in
-  (
-    Scenario(
-      id: "variant-\(placement.rawValue.lowercased())", title: "\(placement.rawValue): answers \(placement == .inline ? "inline" : "pinned")",
-      description: placement == .inline
-        ? "Answers after the request and before the conversation, as requested; at the live scroll limit they can sit below the fold."
-        : "Answers pinned under the scrolling content: always in reach, the request and conversation scroll above them."
-    ) { now in
-      let content = Content(now: now)
-      return await opened(model(content.fractal(content.asks + [content.update])), .attention("attention/ship-tray"))
-    },
-    placement
-  )
-}

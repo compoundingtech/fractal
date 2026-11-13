@@ -12,15 +12,15 @@ import SwiftUI
   public static let liveScrollHeight = PanelMetrics.scrollHeight
 
   /// `scrollHeight` caps the scrolling content as the live panel does; the default renders
-  /// whole pages. `placement` picks the V4 answer-placement variant.
+  /// whole pages. `variant` picks options of the open design questions.
   public static func png(
-    model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name, placement: AnswerPlacement = .inline,
+    model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name, variant: PanelVariant = .shipped,
     scrollHeight: CGFloat = .infinity
   ) async -> Data? {
     await png(
       TrayPanel(model: model, build: build)
         .environment(\.panelScrollHeight, scrollHeight)
-        .environment(\.answerPlacement, placement),
+        .panelVariant(variant),
       appearance: appearance)
   }
 

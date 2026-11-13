@@ -10,6 +10,7 @@ public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.panelWidth) private var width
 
   public init(model: AttentionModel, build: BuildIdentity) {
     self.model = model
@@ -22,7 +23,7 @@ public struct TrayPanel: View {
         .id(model.route)
         .transition(transition)
     }
-    .frame(width: PanelMetrics.width, alignment: .top)
+    .frame(width: width, alignment: .top)
     .clipped()
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)

@@ -5,10 +5,10 @@ import SwiftUI
 /// with 10 pt continuous corners, icon rows about 28–30 pt, a 13 pt bold page title. Apple
 /// publishes none of these; they are measured from Tahoe and its maintained SwiftUI clone
 /// (orchetect/MacControlCenterUI). See the design README.
-enum PanelMetrics {
+public enum PanelMetrics {
   /// Control Center is about 310 pt wide; the tray takes 50 pt more so a row's title, asker and
-  /// age share one line.
-  static let width: CGFloat = 360
+  /// age share one line. W1 (320) and W2 (336) are the open narrower options.
+  public static let width: CGFloat = 360
   /// Leading and trailing content inset: titles, rows and section labels share this edge.
   static let inset: CGFloat = 14
   /// The hover highlight's inset from the panel edge and its corner radius.
@@ -25,6 +25,54 @@ enum PanelMetrics {
   /// its group's edge. Measured from its renders; the Form publishes neither.
   static let formMargin: CGFloat = 20
   static let formHeaderIndent: CGFloat = 10
+  /// Control Center's tile grid (T2): four slots across, 8 pt from the panel edge, 12 pt apart,
+  /// one slot about 64 pt tall. A Small tile takes one slot, a Medium tile two.
+  static let gridColumns: CGFloat = 4
+  static let gridPadding: CGFloat = 8
+  static let gridGap: CGFloat = 12
+  static let gridTileHeight: CGFloat = 64
+
+  /// One grid slot's width in a panel this wide.
+  static func gridSlot(_ width: CGFloat) -> CGFloat {
+    (width - 2 * gridPadding - (gridColumns - 1) * gridGap) / gridColumns
+  }
+
+  /// How many characters of an asker's name a row keeps: fewer as the panel narrows, so the
+  /// title keeps room to read.
+  public static func askerLimit(_ width: CGFloat) -> Int {
+    width >= 360 ? 18 : width >= 336 ? 15 : 13
+  }
+}
+
+/// The open design questions the gallery renders side by side: answer placement (D), panel
+/// width (W) and tile layout (T). The live panel uses `shipped`.
+public struct PanelVariant: Sendable {
+  public var placement: AnswerPlacement
+  public var width: CGFloat
+  public var tiles: TileLayout
+
+  public static let shipped = PanelVariant(placement: .inline, width: PanelMetrics.width, tiles: .capsules)
+}
+
+private struct PanelWidthKey: EnvironmentKey {
+  static let defaultValue: CGFloat = PanelMetrics.width
+}
+
+extension EnvironmentValues {
+  /// The panel's width: `PanelMetrics.width` live, a W option in the gallery.
+  public var panelWidth: CGFloat {
+    get { self[PanelWidthKey.self] }
+    set { self[PanelWidthKey.self] = newValue }
+  }
+}
+
+extension View {
+  /// Applies one option of each open design question.
+  public func panelVariant(_ variant: PanelVariant) -> some View {
+    environment(\.answerPlacement, variant.placement)
+      .environment(\.panelWidth, variant.width)
+      .environment(\.tileLayout, variant.tiles)
+  }
 }
 
 /// The height limit of a page's scrolling content; snapshots lift it to render whole pages. An
