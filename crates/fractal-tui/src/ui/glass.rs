@@ -3425,8 +3425,8 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
-        // A document page, the documents list or Availability has no box to type in: its plain
-        // letters act.
+        // A document page, the documents list and Availability act on plain letters; an open
+        // Availability box takes the typing keys instead.
         if !sidebar_keys
             && !self.home_open()
             && !self.editing
