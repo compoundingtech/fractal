@@ -5857,28 +5857,7 @@
     "projection": "missions",
     "wakes_reconciler": true
   },
-  "mission.run.trace": {
-    "kind": "mission.run.trace",
-    "subjects": [
-      "mission-run"
-    ],
-    "fields": {
-      "trace": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "once",
-    "projection": null,
-    "wakes_reconciler": false,
-    "source_kdl": [
-      "observability"
-    ]
-  },
+
   "observer.observed": {
     "kind": "observer.observed",
     "subjects": [
@@ -6240,6 +6219,42 @@
     "projection": "owned-sets",
     "wakes_reconciler": true
   },
+  "person.deadline-clock-set": {
+    "kind": "person.deadline-clock-set",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "deadline_clock": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "run",
+          "hold-routine",
+          "hold-all"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "until_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "state-transition",
+    "projection": "person-availability",
+    "wakes_reconciler": true
+  },
   "person.delegation-set": {
     "kind": "person.delegation-set",
     "subjects": [
@@ -6271,6 +6286,12 @@
         "immutable": false,
         "reference": false
       },
+      "source": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "text": {
         "value_type": "string",
         "required": true,
@@ -6283,6 +6304,85 @@
     "write_policy": "same-subject-actor",
     "cardinality": "state-transition",
     "projection": "directive-notes",
+    "wakes_reconciler": false
+  },
+  "person.interruptions-set": {
+    "kind": "person.interruptions-set",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "interruptions": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "all",
+          "urgent",
+          "none"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "until_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "state-transition",
+    "projection": "person-availability",
+    "wakes_reconciler": false
+  },
+  "person.presence-observed": {
+    "kind": "person.presence-observed",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "last_input_at_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "observed_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "active",
+          "inactive",
+          "locked",
+          "sleeping"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "append",
+    "projection": "person-availability",
     "wakes_reconciler": false
   },
   "person.rename.completed": {
@@ -6314,6 +6414,42 @@
     "write_policy": "authorized-requester",
     "cardinality": "append",
     "projection": null,
+    "wakes_reconciler": false
+  },
+  "person.status-set": {
+    "kind": "person.status-set",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "status": {
+        "value_type": "string",
+        "required": true,
+        "nullable": true,
+        "values": [
+          "available",
+          "away"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "until_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "state-transition",
+    "projection": "person-availability",
     "wakes_reconciler": false
   },
   "planning-session.approved": {
@@ -6793,34 +6929,7 @@
     "projection": "principals",
     "wakes_reconciler": false
   },
-  "program.attempt.trace": {
-    "kind": "program.attempt.trace",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "trace": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false,
-    "source_kdl": [
-      "observability"
-    ]
-  },
+
   "program.step": {
     "kind": "program.step",
     "subjects": [
@@ -10822,6 +10931,18 @@
         "required": false,
         "immutable": false,
         "reference": true
+      },
+      "priority": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "critical",
+          "high",
+          "normal",
+          "low"
+        ],
+        "immutable": false,
+        "reference": false
       },
       "reason": {
         "value_type": "string",

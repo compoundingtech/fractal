@@ -3,6 +3,11 @@ import { githubRepoSettings, githubRuleset } from '../repos/effect-utils/genie/e
 // Landing goes through GitHub's merge queue. This file declares the live ruleset: fractal-web
 // joined the required checks after both PR and merge-group runs had emitted it successfully.
 // Every required job must run on merge_group, or the queue never receives its checks and merges freeze.
+// Public history admission is a separate ORGANIZATION ruleset's `workflows` rule,
+// selecting .github/workflows/public-repo-history.yml from this repository's
+// approved immutable SHA. Repository settings cannot own an
+// organization ruleset; see docs/ci.md for its admin payload and plan prerequisite.
+// Never require its status context from app 15368: candidate Actions can forge it.
 export default githubRepoSettings({
   repository: { allow_auto_merge: true, delete_branch_on_merge: true },
   rulesets: [githubRuleset({
