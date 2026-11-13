@@ -216,7 +216,11 @@ mod tests {
         let lane = intent.missions["test"].steps["verify"].resource_lane.as_ref().unwrap();
         let owner = Owner { run: "mission-run/test".into(), step: "mission-step/test/verify".into(), attempt: 1, invocation: Some("exec/test/verify".into()) };
         let data = lower_request(lane, "data".into(), owner.clone());
-        let exec = crate::graph::parse_intent("version 2\nexec \"verify\" { command \"true\"; }\n", "node").unwrap();
+        let exec = crate::graph::parse_execution_intent(
+            intent.missions["test"].steps["verify"].declarations_kdl.as_deref().unwrap(),
+            "node",
+            "test",
+        ).unwrap();
         let original = exec.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
         let mut bound = original.clone();
         set_request(&mut bound, &data).unwrap();
