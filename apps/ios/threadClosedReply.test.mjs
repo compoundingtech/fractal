@@ -147,7 +147,7 @@ test('an unsent inline thread does not request server history or subscribe to a 
   const calls = [];
   const inline = compile('InlineThread', 'function threadTextIssue', {
     useStore: () => ({ feed: { belongsTo: () => true, followThreadSummary: (...args) => calls.push(args) } }),
-    useCallback: fn => fn,
+    useCallback: fn => fn, useEffect: effect => { effect(); },
     useThreadPage: (reader, _refresh, follower) => { read = reader; follow = follower; return { items: [], loading: false }; },
     ThreadDetailContent: 'ThreadDetailContent',
   });

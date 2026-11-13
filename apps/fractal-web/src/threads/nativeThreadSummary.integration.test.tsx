@@ -6,6 +6,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import ts from 'typescript'
 import { afterEach, expect, it, vi } from 'vitest'
+import * as Native from '@fractal/client/schema/read'
 import type { ThreadSummary } from '@fractal/client/schema/read'
 
 // Exercise the production native paging, exact-summary hooks and JSX with real
@@ -37,7 +38,12 @@ function production(dependencies: Record<string, unknown>) {
 type Window = { items: ThreadSummary[]; hasMore: boolean }
 type Handlers = { onWindow: (window: Window) => void; onIssue: (issue: string, refused: boolean) => void }
 
-const summary = (id: number): ThreadSummary => ({ id: `thread/${id}`, agent_id: 'agent/reviewer', title: `Review ${id}`,
+// Fixtures go through the generated schema so ids and revisions carry their
+// real brands; `changed` re-decodes a summary after a server-side change.
+type SummaryChange = { title?: string; title_revision?: string; revision?: string; state?: 'open' | 'closed'; unread?: boolean }
+const decodeSummary = Native.decodeUnknownSync(Native.ThreadSummary)
+const changed = (base: ThreadSummary, fields: SummaryChange): ThreadSummary => decodeSummary({ ...base, ...fields })
+const summary = (id: number): ThreadSummary => decodeSummary({ id: `thread/${id}`, agent_id: 'agent/reviewer', title: `Review ${id}`,
   state: 'open', unread: true, message_count: 2, revision: 'fence/one', title_revision: 'title/one' })
 const window = (items: ThreadSummary[], hasMore = false): Window => ({ items, hasMore })
 
@@ -50,7 +56,7 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
   const root = createRoot(host)
   const head = Array.from({ length: 40 }, (_, i) => summary(i))
   const older = summary(40)
-  const summaries = new Map([...head, older].map(item => [item.id, item]))
+  const summaries = new Map<string, ThreadSummary>([...head, older].map(item => [item.id, item]))
   const exact = new Map<string, Handlers>()
   const closed: string[] = []
   const feed = {
@@ -111,8 +117,8 @@ afterEach(() => { vi.unstubAllGlobals() })
 it('an expanded 41st thread follows exact summary changes without list refresh and releases its subscription', async () => {
   const view = mount({ live: true })
   const { host, older, summaries, exact, closed, feed, client, bodyMounted, press, header } = view
-  const update = async (fields: Partial<ThreadSummary>) => {
-    const current = { ...summaries.get(older.id)!, ...fields }
+  const update = async (fields: SummaryChange) => {
+    const current = changed(summaries.get(older.id)!, fields)
     summaries.set(older.id, current)
     await act(async () => { exact.get(older.id)!.onWindow(window([current])) })
   }
@@ -184,7 +190,7 @@ it('caches the exact REST summary of an expanded older thread when no live feed 
     await press('More threads')
     expect(header('Review 40')).not.toBeNull()
     // The server renamed the thread after the continuation page was read.
-    summaries.set(older.id, { ...older, title: 'Renamed over REST', title_revision: 'title/rest', revision: 'fence/rest' })
+    summaries.set(older.id, changed(older, { title: 'Renamed over REST', title_revision: 'title/rest', revision: 'fence/rest' }))
     await press('Review 40')
     expect(client.threadGet).toHaveBeenCalledExactlyOnceWith(older.id, expect.anything())
     expect(feed.followThreadSummary).not.toHaveBeenCalled()
@@ -220,8 +226,8 @@ it('a collapsed thread ignores its in-flight REST read and any frame for its rel
     expect(host.querySelector('[data-body]')).toBeNull()
     // Late answers for the cancelled reader must not reach the context cache.
     await act(async () => {
-      for (const resolve of pending) resolve({ value: { ...older, title: 'Late REST title', revision: 'fence/late' } })
-      released.onWindow(window([{ ...older, title: 'Late live title', revision: 'fence/late' }]))
+      for (const resolve of pending) resolve({ value: changed(older, { title: 'Late REST title', revision: 'fence/late' }) })
+      released.onWindow(window([changed(older, { title: 'Late live title', revision: 'fence/late' })]))
       released.onIssue('Late refusal', true)
     })
     expect(header('Review 40')).not.toBeNull()
