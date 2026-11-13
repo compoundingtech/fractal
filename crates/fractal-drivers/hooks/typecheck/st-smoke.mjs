@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertResponseEvidence } from "./response-evidence.mjs";
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 import { mock } from "node:test";
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -55,6 +56,7 @@ const {default:extension}=await import(pathToFileURL(path.resolve(asset)));
 extension(api);
 await events.get("session_start")({},ctx);
 await until(()=>title==="Quartz[gen]");
+await assertResponseEvidence(events, ctx, read);
 assert.ok(events.has("session_switch"),"OMP /new uses session_switch");
 const meta={messageId:"message/quartz-1"};
 const titleChangesBeforeReplay = titleChanges.length;
