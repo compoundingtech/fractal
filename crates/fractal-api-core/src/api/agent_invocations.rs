@@ -27,7 +27,10 @@ pub async fn input(
     let actor = bound.as_ref().map(BoundActor::actor)
         .or_else(|| peer.as_ref().map(|Extension(peer)| peer.agent.as_str()))
         .or_else(|| session.as_ref().map(|Extension(session)| session.authority_actor.as_str()));
-    if actor != Some(request.agent.as_str()) {
+    if actor != Some(request.agent.as_str()) || matches!(bound, Some(BoundActor::Run(_)))
+        || peer.as_ref().is_some_and(|Extension(peer)| peer.agent != request.agent)
+        || session.as_ref().is_some_and(|Extension(session)| session.authority_actor != request.agent)
+    {
         return Err(ApiError { status: StatusCode::FORBIDDEN, code: "foreign-agent-actor".into(),
             message: "only the invocation's authenticated agent may capture native input".into(),
             details: Box::default() });
@@ -65,7 +68,11 @@ pub async fn input(
         &request.invocation_id, &request.text, now_ms()).map_err(ApiError::internal)?;
     artifact.incarnation = Some(request.incarnation);
     artifact.message_id = Some(request.message_id);
-    invocation_artifacts::record(&state.store, &request.agent, &artifact).map_err(ApiError::internal)?;
+    let artifact = invocation_artifacts::record_exact(&state.store, &request.agent, &artifact)
+        .map_err(ApiError::internal)?.ok_or_else(|| ApiError {
+            status: StatusCode::CONFLICT, code: "invocation-input-conflict".into(),
+            message: "this invocation message already has a different immutable input".into(),
+            details: Box::default() })?;
     signal_changed(&state);
     Ok(Json(json!({"status":"retained","artifact":artifact})))
 }

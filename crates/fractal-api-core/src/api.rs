@@ -1011,6 +1011,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/agent-invocations/{*invocation}", get(agent_invocations::get))
+        .route("/v1/invocation-input", post(agent_invocations::input))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
             "/v1/revision-proposals/{proposal}",

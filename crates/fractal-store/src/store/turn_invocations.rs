@@ -42,6 +42,22 @@ fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: 
 }
 
 impl Store {
+    pub fn finish_work_turn_traces(&self, step: &str, incarnation: &str) -> Result<()> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT json_extract(body,'$.fields.invocation_id'),json_extract(body,'$.fields.error')
+             FROM claims WHERE kind='harness.invocation'
+             AND json_extract(body,'$.fields.owner_step')=?1
+             AND json_extract(body,'$.fields.incarnation')=?2
+             AND json_extract(body,'$.fields.phase')='ended'")?;
+        for row in statement.query_map(params![step, incarnation],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))? {
+            let (invocation, error) = row?;
+            self.finish_invocation_trace(&invocation, error.is_some());
+        }
+        Ok(())
+    }
+
     /// Persist before publishing the wake. Event keys bind every reminder message to
     /// the same turn, without treating a reminder as another provider context.
     pub fn record_work_turn_wake(&self, step: &StepRunView, agent: &str,
@@ -101,10 +117,25 @@ pub fn bind_claim_tx(tx: &Transaction<'_>, origin: &str, subject: &str,
         {
             receipt.invocation_id = id.into();
             receipt.operation_id = id.strip_prefix("invocation/").unwrap_or(id).into();
+            let context: Option<String> = tx.query_row(
+                "SELECT json_extract(body,'$.fields.trace_context') FROM claims
+                 WHERE subject=?1 AND kind='harness.invocation'
+                 AND json_extract(body,'$.fields.invocation_id')=?2
+                 AND json_type(body,'$.fields.trace_context')='object'
+                 ORDER BY store_index LIMIT 1", params![agent, id], |row| row.get(0)).optional()?;
+            receipt.trace_context = context.map(|value| serde_json::from_str(&value)).transpose()?;
         }
     }
     receipt.phase = InvocationPhase::Started;
     fields.insert("invocation_id".into(), json!(receipt.invocation_id));
+    if let Some(context) = receipt.trace_context.clone()
+        .and_then(|context| serde_json::from_value::<crate::otel::AttemptTraceContext>(context).ok())
+    {
+        let trace_id = context.trace_id();
+        if trace_id != "00000000000000000000000000000000" {
+            fields.insert("trace_id".into(), json!(trace_id));
+        }
+    }
     append_receipt_tx(tx, origin, &receipt)?;
     Ok(Some(receipt))
 }
@@ -119,9 +150,70 @@ pub fn record_claim_tx(tx: &Transaction<'_>, origin: &str, claim: &ClaimRecord,
     append_receipt_tx(tx, origin, &receipt)
 }
 
+/// A turn ends at its fenced work receipt, not when the standing provider process exits.
+pub fn record_terminal_tx(tx: &Transaction<'_>, origin: &str, claim: &ClaimRecord) -> Result<()> {
+    if !matches!(claim.kind.as_str(), "work.submitted" | "work.failed" | "work.released") {
+        return Ok(());
+    }
+    let Some(start) = latest_claim_of_kind_tx(tx, &claim.subject, "work.claimed")? else { return Ok(()); };
+    let fields = &start.body["fields"];
+    // The native work writer has already fenced the actor's exact incarnation.
+    // Terminal bodies clear lease fields; submission additionally names its incarnation.
+    let incarnation = claim.body["fields"]["claim_incarnation"].as_str()
+        .or_else(|| claim.body["fields"]["submitted_incarnation"].as_str());
+    if start.actor != claim.actor || fields["attempt"] != claim.body["fields"]["attempt"]
+        || incarnation.is_some_and(|incarnation| fields["claim_incarnation"] != incarnation)
+    { return Ok(()); }
+    let Some(invocation) = fields["invocation_id"].as_str() else { return Ok(()); };
+    let receipt: Option<String> = tx.query_row(
+        "SELECT json_extract(body,'$.fields') FROM claims WHERE kind='harness.invocation'
+         AND subject=?1 AND json_extract(body,'$.fields.invocation_id')=?2
+         ORDER BY store_index LIMIT 1", params![start.actor, invocation], |row| row.get(0)).optional()?;
+    if let Some(receipt) = receipt {
+        let mut receipt: InvocationReceipt = serde_json::from_str(&receipt)?;
+        receipt.phase = InvocationPhase::Ended;
+        receipt.event_key = Some(claim.id.clone());
+        receipt.evidence.push(claim.id.clone());
+        if claim.kind == "work.failed" {
+            receipt.error = claim.body["fields"]["reason"].as_str().map(str::to_owned);
+        }
+        append_receipt_tx(tx, origin, &receipt)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_work_receipt_ends_only_its_exact_turn() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            let agent = "agent/node.worker";
+            let step = "step-run/r/g/build";
+            let mut receipt = receipt_tx(tx, "run", step, 1, 0, agent, "one")?;
+            receipt.phase = InvocationPhase::Started;
+            append_receipt_tx(tx, "node", &receipt)?;
+            append_claim_tx(tx, "node", step, "work.claimed", Some(agent),
+                &json!({"fields":{"attempt":1,"claimant":agent,"claim_incarnation":"one",
+                    "invocation_id":receipt.invocation_id}}), &[], None)?;
+            let wrong = append_claim_tx(tx, "node", step, "work.failed", Some(agent),
+                &json!({"fields":{"attempt":1,"claim_incarnation":"other","reason":"wrong"}}), &[], None)?;
+            record_terminal_tx(tx, "node", &wrong)?;
+            let exact = append_claim_tx(tx, "node", step, "work.failed", Some(agent),
+                &json!({"fields":{"attempt":1,"claim_incarnation":null,"reason":"stopped"}}), &[], None)?;
+            record_terminal_tx(tx, "node", &exact)?;
+            record_terminal_tx(tx, "node", &exact)?;
+            Ok(())
+        }).unwrap().unwrap();
+        let receipts = store.agent_invocation_receipts("agent/node.worker").unwrap();
+        assert_eq!(receipts.len(), 2);
+        let end = receipts.iter().find(|receipt| receipt.phase == InvocationPhase::Ended).unwrap();
+        assert_eq!(end.incarnation.as_deref(), Some("one"));
+        assert_eq!(end.error.as_deref(), Some("stopped"));
+        assert_eq!(end.evidence.len(), 1);
+    }
+
     #[test]
     fn reminders_share_identity_but_ownership_episodes_do_not() {
         let id = operation_id("run", "step", 1, 2, "agent/a", "inc", None);

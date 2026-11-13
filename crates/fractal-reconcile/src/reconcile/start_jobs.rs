@@ -347,9 +347,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         })?;
         self.store
             .revoke_runtime_start(&operation.id, &request.id)?;
-        if !operation.dispatched {
-            self.store
-                .cancel_undispatched_runtime_start(&operation.id)?;
+        if !operation.dispatched
+            && self.store.cancel_undispatched_runtime_start(&operation.id)?
+        {
+            self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), false);
         }
         self.start_changed(subject);
         Ok(())

@@ -16699,3 +16699,70 @@ async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_del
         AxumPath(artifact.sha256),query()).await.unwrap_err();
     assert_eq!(deleted.status,StatusCode::GONE);
 }
+
+#[tokio::test]
+async fn invocation_input_requires_authenticated_exact_agent_incarnation_and_message() {
+    use super::agent_invocations::{InputRequest, input};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input";
+    let invocation = "invocation/input-test";
+    state.store.append_claim(&ClaimInput { subject: agent.into(), kind: "harness.invocation".into(),
+        actor: None, fields: serde_json::from_value(json!({
+            "invocation_id":invocation, "operation_id":"input-test", "phase":"started",
+            "agent":agent, "incarnation":"exact-incarnation", "event_key":"message/exact"
+        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    let request = || InputRequest { agent:agent.into(), incarnation:"exact-incarnation".into(),
+        invocation_id:invocation.into(), message_id:"message/exact".into(),
+        text:"native pi/omp envelope\ntoken=fixture-secret".into() };
+    let denied = input(State(state.clone()), None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Agent("agent/other".into())),
+        None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Run(agent.into())),
+        None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    for mismatch in ["agent", "incarnation", "message", "invocation"] {
+        let mut request = request();
+        match mismatch {
+            "agent" => request.agent = "agent/other".into(),
+            "incarnation" => request.incarnation = "candidate-incarnation".into(),
+            "message" => request.message_id = "message/unrelated".into(),
+            _ => request.invocation_id = "invocation/unrelated".into(),
+        }
+        let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+            None, None, Json(request)).await.unwrap_err();
+        assert!(matches!(denied.status, StatusCode::FORBIDDEN | StatusCode::CONFLICT));
+    }
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+    let Json(first) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, None, Json(request())).await.unwrap();
+    let Json(retry) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, None, Json(request())).await.unwrap();
+    assert_eq!(first, retry);
+    let artifact: fractal_store::invocation_artifacts::InvocationArtifact =
+        serde_json::from_value(first["artifact"].clone()).unwrap();
+    assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+    assert_eq!(artifact.message_id.as_deref(), Some("message/exact"));
+    let retained = fractal_store::invocation_artifacts::read(root.path(), &artifact, now_ms())
+        .unwrap().unwrap();
+    assert_eq!(String::from_utf8(retained).unwrap(), "native pi/omp envelope\ntoken=[REDACTED]");
+    let mut changed = request();
+    changed.text = "different envelope".into();
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, None, Json(changed)).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::CONFLICT);
+    assert_eq!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().len(), 1);
+    let body = json!({"agent":agent, "incarnation":"exact-incarnation",
+        "invocation_id":invocation, "message_id":"message/exact",
+        "text":"native pi/omp envelope\ntoken=fixture-secret"});
+    for (writer, expected) in [(agent, StatusCode::OK), ("agent/other", StatusCode::FORBIDDEN)] {
+        let app = router(state.clone()).layer(Extension(NativeDeliveryPeer {
+            agent:writer.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+        }));
+        let (status, response) = json_request(app, "/v1/invocation-input", body.clone()).await;
+        assert_eq!(status, expected, "{response}");
+        assert!(!response.to_string().contains("fixture-secret"));
+    }
+}

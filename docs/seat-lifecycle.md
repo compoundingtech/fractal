@@ -149,6 +149,17 @@ return phase history for projection/API joins. Join startup failures by operatio
 or invocation ID, and successful runtime evidence only by verified incarnation.
 Metadata additions are optional and old prepared operations remain readable.
 
+Invocation roots use the shared `AttemptTrace` W3C context, linked to the durable
+mission run root when present. The admitted operation retains that exact context
+and supplies it to the provider through `TRACEPARENT`/`TRACESTATE`; inherited
+environment is not receipt authority. Standing-turn roots retain their own context
+and link to verified launch lineage. Native work completion, failure or release
+ends the turn, independently of the standing provider's lifetime. The host keeps
+live span owners through their exact ending evidence; daemon replacement ends the
+host segment without deleting the durable correlation. Missing exporters or
+sampling do not remove invocation records. Environment delivery is not proof that
+an unsupported provider emitted child spans.
+
 A process invocation is not a later work turn on a standing seat. The native
 wake boundary persists a separate `invocation/turn-<identity digest>` before
 publishing input. Its identity includes run, step, attempt, readiness epoch,
@@ -163,6 +174,26 @@ lineage is separate and populated only from a verified exact incarnation.
 Inherited process environment never labels a standing turn, and none of this
 claims that a resumed or steered turn has a fresh provider context.
 
+Response attribution resolves the immutable work claim held at the response's
+observed time and exact incarnation, then joins its receipt `event_key` to the
+turn's `invocation_id`. Simultaneous live claims on different steps are ambiguous:
+neither the newest claim nor the current desired owner supplies a guessed join.
+Without a work claim, only a unique verified launch receipt for the exact
+incarnation supplies a process invocation join. Missing historical receipts stay
+unknown. Identity-only responses keep these joins without creating zero-token or
+zero-cost spend.
+
+Usage continues through the existing deduplicated response accounting and
+replicated cumulative rollup authorities. Rollups retain optional `execution_id`
+(the work claim), `invocation_id`, and `attempt`; period folds preserve each claim
+partition even when reclaims share a model, account and provider incarnation.
+Older aggregate series remain readable with unknown invocation/attempt joins.
+Step execution evidence exposes the same optional `invocation_id`; its usage and
+receipt history do not depend on retained timeline entries or trace sampling.
+`st usage --by invocation` groups exact identities; `--by attempt` groups by step
+and attempt together, never by the attempt number alone. The Usage TUI offers the
+same two groupings and keeps missing evidence in explicit unknown groups.
+
 The pi/omp channel posts the final materialized message envelope, including tag
 and attachment notices, to `/v1/invocation-input` before provider delivery:
 `{agent, incarnation, invocation_id, message_id, text}`. This is native input,
@@ -173,6 +204,38 @@ Codex/OpenCode direct mailbox paths assemble their final provider envelopes
 downstream of this channel hook, so exact native-input capture there remains
 unsupported/unknown rather than substituting a raw mailbox body. Transcript
 and provider response binding require their own native session evidence.
+The POST accepts only the authenticated agent named by the receipt, and requires
+the exact receipt incarnation and message `event_key`. A message tag, candidate
+incarnation, current session or owning-person identity cannot authorize capture.
+Retries preserve the first capture's metadata; a different envelope for the same
+invocation message conflicts.
+
+Terminal transcript capture runs at the reconciler's runtime observation writer.
+An `exited` or `stopped` observation is necessary but insufficient: the admitted
+launch's runtime must positively prove its entire process scope and producer are
+closed. `vanished`, unknown state and signal acknowledgements are not capture
+proof. Pi/omp capture additionally requires that exact incarnation's local native
+session binding, its admitted provider identity, and a transcript whose native
+header verifies the bound session ID. No newest-session/path fallback is used;
+unsupported providers and missing evidence remain explicitly unavailable.
+The immutable artifact metadata retains incarnation, native session ID, binding
+claim, source hash, redacted hash and capture/expiry timestamps.
+The whole transcript is launch-context evidence: an observed launch receipt
+retains `transcript_ref: sha256:<redacted hash>`. It is not copied onto standing
+turns without a proven native interval; turn transcripts remain unknown, while
+their verified parent launch can provide the protected context transcript.
+
+Native inputs and transcripts use the protected redacted content-addressed store,
+not claim bodies or trace attributes. Bytes expire after seven days regardless of
+trace sampling; capture and deletion sweep physically expired files. Refreshing a
+shared content hash keeps newer references readable without extending an older
+reference's expiry. Durable metadata survives expiry and deletion.
+`GET /v1/client/invocation-artifacts/{sha256}?invocation=...&kind=input|transcript`
+requires `read.projections` and the artifact's agent or configured owning person.
+`DELETE` at the same route also requires `control.runtimes` and revokes only that
+reference, not another invocation's shared bytes. Reads are private/no-store;
+deleted or expired references return Gone.
+
 
 
 The graph retains claimed work and pending mail.

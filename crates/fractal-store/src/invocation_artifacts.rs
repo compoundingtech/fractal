@@ -60,6 +60,7 @@ pub fn capture_transcript(state: &Path, invocation: &str, source: &Path, at: u12
     fs::create_dir_all(&private)?;
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
+    directory(state).sweep(std::time::Duration::from_millis(RETENTION_MS as u64));
     let temporary = tempfile::Builder::new().prefix(".capture-").tempfile_in(&private)?;
     let mut output = temporary.reopen()?;
     let mut source_hash = Sha256::new();
@@ -98,6 +99,7 @@ pub fn capture_transcript(state: &Path, invocation: &str, source: &Path, at: u12
 /// Capture an exact native input message, not an assertion about a provider's hidden system prompt.
 pub fn capture_input(state: &Path, invocation: &str, input: &str, at: u128) -> Result<InvocationArtifact> {
     anyhow::ensure!(input.len() as u64 <= MAX_BYTES, "invocation input exceeds 64 MiB");
+    directory(state).sweep(std::time::Duration::from_millis(RETENTION_MS as u64));
     let (safe, redacted_bytes, truncated_characters) = fractal_runtime::transcript::normalize_conversation_text(input);
     let sha256 = directory(state).put(safe.as_bytes())?;
     Ok(InvocationArtifact { invocation_id: invocation.into(), kind: "input".into(), sha256,
@@ -111,13 +113,32 @@ pub fn matches_input(artifact: &InvocationArtifact, input: &str) -> bool {
     artifact.source_sha256 == hex::encode(Sha256::digest(input.as_bytes()))
 }
 
-pub fn record(store: &Store, agent: &str, artifact: &InvocationArtifact) -> Result<()> {
-    let key = format!("invocation-artifact:{}:{}:{}",artifact.invocation_id,artifact.kind,artifact.sha256);
-    if store.operation_claim(&key)?.is_some() { return Ok(()); }
-    store.append_claim(&ClaimInput { subject: agent.into(), kind: "harness.invocation-artifact".into(),
+/// The first capture owns this immutable reference. Concurrent retries return its original
+/// metadata; a different source or identity returns None instead of replacing it.
+pub fn record_exact(store: &Store, agent: &str, artifact: &InvocationArtifact) -> Result<Option<InvocationArtifact>> {
+    let key = format!("invocation-artifact:{}:{}:{}", artifact.invocation_id,
+        artifact.kind, artifact.message_id.as_deref().unwrap_or(""));
+    let input = ClaimInput { subject: agent.into(), kind: "harness.invocation-artifact".into(),
         actor: None, fields: serde_json::from_value(serde_json::json!({"invocation_id":artifact.invocation_id,
             "kind":artifact.kind,"status":"retained","artifact":artifact}))?, evidence: vec![],
-        expected_subject: None, idempotency_key: Some(key) })?;
+        expected_subject: None, idempotency_key: Some(key.clone()) };
+    let claim = match store.append_claim(&input) {
+        Ok(claim) => claim,
+        Err(error) if error.code == "idempotency-mismatch" => {
+            store.operation_claim(&key)?.context("immutable artifact reference missing")?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let original: InvocationArtifact = serde_json::from_value(claim.body["fields"]["artifact"].clone())?;
+    Ok((claim.subject == agent && original.source_sha256 == artifact.source_sha256
+        && original.incarnation == artifact.incarnation && original.message_id == artifact.message_id
+        && original.native_session_id == artifact.native_session_id
+        && original.binding_claim == artifact.binding_claim && original.harness == artifact.harness)
+        .then_some(original))
+}
+
+pub fn record(store: &Store, agent: &str, artifact: &InvocationArtifact) -> Result<()> {
+    anyhow::ensure!(record_exact(store, agent, artifact)?.is_some(), "immutable artifact reference conflicts");
     Ok(())
 }
 
@@ -177,6 +198,47 @@ mod tests {
         invalid.sha256 = "../outside".into();
         assert!(read(root.path(), &invalid, 101).is_err());
     }
+    #[test]
+    fn immutable_reference_keeps_first_metadata_and_rejects_changed_source_or_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut first = capture_input(root.path(), "invocation/example", "first envelope", 100).unwrap();
+        first.incarnation = Some("exact".into());
+        first.message_id = Some("message/exact".into());
+        assert_eq!(record_exact(&store, "agent/example", &first).unwrap(), Some(first.clone()));
+        let mut retry = first.clone();
+        retry.captured_at_unix_ms = 200;
+        retry.expires_at_unix_ms += 100;
+        assert_eq!(record_exact(&store, "agent/example", &retry).unwrap(), Some(first.clone()));
+        retry.source_sha256 = "different-source".into();
+        assert!(record_exact(&store, "agent/example", &retry).unwrap().is_none());
+        retry = first.clone();
+        retry.incarnation = Some("other".into());
+        assert!(record_exact(&store, "agent/example", &retry).unwrap().is_none());
+        assert_eq!(store.claims_for("agent/example", Some("harness.invocation-artifact")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn capture_sweeps_expired_bytes_but_shared_hash_refresh_preserves_new_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let old = capture_input(root.path(), "invocation/old", "old bytes", 100).unwrap();
+        let stale = std::time::SystemTime::now()
+            - std::time::Duration::from_millis((RETENTION_MS + 60_000) as u64);
+        fs::File::open(directory(root.path()).path(&old.sha256)).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(stale)).unwrap();
+        let first = capture_input(root.path(), "invocation/first", "shared bytes", 200).unwrap();
+        assert!(!directory(root.path()).path(&old.sha256).exists());
+        let second = capture_input(root.path(), "invocation/second", "shared bytes", 300).unwrap();
+        assert_eq!(first.sha256, second.sha256);
+        assert!(read(root.path(), &first, first.expires_at_unix_ms).unwrap().is_none());
+        assert!(read(root.path(), &second, first.expires_at_unix_ms).unwrap().is_some());
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(fs::metadata(directory(root.path()).path(&second.sha256)).unwrap()
+            .permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(root.path().join("invocation-artifacts")).unwrap()
+            .permissions().mode() & 0o777, 0o700);
+    }
+
     #[test]
     fn jsonl_capture_reports_redaction_without_republishing_provider_bytes() {
         let root = tempfile::tempdir().unwrap();

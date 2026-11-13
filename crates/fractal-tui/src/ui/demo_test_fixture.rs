@@ -341,6 +341,9 @@ fn usage() -> Vec<fractal_client::UsageRow> {
         agent: s(agent),
         mission_run: run.map(s),
         step: step.map(s),
+        execution_id: None,
+        invocation_id: None,
+        attempt: None,
         model: Some(s(model)),
         account: Some(s(if model.starts_with("gpt") {
             "openai"

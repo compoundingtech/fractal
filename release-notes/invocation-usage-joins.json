@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Historical response, execution and usage projections join native invocations and expose attempt and invocation groupings",
+  "replay": {"status": "none", "detail": "Historical observations without an exact invocation or claim retain unknown joins. Current ownership is not backfilled into prior responses."},
+  "schema": {"status": "changed", "detail": "Adds optional invocation_id and attempt metadata to response rollups, usage rows and response attribution; step executions expose optional invocation_id. Existing execution spend remains the accounting authority."},
+  "rules": {"status": "changed", "detail": "Response attribution uses exact incarnation and historical claim lifecycle at response completion. Multiple active claims remain ambiguous. Usage partitions preserve claim identities and CLI/TUI views can group by step-scoped attempt or invocation."},
+  "compatibility": {"status": "changed", "detail": "Optional metadata is additive; legacy responses retain unknown execution, invocation and attempt. A verified launch alone does not prove later work ownership. Identity-only responses do not manufacture usage or zero cost."},
+  "downtime": {"status": "none", "detail": "No fleet operation or new spend-table migration is required."},
+  "manual": {"status": "none", "detail": "Existing usage queries retain their time-window contract; consumers may use the additional optional grouping keys."},
+  "recovery": {"status": "changed", "detail": "Durable response rollups preserve joins through timeline retention and failures without depending on sampled trace export."}
+}

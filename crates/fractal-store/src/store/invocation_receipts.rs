@@ -146,6 +146,15 @@ impl Store {
         self.read_invocation_receipts(Some(agent), None)
     }
 
+    /// Return only the original admitted launch member, never the current declaration.
+    pub fn invocation_launch_member(&self, invocation: &str) -> Result<Option<Value>> {
+        let Some(operation) = invocation.strip_prefix("invocation/") else { return Ok(None); };
+        let member: Option<String> = self.readers.get().query_row(
+            "SELECT json_extract(body,'$.launch_member') FROM local_runtime_starts WHERE id=?1", [operation],
+            |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
+        member.map(|member| serde_json::from_str(&member).map_err(Into::into)).transpose()
+    }
+
     fn read_invocation_receipts(&self, agent: Option<&str>, invocation_id: Option<&str>) -> Result<Vec<InvocationReceipt>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
@@ -170,6 +179,25 @@ impl Store {
         Ok(())
     }
 
+    /// Retain a private CAS reference as an additive launch observation, never as provider text.
+    pub fn record_invocation_transcript_reference(&self, receipt: &InvocationReceipt,
+        artifact: &crate::invocation_artifacts::InvocationArtifact) -> Result<()> {
+        anyhow::ensure!(artifact.kind == "transcript" && artifact.invocation_id == receipt.invocation_id
+            && artifact.incarnation.is_some() && artifact.incarnation == receipt.incarnation
+            && self.invocation_launch_member(&receipt.invocation_id)?.is_some(),
+            "transcript reference must bind the exact admitted launch incarnation");
+        let mut observed = receipt.clone();
+        observed.phase = InvocationPhase::Observed;
+        observed.event_key = Some(format!("transcript:{}", artifact.sha256));
+        observed.transcript_ref = Some(format!("sha256:{}", artifact.sha256));
+        if let Some(binding) = artifact.binding_claim.as_ref() {
+            observed.evidence.push(binding.clone());
+        }
+        self.connection.batched(|tx| append_receipt_tx(tx, self.origin(), &observed))
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        Ok(())
+    }
+
     /// A terminal runtime observation may close only an already verified exact incarnation.
     /// The source observation can be local; the resulting receipt remains durable.
     pub fn record_invocation_runtime_end(&self, observation: &ClaimRecord) -> Result<()> {
@@ -180,24 +208,27 @@ impl Store {
             return Ok(());
         }
         let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
+        let mut invocations = BTreeMap::new();
+        for receipt in self.agent_invocation_receipts(&observation.subject)? {
+            if receipt.incarnation.as_deref() == Some(incarnation) {
+                invocations.insert(receipt.invocation_id.clone(), receipt);
+            }
+        }
         self.connection.batched(|tx| -> Result<()> {
-            let operation: Option<(String, String, String)> = tx.query_row(
-                "SELECT id,body,result FROM local_runtime_starts WHERE subject=?1
-                 AND json_extract(result,'$.incarnation')=?2
-                 AND json_extract(result,'$.verification') IN ('operation-incarnation','operation-ended','operation-retired')
-                 ORDER BY id DESC LIMIT 1", params![observation.subject, incarnation],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
-            if let Some((id, body, result)) = operation {
-                let body = serde_json::from_str(&body)?;
-                let result = serde_json::from_str(&result)?;
-                if let Some(mut receipt) = native_receipt(&id, &observation.subject, &body,
-                    InvocationPhase::Ended, Some(&result))? {
-                    receipt.evidence.push(observation.id.clone());
-                    append_receipt_tx(tx, self.origin(), &receipt)?;
-                }
+            for receipt in invocations.values() {
+                let mut ended = receipt.clone();
+                ended.phase = InvocationPhase::Ended;
+                ended.event_key = Some(observation.id.clone());
+                ended.evidence.push(observation.id.clone());
+                append_receipt_tx(tx, self.origin(), &ended)?;
             }
             Ok(())
         }).map_err(|error| anyhow::anyhow!("{error}"))??;
+        let failed = fields["status"] == "vanished"
+            || fields["exit_code"].as_i64().is_some_and(|code| code != 0);
+        for invocation in invocations.keys() {
+            self.finish_invocation_trace(invocation, failed);
+        }
         Ok(())
     }
 }
@@ -230,6 +261,35 @@ mod tests {
         let unknown = native_receipt("unknown", "agent/example/worker", &prepared(),
             InvocationPhase::Admitted, None).unwrap().unwrap();
         assert_eq!(unknown.trace_context, None);
+    }
+
+    #[test]
+    fn runtime_end_closes_only_exact_incarnation_launch_and_turn_receipts() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/example/worker";
+        for (operation, incarnation) in [("launch", "exact"), ("turn", "exact"), ("other", "other")] {
+            let mut receipt = native_receipt(operation, agent, &prepared(), InvocationPhase::Started,
+                Some(&json!({"verification":"operation-incarnation","incarnation":incarnation})))
+                .unwrap().unwrap();
+            if operation == "turn" {
+                receipt.parent_invocation_id = Some("invocation/launch".into());
+                receipt.event_key = Some("message/exact".into());
+            }
+            store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &receipt)).unwrap().unwrap();
+        }
+        let observation = store.append_claim(&ClaimInput { subject:agent.into(),
+            kind:"runtime.observed".into(), actor:None,
+            fields:serde_json::from_value(json!({"status":"stopped","incarnation_id":"exact"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        for _ in 0..2 { store.record_invocation_runtime_end(&observation).unwrap(); }
+        for operation in ["launch", "turn"] {
+            let receipts = store.invocation_receipts(&format!("invocation/{operation}")).unwrap();
+            let ended = receipts.iter().filter(|receipt| receipt.phase == InvocationPhase::Ended).collect::<Vec<_>>();
+            assert_eq!(ended.len(), 1);
+            assert!(ended[0].evidence.contains(&observation.id));
+        }
+        assert!(!store.invocation_receipts("invocation/other").unwrap().iter()
+            .any(|receipt| receipt.phase == InvocationPhase::Ended));
     }
 
     #[test]
