@@ -5,8 +5,9 @@ import SwiftUI
 /// What was left of an objective or budget, one bar per step of the last 24 hours, with hour and
 /// percent axes. A bar's height is the step's lowest reading. Steps without a bar carry a mark on
 /// the baseline that differs in shape, not only color: a spent step (0) a red cross, an
-/// unmeasured step a grey ring, never a zero or a bar. A key under the chart names the marks
-/// that appear. The nearly-spent zone is a dashed rule. Hover shows the step's reading and time.
+/// unmeasured step a grey ring, never a zero or a bar. The nearly-spent zone is a dashed rule. A
+/// key under the chart names the rule and the baseline marks that appear. Hover shows the step's
+/// reading and time.
 struct SloHistogram: View {
   let history: SloHistory
   let about: String
@@ -44,7 +45,7 @@ struct SloHistogram: View {
             PointMark(x: .value("Hour", bucket.start, unit: .hour), y: .value("Left", 0))
               .symbol(.cross)
               .symbolSize(22)
-              .foregroundStyle(.red)
+              .foregroundStyle(Color.red.opacity(emphasis))
               .accessibilityHidden(true)
           }
         }
@@ -108,33 +109,42 @@ private struct BaselineRing: View {
   }
 }
 
-/// Names the baseline marks the chart shows, so their shapes need no color to read.
+/// Names the dashed nearly-spent rule and the baseline marks the chart shows, so their shapes
+/// need no color to read.
 private struct HistogramKey: View {
   let levels: Set<BucketLevel>
 
   var body: some View {
-    if levels.contains(.spent) || levels.contains(.unmeasured) {
-      HStack(spacing: 12) {
-        if levels.contains(.spent) {
-          Label {
-            Text("spent")
-          } icon: {
-            Image(systemName: "xmark").foregroundStyle(.red)
-          }
+    HStack(spacing: 12) {
+      Label {
+        Text("nearly spent (\(Int(SloTone.nearlySpentPercent))%)")
+      } icon: {
+        Path { path in
+          path.move(to: CGPoint(x: 0, y: 0.5))
+          path.addLine(to: CGPoint(x: 12, y: 0.5))
         }
-        if levels.contains(.unmeasured) {
-          Label {
-            Text("not measured")
-          } icon: {
-            BaselineRing()
-          }
+        .stroke(Color.gray, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+        .frame(width: 12, height: 1)
+      }
+      if levels.contains(.spent) {
+        Label {
+          Text("spent")
+        } icon: {
+          Image(systemName: "xmark").foregroundStyle(.red)
         }
       }
-      .labelStyle(.titleAndIcon)
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .accessibilityHidden(true)
+      if levels.contains(.unmeasured) {
+        Label {
+          Text("not measured")
+        } icon: {
+          BaselineRing()
+        }
+      }
     }
+    .labelStyle(.titleAndIcon)
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .accessibilityHidden(true)
   }
 }
 
