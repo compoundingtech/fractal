@@ -2,12 +2,11 @@ import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
-// Paths are repository-relative, sorted and length-framed with their contents. Include the
-// generator's build flags and the Nix shell/pins that select rustc (there is no rust-toolchain file).
+// Paths are repository-relative, sorted and length-framed with their contents.
+// Hash package-local build inputs only: unrelated root flake bumps must not stale this
+// package's generated manifest. The generator records rustc separately as provenance.
 export async function markdownWasmInputs(root) {
   const files = [
-    'flake.nix',
-    'flake.lock',
     'packages/fractal-ui/markdown-wasm/Cargo.toml',
     'packages/fractal-ui/markdown-wasm/Cargo.lock',
     'packages/fractal-ui/scripts/generate-markdown-wasm.mjs',
