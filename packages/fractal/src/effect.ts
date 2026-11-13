@@ -17,10 +17,13 @@ export {
 export {
   Program,
   ProgramEntry,
+  ResourceError,
   type CommandOptions,
   type CommandResult,
   type HostContextV1,
   type JournalEntry,
   type ProgramExit,
   type ProgramServices,
+  type ResourceRequest,
 } from './program-engine.ts'
+export { LaneMembership, type Lane, type LaneOptions, type LaneCommandOptions } from './resources.ts'

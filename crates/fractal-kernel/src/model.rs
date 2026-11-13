@@ -385,6 +385,9 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+/// Native finite-execution context carried with the effective member launch.
+pub const RESOURCE_LANE_REQUEST_TAG: &str = "st3.resource-lane";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
     pub kind: MemberKind,
@@ -447,6 +450,9 @@ impl MemberSpec {
         }
         if authored_launch(&self.launch) != authored_launch(&launched.launch) {
             changes.push("launch");
+        }
+        if self.tags.get(RESOURCE_LANE_REQUEST_TAG) != launched.tags.get(RESOURCE_LANE_REQUEST_TAG) {
+            changes.push("resource-lane");
         }
         changes
     }
@@ -847,6 +853,9 @@ pub struct StepSpec {
     /// did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Raise>,
+    /// Finite exec admission policy; independent of an assigned seat's scoped capacity raise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_lane: Option<ResourceLaneSpec>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -881,6 +890,25 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// The declarative counterpart of `resources.lane`: one host-local admission policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLaneSpec {
+    pub name: String,
+    pub host: String,
+    pub max_members: u32,
+    pub capacity: Option<fractal_runtime::Capacity>,
+    pub coverage: ResourceLaneCoverage,
+    pub admission_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLaneCoverage {
+    Logical,
+    Enforced,
 }
 
 /// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The

@@ -20,6 +20,8 @@ export const fakeHost = (
     readonly nack?: string
     readonly ask?: HostContextV1['ask']
     readonly spawn?: HostContextV1['spawn']
+    readonly resource?: HostContextV1['resource']
+    readonly resourceMembership?: HostContextV1['resourceMembership']
   } = {},
 ) => {
   const recorded: Recorded[] = []
@@ -29,6 +31,7 @@ export const fakeHost = (
     step: 'step-run/gen-1/program',
     attempt: 1,
     run: 'mission-run/run-1',
+    ...(options.resourceMembership === undefined ? {} : { resourceMembership: options.resourceMembership }),
     payload: options.payload ?? { change: 'abc' },
     env: { ST_MISSION_RUN: 'mission-run/run-1' },
     cwd: options.cwd ?? '/work',
@@ -42,6 +45,7 @@ export const fakeHost = (
     },
     child: options.child ?? (() => Promise.reject(new Error('unexpected child run'))),
     ask: options.ask ?? (() => Promise.reject(new Error('unexpected ask'))),
+    resource: options.resource ?? (() => Promise.reject(new Error('unexpected resource operation'))),
     spawn:
       options.spawn ??
       (async (argv) => ({ code: 0, signal: null, stdout: argv.join(' '), stderr: '' })),

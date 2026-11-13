@@ -225,7 +225,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     contract = Some(runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?);
                 }
                 backend_entered = true;
-                runtime.start_guarded(&prepared.launch_member, &guard)?;
+                if resource_lanes::request(&prepared.launch_member)?.is_some() {
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
+                } else {
+                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),
                     Err(error) => (None, Some(format!("{error:#}"))),

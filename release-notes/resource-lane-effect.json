@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add Fractal.resources.lane as an Effect scoped host capability, with native lane.exec/lane.run, equivalent step-level lane declarations and generation-bound retirement",
+  "replay": {"status": "changed", "detail": "Lane acquisition always reattaches and revalidates with the host authority; a journaled grant alone is never a launch capability."},
+  "schema": {"status": "changed", "detail": "The program host contract carries resource requests and exact-request cancellation through its existing supervised pipe. ResourceError has typed admission-expired, unsupported-coverage and payload failure codes. Data steps declare lane host/max-members/capacity/coverage/admission-timeout and lower through the same native membership operations."},
+  "rules": {"status": "changed", "detail": "Host-native operations own admission, process containment and retirement. Effect owns scope and control flow; no client-local semaphore is introduced. Existing assigned-agent capacity semantics remain seat raises."},
+  "compatibility": {"status": "changed", "detail": "Program hosts implement resource(request, signal). Existing unlaned commands retain their spawn path. Lane-bound child commands inherit the exact native membership; old program bundles must be republished with the resource-capable SDK before using lane.run, and detached legacy spawn refuses rather than escaping containment. Historical DSL and assigned-agent seat-capacity semantics remain unchanged until republished with a lane declaration."},
+  "downtime": {"status": "none", "detail": "The SDK requires a daemon implementing the native resource operation protocol."},
+  "manual": {"status": "none", "detail": "No native jobs activation, cross-host placement or priority scheduler is enabled by this API."},
+  "recovery": {"status": "changed", "detail": "Replayed acquisition validates its live host generation. Scope release and cancellation retain host custody until confirmed retirement; durable host holds are not scoped finalizers."}
+}

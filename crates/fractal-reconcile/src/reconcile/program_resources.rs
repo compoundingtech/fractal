@@ -1,0 +1,326 @@
+//! Effect resource calls lower to the same host membership and execution adapters as data steps.
+use super::*;
+use fractal_store::store::resource_membership::{Admission, Coverage, Grant, LaneRequest, Membership, Owner};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Acquire {
+    name: String,
+    host: String,
+    #[serde(default = "one")]
+    max_members: u32,
+    capacity: Option<fractal_runtime::Capacity>,
+    coverage: Coverage,
+    admission_timeout: Option<String>,
+}
+fn one() -> u32 { 1 }
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandOptions {
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    timeout: Option<String>,
+    priority: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Execute {
+    membership: Grant,
+    argv: Vec<String>,
+    #[serde(default)]
+    options: CommandOptions,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Child {
+    membership: Grant,
+    mission: String,
+    input: BTreeMap<String, String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Release { membership: Grant }
+
+fn failure(code: &str, message: impl Into<String>) -> Value {
+    serde_json::json!({"_tag":"Failure","error":{"_tag":"ResourceError","code":code,"message":message.into()}})
+}
+fn success(value: impl serde::Serialize) -> Value {
+    serde_json::json!({"_tag":"Success","value":value})
+}
+
+fn execution_id(request: &program::Request) -> String {
+    format!("program-resource-{}", hex::encode(sha2::Sha256::digest(request.idempotency_key().as_bytes())))
+}
+
+impl<R: RuntimeControl> Reconciler<R> {
+    /// A single authority epoch for this daemon's host, never one per program or membership.
+    pub(super) fn ensure_resource_authority(&self) -> Result<()> {
+        let initialized = self.resource_authority.get_or_init(|| {
+            (|| -> Result<()> {
+                self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
+                self.runtime.recover_resource_lanes(&self.store, &self.host, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+                Ok(())
+            })().map_err(|error| format!("resource authority recovery failed: {error:#}"))
+        });
+        initialized.as_ref().map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        Ok(())
+    }
+
+    fn program_membership(&self, run: &MissionRunView, request: &program::Request, grant: &Grant) -> Result<Membership> {
+        let record = self.store.resource_membership_for_grant(grant)?;
+        anyhow::ensure!(record.request.host == self.host, "resource membership does not belong to this execution host");
+        let owns = record.request.owner.run == run.subject
+            && record.request.owner.step == request.step && record.request.owner.attempt == request.attempt;
+        let inherits = self.store.resource_context_for_run(&run.subject)?
+            .is_some_and(|context| context.grant.as_ref() == Some(grant));
+        anyhow::ensure!(owns || inherits, "resource membership belongs to another run, step or attempt");
+        anyhow::ensure!(record.grant.as_ref() == Some(grant), "resource membership generation is stale");
+        Ok(record)
+    }
+
+    fn resource_changed(&self, membership: &LaneRequest) {
+        self.incremental.touch(&fractal_store::store::resource_membership::dependency(&membership.host, &membership.name));
+        self.incremental.touch("seat-admission");
+        self.signal_changed();
+    }
+
+    fn retire_program_membership(&self, record: &Membership) -> Result<bool> {
+        for child in &record.child_runs {
+            smallclaims::touched::note_read(|| child.clone());
+            if !matches!(self.store.mission_run_status(child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
+                self.store.request_mission_run_cancellation(child, "its resource membership scope closed")?;
+            }
+        }
+        let retired = self.runtime.retire_resource_lane(&self.store, &record.request)?;
+        let current = self.store.resource_membership_record(&record.request.id, &record.request.owner)?;
+        if retired || current.state != record.state { self.resource_changed(&record.request); }
+        anyhow::ensure!(current.state != "uncertain", "resource retirement is uncertain; host custody retained");
+        Ok(retired)
+    }
+
+    pub(super) fn cancel_invalid_program_resources(&self) -> Result<()> {
+        for record in self.store.resource_memberships_for_host(&self.host)? {
+            if !record.request.owner.invocation.as_deref().is_some_and(|id| id.starts_with("program:"))
+                || matches!(record.state.as_str(), "retired" | "refused") { continue; }
+            let active = self.store.step_run(&record.request.owner.step)?.is_some_and(|step|
+                step.attempt == record.request.owner.attempt && program::RUNNING_STATES.contains(&step.status.as_str()));
+            let live = self.program_engine.get().is_some_and(|engine|
+                engine.resource_owner_live(&record.request.owner.step, record.request.owner.attempt));
+            if !active || !live { self.retire_program_membership(&record)?; }
+        }
+        Ok(())
+    }
+
+    pub(super) fn settle_program_resource(&self, engine: &program::ProgramEngine, run: &MissionRunView,
+        request: &program::Request, operation: &str, payload: &Value, cancelled: bool) -> Result<bool>
+    {
+        self.ensure_resource_authority()?;
+        match self.apply_program_resource(engine, run, request, operation, payload, cancelled) {
+            Ok(changed) => Ok(changed),
+            Err(error) => {
+                engine.resolve_resource(request, failure("resource-operation-refused", format!("{error:#}")))?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn apply_program_resource(&self, engine: &program::ProgramEngine, run: &MissionRunView,
+        request: &program::Request, operation: &str, payload: &Value, cancelled: bool) -> Result<bool>
+    {
+        let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+        match operation {
+            "resource.lane.acquire" => {
+                let options: Acquire = serde_json::from_value(payload.clone())?;
+                anyhow::ensure!(options.host == self.host, "the resource execution host must be this daemon's host");
+                let lane = LaneRequest {
+                    id: request.idempotency_key(), name: options.name, host: options.host,
+                    max_members: options.max_members, capacity: options.capacity, coverage: options.coverage,
+                    admission_timeout_ms: options.admission_timeout.as_deref()
+                        .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?,
+                    owner: Owner { run: run.subject.clone(), step: request.step.clone(), attempt: request.attempt,
+                        invocation: Some(format!("program:{}", request.key)) },
+                };
+                let fit = self.resource_lane_fit(&lane.id, lane.capacity)?;
+                let admission = self.store.request_resource_membership(&lane, fit, now)?;
+                if cancelled {
+                    self.store.withdraw_resource_membership(&lane.id, &lane.owner, now)?;
+                    let record = self.store.resource_membership_record(&lane.id, &lane.owner)?;
+                    if !self.retire_program_membership(&record)? { return Ok(false); }
+                    engine.resolve_resource(request, failure("cancelled", "Resource acquisition was withdrawn."))?;
+                    return Ok(true);
+                }
+                match admission {
+                    Admission::Admitted(grant) => {
+                        self.resource_changed(&lane);
+                        engine.resolve_resource(request, success(grant))?;
+                        Ok(true)
+                    }
+                    Admission::Refused { code, reason } => {
+                        self.resource_changed(&lane);
+                        engine.resolve_resource(request, failure(code.as_str(), reason))?;
+                        Ok(true)
+                    }
+                    Admission::Queued { .. } => {
+                        if let Some(remaining) = self.store.resource_admission_remaining(&lane.id, &lane.owner, now)? {
+                            self.arm_restart(&format!("program-admission:{}", lane.id), now_ms().saturating_add(u128::from(remaining)));
+                        }
+                        Ok(false)
+                    }
+                }
+            }
+            "resource.lane.release" => {
+                let release: Release = serde_json::from_value(payload.clone())?;
+                // Release remains idempotent after retirement; authorization is still exact.
+                let record = self.store.resource_membership_for_grant(&release.membership)?;
+                anyhow::ensure!(record.request.host == self.host, "resource membership belongs to another execution host");
+                anyhow::ensure!(record.request.owner.run == run.subject && record.request.owner.step == request.step
+                    && record.request.owner.attempt == request.attempt && record.grant.as_ref() == Some(&release.membership),
+                    "release does not own the exact resource generation");
+                if !self.retire_program_membership(&record)? { return Ok(false); }
+                engine.resolve_resource(request, success(Value::Null))?;
+                Ok(true)
+            }
+            "resource.lane.exec" => {
+                let command: Execute = serde_json::from_value(payload.clone())?;
+                let record = self.program_membership(run, request, &command.membership)?;
+                if cancelled {
+                    let id = execution_id(request);
+                    if record.roots.iter().any(|root| root.runtime_id == id) {
+                        self.runtime.retire_resource_exec(&self.store, &record.request, &id)?;
+                        self.resource_changed(&record.request);
+                    }
+                    engine.resolve_resource(request, failure("cancelled", "Resource execution was cancelled."))?;
+                    return Ok(true);
+                }
+                self.execute_program_resource(engine, run, request, record, command)
+            }
+            "resource.lane.run" => {
+                let child: Child = serde_json::from_value(payload.clone())?;
+                let record = self.program_membership(run, request, &child.membership)?;
+                let child_id = self.store.mission_run_subject_for_idempotency_key(&request.idempotency_key());
+                let child_id = self.store.mission_run_supersession_successor(&child_id)?;
+                if cancelled {
+                    smallclaims::touched::note_read(|| child_id.clone());
+                    if !matches!(self.store.mission_run_status(&child_id)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
+                        self.store.request_mission_run_cancellation(&child_id, "its lane.run effect was interrupted")?;
+                        return Ok(false);
+                    }
+                    engine.resolve_resource(request, failure("cancelled", "Linked resource execution was cancelled."))?;
+                    return Ok(true);
+                }
+                anyhow::ensure!(matches!(self.store.resource_membership(&record.request.id, &record.request.owner, now)?,
+                    Admission::Admitted(current) if current == child.membership), "resource scope is not live");
+                let Some(status) = self.store.mission_run_status(&child_id)? else {
+                    for holder in self.store.active_mission_runs_for_mission(&child.mission)? {
+                        smallclaims::touched::note_read(|| holder.subject.clone());
+                    }
+                    // The shared creation boundary binds the child before it becomes runnable.
+                    match self.start_program_child(run, &request.step, &child.mission, &child.input, request.idempotency_key(), Some(&record)) {
+                        Ok(_) => {}
+                        Err(error) if error.code == "mission-run-capacity" => return Ok(false),
+                        Err(error) => return Err(error.into()),
+                    }
+                    self.resource_changed(&record.request);
+                    return Ok(true);
+                };
+                self.store.attach_resource_child(&child.membership, &record.request.owner, &child_id)?;
+                smallclaims::touched::note_read(|| child_id.clone());
+                if !matches!(status.as_str(), "completed" | "failed" | "cancelled") { return Ok(false); }
+                engine.resolve_resource(request, self.program_child_exit(&child_id, &status)?)?;
+                Ok(true)
+            }
+            _ => anyhow::bail!("unsupported resource operation"),
+        }
+    }
+
+    fn execute_program_resource(&self, engine: &program::ProgramEngine, run: &MissionRunView,
+        request: &program::Request, record: Membership, command: Execute) -> Result<bool>
+    {
+        anyhow::ensure!(!command.argv.is_empty(), "resource command argv must contain a program");
+        anyhow::ensure!(command.options.priority.as_deref().is_none_or(|priority| matches!(priority, "background")), "invalid command priority");
+        anyhow::ensure!(matches!(self.store.resource_membership(&record.request.id, &record.request.owner,
+            u64::try_from(now_ms()).unwrap_or(u64::MAX))?, Admission::Admitted(current) if current == command.membership),
+            "resource scope is not live");
+        let timeout = command.options.timeout.as_deref()
+            .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?;
+        let runtime_id = execution_id(request);
+        let root = record.roots.iter().find(|root| root.runtime_id == runtime_id);
+        if root.is_none() {
+            let mut environment = command.options.env;
+            environment.insert("ST_MISSION_RUN".into(), run.subject.clone());
+            environment.insert("ST_STEP_RUN".into(), request.step.clone());
+            environment.insert("ST_SEAT_PRIORITY".into(), command.options.priority.as_deref().unwrap_or("normal").into());
+            environment.insert(crate::store::run_credentials::RUN_CREDENTIAL_ENV.into(),
+                self.store.issue_run_credential(&request.step, request.attempt, program::RUN_CREDENTIAL_LIFETIME_MS)?);
+            let mut argv = command.argv;
+            if cfg!(target_os = "macos") && command.options.priority.as_deref() == Some("background") {
+                argv.splice(0..0, ["/usr/sbin/taskpolicy".into(), "-b".into()]);
+            }
+            let member = MemberSpec {
+                kind: MemberKind::Exec, host: self.host.clone(), runtime_id: runtime_id.clone(),
+                workspace: run.workspace.clone(), workspace_create: false,
+                cwd: command.options.cwd.unwrap_or_else(|| run.workspace.clone()), terminal: false,
+                launch: LaunchSpec::Argv(argv), environment, tags: BTreeMap::new(), display_name: None,
+                lifecycle: MemberLifecycle::Service, terminal_binding: None, one_shot: false,
+                restart: RestartType::Never, restart_intensity: RestartIntensity::default(),
+                shutdown_timeout_ms: 5_000, driver: None, terminal_size: None, capacity: None,
+                declared_priority: None, declared_lane: None, declared_budgets: None,
+            };
+            let mut member = member;
+            resource_lanes::set_request(&mut member, &record.request)?;
+            self.runtime.start_resource_guarded(&self.store, &member, &|| {
+                let current = self.store.step_run(&request.step)?.context("program step disappeared before payload release")?;
+                anyhow::ensure!(current.attempt == request.attempt && program::RUNNING_STATES.contains(&current.status.as_str()),
+                    "program attempt was cancelled before payload release");
+                Ok(())
+            })?;
+            self.resource_changed(&record.request);
+            return Ok(true);
+        }
+        let root = root.expect("root tested above");
+        let generation = root.execution.as_ref().context("execution preparation is uncertain; custody retained")?;
+        engine.watch_resource_once(request, &generation.generation_id, || {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let event_notify = self.event_notify.clone();
+            let step = request.step.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                incremental.touch(&step);
+                signal_changed(&notify, &event_notify);
+            });
+            self.runtime.watch_resource_exec(&runtime_id, &generation.generation_id, wake)
+        })?;
+        let observation = self.runtime.observe_exec(&runtime_id)?.context("resource execution record disappeared")?;
+        anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation.generation_id.as_str()), "resource execution generation changed");
+        if observation.status == "running" {
+            if let Some(timeout) = timeout {
+                let elapsed = self.store.resource_execution_elapsed(&record.request.id, &record.request.owner,
+                    &runtime_id, u64::try_from(now_ms()).unwrap_or(u64::MAX))?
+                    .context("resource execution has no payload release clock")?;
+                if elapsed >= timeout {
+                    self.runtime.retire_resource_exec(&self.store, &record.request, &runtime_id)?;
+                    self.resource_changed(&record.request);
+                    engine.resolve_resource(request, failure("execution-timeout", "Resource command exceeded its payload budget."))?;
+                    return Ok(true);
+                }
+                self.arm_restart(&format!("program-execution:{runtime_id}"), now_ms().saturating_add(u128::from(timeout.saturating_sub(elapsed))));
+            }
+            return Ok(false);
+        }
+        anyhow::ensure!(observation.status == "exited", "resource execution state is indeterminate; custody retained");
+        let (stdout, stderr) = self.runtime.resource_exec_output(&runtime_id, &generation.generation_id)?;
+        let signal = self.runtime.resource_exec_signal(&runtime_id, &generation.generation_id)?.map(|signal| match signal {
+            libc::SIGTERM => "SIGTERM".to_owned(),
+            libc::SIGKILL => "SIGKILL".to_owned(),
+            other => other.to_string(),
+        });
+        self.store.end_resource_execution(&command.membership, &runtime_id, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+        engine.resolve_resource(request, success(serde_json::json!({
+            "code": observation.exit_code.unwrap_or(128), "signal": signal, "stdout": stdout, "stderr": stderr
+        })))?;
+        Ok(true)
+    }
+}

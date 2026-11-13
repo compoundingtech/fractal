@@ -40,7 +40,7 @@ pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 /// A run credential has no expiry of its own: it binds only while its attempt is its step run's
 /// current, live attempt, however long that attempt waits on an ask or a child run.
-const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
+pub(super) const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
 const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
@@ -128,6 +128,8 @@ pub struct Request {
     /// The bundle hash of the program that asked, which journals the key's entries.
     program: String,
     seq: Value,
+    generation: u64,
+    watched_generation: Option<String>,
     since: Instant,
 }
 
@@ -137,6 +139,8 @@ pub enum Wait {
     Run { mission: String, input: BTreeMap<String, String> },
     /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
     Ask(Box<PersonAskRequest>),
+    /// Resource operations always visit the host authority, including journal replay.
+    Resource { operation: String, payload: Value, cancelled: bool },
 }
 
 impl Request {
@@ -230,6 +234,8 @@ impl ProgramEngine {
             dispatch.attempt,
             journal.len()
         );
+        let resource_context = self.store.resource_context_for_run(&dispatch.run)?;
+        let resource_membership = resource_context.as_ref().and_then(|context| context.grant.as_ref());
         let message = json!({
             "t": "start",
             "step": dispatch.step,
@@ -241,6 +247,7 @@ impl ProgramEngine {
             "env": env,
             "cwd": dispatch.cwd,
             "journal": journal,
+            "resourceMembership": resource_membership,
         });
         inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new() });
         send(&inner, &message);
@@ -380,6 +387,50 @@ impl ProgramEngine {
             &json!({"t": "resolved", "step": request.step, "attempt": request.attempt, "seq": pending.seq, "key": request.key, "exit": exit}),
         );
         Ok(())
+    }
+
+    /// Resolve a live host capability operation without replaying a journaled grant. The
+    /// resource module owns durable request identity and generation reattachment.
+    pub fn resolve_resource(&self, request: &Request, exit: Value) -> Result<()> {
+        let mut inner = self.lock();
+        let Some(running) = inner.running.get_mut(&request.step)
+            .filter(|running| running.dispatch.attempt == request.attempt && running.generation == request.generation)
+        else { return Ok(()) };
+        let Some(pending) = running.requests.get(&request.key) else { return Ok(()) };
+        if pending.seq != request.seq { return Ok(()) }
+        // Cancellation can replace the queued operation while its admission is in flight.
+        if matches!((&request.wait, &pending.wait),
+            (Wait::Resource { cancelled: false, .. }, Wait::Resource { cancelled: true, .. }))
+        {
+            return Ok(());
+        }
+        let generation = running.generation;
+        let pending = running.requests.remove(&request.key).expect("request checked above");
+        send_to(&inner, generation, &json!({
+            "t": "resolved", "step": request.step, "attempt": request.attempt,
+            "seq": pending.seq, "key": request.key, "exit": exit,
+        }));
+        Ok(())
+    }
+
+    /// Register an OS completion waiter once per live request/generation, before inspecting its
+    /// completion again. A resumed worker gets a fresh subscription to the same generation.
+    pub fn watch_resource_once(&self, request: &Request, generation: &str, start: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut inner = self.lock();
+        let Some(pending) = inner.running.get_mut(&request.step)
+            .filter(|running| running.dispatch.attempt == request.attempt && running.generation == request.generation)
+            .and_then(|running| running.requests.get_mut(&request.key))
+        else { return Ok(()) };
+        if pending.watched_generation.as_deref() == Some(generation) { return Ok(()) }
+        start()?;
+        pending.watched_generation = Some(generation.to_owned());
+        Ok(())
+    }
+
+    pub fn resource_owner_live(&self, step: &str, attempt: u32) -> bool {
+        let inner = self.lock();
+        inner.running.get(step).is_some_and(|running| running.dispatch.attempt == attempt
+            && inner.host.as_ref().is_some_and(|host| host.generation == running.generation))
     }
 
     /// The program asked for something the daemon refuses (a defect of the bundle): its step fails
@@ -734,7 +785,7 @@ impl ProgramEngine {
         };
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
-            Some("run" | "ask") => self.request(step, attempt, generation, &program, message),
+            Some("run" | "ask" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
             Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
@@ -756,7 +807,9 @@ impl ProgramEngine {
             Ok(wait) => wait,
             Err(reason) => return self.fail(step, attempt, &format!("the program made an invalid request for `{key}`: {reason}")),
         };
-        self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
+        if !matches!(wait, Wait::Resource { .. }) {
+            self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
+        }
         {
             let mut inner = self.lock();
             let Some(running) = inner
@@ -774,6 +827,8 @@ impl ProgramEngine {
                 child: None,
                 program: program.to_owned(),
                 seq: message["seq"].clone(),
+                generation,
+                watched_generation: None,
                 since: Instant::now(),
             };
             running.requests.insert(key.to_owned(), request);
@@ -1108,6 +1163,22 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
             .map(str::to_owned)
             .ok_or_else(|| format!("`{name}` must be a non-empty string"))
     };
+    if matches!(message["t"].as_str(), Some("resource" | "resource-cancel")) {
+        let operation = text("operation")?;
+        if !matches!(operation.as_str(),
+            "resource.lane.acquire" | "resource.lane.release" | "resource.lane.exec" | "resource.lane.run")
+        {
+            return Err(format!("unknown resource operation `{operation}`"));
+        }
+        if !message["payload"].is_object() {
+            return Err("resource payload must be an object".to_owned());
+        }
+        return Ok(Wait::Resource {
+            operation,
+            payload: message["payload"].clone(),
+            cancelled: message["t"] == "resource-cancel",
+        });
+    }
     if message["t"] == "run" {
         let mission = text("mission")?;
         let input = serde_json::from_value::<BTreeMap<String, String>>(message["input"].clone())

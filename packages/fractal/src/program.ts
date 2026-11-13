@@ -4,13 +4,15 @@
  * the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
  * See docs/st3/program-engine.md §11.
  */
-import { Context, Effect, Layer, Schedule, Schema, SchemaAST } from 'effect'
+import { Context, Effect, Layer, Option, Schedule, Schema, SchemaAST } from 'effect'
 import { Activity, DurableDeferred, type Workflow } from 'effect/workflow'
 
 import { mission as dataMission, type MissionIntent } from './define.ts'
 import type { Authority, PersonReference } from './mod.ts'
 import {
   keyed,
+  CommandResultSchema,
+  ResourceError,
   Program,
   programEntry,
   ProgramEntry,
@@ -198,6 +200,8 @@ const child = (id: string, mission: string, input: Readonly<Record<string, strin
   })
 
 const noInterruptRetry = Schedule.recurs(0)
+/** Native commands inside a replayable step use that step's identity, not global call order. */
+class ResourceCommandScope extends Context.Service<ResourceCommandScope, string>()('fractal/ResourceCommandScope') {}
 
 export interface StepOptions {
   readonly id: string
@@ -255,7 +259,7 @@ export function step(
         name: key,
         success: success ?? Schema.Void,
         error: options.error ?? TaggedFailure,
-        execute: success === undefined ? Effect.asVoid(effect) : effect,
+        execute: Effect.provideService(success === undefined ? Effect.asVoid(effect) : effect, ResourceCommandScope, key),
         interruptRetryPolicy: noInterruptRetry,
       }),
     )
@@ -331,10 +335,23 @@ export function run(
 export const command = (
   argv: readonly string[],
   options?: CommandOptions,
-): Effect.Effect<CommandResult, never, Program> =>
-  Effect.flatMap(Effect.service(Program), (program) =>
-    Effect.promise(() => program.host.spawn(argv, options)),
-  )
+): Effect.Effect<CommandResult, ResourceError, Program> =>
+  Effect.gen(function* () {
+    const program = yield* Program
+    if (program.host.resourceMembership === undefined)
+      return yield* Effect.promise(() => program.host.spawn(argv, options))
+    const scope = Option.getOrElse(yield* Effect.serviceOption(ResourceCommandScope), () => 'program')
+    const base = `resource.command/${scope}`
+    const occurrence = (program.occurrences.get(base) ?? 0) + 1
+    program.occurrences.set(base, occurrence)
+    const key = occurrence === 1 ? base : `${base}#${occurrence}`
+    return yield* Effect.flatMap(Effect.promise((signal) => program.host.resource({
+      key, operation: 'resource.lane.exec',
+      payload: { membership: program.host.resourceMembership, argv, options: options ?? {} },
+    }, signal)), (exit) => exit._tag === 'Success'
+      ? Effect.orDie(Schema.decodeUnknownEffect(CommandResultSchema)(exit.value))
+      : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(ResourceError)(exit.error)), Effect.fail))
+  })
 
 /** The run's `ST_*` variables (`ST_MISSION_RUN`, `ST_STEP_RUN`, …). */
 export const env: Effect.Effect<Readonly<Record<string, string>>, never, Program> = Effect.map(
