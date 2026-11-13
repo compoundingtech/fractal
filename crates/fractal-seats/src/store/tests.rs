@@ -2462,10 +2462,10 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
         record
     };
     let first = event("work.claimed", at,
-        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old"}));
+        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old","claim_expires_at_unix_ms":at+600_000}));
     event("work.failed", at + 200, json!({"attempt":1}));
     let second = event("work.claimed", at + 300,
-        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new"}));
+        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new","claim_expires_at_unix_ms":at+600_300}));
     let respond = |entry: &str, source: &str, incarnation: &str, time: u128, body: Value| {
         let mut input = timeline_observation(agent, incarnation, entry);
         input.fields.insert("entry_type".into(), json!("usage"));
