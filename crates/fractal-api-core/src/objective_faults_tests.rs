@@ -113,3 +113,20 @@ fn an_undeclared_explicit_reviewer_never_falls_back_to_the_fleet_fault_agent() {
     assert_eq!(result, ObjectiveFaults { unowned: 1, ..ObjectiveFaults::default() });
     assert!(open(&store).is_empty());
 }
+
+#[test]
+fn a_row_no_longer_judged_ends_its_fault_and_a_judged_or_foreign_one_keeps_it() {
+    let store = Store::open_memory("node").unwrap();
+    with_fault_agent(&store);
+    let missed = [row("merge-latency/p95", "missed"), row("flakes", "missed")];
+    assert_eq!(check(&store, &missed, &objectives()).unwrap().opened, 2);
+    let judged = BTreeSet::from(["merge-latency/p95".to_owned()]);
+    // `flakes` is no longer judged; `merge-latency/p95` is, so only a met row ends it.
+    assert_eq!(end_unjudged(&store, |id| objectives().contains(id), &judged).unwrap(), 1);
+    assert_eq!(open(&store).keys().collect::<Vec<_>>(), ["slo-objective/node/merge-latency/p95"]);
+    assert_eq!(store.operational_failure("slo-objective/node/flakes").unwrap().unwrap().status, "resolved");
+    // Nothing left to end, and a row the caller does not own is never ended.
+    assert_eq!(end_unjudged(&store, |id| objectives().contains(id), &judged).unwrap(), 0);
+    assert_eq!(end_unjudged(&store, |_| false, &BTreeSet::new()).unwrap(), 0);
+    assert_eq!(open(&store).len(), 1);
+}

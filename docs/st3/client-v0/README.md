@@ -2128,8 +2128,10 @@ grant, policy and disclosure class. Omitting it preserves fleet pagination. The 
 avoids output pagination for a known ID, not native roster scanning, and does not provide
 priorities, planning conversations, or additional disclosure authority.
 
-The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
-under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
+The adapter uses `attention-rich`, `missions-rich`, `agents-rich`, `attention-content`, `slo`
+and `slo-history` under `/v1/client/assistant/`. `slo` and `slo-history` need
+`read.assistant.slo` and return pages of allowlisted objective/budget rows and one row's history.
+Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
 closed typed actions. `work.done` requires `write.assistant.answers` and immediately answers
 supported owner alerts through the existing fenced, idempotent action path, without creating
