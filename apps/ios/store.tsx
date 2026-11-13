@@ -547,7 +547,7 @@ function useAppStore(proof?: FabricProfile) {
     if (!client || status !== 'online' || !caps || !servesAvailability(caps)) return;
     try {
       const [people, notes] = await Promise.all([client.availabilityList(), client.notesList()]);
-      if (capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes, caps.session_actor), issue: '' });
+      if (capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes), issue: '' });
     } catch (e) { if (capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
