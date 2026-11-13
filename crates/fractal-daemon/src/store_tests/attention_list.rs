@@ -493,7 +493,7 @@ assert!(!revisions.has_changed().unwrap());
 /// and presence move nothing attention shows, so they fold nothing.
 #[test]
 fn the_published_list_follows_the_asked_persons_deadline_clock() {
-use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock, Interruptions, Presence, Status};
+use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock, DeviceReport, DeviceState, Interruptions, Status};
 let (store, _, mut request) = fixture();
 store.start_attention_list_refresher().unwrap();
 store.set_ask_deadlines(true);
@@ -511,7 +511,7 @@ let clock_folds = || store.attention_list_folds().get("person.deadline-clock-set
 assert_eq!(served(&refresh_and_check(&store)), at(deadline));
 let set = |clock: DeadlineClock| {
     let folded = clock_folds();
-    store.set_person_availability("person/avery", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
+    store.set_person_availability("person/avery", "host/alder", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
     let published = refresh_and_check(&store);
     assert_eq!(clock_folds(), folded + 1, "{clock:?} folds the list");
     served(&published)
@@ -522,11 +522,12 @@ let changes = store.claims_for("person/avery", Some("person.deadline-clock-set")
 let held = changes[1].accepted_at_unix_ms - changes[0].accepted_at_unix_ms;
 assert_eq!(served_after_run, at(deadline + held));
 let published = refresh_and_check(&store);
-store.set_person_availability("person/avery", &[
+store.set_person_availability("person/avery", "host/alder", &[
     AvailabilityChange::Status(Some(Status::Away), None),
     AvailabilityChange::Interruptions(Interruptions::Urgent, None),
 ], now_ms()).unwrap();
-store.report_person_presence("person/avery", "host/alder", Presence::Present, now_ms(), now_ms()).unwrap();
+store.report_person_presence("person/avery", "host/alder",
+    DeviceReport { state: DeviceState::Active, last_input_at: None, observed_at: now_ms() }, now_ms()).unwrap();
 assert!(store.index().unwrap() > published.cut);
 assert_eq!(
     store.read_snapshot(|index| store.attention_list_delta(&published, index, now_ms())).unwrap(),

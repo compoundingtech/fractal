@@ -181,6 +181,7 @@ mission "garden/review" state="ready" {
     act(&store, &prune, &birch, "wait", Some(2 * 60 * MINUTE as u64), "wait-prune");
     store
         .ask_person(&PersonAskRequest {
+            priority: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Which beds stay?".into(),
