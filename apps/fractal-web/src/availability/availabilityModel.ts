@@ -35,7 +35,7 @@ const presenceLabels: Readonly<Record<string, string>> = {
   unreported: 'not reported',
 }
 const interruptionDetails: Readonly<Record<string, string>> = {
-  urgent: 'Only asks with a deadline within an hour reach you.',
+  urgent: 'Only asks with priority critical reach you.',
   none: 'No ask reaches you.',
 }
 const deadlineClockDetails: Readonly<Record<string, string>> = {

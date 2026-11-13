@@ -38,7 +38,7 @@ describe('availabilityFacts', () => {
     }
     expect(availabilityFacts({ availability: away, note: { ...note, expires_at: iso(120) } }, now, zone)).toEqual([
       { label: 'Status', value: 'Away · until 11:30', detail: 'Set by you; presence is idle 2m ago.' },
-      { label: 'Interruptions', value: 'Urgent asks only · until 11:00', detail: 'Only asks with a deadline within an hour reach you.' },
+      { label: 'Interruptions', value: 'Urgent asks only · until 11:00', detail: 'Only asks with priority critical reach you.' },
       { label: 'Deadline clock', value: 'Held for routine asks · since 9:45 · until tomorrow 9:00', detail: 'Routine deadlines pause; urgent asks keep running.' },
       { label: 'Note', value: 'Focus on the release.', detail: 'Expires 12:00.' },
     ])
