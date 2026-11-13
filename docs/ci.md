@@ -334,7 +334,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `fractal slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for the `fractal/flakes` objective; the poller reads only the name (`docs/st3/plugins.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
@@ -884,37 +884,55 @@ story-identity checks, matrix size and job timeout are unchanged.
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
 out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
-**full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
-cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
-configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+**full** Storybook index, then assigns longest measured stories first to the least-loaded
+shard, breaking ties by story ID and shard index. The committed `kit-play-costs.json`
+beside the runner records full four-case story costs from hosted merge-group logs.
+New stories use the manifest's median story cost. Shard 0 starts with a reservation
+equal to 20% of total estimated play work for its non-play lanes. Assignment is
+independent of index ordering and runner speed; adding a story can rebalance existing
+stories. `kitShardCount` in `.github/workflows/workspace-ci.ts` configures N.
+`KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
 Every shard generates and checks the app changelog registry after the frozen install,
 before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
-assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
+assertions. A small index may leave a shard with no plays; its receipt still participates
+in exact full-index coverage. Shard 0 runs every
 stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
 Storybook build and their strict plays. Browser controls and Storybook wait for every
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
 
-The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
-exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
-spent about four minutes preparing the runner, six minutes installing and running
-the non-play streams, and two minutes on browser controls/builds before strict plays.
-Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
-shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
-story partition: shard 0 also owns the other lanes. Play speed varies too:
-[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
-took 20m39s for shard 1's same 1,265 cases, leaving little room even without
-the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
-took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
-EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
-contention on a local build host. Four shards halve each old parity partition while preserving
-the stable hash rule, all cases, axe and receipt coverage. A third shard would
-reduce plays by only about a third, leaving less headroom for shard 0's fixed work
-and the observed runner variation. Extra shards duplicate setup and the small
-Storybook build; they do not duplicate app tests or browser controls. These are
-historical timings, not a measured runtime guarantee for the four-shard workflow.
+The job timeout stays **25 minutes**. The ten most recent merge-group runs inspected
+on 2026-11-13 contained six executing web matrices, three skipped lanes and one matrix
+not yet scheduled. Job durations (minutes, including setup and cleanup) were:
+
+| Run | Shard 0 | Shard 1 | Shard 2 | Shard 3 |
+| --- | ---: | ---: | ---: | ---: |
+| [43382323570](https://github.com/compoundingtech/fractal/actions/runs/43382323570) | 25.53 cancelled | 16.73 | 10.48 | 10.50 |
+| [43344153135](https://github.com/compoundingtech/fractal/actions/runs/43344153135) | 24.05 | 17.28 | 9.22 | 14.48 |
+| [43343940579](https://github.com/compoundingtech/fractal/actions/runs/43343940579) | 0.55 failed before plays | 14.20 | 11.47 | 12.15 |
+| [43339162862](https://github.com/compoundingtech/fractal/actions/runs/43339162862) | 23.63 failed | 17.47 | 11.37 | 12.38 |
+| [43325952348](https://github.com/compoundingtech/fractal/actions/runs/43325952348) | 25.42 cancelled | 13.33 | 9.45 | 13.38 |
+| [43288610870](https://github.com/compoundingtech/fractal/actions/runs/43288610870) | 17.40 | 17.27 | 11.50 | 14.32 |
+
+The old equal-probability hash partition ignored both story cost and shard 0's other
+work. In run 43382323570, shard 0 reached strict plays only at 07:22:13Z after starting
+at 07:07:08Z, leaving under ten minutes for its unchanged story share. Reserving
+non-play work and distributing measured story costs addresses this structural skew
+without adding runners, increasing the timeout, or dropping stories or axe.
+The same shard-1 set took 13.63–14.24 play minutes on EPYC 7763 runners and
+10.53–10.56 on EPYC 9V74 runners in this sample. Runner speed contributes, but
+cannot explain away shard 0's fixed overhead. The longest measured individual
+case was `sidebar-tree--filter-keystroke-to-paint` (111–172 seconds); the scheduler
+spreads such expensive stories instead of treating them like static stories.
+The manifest uses the median of each story's complete observed case samples;
+partial story prefixes from cancelled jobs are excluded when a complete sample exists.
+Refresh it explicitly with `node packages/fractal-ui/scripts/kit-play-costs.mjs`
+followed by its `sourceJobs` IDs (or a newly reviewed sample). This fetches hosted
+logs; ordinary execution and CI remain offline with respect to the manifest.
+Manual `gh workflow run fleet.yml --ref BRANCH` forces all web inputs and selects
+the same full story/a11y matrix as merge groups; no trigger or label change is needed.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and

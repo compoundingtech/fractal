@@ -3873,6 +3873,9 @@ pub struct PersonUpdate {
     pub about: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Words to speak aloud, present only when the person asked to be told this outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<RequestSubject>,
 }
@@ -4572,6 +4575,8 @@ pub enum AssistantScope {
     Conversation,
     #[serde(rename = "read.assistant.terminal")]
     Terminal,
+    #[serde(rename = "read.assistant.slo")]
+    Slo,
     #[serde(rename = "write.assistant.messages")]
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]

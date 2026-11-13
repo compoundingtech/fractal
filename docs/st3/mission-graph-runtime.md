@@ -50,7 +50,7 @@ The host's acknowledgement waits for actual worker termination, including native
 
 Worker and effect-group fencing is scoped to the waiting run, its superseded predecessors, and descendants of every generation in that lineage. Unrelated member-local cancellations do not block its admission or finalizers. A liveness failure stays immediately visible even when its native worker has not exited; the related replacement still waits for that actual exit.
 
-Every superseding step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. Unreviewed direct run revision remains a separate generation-adoption operation; approved proposal cutover uses a fresh linked run. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or revision-policy knob is introduced.
+Every superseding step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. A declared schedule is the exception for its occurrence history: the replacement's same-named schedule does not replay a tick any predecessor already reached (see [Recurring schedules](#recurring-schedules)). Unreviewed direct run revision remains a separate generation-adoption operation; approved proposal cutover uses a fresh linked run. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or revision-policy knob is introduced.
 
 
 ## First readiness under load
@@ -398,7 +398,7 @@ The default mission permits one nonterminal run. This default also lets `fractal
 
 Bare `concurrent-runs` permits unlimited nonterminal runs. `concurrent-runs max=N` sets a positive limit.
 
-The capacity check runs after the idempotency check. A child start waits when capacity is full, but a direct start returns `mission-run-capacity`.
+The capacity check runs after the idempotency check. A child start waits when capacity is full, but a direct start returns `mission-run-capacity`. A waiting `uses-mission` step follows the runs holding that capacity: when a holder ends or releases admission through cancellation, the parent is evaluated reactively and tries to start its child. Each handoff follows the new holder; it does not wait for a periodic full reconciliation pass.
 
 Missions and agents do not support in-place ownership changes. Publish a replacement mission and cancel the old run when ownership must change.
 
@@ -1300,6 +1300,14 @@ on `work ask` (optional `summary` and `subjects`; no question, answers or recomm
 `about` is the proof that the person asked: their own mission run or step run (the run, or its
 root run, names them as requester), or a message they sent to the posting agent. Anything else
 returns `update-not-asked`.
+
+An update may also carry `speech` (`--speech TEXT`): 1 to 300 characters that a client reads
+aloud, the same field and limits as a notice's `speech`. An agent sets it only when the person
+asked to be told this outcome; an update without it is shown and not spoken. Only an update
+carries `speech`, and only an agent posts one with it: the update the daemon posts when an ask
+ends has none. A daemon that predates the field refuses to post a request carrying it
+(`invalid-person-request`) and refuses to mark a replicated one read (`unsupported-person-request`),
+so every daemon is updated before agents use `--speech`.
 
 The update is a person step in a run of its own, so no step waits on it and the poster keeps
 working. It stays on the person's home until they read it, even after the poster stops; the
@@ -2205,7 +2213,9 @@ The runtime withdraws it when a subsequent occurrence successfully starts work.
 The runtime gives each occurrence a deterministic mission run and a unique workspace below the declared root.
 The occurrence belongs to the schedule's stable identity, across parent revisions, re-publication,
 child revision changes and daemon restarts. An already reached tick is never replayed by
-`catch-up "latest"`. Members admitting the same tick while apart converge on one run and initial
+`catch-up "latest"`. When publication supersedes the declaring run, the replacement's same-named
+schedule continues the reached occurrences of that schedule in every run it supersedes, even though
+its subject names the new run. Members admitting the same tick while apart converge on one run and initial
 generation; the first creation in canonical claim order supplies its child definition.
 
 A fleet member holds scheduled admission until at least one peer comparison since startup

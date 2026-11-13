@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v26.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1188,6 +1188,7 @@ impl World {
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
             "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
+            "github-workflow-run" => format!("github-workflow-run/convergence/repo-{small}/{}", self.fresh("run")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -2031,15 +2032,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v25 adds the four person-availability kinds and new optional fields (main's, a note's
-/// `source` and an ask's `priority`) to kind selection, shifting the shared RNG schedule. Seed 21
-/// writes none of the new kinds; its schedule adds an old build at the start, which is a writer
-/// in every sealed checkpoint, never seals, and is never excused, so no cut is certified and
-/// nothing trims (hosted burst runs in fixtures/convergence/README.md). It converges without
-/// trimming, and trims once the old build is excused and the next cut falls due, which its run
-/// then checks. The never-trim set is characterized by hosted CI; a lightly loaded runner can
-/// diverge (#6210).
-const NEVER_TRIMS: &[u64] = &[21];
+/// Corpus v26 adds the four person-availability kinds and new optional fields (a note's `source`
+/// and an ask's `priority`) to v25's kind selection, shifting the shared RNG schedule.
+const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
@@ -2049,7 +2044,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, never);
     eprintln!(
-        "convergence corpus v25 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v26 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2058,7 +2053,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v25 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v26 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2066,7 +2061,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v25 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v26 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2279,7 +2274,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v26.json"
         }))
         .unwrap(),
     )

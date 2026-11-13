@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds person.status-set (status available|away|null), person.interruptions-set (all|urgent|none) and person.deadline-clock-set (run|hold-routine|hold-all), each with optional until_unix_ms and a required daemon-assigned source, and person.presence-observed (state active|inactive|locked|sleeping, optional last_input_at_unix_ms, observed_at_unix_ms, source). person.directive-note-set gains optional source, and work.person-asked gains optional priority (critical|high|normal|low). The claim-registry digest changes and the convergence corpus moves to claims-v25.json."
+    "detail": "Adds person.status-set (status available|away|null), person.interruptions-set (all|urgent|none) and person.deadline-clock-set (run|hold-routine|hold-all), each with optional until_unix_ms and a required daemon-assigned source, and person.presence-observed (state active|inactive|locked|sleeping, optional last_input_at_unix_ms, observed_at_unix_ms, source). person.directive-note-set gains optional source, and work.person-asked gains optional priority (critical|high|normal|low). The claim-registry digest changes and the convergence corpus moves to claims-v26.json."
   },
   "rules": {
     "status": "changed",

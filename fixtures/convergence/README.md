@@ -322,26 +322,34 @@ inputs through the existing generic paths. No old-build admission or checkpoint 
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
 
-`claims-v25.json` adds the person-availability kinds `person.status-set`,
-`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`. Versions 1
-through 24 stay frozen. Generate it with
+`claims-v25.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a completed
+Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md), and carries the
+optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fields the registry has
+gained since v24. Versions 1 through 24 stay frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
-do not hand-edit it. The simulation and audit reports select v25. Draws use the generic append
-path: only the subject person's own claims are admitted, as on every admission path. As a full
-registry snapshot, v25 also carries optional fields that reached main after v24: `gate.requested`
-gains `dispatch` and `host`, `runtime.action.requested` gains `from_stale_handoff`, and
-`runtime.observed` gains `exit_evidence`. The availability change itself also adds the optional
-`source` to `person.directive-note-set` and the optional `priority` to `work.person-asked`. These
-fields and the new kinds all shift the shared random schedule.
-With v25 every fixed seed converges, and seed 21 is the exact never-trim set: hosted burst
-[run 43406157522](https://github.com/compoundingtech/fractal/actions/runs/43406157522) printed
-`trimmed=false` for seed 21 and `trimmed=true` for every other fixed seed. The cause is the
-schedule, not a new kind. A hosted trace of seed 21
-([run 43434415532](https://github.com/compoundingtech/fractal/actions/runs/43434415532)) shows
-that it writes none of the four new kinds, and skipping them changes nothing. Its schedule adds
-an old build at the start. That node is a writer in every sealed checkpoint, never seals one,
-and is never excused, so no cut is certified and no node trims. v24's rule that every fixed seed
-trims is therefore not carried forward for seed 21. Instead its test carries the run on: a person
-excuses the old build, a day passes so the next cut is due, the fleet quiesces and is checked
-again, and every modern node must then trim. A lightly loaded runner can diverge from hosted CI
-(#6210).
+do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`. With v25 every fixed seed converges; seeds
+2 and 233 are the exact never-trim set, observed by hosted linux-tests (runs 43416435882 and
+43424149648) and hosted burst cargo-test run 43411988505. In both seeds the old build draws the new
+kind, and that one replicated claim makes it a writer every later checkpoint waits for; an old build
+never seals. Seed 233 never excuses it (quiesce's even draw says no). Seed 2 does, but its schedule
+ends with `checkpoint/2100-01-24` sealed under two participant sets and no later cut. Hosted burst
+runs on throwaway tracing commits show this: in
+[43425100378](https://github.com/compoundingtech/fractal/actions/runs/43425100378) excusing seed
+233's old build trims every modern node; in
+[43428226636](https://github.com/compoundingtech/fractal/actions/runs/43428226636) skipping only
+the old build's `github.workflow-run` write, after drawing it so the schedule is unchanged, trims
+both seeds; in [43431112343](https://github.com/compoundingtech/fractal/actions/runs/43431112343)
+one more cut trims seed 2 on every modern node. So the kind changes which writers a checkpoint
+waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
+the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
+authority (#6210).
+
+`claims-v26.json` adds the person-availability kinds `person.status-set`,
+`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`, the
+optional `source` of `person.directive-note-set` and the optional `priority` of
+`work.person-asked`. Versions 1 through 25 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v26.json`;
+do not hand-edit it. The simulation and audit reports select v26. Draws use the generic append
+path: only the subject person's own claims are admitted, as on every admission path. The new
+kinds and fields shift the shared random schedule.

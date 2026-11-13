@@ -1245,6 +1245,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_plugin::WORKFLOW_RUN_FAMILY,
+            "github-workflow-run/OWNER/REPO/RUN_ID",
+            "One completed CI run of a GitHub repository, written once by its repository's poller.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
@@ -2172,6 +2178,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Once,
             Some("resources"),
             true,
+            &[],
+        ),
+        (
+            github_plugin::WORKFLOW_RUN,
+            &[github_plugin::WORKFLOW_RUN_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
             &[],
         ),
         (
@@ -3280,6 +3295,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
+        github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -5200,6 +5216,8 @@ mod tests {
         }
         current.claims.get_mut(directive_notes::KIND).unwrap().fields.remove("source").unwrap();
         current.claims.get_mut("work.person-asked").unwrap().fields.remove("priority").unwrap();
+        current.claims.remove(github_plugin::WORKFLOW_RUN).unwrap();
+        current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.observed").unwrap()

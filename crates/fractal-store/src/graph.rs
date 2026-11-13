@@ -1753,15 +1753,15 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     Ok(())
 }
 
-/// An objective a fleet declares: the kernel's strict reader, and only an interval over claims
-/// named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
+/// An objective a fleet declares: the kernel's strict reader, and only an interval or count over
+/// claims named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
 fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
     let objective = crate::objective::parse(&canonical_node(node)?)?;
     if !objective.declarable() {
         return Err(FractalError::new(
             "objective-not-declarable",
             format!(
-                "objective `{}`: a fleet declares an `interval` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
+                "objective `{}`: a fleet declares an `interval` or `count` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
                 objective.name,
                 objective.indicator.kind()
             ),

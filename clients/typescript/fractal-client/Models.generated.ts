@@ -936,6 +936,7 @@ export type AssistantScope =
   | "read.assistant.agents"
   | "read.assistant.conversation"
   | "read.assistant.terminal"
+  | "read.assistant.slo"
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
   | "write.assistant.answers"
@@ -3489,6 +3490,7 @@ export type PersonStepParameters = {
 
 export type PersonUpdate = {
   about: Id;
+  speech?: string;
   subjects?: Array<RequestSubject>;
   summary?: string;
   type: "update";
