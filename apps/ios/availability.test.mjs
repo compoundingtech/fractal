@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { availabilityRows, ownAvailability, servesAvailability, whenText } from './availability.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { AXES, CLEARED, CUSTOM_HINT, REPAIR_FOR_AVAILABILITY, UNTIL_PRESETS, availabilityRows, axisChange, customUntil, ownAvailability, presetUntil, servesAvailability, whenText, writeRefusal } from './availability.ts';
 
 // Local wall-clock moments, so the expectations hold in any time zone.
 const now = new Date(2026, 10, 12, 14, 0);
@@ -82,4 +83,36 @@ test('overrides name their source, start and end', () => {
   assert.equal(open[0].context, 'Set by you');
   assert.equal(open[2].context, 'Held time is added to every deadline · since 13:00');
   assert.equal(open[3].context, 'Note for agents · until you clear it');
+});
+
+test('presets end in 30 minutes, one or two hours, or at 09:00 tomorrow even before 09:00 today', () => {
+  assert.deepEqual(UNTIL_PRESETS.map(preset => presetUntil(preset, now)), [
+    new Date(2026, 10, 12, 14, 30), new Date(2026, 10, 12, 15), new Date(2026, 10, 12, 16), new Date(2026, 10, 13, 9),
+  ]);
+  assert.deepEqual(presetUntil('Until tomorrow 9:00', new Date(2026, 10, 12, 7, 30)), new Date(2026, 10, 13, 9));
+  assert.deepEqual(presetUntil('Until tomorrow 9:00', new Date(2026, 11, 31, 23)), new Date(2027, 0, 1, 9));
+});
+
+test('a typed end is the next such clock time or a span from now', () => {
+  assert.deepEqual(customUntil('17:30', now), new Date(2026, 10, 12, 17, 30));
+  assert.deepEqual(customUntil(' 8.15 ', now), new Date(2026, 10, 13, 8, 15));
+  assert.deepEqual(customUntil('14:00', now), new Date(2026, 10, 13, 14), 'now itself has passed');
+  assert.deepEqual(customUntil('45m', now), new Date(2026, 10, 12, 14, 45));
+  assert.deepEqual(customUntil('1h30m', now), new Date(2026, 10, 12, 15, 30));
+  assert.deepEqual(customUntil('3 h', now), new Date(2026, 10, 12, 17));
+  for (const typed of ['', '0m', '24:00', '9:60', 'soon', '5']) assert.equal(customUntil(typed, now), CUSTOM_HINT, typed);
+});
+
+test('a default value clears its axis without an end; any other carries its end', () => {
+  for (const axis of Object.keys(AXES)) assert.ok(AXES[axis].choices.some(([, value]) => value === CLEARED[axis]), axis);
+  assert.deepEqual(axisChange('status', null, null), { status: { value: null } });
+  assert.deepEqual(axisChange('interruptions', 'urgent', new Date(Date.UTC(2026, 10, 12, 18))), { interruptions: { value: 'urgent', until: '2026-11-12T18:00:00.000Z' } });
+  assert.deepEqual(axisChange('deadline_clock', 'hold-all', null), { deadline_clock: { value: 'hold-all' } });
+});
+
+test('a pairing without the write scopes is told to re-pair; an agent is told only a person writes', () => {
+  const refused = (status, code, message) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message, retryable: false, details: {} }, status);
+  assert.equal(writeRefusal(refused(403, 'forbidden', 'the authenticated client session is not granted `write.availability`')), REPAIR_FOR_AVAILABILITY);
+  assert.match(writeRefusal(refused(403, 'forbidden', 'only a person writes their own availability, presence or note; agents are refused')), /^Only a person changes/);
+  assert.doesNotMatch(writeRefusal(refused(422, 'validation-failed', 'status.until must be in the future')), /re-pair/i);
 });
