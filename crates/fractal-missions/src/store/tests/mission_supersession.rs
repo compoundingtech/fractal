@@ -474,3 +474,57 @@ fn mission_supersession_respects_step_level_human_revision_policy() {
     assert_eq!(store.supersede_idle_mission_run(&retained, &first).unwrap(), None);
     assert!(retained.supersession_fault.is_none());
 }
+
+fn population(store: &Store, count: usize) -> Vec<MissionRunView> {
+    publish_mission(store, ORIGINAL, "population-original");
+    (0..count).map(|index| {
+        store.create_mission_run(&MissionRunRequest {
+            mission: "retry-work".into(), revision: None, workspace: "/work/retry".into(),
+            requester: Some("person/requester".into()), mode: None,
+            inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+            idempotency_key: format!("population-{index}"),
+        }).unwrap()
+    }).collect()
+}
+
+#[test]
+fn mission_supersession_single_head_publication_bounds_source_work_and_drains() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 193);
+    let target = publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "population-fixed");
+    let linked = sources.iter().filter(|source| current(&store, source).superseded_by.is_some()).count();
+    assert!(linked > 0 && linked <= 32,
+        "a publication writer must process at most one source batch, not the whole mission: {linked}");
+    store.supersede_mission_publications().unwrap();
+    let mut replacements = BTreeSet::new();
+    for source in &sources {
+        let fresh = replacement(&store, source);
+        assert_eq!(fresh.revision, target.revision);
+        assert_link(&current(&store, source), &fresh);
+        assert!(replacements.insert(fresh.subject.clone()));
+    }
+    assert!(!store.supersede_mission_publications().unwrap());
+    for source in &sources {
+        assert_eq!(store.claims_for(&replacement(&store, source).subject, Some("mission-run.created")).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn mission_supersession_single_head_sql_work_scales_linearly_without_warming() {
+    fn work(count: usize) -> smallclaims::sqlite::work::SqliteWork {
+        let store = Store::open_memory("owner").unwrap();
+        let sources = population(&store, count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "population-fixed");
+        store.supersede_mission_publications().unwrap();
+        let work = scope.finish();
+        assert!(sources.iter().all(|source| current(&store, source).superseded_by.is_some()));
+        work
+    }
+    let small = work(64);
+    let large = work(256);
+    assert!(large.statements < small.statements * 6,
+        "four times the population must not reload every active pinned definition for each replacement: {small:?} -> {large:?}");
+    assert!(large.vm_steps < small.vm_steps * 6,
+        "source paging and capacity admission must have bounded per-source work: {small:?} -> {large:?}");
+}
