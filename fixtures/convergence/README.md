@@ -375,4 +375,10 @@ registry. Versions 1 through 27 stay frozen. Generate it with
 do not hand-edit it. The simulation and audit reports select v28. Control draws use the person's
 native admission path over a few rows, with a snooze that sometimes ends; the focused regression
 admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
-converge. PENDING: hosted never-trim characterization of v28.
+converge.
+
+Hosted [burst run 43505757629](https://github.com/compoundingtech/fractal/actions/runs/43505757629)
+observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
+This includes v27's non-trimming seed 21 and the earlier provisional controls seeds 610 and 1597.
+The exact v28 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
+no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
