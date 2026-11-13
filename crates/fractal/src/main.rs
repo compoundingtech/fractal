@@ -99,7 +99,6 @@ mod hosts_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
-mod hosts_cli;
 mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
