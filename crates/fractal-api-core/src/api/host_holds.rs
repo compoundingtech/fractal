@@ -58,10 +58,13 @@ mod tests {
         let wake = state.notify.notified();
         tokio::pin!(wake);
         wake.as_mut().enable();
-        release(State(state.clone()), None, Json(ReleaseHostHold {
+        let Json(released) = release(State(state.clone()), None, Json(ReleaseHostHold {
             actor: hold.owner, host: hold.host, id: hold.id, expected_revision: hold.revision,
             resolution: "repaired".into(),
         })).await.unwrap();
+        assert_eq!(released.revision, hold.revision + 1);
+        assert_eq!(released.resolution.as_deref(), Some("repaired"));
+        assert!(released.released_at_unix_ms.is_some());
         assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
             std::future::Future::poll(wake.as_mut(), context).is_ready())).await);
         assert!(client_attention_resources(&state.store, Some("person/operator"), false).unwrap()
