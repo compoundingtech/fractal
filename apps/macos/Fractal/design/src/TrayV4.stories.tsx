@@ -7,13 +7,7 @@ import type { Meta, StoryObj } from '@storybook/react'
 
 import { MenuBarItem, menuBarStateIds } from './MenuBarItem.tsx'
 import { RenderedPanel } from './RenderedPanel.tsx'
-import {
-  appearances,
-  heightOf,
-  menuBarStates,
-  scenarioById,
-  v3History,
-} from './renders.ts'
+import { appearances, heightOf, menuBarStates, scenarioById, v3History } from './renders.ts'
 
 type Decision = { readonly id: string; readonly text: string }
 
@@ -39,30 +33,88 @@ const round: readonly Decision[] = [
 
 /** Earlier decisions V4 keeps. */
 const kept: readonly Decision[] = [
-  { id: 'K1', text: 'No panel background: the menu-bar window’s glass is the surface; tiles and groups are content-layer fills, never glass on glass.' },
-  { id: 'K2', text: 'Text styles only: one headline per page (its title), subheadline semibold secondary section labels, footnote metadata.' },
-  { id: 'K3', text: 'One leading edge, the 14 pt inset: the top level’s rows and section labels, an ask page’s labels and platters, and a module page’s groups, section labels and footers (not the grouped Form’s 20 pt groups and 30 pt labels).' },
-  { id: 'K4', text: 'At most one prominent button per page: an ask’s recommended answer (never a decline, never one that needs words), while nothing is typed; an update’s Mark Read. No answer takes Return.' },
-  { id: 'K5', text: 'No hover-only actions: rows highlight under the pointer as feedback, every action is in place on the page.' },
-  { id: 'K7', text: 'Urgency is a symbol plus weight (urgent bubble, clock badge + semibold deadline), never color alone.' },
-  { id: 'K9', text: 'Typed answers and the note draft live on the model: they survive the panel closing, and the row shows a pencil.' },
+  {
+    id: 'K1',
+    text: 'No panel background: the menu-bar window’s glass is the surface; tiles and groups are content-layer fills, never glass on glass.',
+  },
+  {
+    id: 'K2',
+    text: 'Text styles only: one headline per page (its title), subheadline semibold secondary section labels, footnote metadata.',
+  },
+  {
+    id: 'K3',
+    text: 'One leading edge, the 14 pt inset: the top level’s rows and section labels, an ask page’s labels and platters, and a module page’s groups, section labels and footers (not the grouped Form’s 20 pt groups and 30 pt labels).',
+  },
+  {
+    id: 'K4',
+    text: 'At most one prominent button per page: an ask’s recommended answer (never a decline, never one that needs words), while nothing is typed; an update’s Mark Read. No answer takes Return.',
+  },
+  {
+    id: 'K5',
+    text: 'No hover-only actions: rows highlight under the pointer as feedback, every action is in place on the page.',
+  },
+  {
+    id: 'K7',
+    text: 'Urgency is a symbol plus weight (urgent bubble, clock badge + semibold deadline), never color alone.',
+  },
+  {
+    id: 'K9',
+    text: 'Typed answers and the note draft live on the model: they survive the panel closing, and the row shows a pencil.',
+  },
   { id: 'K10', text: 'Settings… (⌘,) holds Show in Menu Bar and, new in V4, Quit (⌘Q).' },
-  { id: 'K11', text: 'Offline keeps the last data, says since when, and offers Try Again; the status item swaps to the sync-problem symbol.' },
-  { id: 'K12', text: 'Histograms (Objectives page): Swift Charts bars per hour, shape-coded unmeasured and spent hours, a key under each chart.' },
-  { id: 'K13', text: 'Snooze (presets) and Dismiss sit on the page, icon-only and named; outcomes are words; a committed answer or control returns to the top level with a receipt row.' },
+  {
+    id: 'K11',
+    text: 'Offline keeps the last data, says since when, and offers Try Again; the status item swaps to the sync-problem symbol.',
+  },
+  {
+    id: 'K12',
+    text: 'Histograms (Objectives page): Swift Charts bars per hour, shape-coded unmeasured and spent hours, a key under each chart.',
+  },
+  {
+    id: 'K13',
+    text: 'Snooze (presets) and Dismiss sit on the page, icon-only and named; outcomes are words; a committed answer or control returns to the top level with a receipt row.',
+  },
 ]
 
 /** Where V4 follows Control Center and where it departs, with the reason. */
-const benchmarks: readonly { readonly what: string; readonly native: string; readonly v4: string }[] = [
-  { what: 'Panel width', native: '≈306–310 pt (Tahoe CC and module pages)', v4: '360 pt: a row carries title, asker and age on one line (n2)' },
+const benchmarks: readonly {
+  readonly what: string
+  readonly native: string
+  readonly v4: string
+}[] = [
+  {
+    what: 'Panel width',
+    native: '≈306–310 pt (Tahoe CC and module pages)',
+    v4: '360 pt: a row carries title, asker and age on one line (n2)',
+  },
   { what: 'Content inset', native: '14 pt', v4: '14 pt' },
   { what: 'Row highlight', native: 'inset 6 pt, 10 pt continuous radius', v4: 'same' },
-  { what: 'Rows', native: 'icon rows 30 pt (26 pt circle), text rows 22 pt', v4: '28 pt one-line rows (n2)' },
-  { what: 'Tiles', native: '4-slot grid, 2×1 capsule 140 × 64 pt, 34–36 pt circle', v4: 'three equal capsules ≈ 110 × 38 pt, 28 pt circle: one row for three modules that each toggle and drill' },
+  {
+    what: 'Rows',
+    native: 'icon rows 30 pt (26 pt circle), text rows 22 pt',
+    v4: '28 pt one-line rows (n2)',
+  },
+  {
+    what: 'Tiles',
+    native: '4-slot grid, 2×1 capsule 140 × 64 pt, 34–36 pt circle',
+    v4: 'three equal capsules ≈ 110 × 38 pt, 28 pt circle: one row for three modules that each toggle and drill',
+  },
   { what: 'On state', native: 'white circle, tinted symbol', v4: 'same' },
-  { what: 'Page header', native: '13 pt bold title, trailing switch, no back chevron', v4: 'same plus a back chevron (n1) and Esc' },
-  { what: 'Trailing row', native: '“… Settings…” as a 22 pt text row', v4: 'Settings… with version and refresh' },
-  { what: 'Transition', native: 'undocumented; the panel resizes', v4: 'push: pages enter from and leave to the trailing edge, critically damped 0.32 s; a cross-fade with Reduce Motion. VoiceOver moves to the page title, and back to the row or tile' },
+  {
+    what: 'Page header',
+    native: '13 pt bold title, trailing switch, no back chevron',
+    v4: 'same plus a back chevron (n1) and Esc',
+  },
+  {
+    what: 'Trailing row',
+    native: '“… Settings…” as a 22 pt text row',
+    v4: 'Settings… with version and refresh',
+  },
+  {
+    what: 'Transition',
+    native: 'undocumented; the panel resizes',
+    v4: 'push: pages enter from and leave to the trailing edge, critically damped 0.32 s; a cross-fade with Reduce Motion. VoiceOver moves to the page title, and back to the row or tile',
+  },
 ]
 
 const sources = [
@@ -147,9 +199,9 @@ const Space = () => {
         </tbody>
       </table>
       <p className="at-gallery-description">
-        Light appearance. “As shown” caps scrolling content at each design’s live limit (V3: 620
-        pt of Form at 400 pt wide; V4: 520 pt of page at 360 pt wide). {v3History?.heightsSource}.
-        V4’s top level never scrolls in these scenarios; an ask’s page scrolls inside the panel.
+        Light appearance. “As shown” caps scrolling content at each design’s live limit (V3: 620 pt
+        of Form at 400 pt wide; V4: 520 pt of page at 360 pt wide). {v3History?.heightsSource}. V4’s
+        top level never scrolls in these scenarios; an ask’s page scrolls inside the panel.
       </p>
     </section>
   )
@@ -245,7 +297,14 @@ export const AskPages: Story = {
   render: () => (
     <div className="at-gallery">
       <Scenarios
-        ids={['ask-decision', 'ask-choice', 'ask-feedback', 'ask-in-fractal', 'update-page', 'ask-sending']}
+        ids={[
+          'ask-decision',
+          'ask-choice',
+          'ask-feedback',
+          'ask-in-fractal',
+          'update-page',
+          'ask-sending',
+        ]}
       />
     </div>
   ),
@@ -256,7 +315,13 @@ export const TilePages: Story = {
   render: () => (
     <div className="at-gallery">
       <Scenarios
-        ids={['page-availability', 'speech-speaking', 'speech-in-call', 'speech-muted', 'page-objectives']}
+        ids={[
+          'page-availability',
+          'speech-speaking',
+          'speech-in-call',
+          'speech-muted',
+          'page-objectives',
+        ]}
       />
     </div>
   ),

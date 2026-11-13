@@ -144,7 +144,7 @@ collection, but `FractalClient` has no typed attention or availability stream.
     removed; an answered one stays as its receipt.
   - **Log.** Each verdict and outcome is logged once per item revision
     (`speech attention/…#rev from agent: urgent, queued` or `asked to be told,
-    queued`, `speaking`, then `spoken`, `skipped` or the service's failure),
+queued`, `speaking`, then `spoken`, `skipped` or the service's failure),
     plus mutes and call starts and ends; spoken text never enters the log. The
     tray waits 30 seconds for `queued`, then 60 seconds plus 30 seconds of
     margin for the result.
