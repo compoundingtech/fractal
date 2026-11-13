@@ -152,11 +152,13 @@ extension PageHeader where Trailing == EmptyView {
 
   /// Pushes a page, then reads what it shows.
   static func open(_ route: PanelRoute, in model: AttentionModel) {
+    PanelPerformance.begin()
     withAnimation(push) { model.open(route) }
     Task { await model.readOpenPage() }
   }
 
   static func back(in model: AttentionModel) {
+    PanelPerformance.begin()
     withAnimation(push) { model.back() }
   }
 }

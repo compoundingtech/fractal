@@ -7,10 +7,8 @@ struct RelativeTime: View {
   var prefix: String?
 
   var body: some View {
-    TimelineView(.periodic(from: .now, by: 30)) { context in
-      Text([prefix, Self.relative(date, now: context.date)].compactMap { $0 }.joined(separator: " "))
-        .help(Absolute.text(date))
-    }
+    Text([prefix, Self.relative(date, now: PanelMinuteClock.shared.now)].compactMap { $0 }.joined(separator: " "))
+      .help(Absolute.text(date))
   }
 
   static func relative(_ date: Date, now: Date) -> String {
@@ -195,12 +193,12 @@ struct PanelForm<Content: View>: View {
   @ViewBuilder let content: () -> Content
 
   var body: some View {
-    Form(content: content)
-      .formStyle(.grouped)
-      .scrollContentBackground(.hidden)
-      .contentMargins(.horizontal, PanelMetrics.inset - PanelMetrics.formMargin, for: .scrollContent)
-      .frame(maxHeight: maxHeight)
-      .fixedSize(horizontal: false, vertical: true)
+    PanelScrollLayout(cap: maxHeight) {
+      Form(content: content)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .contentMargins(.horizontal, PanelMetrics.inset - PanelMetrics.formMargin, for: .scrollContent)
+    }
   }
 }
 

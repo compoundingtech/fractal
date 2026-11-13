@@ -114,6 +114,9 @@ public enum AnswerState: Sendable, Equatable {
   /// on every refresh while it is open on screen; a failed read keeps the last one, marked stale.
   public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
   public internal(set) var excerpts: [String: LiveSection<ConversationExcerpt?>] = [:]
+  // Successful identical polls advance freshness without invalidating page content.
+  @ObservationIgnored var contextReadAt: [String: Date] = [:]
+  @ObservationIgnored var excerptReadAt: [String: Date] = [:]
   /// Image attachments by SHA-256; content-addressed, so read once, and kept only while a
   /// kept context still names them.
   public internal(set) var attachments: [String: LiveSection<Data>] = [:]
@@ -238,27 +241,22 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  /// Reads the histories that are due concurrently and keeps the rest. A failed row keeps its
-  /// last history and marks the section stale with its reason; the next refresh retries it.
+  /// Reads due histories serially to avoid a burst of transport queues/threads, keeping the rest.
+  /// A failed row keeps its last history and marks the section stale; the next refresh retries it.
   private func readSloHistory(_ rows: [SloEntry], from adapter: any AttentionAdapter, now: Date?) async {
     let started = now ?? .now
     sloHistoryCache.keep(rows)
     let listed = Set(rows.map(\.id))
     var histories = (sloHistory.value ?? [:]).filter { listed.contains($0.key) }
     var failure: Error?
-    await withTaskGroup(of: (SloEntry, Result<SloHistory, Error>).self) { group in
-      for row in sloHistoryCache.due(rows, now: started) {
-        let request = SloHistoryRequest(id: row.id, until: started)
-        group.addTask { (row, await Self.capture { try await adapter.readSloHistory(request) }) }
-      }
-      for await (row, result) in group {
-        switch result {
-        case .success(let history):
-          histories[row.id] = history
-          sloHistoryCache.read(row, at: started)
-        case .failure(let error):
-          failure = failure ?? error
-        }
+    for row in sloHistoryCache.due(rows, now: started) {
+      let request = SloHistoryRequest(id: row.id, until: started)
+      switch await Self.capture({ try await adapter.readSloHistory(request) }) {
+      case .success(let history):
+        histories[row.id] = history
+        sloHistoryCache.read(row, at: started)
+      case .failure(let error):
+        failure = failure ?? error
       }
     }
     sloHistory.value = histories
@@ -294,10 +292,15 @@ public enum AnswerState: Sendable, Equatable {
       return open.contains(id)
     }
     answerDrafts = answerDrafts.filter { open.contains($0.key) }
-    contexts = contexts.filter { open.contains($0.key) }
-    excerpts = excerpts.filter { open.contains($0.key) }
-    let named = Set(contexts.values.flatMap { $0.value?.request?.attachments.map(\.sha256) ?? [] })
-    attachments = attachments.filter { named.contains($0.key) }
+    let keptContexts = contexts.filter { open.contains($0.key) }
+    if contexts != keptContexts { contexts = keptContexts }
+    let keptExcerpts = excerpts.filter { open.contains($0.key) }
+    if excerpts != keptExcerpts { excerpts = keptExcerpts }
+    contextReadAt = contextReadAt.filter { open.contains($0.key) }
+    excerptReadAt = excerptReadAt.filter { open.contains($0.key) }
+    let named = Set(keptContexts.values.flatMap { $0.value?.request?.attachments.map(\.sha256) ?? [] })
+    let keptAttachments = attachments.filter { named.contains($0.key) }
+    if attachments != keptAttachments { attachments = keptAttachments }
     if let focused = focusedInput, focused != Self.noteInput, !open.contains(focused) { focusedInput = nil }
     let shown = Set(page.records.filter { !$0.isSnoozed(at: snoozeClock) }.map(\.id))
     controls = controls.filter { id, state in

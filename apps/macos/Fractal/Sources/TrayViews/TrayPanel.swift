@@ -26,6 +26,7 @@ public struct TrayPanel: View {
     }
     .frame(width: width, alignment: .top)
     .clipped()
+    .background(PanelFrameMarker(route: model.route))
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)
   }

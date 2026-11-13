@@ -31,13 +31,13 @@ struct PanelScroll<Content: View>: View {
   @ViewBuilder let content: () -> Content
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 0, content: content)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
+    PanelScrollLayout(cap: maxHeight) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0, content: content)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.vertical, 4)
+      }
     }
-    .frame(maxHeight: maxHeight)
-    .fixedSize(horizontal: false, vertical: true)
   }
 }
 
@@ -441,11 +441,9 @@ struct ShortAge: View {
   let date: Date
 
   var body: some View {
-    TimelineView(.periodic(from: .now, by: 30)) { context in
-      Text(Self.text(date, now: context.date))
-        .monospacedDigit()
-        .help(Absolute.text(date))
-    }
+    Text(Self.text(date, now: PanelMinuteClock.shared.now))
+      .monospacedDigit()
+      .help(Absolute.text(date))
   }
 
   static func text(_ date: Date, now: Date) -> String {

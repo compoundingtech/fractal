@@ -366,9 +366,30 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(reads.count, 3, "a page on screen is re-read on every refresh")
     XCTAssertEqual(model.contexts[ask.id]?.value, context, "a failed reread keeps the last detail")
     XCTAssertEqual(model.contexts[ask.id]?.state, .stale(lastSuccess: now, reason: "member gone"))
-    XCTAssertEqual(model.excerpts[ask.id]?.state, .fresh(now + 60), "the conversation is read on its own")
+    XCTAssertEqual(model.excerpts[ask.id]?.state, .fresh(now), "identical successful reads do not rewrite the conversation")
     let imageReads = await adapter.attachmentReads
     XCTAssertEqual(imageReads, ["abc"], "an image is content-addressed: read once")
+  }
+
+  func testIdenticalPageReadsKeepSectionsStableButFailureUsesLatestSuccessfulRead() async {
+    let ask = Fixture.record(request: Fixture.decision())
+    let page = AttentionPage(records: [ask], canAnswer: true)
+    let adapter = FakeAdapter(attention: [.success(page), .success(page)], slo: [.success(slo), .success(slo)])
+    await adapter.setContext(AttentionContext(detail: "unchanged", request: nil))
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(ask.id))
+    await model.readOpenPage(now: now)
+    let contexts = model.contexts
+    let excerpts = model.excerpts
+    await model.refresh(now: now + 30) // Includes pruning, which must not rewrite sections either.
+    await model.readOpenPage(now: now + 30)
+    XCTAssertEqual(model.contexts, contexts)
+    XCTAssertEqual(model.excerpts, excerpts)
+    await adapter.failContext("offline")
+    await model.readOpenPage(now: now + 60)
+    XCTAssertEqual(model.contexts[ask.id]?.state, .stale(lastSuccess: now + 30, reason: "offline"))
+    XCTAssertEqual(model.excerpts, excerpts, "a failing context does not invalidate an unchanged excerpt")
   }
 
   func testBackRemembersThePageAndClosingThePanelReturnsToTheTopLevelKeepingDrafts() async {

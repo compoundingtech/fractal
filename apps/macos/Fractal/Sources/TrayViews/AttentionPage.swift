@@ -405,10 +405,11 @@ private struct Attachments: View {
 private struct AttachmentImage: View {
   let attachment: AttachmentRef
   let section: LiveSection<Data>?
+  @State private var image: NSImage?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 3) {
-      if let data = section?.value, let image = NSImage(data: data) {
+      if let image {
         Image(nsImage: image)
           .resizable()
           .scaledToFit()
@@ -425,6 +426,9 @@ private struct AttachmentImage: View {
           .accessibilityLabel("Loading image")
       }
       if let name = attachment.name { Text(name).font(.subheadline).foregroundStyle(.secondary) }
+    }
+    .task(id: section?.value) {
+      image = section?.value.flatMap { RenderedContent.shared.image($0) }
     }
   }
 }

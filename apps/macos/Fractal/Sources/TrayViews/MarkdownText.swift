@@ -10,7 +10,7 @@ struct MarkdownText: View {
   var lineLimit: Int?
 
   var body: some View {
-    let blocks = Array(Markdown.blocks(text).enumerated())
+    let blocks = RenderedContent.shared.blocks(text)
     Group {
       if let lineLimit {
         LineCappedStack(lines: lineLimit, spacing: 6) {
@@ -65,9 +65,7 @@ struct MarkdownText: View {
 
   /// Inline markdown; text that does not parse shows as written.
   static func inline(_ text: String) -> Text {
-    let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    if let attributed = try? AttributedString(markdown: text, options: options) { return Text(attributed) }
-    return Text(verbatim: text)
+    Text(RenderedContent.shared.inline(text))
   }
 }
 

@@ -131,6 +131,11 @@ if arguments.first == "--capture" {
 _ = NSApplication.shared
 NSApp.setActivationPolicy(.prohibited)
 
+if arguments == ["--scroll-probe"] {
+  await ScrollProbe.run()
+  exit(0)
+}
+
 let wanted = Set(arguments)
 if let unknown = wanted.subtracting(panels.map(\.id) + variantScenarios.map(\.scenario.id) + noticeScenarios.map(\.id)).first {
   fail("unknown scenario \(unknown)", code: 2)

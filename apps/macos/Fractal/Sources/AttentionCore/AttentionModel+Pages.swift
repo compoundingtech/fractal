@@ -37,13 +37,15 @@ extension AttentionModel {
     async let excerpt = Self.capture { try await adapter.readExcerpt(record) }
     let (contextResult, excerptResult) = await (context, excerpt)
     var contextSection = contexts[id] ?? LiveSection()
-    Self.apply(contextResult, to: &contextSection, now: now ?? .now)
+    Self.applyPage(contextResult, to: &contextSection, lastRead: &contextReadAt[id], now: now ?? .now)
     var excerptSection = excerpts[id] ?? LiveSection()
-    Self.apply(excerptResult, to: &excerptSection, now: now ?? .now)
+    Self.applyPage(excerptResult, to: &excerptSection, lastRead: &excerptReadAt[id], now: now ?? .now)
     // The card may have left while these were read.
     guard self.record(id: id) != nil else { return }
-    contexts[id] = contextSection
-    excerpts[id] = excerptSection
+    // Fresh timestamps alone are not a content change. Keep the observable sections stable
+    // on a successful identical read; failures and recovery still publish their state.
+    if !Self.samePageSection(contexts[id], contextSection) { contexts[id] = contextSection }
+    if !Self.samePageSection(excerpts[id], excerptSection) { excerpts[id] = excerptSection }
     await readAttachments(contextSection.value?.request?.attachments ?? [], from: adapter, now: now)
   }
 
@@ -56,8 +58,24 @@ extension AttentionModel {
       for await (sha, result) in group {
         var section = attachments[sha] ?? LiveSection()
         Self.apply(result, to: &section, now: now ?? .now)
-        attachments[sha] = section
+        if attachments[sha] != section { attachments[sha] = section }
       }
     }
+  }
+
+  private static func applyPage<T: Sendable & Equatable>(
+    _ result: Result<T, Error>, to section: inout LiveSection<T>, lastRead: inout Date?, now: Date
+  ) {
+    // Retain the true most-recent successful read for a later stale error, even when the
+    // observable fresh section intentionally retains its old timestamp.
+    if case .failure = result, let lastRead { section.state = .fresh(lastRead) }
+    Self.apply(result, to: &section, now: now)
+    if case .success = result { lastRead = now }
+  }
+
+  private static func samePageSection<T: Sendable & Equatable>(_ old: LiveSection<T>?, _ new: LiveSection<T>) -> Bool {
+    guard let old, old.value == new.value else { return false }
+    if case .fresh = old.state, case .fresh = new.state { return true }
+    return old == new
   }
 }
