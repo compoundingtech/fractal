@@ -1070,7 +1070,7 @@ impl RuntimeStartsStore for Store {
     }
 
     fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
-        self.connection
+        let changed = self.connection
             .batched(|tx| -> Result<bool> {
                 let operation =
                     tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
@@ -1096,9 +1096,17 @@ impl RuntimeStartsStore for Store {
                     /* sqlite-large-value: allow-for-now lv-h3c233cfbc1f1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::StartupFailed, Some(&result))?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::ProducerClosed, Some(&result))?;
                 Ok(true)
             })
-            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        if changed {
+            self.finish_invocation_trace(&format!("invocation/{id}"), true);
+        }
+        Ok(changed)
     }
 
     fn runtime_start_applied(&self, id: &str) -> Result<()> {
@@ -1206,6 +1214,31 @@ mod tests {
     use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn initially_unverified_launch_retains_later_producer_closure_and_ends_trace() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/unverified-closure";
+        let mut start = operation("unverified-closure", agent, None);
+        let invocation = format!("invocation/{}", start.id);
+        let trace = store.start_invocation_trace(&invocation, agent, &[]);
+        start.body["trace_context"] = serde_json::to_value(&trace).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "candidate_incarnation":"candidate", "incarnation":null,
+            "verification":"launch-accepted-unverified"
+        })).unwrap();
+        assert!(store.close_unverified_runtime_start(&start.id).unwrap());
+        assert!(!store.close_unverified_runtime_start(&start.id).unwrap());
+        let receipts = store.invocation_receipts(&invocation).unwrap();
+        for phase in [InvocationPhase::StartupFailed, InvocationPhase::ProducerClosed] {
+            let receipt = receipts.iter().find(|receipt| receipt.phase == phase).unwrap();
+            assert_eq!(receipt.incarnation, None);
+            assert_eq!(receipt.error.as_deref(), Some("producer closed without a verified launch"));
+            assert_eq!(receipt.trace_context, Some(serde_json::to_value(&trace).unwrap()));
+        }
+        assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
 
     #[test]
     fn mission_publication_fences_unpaged_owned_and_legacy_gate_starts_at_every_boundary() {
