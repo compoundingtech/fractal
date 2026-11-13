@@ -902,39 +902,74 @@ mod tests {
         let current = grant(&store, &holder, wall());
         let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: None, require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
-        let generation = runtime.spawn_in_lane_checked("holder", &fractal_runtime::Launch::Argv(vec!["sleep".into(), "60".into()]),
-            root.path(), &std::env::vars().collect(), &policy, &|| Ok(())).unwrap();
+        let binding = fractal_runtime::ResourceExecutionBinding {
+            membership_id: current.membership_id.clone(), generation: current.generation.clone(),
+            authority_epoch: current.authority_epoch.clone(),
+        };
+        let generation = runtime.spawn_in_lane_authorized("holder", &fractal_runtime::Launch::Argv(vec!["sleep".into(), "60".into()]),
+            root.path(), &std::env::vars().collect(), &policy, &binding, &|| Ok(()),
+            &|execution, release| store.release_resource_payload(&current, "holder", execution, release)).unwrap();
         store.launch_resource_membership(&current, "holder", &generation, wall()).unwrap();
         let waiters = (0..8).map(|index| {
             let mut waiter = request(&format!("native-{index}"));
             waiter.name.clone_from(&holder.name);
             waiter
         }).collect::<Vec<_>>();
+        let mut queued_at = Vec::new();
         for waiter in &waiters {
+            queued_at.push(std::time::Instant::now());
             assert!(matches!(store.request_resource_membership(waiter, Fit::default(), wall()).unwrap(), Admission::Queued { .. }));
         }
         let cancel_started = std::time::Instant::now();
         store.cancel_resource_membership(&current, &holder.owner, wall()).unwrap();
         assert!(store.retire_resource_membership(&current, &holder.owner, &runtime, wall()).unwrap());
         let cancelled_after = cancel_started.elapsed();
+        assert!(runtime.retired_if("holder", &generation.generation_id).unwrap());
         let mut handoffs = Vec::new();
+        let mut queue_waits = Vec::new();
+        let mut execution_observed = Vec::new();
+        let mut retirements = Vec::new();
+        let mut max_holders = 0;
         for (index, waiter) in waiters.iter().enumerate() {
             let started = std::time::Instant::now();
             let next = grant(&store, waiter, wall());
+            queue_waits.push(queued_at[index].elapsed().as_secs_f64() * 1000.0);
+            let holders = store.resource_memberships_for_host(&holder.host).unwrap().into_iter()
+                .filter(|member| matches!(member.state.as_str(), "admitted" | "launched" | "retiring" | "uncertain")).count();
+            max_holders = max_holders.max(holders);
+            assert_eq!(holders, 1, "capacity-one admission must retain exclusive custody");
             let id = format!("payload-{index}");
             store.prepare_resource_membership(&next, &id).unwrap();
-            let generation = runtime.spawn_in_lane_checked(&id, &fractal_runtime::Launch::Argv(vec!["true".into()]),
-                root.path(), &std::env::vars().collect(), &policy, &|| Ok(())).unwrap();
+            let binding = fractal_runtime::ResourceExecutionBinding {
+                membership_id: next.membership_id.clone(), generation: next.generation.clone(),
+                authority_epoch: next.authority_epoch.clone(),
+            };
+            let generation = runtime.spawn_in_lane_authorized(&id, &fractal_runtime::Launch::Argv(vec!["true".into()]),
+                root.path(), &std::env::vars().collect(), &policy, &binding, &|| Ok(()),
+                &|execution, release| store.release_resource_payload(&next, &id, execution, release)).unwrap();
             store.launch_resource_membership(&next, &id, &generation, wall()).unwrap();
             handoffs.push(started.elapsed().as_secs_f64() * 1000.0);
             let ended = runtime.wait_for_exit(&id, &generation.generation_id).unwrap();
             assert_eq!(ended.exit_code, Some(0));
+            execution_observed.push(std::time::Duration::from_millis(wall().saturating_sub(
+                u64::try_from(generation.payload_released_at_unix_ms.unwrap()).unwrap())).as_secs_f64() * 1000.0);
             store.end_resource_execution(&next, &id, wall()).unwrap();
+            let retiring = std::time::Instant::now();
             assert!(store.retire_resource_membership(&next, &waiter.owner, &runtime, wall()).unwrap());
+            retirements.push(retiring.elapsed().as_secs_f64() * 1000.0);
+            assert!(runtime.retired_if(&id, &generation.generation_id).unwrap());
         }
+        assert_eq!(max_holders, 1);
+        let records = store.resource_memberships_for_host(&holder.host).unwrap();
+        assert_eq!(records.len(), 9);
+        assert!(records.iter().all(|member| member.state == "retired"), "all holder and waiter custody must retire");
+        queue_waits.sort_by(f64::total_cmp);
+        execution_observed.sort_by(f64::total_cmp);
+        retirements.sort_by(f64::total_cmp);
         handoffs.sort_by(f64::total_cmp);
-        eprintln!("native resource benchmark: N=8, capacity=1, completed=8, cancel_to_empty_ms={:.3}, admission_to_payload_median_ms={:.3}, max_ms={:.3}",
-            cancelled_after.as_secs_f64() * 1000.0, handoffs[4], handoffs[7]);
+        eprintln!("native resource benchmark: N=8, capacity=1, completed=8, max_holders={max_holders}, final_active=0, cancel_to_empty_ms={:.3}, admission_to_payload_median_ms={:.3}, max_ms={:.3}, queue_wait_median_ms={:.3}, queue_wait_max_ms={:.3}, execution_observed_median_ms={:.3}, execution_observed_max_ms={:.3}, retirement_median_ms={:.3}, retirement_max_ms={:.3}",
+            cancelled_after.as_secs_f64() * 1000.0, handoffs[4], handoffs[7], queue_waits[4], queue_waits[7],
+            execution_observed[4], execution_observed[7], retirements[4], retirements[7]);
     }
 
     #[test]
