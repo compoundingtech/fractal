@@ -909,13 +909,14 @@ fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
     let tool = serde_json::to_value(tool_definitions(Profile::Mcp).into_iter()
         .find(|tool| tool.name == AVAILABILITY_GET).unwrap()).unwrap();
     let description = tool["description"].as_str().unwrap();
-    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note"] {
+    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note", "unreported"] {
         assert!(description.contains(phrase), "{phrase}: {description}");
     }
     assert_eq!(tool["inputSchema"]["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["max_response_bytes"]);
     let value = &tool["outputSchema"]["oneOf"][0]["properties"]["value"];
     let availability = &value["properties"]["availability"];
     assert_eq!(availability["properties"]["status"], json!({"enum":["available","away"]}));
+    assert_eq!(availability["properties"]["status_source"], json!({"enum":["override","presence","unreported"]}));
     assert_eq!(availability["properties"]["presence"], json!({"type":"null"}), "assistants never see raw presence");
     assert_eq!(availability["properties"]["presence_observed_at"], json!({"type":"null"}));
     assert_eq!(availability["properties"]["interruptions"], json!({"enum":["all","urgent","none"]}));

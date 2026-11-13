@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use fractal_client::{
     AvailabilityDeadlineClockChange, AvailabilityInterruptionsChange, AvailabilitySet,
-    AvailabilityStatusChange, PersonAvailability, PresenceReport,
+    AvailabilityStatusChange, AvailabilityStatusSource, PersonAvailability, PresenceReport,
 };
 use fractal_daemon::client::Endpoint;
 
@@ -35,11 +35,16 @@ enum AvailabilityCommand {
         #[arg(value_enum)]
         axes: Vec<Axis>,
     },
-    /// Report this device's presence, as a paired client does. Persons only.
+    /// Report this device's state, as a paired client does on each transition. Persons only.
     Presence {
-        #[arg(value_parser = ["present", "idle", "locked"])]
-        presence: String,
-        /// When the device observed it, UTC RFC3339; defaults to now.
+        /// active: in use; inactive: idle at the screen; locked; sleeping.
+        #[arg(value_parser = ["active", "inactive", "locked", "sleeping"])]
+        state: String,
+        /// The device's last user input, UTC RFC3339; the daemon counts an active device present
+        /// until ten minutes after it.
+        #[arg(long, value_name = "RFC3339")]
+        last_input_at: Option<String>,
+        /// When the device observed the state, UTC RFC3339; defaults to now.
         #[arg(long, value_name = "RFC3339")]
         observed_at: Option<String>,
     },
@@ -144,7 +149,12 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
     let at = |label: &str, time: &Option<String>| {
         time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
     };
-    let source = if availability.status_source == "override" { "set" } else { "from presence" };
+    let source = match availability.status_source {
+        AvailabilityStatusSource::Override => "set",
+        AvailabilityStatusSource::Presence => "from presence",
+        AvailabilityStatusSource::Unreported => "no device reporting",
+        AvailabilityStatusSource::Unknown => "source not known to this client",
+    };
     let mut block = format!("{}\n", availability.person);
     let _ = writeln!(
         block,
@@ -221,15 +231,21 @@ pub(super) async fn run(
             .availability_set(&clear_request(&axes))
             .await
             .context("could not clear your availability")?,
-        Some(AvailabilityCommand::Presence { presence, observed_at }) => {
-            let observed_at = match observed_at.as_deref() {
-                Some(at) => parse_time(at, "--observed-at")?,
-                None => utc_millis(now),
-            };
-            client
-                .presence_report(&PresenceReport { presence, observed_at })
+        Some(AvailabilityCommand::Presence { state, last_input_at, observed_at }) => {
+            let reported = client
+                .presence_report(&presence_request(state, last_input_at.as_deref(), observed_at.as_deref(), now)?)
                 .await
                 .context("could not report your presence")?
+                .value;
+            if json_output {
+                return super::print_value(&reported, true);
+            }
+            print!("{}", render_block(&reported.availability));
+            match &reported.report_again_at {
+                Some(at) => println!("Report again at {at} if the state has not changed by then."),
+                None => println!("Report again on the next state change or input."),
+            }
+            return Ok(());
         }
     }
     .value;
@@ -238,6 +254,24 @@ pub(super) async fn run(
     }
     print!("{}", render_block(&changed));
     Ok(())
+}
+
+/// A presence report for `state`; times are normalized to UTC milliseconds, `observed_at`
+/// defaulting to `now`.
+fn presence_request(
+    state: String,
+    last_input_at: Option<&str>,
+    observed_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PresenceReport> {
+    Ok(PresenceReport {
+        state,
+        last_input_at: last_input_at.map(|at| parse_time(at, "--last-input-at")).transpose()?,
+        observed_at: match observed_at {
+            Some(at) => parse_time(at, "--observed-at")?,
+            None => utc_millis(now),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -328,30 +362,45 @@ mod tests {
     }
 
     #[test]
-    fn availability_presence_offers_only_reportable_values() {
-        let args = parse(&["presence", "idle", "--observed-at", "2026-11-12T17:00:00Z"]);
-        let Some(AvailabilityCommand::Presence { presence, observed_at }) = args.command else { panic!("expected presence") };
-        assert_eq!(presence, "idle");
-        assert_eq!(observed_at.as_deref(), Some("2026-11-12T17:00:00Z"));
-        assert!(refused(&["presence", "unknown"]));
+    fn availability_presence_reports_raw_device_states_with_utc_times() {
+        let args = parse(&[
+            "presence", "active", "--last-input-at", "2026-11-12T18:55:00+01:00", "--observed-at", "2026-11-12T17:00:00Z",
+        ]);
+        let Some(AvailabilityCommand::Presence { state, last_input_at, observed_at }) = args.command else {
+            panic!("expected presence")
+        };
+        assert_eq!(
+            serde_json::to_value(
+                presence_request(state, last_input_at.as_deref(), observed_at.as_deref(), at("2026-11-12T17:01:00Z"))
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"state": "active", "last_input_at": "2026-11-12T17:55:00.000Z", "observed_at": "2026-11-12T17:00:00.000Z"})
+        );
+        assert_eq!(
+            serde_json::to_value(presence_request("locked".into(), None, None, at("2026-11-12T17:01:00Z")).unwrap()).unwrap(),
+            json!({"state": "locked", "observed_at": "2026-11-12T17:01:00.000Z"})
+        );
+        assert!(presence_request("active".into(), Some("soon"), None, at("2026-11-12T17:01:00Z")).is_err());
+        for state in ["inactive", "sleeping"] {
+            assert!(!refused(&["presence", state]), "{state}");
+        }
+        for derived in ["present", "idle", "unreported", "unknown"] {
+            assert!(refused(&["presence", derived]), "{derived} is derived by the daemon, not reported");
+        }
         assert!(refused(&["presence"]));
     }
 
     #[test]
     fn availability_block_shows_presence_only_when_the_read_carries_it() {
-        let own = PersonAvailability {
-            person: "person/ada".into(),
-            status: "away".into(),
-            status_source: "override".into(),
-            status_until: Some("2026-11-12T18:00:00.000Z".into()),
-            presence: Some("idle".into()),
-            presence_observed_at: Some("2026-11-12T17:00:00.000Z".into()),
-            interruptions: "urgent".into(),
-            interruptions_until: None,
-            deadline_clock: "hold-all".into(),
-            deadline_clock_since: Some("2026-11-12T16:00:00.000Z".into()),
-            deadline_clock_until: None,
-        };
+        let own: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "away", "status_source": "override",
+            "status_until": "2026-11-12T18:00:00.000Z",
+            "presence": "idle", "presence_observed_at": "2026-11-12T17:00:00.000Z",
+            "interruptions": "urgent", "interruptions_until": null,
+            "deadline_clock": "hold-all", "deadline_clock_since": "2026-11-12T16:00:00.000Z", "deadline_clock_until": null,
+        }))
+        .unwrap();
         assert_eq!(
             render_block(&own),
             concat!(
@@ -364,5 +413,28 @@ mod tests {
         );
         let other = PersonAvailability { presence: None, presence_observed_at: None, ..own };
         assert!(!render_block(&other).contains("presence"));
+    }
+
+    #[test]
+    fn availability_block_names_an_unreported_or_unknown_source() {
+        let unreported: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "available", "status_source": "unreported", "status_until": null,
+            "presence": "unreported", "presence_observed_at": null,
+            "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        let block = render_block(&unreported);
+        assert!(block.contains("  status          available (no device reporting)\n"), "{block}");
+        assert!(block.contains("  presence        unreported\n"), "{block}");
+        // A word from a newer daemon still renders instead of failing the read.
+        let newer: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "in-a-meeting", "status_source": "calendar", "status_until": null,
+            "presence": null, "presence_observed_at": null,
+            "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        assert!(render_block(&newer).contains("  status          unknown (source not known to this client)\n"));
     }
 }

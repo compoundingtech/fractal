@@ -5330,9 +5330,9 @@ async fn availability_cli_person_sets_reports_presence_and_clears() {
     assert_eq!(fresh["people"].as_array().unwrap().len(), 1);
     let own = &fresh["people"][0];
     assert_eq!(own["person"], "person/ada");
-    assert_eq!(own["status"], "away", "unknown presence never reads as available");
-    assert_eq!(own["status_source"], "presence");
-    assert_eq!(own["presence"], "unknown");
+    assert_eq!(own["status"], "available", "with no device reporting, agents ask normally");
+    assert_eq!(own["status_source"], "unreported");
+    assert_eq!(own["presence"], "unreported");
     assert_eq!(own["interruptions"], "all");
     assert_eq!(own["deadline_clock"], "run");
 
@@ -5353,17 +5353,35 @@ async fn availability_cli_person_sets_reports_presence_and_clears() {
         human.contains(&format!("status          away (set) until {}", set["status_until"].as_str().unwrap())),
         "{human}"
     );
-    assert!(human.contains("presence        unknown"), "{human}");
+    assert!(human.contains("presence        unreported"), "{human}");
 
-    // With the override cleared, a present report makes the derived status available.
+    // With the override cleared and no device reporting, status is available and unreported.
     let cleared = value(&cli(true, &["availability", "clear", "status"]).await);
-    assert_eq!(cleared["status_source"], "presence");
+    assert_eq!(cleared["status"], "available");
+    assert_eq!(cleared["status_source"], "unreported");
     assert!(cleared["status_until"].is_null());
-    let present = value(&cli(true, &["availability", "presence", "present"]).await);
+    // A locked device makes the derived status away; an active one makes it available and
+    // says when to report again if nothing changes (ten minutes after the last input).
+    let locked = value(&cli(true, &["availability", "presence", "locked"]).await);
+    assert_eq!(locked["availability"]["presence"], "locked");
+    assert_eq!(locked["availability"]["status"], "away");
+    assert_eq!(locked["availability"]["status_source"], "presence");
+    assert!(locked["report_again_at"].is_null(), "{locked}");
+    let before = chrono::Utc::now().timestamp_millis();
+    let active = value(&cli(true, &["availability", "presence", "active"]).await);
+    let after = chrono::Utc::now().timestamp_millis();
+    let present = &active["availability"];
     assert_eq!(present["presence"], "present");
     assert_eq!(present["status"], "available");
     assert_eq!(present["status_source"], "presence");
     assert!(present["presence_observed_at"].is_string());
+    let again = rfc3339_ms(&active["report_again_at"]);
+    assert!((before + 600_000..=after + 600_000).contains(&again), "{active}");
+    let human = cli(false, &["availability", "presence", "active"]).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("presence        present observed "), "{human}");
+    assert!(human.contains("Report again at "), "{human}");
 
     let held = value(&cli(true, &[
         "availability", "set", "--interruptions", "none", "--deadline-clock", "hold-all",
@@ -5390,7 +5408,7 @@ async fn availability_cli_person_sets_reports_presence_and_clears() {
     let invalid: [&'static [&'static str]; 3] = [
         &["availability", "set", "--status", "away", "--until", "2000-01-01T00:00:00Z"],
         &["availability", "set", "--status", "away", "--until", "soon"],
-        &["availability", "presence", "idle", "--observed-at", "2000-01-01T00:00:00Z"],
+        &["availability", "presence", "inactive", "--observed-at", "2000-01-01T00:00:00Z"],
     ];
     for args in invalid {
         assert!(!cli(true, args).await.status.success(), "{args:?}");
@@ -5423,7 +5441,7 @@ async fn availability_cli_agent_reads_without_presence_and_cannot_write() {
     for args in [
         vec!["availability", "set", "--status", "available"],
         vec!["availability", "clear"],
-        vec!["availability", "presence", "present"],
+        vec!["availability", "presence", "active"],
         vec!["availability", "set", "--status", "available", "--actor", "person/ada"],
     ] {
         let refusal = failure(&run_lane_cli(&socket, &config_home, Some(&agent), true, &args).await);
