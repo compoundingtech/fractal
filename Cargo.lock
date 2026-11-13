@@ -2308,6 +2308,7 @@ dependencies = [
  "libc",
  "notify",
  "opentelemetry",
+ "opentelemetry_sdk",
  "rusqlite",
  "serde",
  "serde_json",

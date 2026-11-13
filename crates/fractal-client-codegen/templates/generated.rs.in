@@ -28,6 +28,139 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+/// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSet {
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// The person's current note after a write; `None` once cleared or already expired.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNoteSetResult {
+    pub note: Option<DirectiveNote>,
+}
+
+/// A response word with known values; an unknown word reads as `Unknown`, so a newer daemon's
+/// values stay readable.
+macro_rules! open_word {
+    ($(#[$doc:meta])* $name:ident { $($case:ident = $word:literal),+ $(,)? }) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+        pub enum $name {
+            $(#[serde(rename = $word)] $case,)+
+            #[serde(other)]
+            Unknown,
+        }
+        impl $name {
+            /// The wire word; `unknown` for a word this client does not know.
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$case => $word,)+ Self::Unknown => "unknown" }
+            }
+        }
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+        }
+    };
+}
+
+open_word!(
+    /// A person's effective status.
+    AvailabilityStatus { Available = "available", Away = "away" }
+);
+open_word!(
+    /// Where a status comes from; `Unreported` when no device's state has counted for 24 hours
+    /// (status then reads available).
+    AvailabilityStatusSource { Override = "override", Presence = "presence", Unreported = "unreported" }
+);
+open_word!(
+    /// Presence the daemon derives from the person's device states.
+    AvailabilityPresence { Present = "present", Idle = "idle", Locked = "locked", Unreported = "unreported" }
+);
+open_word!(
+    /// Which attention may interrupt: all, only rows with `urgent` true, or none.
+    AvailabilityInterruptions { All = "all", Urgent = "urgent", None = "none" }
+);
+open_word!(
+    /// A hold pauses the deadline clock of asks that are not urgent, or of every ask.
+    AvailabilityDeadlineClock { Run = "run", HoldRoutine = "hold-routine", HoldAll = "hold-all" }
+);
+
+/// A person's effective availability; `presence` and `presence_observed_at` are `None` for
+/// anyone but the person.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonAvailability {
+    pub person: String,
+    pub status: AvailabilityStatus,
+    pub status_source: AvailabilityStatusSource,
+    pub status_until: Option<String>,
+    pub presence: Option<AvailabilityPresence>,
+    pub presence_observed_at: Option<String>,
+    pub interruptions: AvailabilityInterruptions,
+    pub interruptions_until: Option<String>,
+    pub deadline_clock: AvailabilityDeadlineClock,
+    pub deadline_clock_since: Option<String>,
+    pub deadline_clock_until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonAvailabilities {
+    pub people: Vec<PersonAvailability>,
+}
+
+/// `value: None` clears the status override and takes no `until`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusChange {
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityInterruptionsChange {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityDeadlineClockChange {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+/// Changes to the session person's own availability; an absent axis is unchanged.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilitySet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AvailabilityStatusChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruptions: Option<AvailabilityInterruptionsChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_clock: Option<AvailabilityDeadlineClockChange>,
+}
+
+/// One device's raw state, `active`, `inactive`, `locked` or `sleeping`, sent on every change
+/// with its last input. The daemon derives presence and assigns the source.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PresenceReport {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_at: Option<String>,
+    pub observed_at: String,
+}
+
+/// The person's availability after a report, and when the device reports again although its
+/// state has not changed: while present, the instant it turns idle without newer input. `None`:
+/// report on the next state change or the next input.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PresenceReportResult {
+    pub availability: PersonAvailability,
+    pub report_again_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,

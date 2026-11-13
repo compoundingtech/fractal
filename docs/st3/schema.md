@@ -169,6 +169,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `mission.provenance` | `mission` | `system-only` | `once` | `durable` | `mission!:subject-reference(mission)`, `provenance!:object`, `revision!:string` | `provenance` |
 | `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `revision:string`, `state:string` | `mission` |
 | `mission.renamed` | `mission` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
+| `mission.run.trace` | `mission-run` | `system-only` | `once` | `durable` | `trace:any` | `observability` |
 | `observer.observed` | `observer` | `system-only` | `append` | `durable` | `attempt:string`, `changed:boolean`, `changed_fields:array`, `cursor:string`, `locator:string`, `next_check_unix_ms:string`, `observation:subject-reference`, `provider:string`, `resource:subject-reference`, `revision:string`, `status:string` | `observer` |
 | `observer.refresh-requested` | `observer` | `system-only` | `append` | `durable` | `attempt!:string`, `revision!:string` | `refresh` |
 | `observer.state` | `observer` | `system-only` | `state-transition` | `durable` | `attempt:string`, `error_code:string`, `next_check_unix_ms:string`, `reason:string`, `revision:string`, `state!:string` | `observer` |
@@ -195,6 +196,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `planning-session.started` | `planning-session` | `authorized-requester` | `once` | `durable` | `mission:subject-reference`, `planner:subject-reference`, `planner_config:object`, `request:subject-reference`, `requester:subject-reference`, `target_generation:subject-reference`, `target_run:subject-reference`, `workspace:string` | `planning-session` |
 | `principal.key-granted` | `person`, `agent` | `system-only` | `append` | `durable` | `issuer!:string`, `issuer_key!:string`, `key!:string`, `label:string`, `role!:string` |  |
 | `principal.key-revoked` | `person`, `agent` | `system-only` | `append` | `durable` | `key!:string`, `reason:string` |  |
+| `program.attempt.trace` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `trace:any` | `observability` |
 | `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `child:string`, `error:any`, `key!:string`, `ms:integer`, `program!:string`, `status!:string`, `value:any` | `step`, `program` |
 | `publication.operation` | `*` | `system-only` | `append` | `durable` | `action:string`, `operation:string`, `status!:string` | `revision`, `reset`, `cancellation`, `refresh`, `feedback` |
 | `read-position.advanced` | `read-position` | `ordinary-client` | `append` | `durable` | `at_ms!:integer`, `conversation!:string`, `owner!:subject-reference(person)` |  |

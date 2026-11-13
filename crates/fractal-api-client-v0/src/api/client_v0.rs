@@ -3039,6 +3039,9 @@ pub async fn publication_definition(
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -13585,7 +13588,7 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
-    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+    async fn device_write_scopes_are_in_default_device_and_full_control_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let app = super::super::router(state.clone());
@@ -13606,8 +13609,10 @@ mission "differential" state="ready" {
             ).unwrap();
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
-            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
-                .contains(&json!("write.client-diagnostics")));
+            let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
+                assert!(scopes.contains(&json!(scope)), "{scope}");
+            }
         }
     }
 

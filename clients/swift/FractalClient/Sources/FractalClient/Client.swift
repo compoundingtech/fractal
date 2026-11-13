@@ -329,6 +329,7 @@ public actor FractalClient {
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
+    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> { try await get("v1/client/availability", query: person.map { [URLQueryItem(name: "person", value: $0)] } ?? []) }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
     public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> { try await get("v1/client/private-notes/\(Self.pathSegment(uri))") }
@@ -489,6 +490,12 @@ public actor FractalClient {
     }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+    /// Set or clear the session person's own availability. Requires write.availability; agent sessions are refused.
+    public func availabilitySet(_ request: AvailabilitySet) async throws -> Envelope<PersonAvailability> { try await self.request("v1/client/availability", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
+    /// Report one device's raw state for the session person, on every state change and again at `reportAgainAt`; the daemon derives presence and assigns the source. Requires write.presence.
+    public func presenceReport(_ report: PresenceReport) async throws -> Envelope<PresenceReportResult> { try await post("v1/client/presence", report) }
+    /// Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused.
+    public func notesSet(_ request: DirectiveNoteSet) async throws -> Envelope<DirectiveNoteSetResult> { try await self.request("v1/client/notes", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
 
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }

@@ -5857,6 +5857,28 @@
     "projection": "missions",
     "wakes_reconciler": true
   },
+  "mission.run.trace": {
+    "kind": "mission.run.trace",
+    "subjects": [
+      "mission-run"
+    ],
+    "fields": {
+      "trace": {
+        "value_type": "any",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": false,
+    "source_kdl": [
+      "observability"
+    ]
+  },
   "observer.observed": {
     "kind": "observer.observed",
     "subjects": [
@@ -6217,63 +6239,6 @@
     "cardinality": "append",
     "projection": "owned-sets",
     "wakes_reconciler": true
-  },
-  "person.attention-seen": {
-    "kind": "person.attention-seen",
-    "subjects": [
-      "person"
-    ],
-    "fields": {
-      "attention_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "source": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "capability-holder",
-    "cardinality": "append",
-    "projection": "person-attention-controls",
-    "wakes_reconciler": false
-  },
-  "person.attention-snoozed": {
-    "kind": "person.attention-snoozed",
-    "subjects": [
-      "person"
-    ],
-    "fields": {
-      "attention_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "source": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "until_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "nullable": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "capability-holder",
-    "cardinality": "append",
-    "projection": "person-attention-controls",
-    "wakes_reconciler": false
   },
   "person.deadline-clock-set": {
     "kind": "person.deadline-clock-set",
@@ -6984,6 +6949,34 @@
     "cardinality": "append",
     "projection": "principals",
     "wakes_reconciler": false
+  },
+  "program.attempt.trace": {
+    "kind": "program.attempt.trace",
+    "subjects": [
+      "step-run"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "trace": {
+        "value_type": "any",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false,
+    "source_kdl": [
+      "observability"
+    ]
   },
   "program.step": {
     "kind": "program.step",

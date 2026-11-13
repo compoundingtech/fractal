@@ -154,6 +154,7 @@ pub use published_attention::{
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
     refresh_agent_roster(store, false)
 }
+mod availability;
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -661,8 +662,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(client_diagnostics::ingest)
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
-        .route("/v1/client/notes", get(directive_notes::read))
-        .route("/v1/notes", axum::routing::put(directive_notes::write))
+        .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/observations", post(client_observations::report)
@@ -2066,6 +2068,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "set-managed-subject"
         | "not-found"
         | "forbidden"
+        | "directive-note-feature-barrier"
         | "pairing-origin-required"
         | "pairing-restart-required"
         | "attention-migrated"
