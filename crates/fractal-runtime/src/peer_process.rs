@@ -104,6 +104,20 @@ impl PeerProcessIdentity {
         { let _ = (pid, start_token); anyhow::bail!("process generation witnesses unavailable") }
     }
 
+    /// Pin a same-UID ancestor of this accepted connector, revalidating the entire chain.
+    ///
+    /// This proves local process ownership only: callers must separately verify the native
+    /// harness/session and authorize adoption. A PID or this witness grants no agent authority.
+    /// The returned witness must be validated again when installing or using a binding.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn verify_ancestor(&self, ancestor: u32) -> Result<Self> {
+        self.validate()?;
+        let witness = verify_ancestor_chain(self.pid, ancestor, process_metadata, Self::capture_pid)?;
+        self.validate()?;
+        witness.validate()?;
+        Ok(witness)
+    }
+
     /// Pin a process explicitly enrolled by the trusted launcher before listening.
     pub fn capture_pid(pid: u32) -> Result<Self> {
         #[cfg(target_os = "linux")]
@@ -158,6 +172,146 @@ impl PeerProcessIdentity {
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessMetadata {
+    parent: u32,
+    birth: u64,
+    uid: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn process_metadata(pid: u32) -> Result<ProcessMetadata> {
+    let (parent, birth, uid) = macos_process_identity(pid)?;
+    Ok(ProcessMetadata { parent, birth, uid })
+}
+
+#[cfg(target_os = "linux")]
+fn process_metadata(pid: u32) -> Result<ProcessMetadata> {
+    use anyhow::Context as _;
+    crate::procfs::require_matching_procfs()?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let mut fields = stat.rsplit_once(") ").context("malformed ancestor stat")?.1.split_whitespace();
+    let state = fields.next().context("missing ancestor state")?;
+    anyhow::ensure!(!matches!(state, "Z" | "X" | "x"), "ancestor process has exited");
+    let parent = fields.next().context("missing ancestor parent")?.parse()?;
+    let birth = fields.nth(17).context("missing ancestor birth")?.parse()?;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .context("missing ancestor effective UID")?.parse()?;
+    Ok(ProcessMetadata { parent, birth, uid })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn verify_ancestor_chain<T>(
+    connector: u32,
+    ancestor: u32,
+    mut inspect: impl FnMut(u32) -> Result<ProcessMetadata>,
+    pin: impl FnOnce(u32) -> Result<T>,
+) -> Result<T> {
+    let first = inspect(connector)?;
+    let mut chain = vec![(connector, first)];
+    let mut current = first;
+    let mut pid = connector;
+    while pid != ancestor {
+        anyhow::ensure!(current.parent > 1, "requested process is not a caller ancestor");
+        pid = current.parent;
+        anyhow::ensure!(!chain.iter().any(|(seen, _)| *seen == pid), "ancestor chain contains a cycle");
+        current = inspect(pid)?;
+        anyhow::ensure!(current.uid == first.uid, "ancestor chain crosses an effective UID boundary");
+        chain.push((pid, current));
+    }
+    // Pin before the second read: a PID reused during pinning cannot replace the
+    // observed ancestor. Parent links are rechecked as well as generations.
+    let witness = pin(ancestor)?;
+    for (pid, observed) in chain {
+        anyhow::ensure!(inspect(pid)? == observed, "ancestor chain changed during verification");
+    }
+    Ok(witness)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod ancestor_tests {
+    use super::*;
+
+    fn fixture(pid: u32) -> Result<ProcessMetadata> {
+        match pid {
+            30 => Ok(ProcessMetadata { parent: 20, birth: 300, uid: 7 }),
+            20 => Ok(ProcessMetadata { parent: 10, birth: 200, uid: 7 }),
+            10 => Ok(ProcessMetadata { parent: 1, birth: 100, uid: 7 }),
+            _ => anyhow::bail!("process unavailable"),
+        }
+    }
+
+    #[test]
+    fn adoption_ancestor_pins_only_a_same_uid_caller_ancestor() {
+        assert_eq!(verify_ancestor_chain(30, 10, fixture, Ok).unwrap(), 10);
+        assert_eq!(verify_ancestor_chain(30, 30, fixture, Ok).unwrap(), 30);
+        assert!(verify_ancestor_chain(30, 40, fixture, |_| -> Result<()> {
+            panic!("unrelated process must not be pinned")
+        }).is_err());
+    }
+
+    #[test]
+    fn adoption_ancestor_refuses_uid_transitions_cycles_and_missing_evidence() {
+        for field in ["uid", "parent", "missing"] {
+            assert!(verify_ancestor_chain(30, 10, |pid| {
+                let mut metadata = fixture(pid)?;
+                if pid == 20 {
+                    match field {
+                        "uid" => metadata.uid = 8,
+                        "parent" => metadata.parent = 30,
+                        _ => anyhow::bail!("process disappeared"),
+                    }
+                }
+                Ok(metadata)
+            }, |_| -> Result<()> { panic!("invalid ancestry must not be pinned") }).is_err());
+        }
+    }
+
+    #[test]
+    fn adoption_ancestor_revalidates_every_parent_generation_and_uid_after_pinning() {
+        use std::cell::Cell;
+        for changed_pid in [30, 20, 10] {
+            for field in ["parent", "birth", "uid", "missing"] {
+                let pinned = Cell::new(false);
+                assert!(verify_ancestor_chain(30, 10, |pid| {
+                    let mut metadata = fixture(pid)?;
+                    if pinned.get() && pid == changed_pid {
+                        match field {
+                            "parent" => metadata.parent += 1,
+                            "birth" => metadata.birth += 1,
+                            "uid" => metadata.uid += 1,
+                            _ => anyhow::bail!("process exited"),
+                        }
+                    }
+                    Ok(metadata)
+                }, |_| { pinned.set(true); Ok(()) }).is_err());
+            }
+        }
+        assert!(verify_ancestor_chain(30, 10, fixture, |_| -> Result<()> {
+            anyhow::bail!("cannot pin process")
+        }).is_err());
+    }
+
+    #[test]
+    fn adoption_ancestor_real_process_witness_expires_on_exit() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh").args(["-c", "read line"])
+            .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+        let peer = PeerProcessIdentity::capture_pid(child.id()).unwrap();
+        let own = peer.verify_ancestor(std::process::id());
+        let unrelated = PeerProcessIdentity::capture_pid(std::process::id()).unwrap()
+            .verify_ancestor(child.id());
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        own.unwrap().validate().unwrap();
+        assert!(unrelated.is_err());
+        assert!(peer.verify_ancestor(std::process::id()).is_err());
     }
 }
 
