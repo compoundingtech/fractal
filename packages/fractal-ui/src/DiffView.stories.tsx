@@ -283,6 +283,8 @@ const staysOnPlainLines = async ({ canvasElement }: { canvasElement: HTMLElement
   await expect(plain.textContent).toContain('retained row')
   await expect(getComputedStyle(plain).visibility).toBe('visible')
   await expect(plain.getBoundingClientRect().height).toBeGreaterThan(0)
+  // The plain lines scroll sideways like Pierre's code columns, so a keyboard can reach them.
+  await expect(plain.tabIndex).toBe(0)
   await expect(getComputedStyle(view.querySelector<HTMLElement>('[data-renderer-stub]')!).visibility).toBe('hidden')
   await expect(view.querySelector('[role="alert"]')).toBeNull()
 }

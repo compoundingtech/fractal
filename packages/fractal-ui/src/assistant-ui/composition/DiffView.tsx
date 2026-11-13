@@ -146,12 +146,13 @@ function useScheme(host: React.RefObject<HTMLElement | null>) {
   return scheme
 }
 
-function PlainDiff({ file, wrap }: { readonly file: NormalizedDiffFile; readonly wrap: boolean }) {
+/** The plain lines scroll sideways like Pierre's code columns, so they take the same tab stop (none when wrapped or compact). */
+function PlainDiff({ file, wrap, focusable }: { readonly file: NormalizedDiffFile; readonly wrap: boolean; readonly focusable: boolean }) {
   const lines = file.patch.replace(/\n$/, '').split('\n')
   const start = lines.findIndex(line => line.startsWith('@@'))
   // Like Pierre: no separator above a first hunk that starts at line 1.
   const body = lines.slice(Math.max(0, start)).filter((line, index) => !(index === 0 && /^@@ -[01],?\d* \+[01],?/.test(line)))
-  return <pre data-diff-plain {...stylex.props(styles.plain, wrap && styles.plainWrap)}>{body.map((line, index) => line.startsWith('@@')
+  return <pre data-diff-plain tabIndex={!wrap && focusable ? 0 : undefined} {...stylex.props(styles.plain, wrap && styles.plainWrap)}>{body.map((line, index) => line.startsWith('@@')
     ? <span key={index} {...stylex.props(styles.plainLine, styles.plainHunk)}>{line}{'\n'}</span>
     : <span key={index} data-diff-kind={line[0] === '+' ? 'added' : line[0] === '-' ? 'removed' : 'context'} {...stylex.props(styles.plainLine, line[0] === '+' && styles.plainAdded, line[0] === '-' && styles.plainRemoved)}>{line}{'\n'}</span>)}</pre>
 }
@@ -213,7 +214,7 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   return <div ref={host} role={density === 'compact' ? undefined : 'region'} aria-label={density === 'compact' ? undefined : label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} aria-busy={state === 'plain' || state === 'rendering' ? true : undefined} tabIndex={density === 'compact' ? undefined : 0} data-testid={testId} data-diff-state={state} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
       const key = keys[index]!
-      const plain = <PlainDiff file={file} wrap={wrap} />
+      const plain = <PlainDiff file={file} wrap={wrap} focusable={density !== 'compact'} />
       return <div key={key} data-diff-file={file.path} {...stylex.props(styles.file)}>
         {Renderer ? <RenderBoundary fileKey={key} patch={file.patch} report={report} plain={plain}><RenderedFile Renderer={Renderer} fileKey={key} report={report} plain={plain} props={{ file, layout, wrap, focusable: density !== 'compact', header, lineNumbers: lineNumbers ?? (density !== 'compact' && !file.excerpt), scheme, collapsed }} /></RenderBoundary> : plain}
       </div>
@@ -278,7 +279,7 @@ const styles = stylex.create({
   swap: { display: 'grid', minWidth: 0 },
   swapCell: { gridArea: '1 / 1', minWidth: 0 },
   swapPending: { visibility: 'hidden' },
-  plain: { margin: 0, paddingBlock: `var(--fractal-diff-plain-pad, ${s.md})`, overflowX: 'auto', fontFamily: t.fontMono, fontSize: `var(--fractal-diff-plain-size, ${t.codeSize})`, lineHeight: `var(--fractal-diff-plain-leading, ${t.uiLeading})`, color: 'var(--fractal-diff-fg)', whiteSpace: 'pre' },
+  plain: { margin: 0, paddingBlock: `var(--fractal-diff-plain-pad, ${s.md})`, overflowX: 'auto', fontFamily: t.fontMono, fontSize: `var(--fractal-diff-plain-size, ${t.codeSize})`, lineHeight: `var(--fractal-diff-plain-leading, ${t.uiLeading})`, color: 'var(--fractal-diff-fg)', whiteSpace: 'pre', ':focus-visible': { outlineWidth: 'var(--fractal-diff-focus-width)', outlineStyle: 'solid', outlineColor: 'var(--fractal-diff-focus-color)', outlineOffset: 'var(--fractal-diff-focus-inset)' } },
   plainWrap: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   plainLine: { display: 'block', minHeight: `var(--fractal-diff-plain-leading, ${t.uiLeading})`, paddingInline: s.sm },
   plainHunk: { color: text.fgMuted },
