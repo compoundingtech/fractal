@@ -3595,6 +3595,10 @@
         "quantity": {"type": "number", "minimum": 0}
       }
     },
+    "GoldenResponseEvidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/TimelineUsageBody" }
+    },
     "TimelineUsageBody": {
       "description": "Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets.",
       "type": "object", "additionalProperties": false, "required": ["semantics", "driver", "attribution"],

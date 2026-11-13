@@ -37,6 +37,7 @@
     { "file": "timeline.json", "definition": "Envelope" },
     { "file": "timeline-views.json", "definition": "Envelope" },
     { "file": "timeline-conformance.json", "definition": "TimelinePage" },
+    { "file": "response-evidence.json", "definition": "GoldenResponseEvidence" },
     { "file": "notice-conformance.json", "definition": "NoticeSnapshot" },
     { "file": "timeline-relay-omission.json", "definition": "Envelope" },
     { "file": "timeline-delivery-links.json", "definition": "Envelope" },
