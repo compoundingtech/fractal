@@ -1171,6 +1171,7 @@ impl RuntimeStartsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
