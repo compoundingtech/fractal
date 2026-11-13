@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal web reports the browser's raw presence state from one tab: active while any tab is visible and focused, inactive otherwise, with the newest input of any tab",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim or client API change; the app uses the existing client-v0 availability operations."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change. One tab per browser, the holder of a Web Lock, reports to POST /v1/client/presence on each change of the browser's state and again at the answer's report_again_at; no idle threshold and no heartbeat."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Reports start only when the capabilities grant write.presence to a person session, so other pairings and sessions report nothing; a daemon without POST /v1/client/presence (404) stops the reports, and a replay reports nothing."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "A device's state stops counting 24 hours after it was observed; set a status override to ignore presence."
+  }
+}
