@@ -207,10 +207,16 @@ even when its immutable claim row remains retained. Incremental reads and full
 replay both select the latest unrepaired revision.
 The text is advisory only: no approval, gate, ask or assignment reads it as evidence.
 
-The trusted local CLI writes with `PUT /v1/notes`, using a concrete person identity
-and a body containing that same `person` and `actor`, nullable `text`, and optional
-`expires_at`. Agents and paired-client delegated writes are refused. Text is
-nonblank and bounded to 4096 UTF-8 bytes. The replicated claim
+A person writes their own note with `PUT /v1/client/notes` (`notes.set`, scope
+`write.notes`), from the local CLI or from a paired device granted `write.notes`. The
+`DirectiveNoteSet` body holds a required nullable `text`, where `null` clears the note, and
+an optional `expires_at`; it never names the person, which is always the session's own.
+Like every person-state write, the claim records the daemon-assigned `source`: the pairing
+grant for a paired device, otherwise `host/<member>`; the body never names it. Agent sessions are refused with `403` even though a local agent session holds every scope.
+The response `DirectiveNoteSetResult` holds the current `note`, or `null` once cleared or
+already expired. Text is nonblank and bounded to 4096 UTF-8 bytes; invalid input is
+`validation-failed`. The generated Rust `notes_set` and Swift and TypeScript `notesSet`
+methods use this route; see the [write fixture](fixtures/directive-note-set.json). The replicated claim
 `person.directive-note-set` is admitted only with its person as author. Publication
 requires anchored fleet membership and `person_directive_note` version 1
 advertisement from every active member. Pending unsigned local membership changes
@@ -2007,11 +2013,11 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-client diagnostics writes, availability and presence writes for the paired person, glasses
+client diagnostics writes, availability, presence and note writes for the paired person, glasses
 reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`write.availability`, `write.presence`, `read.glasses`, `control.glasses`, `terminal.read`,
+`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so

@@ -50,6 +50,16 @@ fn availability_words_a_newer_daemon_adds_read_as_unknown() {
     assert_eq!((AvailabilityDeadlineClock::HoldAll.as_str(), AvailabilityStatus::Unknown.to_string()), ("hold-all", "unknown".to_owned()));
 }
 
+#[test]
+fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
+    let set: DirectiveNoteSet = decode("directive-note-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());
+    let written: Envelope<DirectiveNoteSetResult> = decode("directive-note-set-result.json");
+    assert_eq!(written.value.note.as_ref().map(|note| note.text.as_str()), set.text.as_deref());
+    let clear = DirectiveNoteSet { text: None, expires_at: None };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
+}
+
 
 #[test]
 fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
