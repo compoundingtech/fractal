@@ -1136,7 +1136,10 @@ async fn the_reconciler_arms_the_ask_deadline_wake_past_the_time_the_clock_was_h
                 subject: "person/operator".into(),
                 kind: "person.deadline-clock-set".into(),
                 actor: Some("person/operator".into()),
-                fields: BTreeMap::from([("deadline_clock".into(), json!(deadline_clock))]),
+                fields: BTreeMap::from([
+                    ("deadline_clock".into(), json!(deadline_clock)),
+                    ("source".into(), json!("host/amber")),
+                ]),
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: None,
