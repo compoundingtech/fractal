@@ -5270,6 +5270,11 @@ mod tests {
         current.claims.remove("program.step").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
+        current.claims.remove(invocation::KIND).unwrap();
+        current.claims.remove("harness.invocation-artifact").unwrap();
+        for field in ["producer_version", "invocation_id"] {
+            current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
+        }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         for field in ["phase", "admission_publication"] {
@@ -5295,11 +5300,11 @@ mod tests {
         }
         for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
             "work.failed", "work.released", "work.extended"] {
-            for field in ["declared_model", "trace_id", "fallback"] {
+            for field in ["declared_model", "trace_id", "fallback", "invocation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        for field in ["execution_id", "unpriced_responses"] {
+        for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
