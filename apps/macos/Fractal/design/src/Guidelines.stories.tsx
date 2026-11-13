@@ -157,10 +157,10 @@ const checklist: readonly Check[] = [
       'Ask kind and availability symbols use .hierarchical; the urgent bubble is .monochrome so it does not wash out; status symbols use filled variants.',
   },
   {
-    item: 'One prominent action per view, and it is the default action',
-    verdict: 'pass',
+    item: 'One prominent action per view',
+    verdict: 'partial',
     evidence:
-      'Only the first answerable ask’s recommended answer is .borderedProminent with .keyboardShortcut(.defaultAction), and only while nothing is typed or focused; the note editor’s Save takes that role while it is open. Flat fallbacks draw it untinted (inactive window); a capture shows the tint.',
+      'Only the first answerable ask’s recommended answer is .borderedProminent (never a recommended decline), and only while nothing is typed or focused; the note editor’s Save takes that role while open. No answer is the Return default: answers are irreversible. Flat fallbacks draw it untinted (inactive window); no V2 capture yet.',
   },
   {
     item: 'No hover-only controls',
@@ -177,7 +177,7 @@ const checklist: readonly Check[] = [
     item: 'Keyboard reaches every control; frequent actions have shortcuts',
     verdict: 'partial',
     evidence:
-      '⌘R refresh, ⌘, Settings, ⌘Q quit, Return answers the leading ask or sends the focused field; Tab reaches every control. No arrow-key navigation between asks.',
+      '⌘R refresh, ⌘, Settings, ⌘Q quit, Return sends the focused field or saves the note; Tab reaches every control. No arrow-key navigation between asks.',
   },
   {
     item: 'Reduce Transparency / Increase Contrast respected',

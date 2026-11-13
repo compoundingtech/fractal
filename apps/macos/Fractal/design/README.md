@@ -31,10 +31,11 @@ Appearance menu forces Light or Dark.
 | Set                      | Files                                                           | Committed | Regenerate (on a Mac)                                                                                    |
 | ------------------------ | --------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
 | Fallback, shipped design | `<scenario>-<appearance>.png`, `menubar-*.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                |
-| Real captures            | `capture/*.png`, `capture.json`                                 | yes       | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
+| Real captures            | `capture/*.png`, `capture.json`                                 | when run  | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
 | Exploration              | `explore/*.png`, `explore.json`                                 | no        | `devenv tasks run attention-tray:gallery-explore`                                                        |
 
-A render missing from a manifest or from disk shows a labelled placeholder instead of failing the
+Real captures are committed when a consented capture run produces them; without them every story
+shows the flat fallback. A render missing from a manifest or from disk shows a labelled placeholder instead of failing the
 build; without `explore/` the Exploration story says how to generate it.
 
 ## Run

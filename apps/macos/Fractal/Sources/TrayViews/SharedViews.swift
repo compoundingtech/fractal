@@ -161,3 +161,42 @@ struct PanelForm<Content: View>: View {
       .fixedSize(horizontal: false, vertical: true)
   }
 }
+
+/// A disclosure whose chevron trails the label, as in System Settings, so a disclosed row keeps
+/// the leading edge every other row has.
+struct TrailingChevronDisclosureStyle: DisclosureGroupStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Button {
+        withAnimation(.snappy) { configuration.isExpanded.toggle() }
+      } label: {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          configuration.label
+          Spacer(minLength: 4)
+          DisclosureChevron(isExpanded: configuration.isExpanded)
+        }
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+      if configuration.isExpanded { configuration.content }
+    }
+  }
+}
+
+extension DisclosureGroupStyle where Self == TrailingChevronDisclosureStyle {
+  static var trailingChevron: TrailingChevronDisclosureStyle { .init() }
+}
+
+/// The chevron a disclosure or collapsible section header shows at its trailing edge.
+struct DisclosureChevron: View {
+  let isExpanded: Bool
+
+  var body: some View {
+    Image(systemName: "chevron.right")
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(.secondary)
+      .rotationEffect(.degrees(isExpanded ? 90 : 0))
+      .accessibilityHidden(true)
+  }
+}

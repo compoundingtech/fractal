@@ -221,9 +221,11 @@ private struct NoteRow: View {
             .fixedSize()
             Spacer()
             Button("Cancel") { model.noteDraft = nil }
+            // Saving a note is reversible: Return saves, unless an ask's field has the focus.
             Button("Save") { save(draft) }
               .buttonStyle(.borderedProminent)
-              .keyboardShortcut(.defaultAction)
+              .keyboardShortcut(
+                model.focusedInput == nil || model.focusedInput == AttentionModel.noteInput ? .defaultAction : nil)
               .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
           }
           .controlSize(.small)
@@ -265,6 +267,9 @@ private struct NoteRow: View {
       } else if model.focusedInput == AttentionModel.noteInput {
         model.focusedInput = nil
       }
+    }
+    .onDisappear {
+      if model.focusedInput == AttentionModel.noteInput { model.focusedInput = nil }
     }
   }
 

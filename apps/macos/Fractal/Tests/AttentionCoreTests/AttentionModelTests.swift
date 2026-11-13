@@ -141,7 +141,8 @@ final class AttentionModelTests: XCTestCase {
     await model.refresh(now: now)
     model.answerDrafts[ask.id] = AnswerDraft(words: "Only on review-host")
     model.answerDrafts[other.id] = AnswerDraft(selected: "changes")
-    XCTAssertTrue(model.hasUnsentInput, "a draft keeps Return off the default answer")
+    model.focusedInput = other.id
+    XCTAssertTrue(model.hasUnsentInput, "a draft takes the prominence from the recommended answer")
 
     await model.answer(ask, with: WorkDoneAnswer(summary: "Only on review-host"), label: "“Only on review-host”")
     XCTAssertEqual(model.answerDrafts[ask.id]?.words, "Only on review-host", "a refused answer keeps what was typed")
@@ -153,6 +154,7 @@ final class AttentionModelTests: XCTestCase {
 
     await model.refresh(now: now)
     XCTAssertNil(model.answerDrafts[other.id], "a card that left Fractal drops its draft")
+    XCTAssertNil(model.focusedInput, "and its field's focus")
     XCTAssertFalse(model.hasUnsentInput)
   }
 

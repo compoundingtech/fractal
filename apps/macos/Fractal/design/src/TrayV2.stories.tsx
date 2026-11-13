@@ -29,7 +29,7 @@ const locked: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'K4',
-    text: 'At most one prominent button: the first answerable ask’s recommended answer, which is also the default action (Return) while nothing is being typed.',
+    text: 'At most one prominent button: the first answerable ask’s recommended answer (never a decline), while nothing is being typed. No answer takes Return: answers are irreversible and the next ask moves into place after a commit.',
   },
   {
     id: 'K5',
@@ -57,7 +57,7 @@ const locked: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'K11',
-    text: 'Status item: one template glyph plus count; offline swaps the glyph for the sync-problem symbol; objectives stay in the panel (no gauge glyph).',
+    text: 'Status item: one template glyph (plus the count in M1/M3); offline swaps the glyph for the sync-problem symbol; objectives stay in the panel (no gauge glyph).',
   },
   {
     id: 'K12',
