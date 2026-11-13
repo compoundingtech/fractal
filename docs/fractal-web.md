@@ -820,10 +820,10 @@ The note shows its text and expiry, or that there is none.
 
 Availability is not a followed collection, so the section reads it when Settings opens, when
 the page regains focus or becomes visible, and when the connection returns; a later answer
-replaces an earlier one only if it was requested later. Fixture and replay sources have no
-availability port and show no section. A refused read explains itself: a rejected credential
-asks for pairing again, a missing grant says that reading was not granted, and a session that
-is no person says so.
+replaces an earlier one only if it was requested later. Fixture sources have no availability
+port, and a replay page drops the live source's port, so neither shows the section. A refused
+read explains itself: a rejected credential asks for pairing again, a missing grant says that
+reading was not granted, and a session that is no person says so.
 
 Below the summary the person sets or clears each axis and the note. **Changes last** bounds the
 next change: until changed, 30 minutes, 1 hour, 2 hours, tomorrow at 9:00 local time (the next
