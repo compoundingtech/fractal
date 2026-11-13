@@ -12,7 +12,7 @@ struct ReadAloudButton: View {
     if let speech = model.speech {
       if speech.status[record.id] == .speaking {
         Button { speech.skip(id: record.id) } label: { Label("Stop Speaking", systemImage: "stop.fill") }
-          .help("Stop reading this aloud; the queue goes on (\(SpeechHotkey.stop) from any app)")
+          .help(SpeechText.stopHelp("Stop reading this aloud; the queue goes on", speech))
       } else {
         Button { model.speakAloud(record) } label: { Label("Read Aloud", systemImage: "speaker.wave.2") }
           .labelStyle(.iconOnly)

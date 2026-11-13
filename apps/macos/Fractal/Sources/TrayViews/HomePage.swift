@@ -239,13 +239,14 @@ private struct SpeechTile: View {
   let size: ModuleTile.Size
 
   var body: some View {
-    let now = Date.now
-    let muted = speech.mutes.all(now: now) != nil
+    let controls = speech.controls
+    let muted = controls?.muted != nil
     ModuleTile(
       title: "Speech",
-      value: Self.value(speech, muted: muted),
-      symbol: muted ? "speaker.slash.fill" : speech.call.holdsSpeech ? "phone.fill" : "speaker.wave.2.fill",
-      isOn: !muted,
+      value: Self.value(speech),
+      symbol: muted ? "speaker.slash.fill" : controls?.held == .inCall ? "phone.fill" : "speaker.wave.2.fill",
+      // Until the speech service reports its controls the circle opens the page.
+      isOn: controls.map { $0.muted == nil },
       toggleHelp: muted ? "Unmute speech" : "Mute speech until you unmute; banners still show",
       toggle: {
         if muted { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
@@ -256,11 +257,12 @@ private struct SpeechTile: View {
     )
   }
 
-  @MainActor static func value(_ speech: SpeechCoordinator, muted: Bool) -> String {
-    if muted { return "Muted" }
-    if speech.call.holdsSpeech { return "Held · call" }
-    if speech.current != nil { return "Speaking" }
-    return "On"
+  @MainActor static func value(_ speech: SpeechCoordinator) -> String {
+    switch speech.controls?.held {
+    case .muted: return "Muted"
+    case .inCall: return "Held · call"
+    default: return speech.current != nil ? "Speaking" : "On"
+    }
   }
 }
 

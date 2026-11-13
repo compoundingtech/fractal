@@ -28,11 +28,11 @@ public enum SpeechQuiet: String, Sendable, Equatable {
 
 /// Why an item is shown as a banner but not spoken.
 public enum SpeechHeld: Sendable, Equatable, CustomStringConvertible {
-  /// All speech is muted; nil: until the person lifts it.
+  /// The speech service holds all speech (the person's mute); nil: until the person lifts it.
   case muted(until: Date?)
   /// This requester is muted.
   case agentMuted(until: Date?)
-  /// A microphone or camera is in use and speech is not allowed for this call.
+  /// The speech service holds speech for a call the person has not allowed it during.
   case inCall
   case rateLimited
 
@@ -59,30 +59,25 @@ public enum SpeechVerdict: Sendable, Equatable {
 public struct SpeechContext: Sendable, Equatable {
   public var availability: Availability?
   public var macPresence: PresenceState?
-  public var call: CallState
   public var mutes: SpeechMutes
   public var now: Date
 
-  public init(
-    availability: Availability?, macPresence: PresenceState?, call: CallState = CallState(),
-    mutes: SpeechMutes = SpeechMutes(), now: Date
-  ) {
+  public init(availability: Availability?, macPresence: PresenceState?, mutes: SpeechMutes = SpeechMutes(), now: Date) {
     self.availability = availability
     self.macPresence = macPresence
-    self.call = call
     self.mutes = mutes
     self.now = now
   }
 }
 
-/// The tray's delivery policy; the speech service only decides how, never whether. An item is
-/// delivered only if Fractal marks it urgent, it is an update the person asked to be told, or
-/// the person pressed Read Aloud; the person is available and this Mac is present as Fractal
-/// derives it; and interruptions allow it (`all`, or `urgent` for an item spoken unasked; never
-/// `none` or a word this tray does not know). Each revision is delivered once. A delivery is a
-/// banner, and speech too unless speech is muted (all or this requester), the Mac is in a call
-/// the person has not allowed speech for, or the requester spoke within 10 minutes. Reading
-/// aloud on request skips the once-per-revision and per-requester limits; the person is asking now.
+/// The tray's delivery policy: whether an item is delivered; the speech service decides how,
+/// and holds speech for the person's mute and calls for every caller. An item is delivered
+/// only if Fractal marks it urgent, it is an update the person asked to be told, or the person
+/// pressed Read Aloud; the person is available and this Mac is present as Fractal derives it;
+/// and interruptions allow it (`all`, or `urgent` for an item spoken unasked; never `none` or a
+/// word this tray does not know). Each revision is delivered once. A delivery is a banner, and
+/// speech too unless this requester is muted or spoke within 10 minutes. Reading aloud on
+/// request skips the once-per-revision and per-requester limits; the person is asking now.
 public struct SpeechGate: Sendable, Equatable {
   public static let perRequester: TimeInterval = 10 * 60
 
@@ -120,13 +115,10 @@ public struct SpeechGate: Sendable, Equatable {
     return .speak
   }
 
-  /// What holds speech for this item right now: the mutes and the call. Also checked when a
-  /// queued item's turn comes, so a mute or a call started meanwhile still holds it.
+  /// What the tray holds speech for this item for right now: the requester's mute. Also checked
+  /// when a queued item's turn comes, so a mute set meanwhile still holds it.
   public static func held(_ record: AttentionRecord, _ context: SpeechContext) -> SpeechHeld? {
-    if let mute = context.mutes.all(now: context.now) { return .muted(until: mute.until) }
-    if let mute = context.mutes.agent(record.from, now: context.now) { return .agentMuted(until: mute.until) }
-    if context.call.holdsSpeech { return .inCall }
-    return nil
+    context.mutes.agent(record.from, now: context.now).map { .agentMuted(until: $0.until) }
   }
 
   /// Records a delivery; `spoke` also starts the requester's rate window. Counted whatever

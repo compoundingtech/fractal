@@ -2,8 +2,8 @@ import AttentionCore
 import Foundation
 
 /// Speech states of the panel's Speech page (the speech tile drilled into), driven through the
-/// real `SpeechCoordinator` (refreshes, call devices, mutes), plus the native notification's
-/// content model.
+/// real `SpeechCoordinator` (refreshes, the speech service's controls as `watch` reports them,
+/// agent mutes), plus the native notification's content model.
 private struct SpeechContent {
   let now: Date
   let url = URL(string: "https://fractal.example/attention")!
@@ -53,16 +53,27 @@ private struct SpeechContent {
   var slo: SloSnapshot { SloSnapshot(asOf: now - 60, rows: []) }
 }
 
-@MainActor private func speechModel(_ records: [AttentionRecord], _ content: SpeechContent)
-  -> (AttentionModel, SpeechCoordinator)
-{
+@MainActor private func speechModel(
+  _ records: [AttentionRecord], _ content: SpeechContent,
+  controls: SpeechServiceControls = SpeechServiceControls(stopHotkey: FixtureSpeech.hotkey)
+) -> (AttentionModel, SpeechCoordinator) {
   let fractal = FixtureFractal(
     page: AttentionPage(records: records, canAnswer: true), slo: content.slo, histories: [:],
     availability: content.available)
-  let speech = SpeechCoordinator(output: FixtureSpeech(), clock: { content.now }, log: { _ in })
+  let speech = FixtureSpeech(state: SpeechServiceState(controls: controls)).coordinator(clock: { content.now })
   let model = AttentionModel(adapter: fractal, availabilityAdapter: fractal, speech: speech)
   model.macPresence = .present
   return (model, speech)
+}
+
+/// The fixture service answers `held` asynchronously, as the real one does: wait until the
+/// tray shows it.
+@MainActor private func settled(_ speech: SpeechCoordinator) async {
+  var tries = 0
+  while speech.current != nil, tries < 1000 {
+    tries += 1
+    await Task.yield()
+  }
 }
 
 let speechScenarios: [Scenario] = [
@@ -83,9 +94,13 @@ let speechScenarios: [Scenario] = [
       "The microphone and camera are in use: a critical ask shows as a banner but is not spoken; the person may allow speech for this call."
   ) { now in
     let content = SpeechContent(now: now)
-    let (model, speech) = speechModel([content.rollback], content)
-    speech.callDevices(["camera: FaceTime HD Camera", "microphone: us.zoom.xos"], now: now)
+    let (model, speech) = speechModel(
+      [content.rollback], content,
+      controls: SpeechServiceControls(
+        call: .init(devices: ["camera: FaceTime HD Camera", "microphone: us.zoom.xos"]),
+        stopHotkey: FixtureSpeech.hotkey))
     await model.refresh(now: now)
+    await settled(speech)
     model.open(.speech)
     return model
   },
@@ -94,10 +109,12 @@ let speechScenarios: [Scenario] = [
     description: "Speech muted for an hour and one agent muted for today: critical asks still show as banners."
   ) { now in
     let content = SpeechContent(now: now)
-    let (model, speech) = speechModel([content.rollback], content)
-    speech.muteAll(.hours(1), now: now)
+    let (model, speech) = speechModel(
+      [content.rollback], content,
+      controls: SpeechServiceControls(muted: .init(until: now + 3600), stopHotkey: FixtureSpeech.hotkey))
     speech.mute(agent: "janitor", .endOfToday, now: now)
     await model.refresh(now: now)
+    await settled(speech)
     model.open(.speech)
     return model
   },

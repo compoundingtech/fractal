@@ -69,8 +69,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   private let isConfigured: Bool
   private let presence: PresenceReporter?
   private let notifications: SpeechNotifications?
-  private let calls: CallMonitor?
-  private let stopHotkey: StopHotkey?
+  /// Follows the speech service's controls (mute, call, Stop hotkey) for the panel.
+  private var speechWatch: Task<Void, Never>?
   private var refreshLoop: Task<Void, Never>?
   private var lastLogged: String?
 
@@ -91,16 +91,12 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       self.model = model
       presence = PresenceReporter(adapter: adapter, model: model, log: Self.log)
       notifications = speech.map { SpeechNotifications(model: model, speech: $0, log: Self.log) }
-      calls = speech.map { speech in CallMonitor(report: { speech.callDevices($0, now: .now) }, log: Self.log) }
-      stopHotkey = speech.map { speech in StopHotkey { speech.stopCurrent() } }
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
       model = AttentionModel(adapter: nil, configurationError: String(describing: error))
       presence = nil
       notifications = nil
-      calls = nil
-      stopHotkey = nil
       isConfigured = false
     }
     super.init()
@@ -126,8 +122,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     guard isConfigured, refreshLoop == nil else { return }
     presence?.start()
     notifications?.start()
-    calls?.start()
-    if let reason = stopHotkey?.register() { Self.log("stop hotkey off: \(reason)") }
+    if let speech = model.speech { speechWatch = Task { await speech.watch() } }
     let model = model
     refreshLoop = Task { [weak self] in
       while !Task.isCancelled {
@@ -142,8 +137,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     refreshLoop?.cancel()
     refreshLoop = nil
     presence?.stop()
-    calls?.stop()
-    stopHotkey?.unregister()
+    speechWatch?.cancel()
+    speechWatch = nil
   }
 
   /// Opening the app again (Spotlight, Finder) puts a hidden status item back.

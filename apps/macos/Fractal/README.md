@@ -101,8 +101,10 @@ collection, but `FractalClient` has no typed attention or availability stream.
   once; keyboard-only returns show within a minute. A failed report is retried
   after a minute, never while asleep. Reports and failures are logged once per
   change.
-- **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what the local
-  speech service (`flakes/speech-service`) says; the service only decides how.
+- **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what it asks the
+  local speech service (`flakes/speech-service`, wire v2) to say; the service
+  decides how, and holds the person's controls (mute, calls, Stop) for every
+  caller, this tray and the person's `speak` alike.
   - **Delivery.** An item is delivered only if Fractal marks the ask `urgent`
     (its one urgency rule; the tray never derives urgency from a deadline), it
     is an update the person asked to be told (it carries `update.speech`), or
@@ -115,25 +117,28 @@ collection, but `FractalClient` has no typed attention or availability stream.
     delivered once, kept across restarts; Read aloud may repeat it.
   - **Banner and speech.** A delivery is a native notification, and the
     update's own `speech` words, else the title (nothing else), are spoken too
-    unless speech is muted (all, or this requester), the Mac is in a call the
-    person has not allowed speech for, or the requester spoke within 10
-    minutes. Read aloud posts no banner and shows in the panel why it stayed
-    quiet.
-  - **Queue and controls.** The tray sends one item at a time and owns the
-    queue, so it knows what is being spoken. **Stop** (panel, notification, or
-    `⌃⌥⌘.` from any app via Carbon `RegisterEventHotKey`, no permission) ends
-    the current item and the queue goes on; **Skip** drops a queued item;
-    **Mute this agent** (1 hour or today) and **Mute speech** (1 hour, 4 hours,
-    until tomorrow 9:00, or until unmuted) drop what they hold and stop it if it
-    is speaking. Mutes are speech only, kept in the app's defaults across
-    restarts, and end on their own.
-  - **Calls.** A microphone in use by another process (Core Audio process
-    objects, `kAudioProcessPropertyIsRunningInput`, the menu bar indicator's
-    signal) or any camera running (`kCMIODevicePropertyDeviceIsRunningSomewhere`)
-    is a call: speech stops and items are banners only. Both are listeners, not
-    polls, and need no permission. **Allow speech during this call** in the
-    panel lifts that for the current call only; the call ends, and the override
-    resets, after 15 seconds without any microphone or camera in use.
+    unless this requester is muted or spoke within 10 minutes, or the service
+    holds it. The spoken banner shows once the service queued the item (or
+    could not be reached); one the service answers `held` (`muted` or
+    `in_call`) gets the held banner instead. Read aloud posts no banner and
+    shows in the panel why it stayed quiet.
+  - **Queue and agent gate.** The tray sends one item at a time and owns its
+    queue, so it knows which of its items is being spoken. **Skip** drops a
+    queued item; **Mute this agent** (1 hour or today) drops what it holds and
+    stops it if it is speaking (`skip{id}`). Agent mutes are speech only, kept
+    in the app's defaults across restarts, and end on their own.
+  - **Person controls (speech service).** The tray follows the service's
+    `watch` (its controls and queue, at every change; reconnecting with
+    backoff from 1 to 30 seconds while the service is absent or restarting)
+    and sends the person's controls to it: **Stop** in the panel or the
+    notification sends `stop`, which ends the service's current request (the
+    service's own `⌃⌥⌘.` hotkey does the same) and the queue goes on; **Mute
+    speech** (1 hour, 4 hours, until tomorrow 9:00, or until unmuted) sends
+    `mute`/`unmute`; **Allow speech during this call**, shown while the
+    service reports a call, sends `allow_call` and resets when the call ends.
+    The panel shows the service's mute, call and Stop hotkey as it reports
+    them; a service that reports none (absent, or older than wire v2) leaves
+    them out, and speech goes on without them.
   - **Notification.** While an item is spoken (or held to a banner) the tray
     shows a notification for it (`UNUserNotificationCenter`, one per item,
     replaced as it changes) with Stop, its answers as buttons, a text reply for
@@ -144,10 +149,10 @@ collection, but `FractalClient` has no typed attention or availability stream.
     removed; an answered one stays as its receipt.
   - **Log.** Each verdict and outcome is logged once per item revision
     (`speech attention/…#rev from agent: urgent, queued` or `asked to be told,
-queued`, `speaking`, then `spoken`, `skipped` or the service's failure),
-    plus mutes and call starts and ends; spoken text never enters the log. The
-    tray waits 30 seconds for `queued`, then 60 seconds plus 30 seconds of
-    margin for the result.
+queued`, `speaking`, then `spoken`, `skipped`, `held (…)` or the service's
+    failure), plus agent mutes and the service's mute, call starts and ends;
+    spoken text never enters the log. The tray waits 30 seconds for `queued`,
+    then 60 seconds plus 30 seconds of margin for the result.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
@@ -264,9 +269,9 @@ activation: an explicit launcher/readiness diagnostic identifies them.
 The tray asks for one permission, Notifications (`UNUserNotificationCenter`,
 alerts only), on its first launch with a speech service; it needs no Screen
 Recording, Accessibility, Microphone, Camera, AppleEvents or Developer Tools
-permission and no entitlements (call detection reads only device and process
-state; the Stop hotkey is a Carbon hot key). Notifications need the bundle
-signature to bind `Info.plist`: Home Manager's ad-hoc bundle signing of
+permission and no entitlements (call detection and the Stop hotkey are the
+speech service's). Notifications need the bundle signature to bind
+`Info.plist`: Home Manager's ad-hoc bundle signing of
 `~/Applications/AttentionTray.app` does, the store bundle's linker-only
 signature does not (`UNErrorDomain` 1, no prompt). The permission is keyed by
 bundle identifier and stays granted when a rebuild changes the cdhash. No
