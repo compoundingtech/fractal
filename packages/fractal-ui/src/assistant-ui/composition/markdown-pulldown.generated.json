@@ -1,9 +1,7 @@
 {
   "inputs": {
-    "sha256": "07d73ca1d1395d8a57f8645672e6d841f80416a451bac895a4c82576a324c580",
+    "sha256": "d850f211b876c6dacb3ba21feceeac3aeedc7257cdf8acba063057341ede12e9",
     "files": [
-      "flake.lock",
-      "flake.nix",
       "packages/fractal-ui/markdown-wasm/Cargo.lock",
       "packages/fractal-ui/markdown-wasm/Cargo.toml",
       "packages/fractal-ui/markdown-wasm/src/lib.rs",
