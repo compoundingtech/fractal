@@ -137,11 +137,34 @@ fn with_deadline(mut body: Value, deadline: &Option<AskDeadline>) -> Value {
     body
 }
 
-/// Whether an ask already recorded under a key was asked with the same deadline and default: a
-/// retry with the same key keeps the first ask's absolute deadline, so it must not name another.
-fn same_deadline(existing: &Value, input: &PersonAskRequest) -> bool {
+/// The priority an ask records: one of [`fractal_schema::availability::PRIORITIES`], or `None`
+/// for `normal`, which an ask has without one, so naming it records the same ask.
+fn ask_priority(input: &PersonAskRequest) -> Result<Option<&str>, FractalError> {
+    match input.priority.as_deref() {
+        None | Some("normal") => Ok(None),
+        Some(priority) if fractal_schema::availability::PRIORITIES.contains(&priority) => Ok(Some(priority)),
+        Some(priority) => Err(FractalError::new(
+            "invalid-ask-priority",
+            format!("an ask's priority is critical, high, normal or low, not `{priority}`"),
+        )),
+    }
+}
+
+/// Adds a priority other than `normal` to an ask claim body.
+fn with_priority(mut body: Value, priority: Option<&str>) -> Value {
+    if let Some(priority) = priority {
+        body["fields"]["priority"] = json!(priority);
+    }
+    body
+}
+
+/// Whether an ask already recorded under a key was asked with the same deadline, default and
+/// priority: a retry with the same key keeps the first ask's absolute deadline, so it must not
+/// name another.
+fn same_terms(existing: &Value, input: &PersonAskRequest, priority: Option<&str>) -> bool {
     existing["fields"]["deadline_ms"] == json!(input.deadline_ms)
         && existing["fields"]["default_answer"] == json!(input.default_answer)
+        && existing["fields"]["priority"].as_str() == priority
 }
 
 /// The answer the person gives and the summary history keeps. A free-text ask takes text
@@ -454,6 +477,7 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             let structured = canonical_request(input)?;
+            let priority = ask_priority(input)?;
             let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
                 .ok_or_else(|| FractalError::new("missing-step-run", format!("asking step `{}` does not exist; use a current step from `work ls`, or omit --step for an independent ask", input.step.as_deref().unwrap())))?;
@@ -471,7 +495,7 @@ impl PersonWorkStore for Store {
                     || existing.body["fields"]["title"] != input.title
                     || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || !same_deadline(&existing.body, input) {
+                    || !same_terms(&existing.body, input, priority) {
                     return Err(FractalError::new("idempotency-conflict", "this ask key already names a different question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
@@ -515,10 +539,10 @@ impl PersonWorkStore for Store {
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
+                &with_priority(with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
                     "origin_step": origin_subject, "origin_attempt": origin.attempt,
                     "person": input.person, "title": input.title, "reason": input.reason,
-                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
+                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             let pause = append_claim_tx(tx, &self.origin, &origin_subject, "step-run.state", Some("daemon/runtime"),
                 &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), &[claim.id], None).map_err(claim_append_error)?;
@@ -959,6 +983,12 @@ impl PersonWorkStore for Store {
                 "an update waits for nobody, so it has no deadline or default answer",
             ));
         }
+        if input.priority.is_some() {
+            return Err(FractalError::new(
+                "invalid-ask-priority",
+                "an update asks nothing, so it has no priority",
+            ));
+        }
         let structured = canonical_request(input)?;
         let about = structured["about"].as_str().unwrap_or_default().to_owned();
         self.with_all_runs_fenced(|tx| {
@@ -1067,6 +1097,7 @@ impl PersonWorkStore for Store {
             ));
         }
         let structured = canonical_request(input)?;
+        let priority = ask_priority(input)?;
         let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now_ms())?;
         self.with_all_runs_fenced(|tx| {
             let mut stable_input;
@@ -1093,7 +1124,7 @@ impl PersonWorkStore for Store {
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || !same_deadline(&existing.body, input) {
+                    || !same_terms(&existing.body, input, priority) {
                     return Err(FractalError::new("idempotency-conflict", "this ask key already names another question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
@@ -1106,10 +1137,10 @@ impl PersonWorkStore for Store {
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
+                &with_priority(with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
                     "attempt": 1, "status": "ready", "mission_spec": mission,
-                    "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
+                    "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
         })
