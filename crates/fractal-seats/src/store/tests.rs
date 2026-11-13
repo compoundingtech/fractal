@@ -2052,7 +2052,7 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
         claim.fields.insert("driver".into(), json!("codex"));
         claim.fields.insert("entry_type".into(), json!("usage"));
         let mut body = json!({"semantics":"response", "model":"gpt-6.1-sol",
-            "input_tokens":input,"output_tokens":100,"total_tokens":input+100});
+            "input_tokens":input,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":input+100});
         if reported {
             body["cost"] = json!(0.001);
         }
