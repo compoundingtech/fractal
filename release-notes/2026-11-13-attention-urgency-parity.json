@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Materialized attention rows expose the canonical urgent flag, matching full attention reads",
+  "replay": {
+    "status": "changed",
+    "detail": "The local person-step and custom attention IVM families rebuild under the public-row.v4.urgent fingerprint so cached public rows include urgent, including false for non-critical asks. The rebuild is local and does not change recorded claims."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No new claim or API fields; materialized rows now populate the existing urgent field."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Both readers use the existing canonical rule: only a critical ask is urgent."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Upgraded daemons rebuild their local attention families. Older daemons may still omit urgent from materialized rows; full reads and recorded claims remain compatible."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption; local attention families rebuild automatically."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback restores the older local projection fingerprint and may omit urgent from materialized rows; recorded claims are unchanged."
+  }
+}
