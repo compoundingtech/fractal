@@ -144,8 +144,7 @@ final class SpeechNotifications: NSObject, SpeechDeliverySink, UNUserNotificatio
         return
       }
       show(SpeechNotice(record: record, state: .answered(.sending(label)), canAnswer: model.canAnswer))
-      await model.answer(record, with: answer, label: label)
-      if let state = model.answers[id] {
+      if let state = await model.answer(record, with: answer, label: label) {
         show(SpeechNotice(record: record, state: .answered(state), canAnswer: model.canAnswer))
       }
     }

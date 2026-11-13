@@ -88,7 +88,8 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.answers[ask.id], .sending("Ship"), "no optimistic success while in flight")
     XCTAssertEqual(model.asks, [ask])
     await adapter.release(.success(()))
-    await sending.value
+    let ended = await sending.value
+    XCTAssertEqual(ended, .committed("Ship"), "the caller learns the commit after the card left")
 
     let submitted = await adapter.submitted
     XCTAssertEqual(submitted, [WorkDoneSubmission(record: ask, answer: answer)])

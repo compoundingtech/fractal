@@ -188,7 +188,14 @@ public enum SpeechStatus: Sendable, Equatable {
 
   private func evaluate(_ record: AttentionRecord, readAloud: Bool, _ context: SpeechContext) {
     if current?.id == record.id || queue.contains(where: { $0.id == record.id }) { return }
-    switch gate.verdict(record, readAloud: readAloud, context) {
+    var verdict = gate.verdict(record, readAloud: readAloud, context)
+    // One item per requester in flight: a second waits as a banner, as within the rate window.
+    if verdict == .speak, !readAloud,
+      current?.from == record.from || queue.contains(where: { $0.from == record.from })
+    {
+      verdict = .banner(.rateLimited)
+    }
+    switch verdict {
     case .quiet(let reason):
       // Automatic delivery stays silent in the panel; only a read-aloud request shows why.
       if readAloud { status[record.id] = .quiet(reason) }
