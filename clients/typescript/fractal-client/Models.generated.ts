@@ -250,6 +250,7 @@ export type AgentMessageDay = {
   low_percent?: number | null;
   messages: number;
   since_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   until_ms: number;
   usage_cost_microusd: number;
@@ -1069,6 +1070,7 @@ export type Attention = ResourceHeader & {
   targets?: Array<Id>;
   title: string;
   update?: PersonUpdate;
+  urgent?: boolean;
   variant_id?: Id;
   what?: string;
 };
@@ -2429,6 +2431,8 @@ export type GlassTab = {
 };
 
 export type GoldenResourceSet = Array<Resource>;
+
+export type GoldenResponseEvidence = Array<TimelineUsageBody>;
 
 export type HarnessAnswerInput = {
   positions: Array<number>;
@@ -4197,6 +4201,7 @@ export type StepExecutionUsage = {
   output_tokens: number;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4559,6 +4564,13 @@ export type TimelinePage = {
   session_id: Id;
 };
 
+export type TimelineProviderQuota = {
+  quantity: number;
+  unit: TimelineProviderQuotaUnit;
+};
+
+export type TimelineProviderQuotaUnit = "premium_requests";
+
 export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
@@ -4566,6 +4578,13 @@ export type TimelineRedactionBody = {
   reason: string;
   withheld_bytes: number;
   withheld_items?: number;
+};
+
+export type TimelineResponseCostComponents = {
+  cache_read?: number;
+  cache_write?: number;
+  input?: number;
+  output?: number;
 };
 
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
@@ -4605,6 +4624,8 @@ export type TimelineTruncationBody = {
 };
 
 export type TimelineUsageBody = {
+  account?: string;
+  api?: string;
   attribution: {
   agent_id: Id;
   generation_id?: string | null;
@@ -4612,22 +4633,33 @@ export type TimelineUsageBody = {
   step_id?: string | null;
 };
   blocks?: Array<TimelineBlock>;
+  cache_write_1h_tokens?: number;
   cache_write_tokens?: number;
   cached_tokens?: number;
   compactions?: number;
+  completed_at_unix_ms?: number;
   context_used_percent?: number;
   context_used_tokens?: number;
   context_window_tokens?: number;
   cost?: number;
+  cost_components?: TimelineResponseCostComponents;
   currency?: string;
   driver: string;
+  duration_ms?: number;
   input_tokens?: number;
   last_compaction_ms?: number;
   last_compaction_trigger?: "manual" | "auto" | "threshold" | "overflow" | "idle" | "unknown";
   model?: string;
   output_tokens?: number;
+  provider?: string;
+  provider_quota?: TimelineProviderQuota;
+  reasoning_tokens?: number;
+  response_id?: string;
   semantics: "context_occupancy" | "session_cumulative" | "response";
+  started_at_unix_ms?: number;
+  stop_reason?: string;
   total_tokens?: number;
+  ttft_ms?: number;
   turn_id?: string;
 };
 
@@ -4931,6 +4963,7 @@ export type UsageContext = {
 export type UsageCredits = {
   budget_microusd: number;
   period_start_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   used_microusd: number;
 };
@@ -4989,6 +5022,7 @@ export type UsagePricing = {
   rates_usd_per_million_tokens?: UsagePricingRates;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -5019,6 +5053,7 @@ export type UsageRow = {
   reported_cost_microusd: number;
   step?: Id;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 

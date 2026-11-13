@@ -8385,6 +8385,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {

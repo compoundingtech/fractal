@@ -84,9 +84,10 @@ pub fn stop_counting_ask_deadlines(connection: &Connection) -> Result<bool> {
 /// Which of an ask's responses stand once a deadline has applied its default. Members resolve
 /// independently, so a person may answer on another member before the deadline while the
 /// ask's own member applies the default: a person's answer accepted before the cutoff (the
-/// ask's deadline, or when the default was applied for an ask made without one) wins, and one
-/// accepted at or after it does not. Every member holds the same claims with the same accept
-/// times, so every member keeps the same responses. Without a deadline response all stand.
+/// ask's deadline with the person's deadline clock applied, [`answer_cutoff`], or when the
+/// default was applied for an ask made without one) wins, and one accepted at or after it does
+/// not. Every member holds the same claims with the same accept times, so every member keeps
+/// the same responses. Without a deadline response all stand.
 pub fn standing_responses<T>(
     responses: Vec<T>,
     by_deadline: impl Fn(&T) -> bool,
@@ -114,17 +115,47 @@ pub fn standing_responses<T>(
     (standing, answered_in_time)
 }
 
+/// `deadline`, which `ask` counts toward from `asked_at`, once the asked person's deadline clock
+/// applies: plus every interval the person held the clock since (`hold-all` holds every ask,
+/// `hold-routine` only one that is not urgent). `None` while a hold that applies is open with no
+/// end, so nothing resolves the ask. A pairing request is a capability request: it always
+/// expires on time.
+pub fn clocked_deadline(connection: &Connection, ask: &ClaimRecord, asked_at: u128, deadline: u128) -> rusqlite::Result<Option<u128>> {
+    let fields = &ask.body["fields"];
+    let Some(person) = fields["person"].as_str().filter(|_| ask.actor.as_deref() != Some("daemon/browser-pairing")) else {
+        return Ok(Some(deadline));
+    };
+    let holds = super::availability::deadline_clock_holds_in(connection, person, asked_at)?;
+    Ok(super::availability::effective_deadline(asked_at, deadline, super::availability::urgent_ask(fields), &holds))
+}
+
 /// When an ask resolves by itself if the person has not answered: the deadline it was asked
 /// with, or, for an ask made before deadlines, `default_ms` after it was asked or after this
-/// node began counting (`since`), whichever is later. An update waits for nobody and has none.
-pub fn ask_deadline(ask: &ClaimRecord, since: u128, default_ms: u64) -> Option<u128> {
+/// node began counting (`since`), whichever is later; then moved past the time the asked
+/// person held their deadline clock ([`clocked_deadline`]). `None` for an update, which waits
+/// for nobody, and while the clock is held.
+pub fn effective_ask_deadline(connection: &Connection, ask: &ClaimRecord, since: u128, default_ms: u64) -> rusqlite::Result<Option<u128>> {
     if is_update(ask) {
-        return None;
+        return Ok(None);
     }
-    if let Some(deadline) = ask.body["fields"]["deadline_unix_ms"].as_u64() {
-        return Some(u128::from(deadline));
+    let (asked_at, deadline) = match ask.body["fields"]["deadline_unix_ms"].as_u64() {
+        Some(deadline) => (ask.accepted_at_unix_ms, u128::from(deadline)),
+        None => {
+            let from = ask.accepted_at_unix_ms.max(since);
+            (from, from + u128::from(default_ms))
+        }
+    };
+    clocked_deadline(connection, ask, asked_at, deadline)
+}
+
+/// The time before which a person's answer to `ask` beats a default its deadline applied
+/// (`standing_responses`): its stored deadline with the person's deadline clock applied.
+/// `None` for an ask asked without one, or one still held: when the default was applied decides.
+pub fn answer_cutoff(connection: &Connection, ask: &ClaimRecord) -> rusqlite::Result<Option<u128>> {
+    match ask.body["fields"]["deadline_unix_ms"].as_u64() {
+        Some(deadline) => clocked_deadline(connection, ask, ask.accepted_at_unix_ms, u128::from(deadline)),
+        None => Ok(None),
     }
-    Some(ask.accepted_at_unix_ms.max(since) + u128::from(default_ms))
 }
 
 /// The answer id that applies at an ask's deadline, if it names one.
@@ -712,13 +743,25 @@ pub fn enrich_responses(
             None => asks.push((ask, deadline.and_then(|deadline| u128::try_from(deadline).ok()), vec![response])),
         }
     }
+    let by_deadline = |(_, body, _, _, _): &(Option<String>, Value, String, bool, String)| body["fields"]["resolved_by"] == "deadline";
     for (ask, deadline, responses) in asks {
+        // A held clock moves the cutoff past the stored deadline; the person's clock is read
+        // only for an ask a deadline resolved.
+        let cutoff = match deadline {
+            Some(_) if responses.iter().any(by_deadline) => match request(connection, &ask)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+            {
+                Some(claim) => answer_cutoff(connection, &claim)?,
+                None => deadline,
+            },
+            _ => deadline,
+        };
         let (standing, overridden) = standing_responses(
             responses,
-            |(_, body, _, _, _)| body["fields"]["resolved_by"] == "deadline",
+            by_deadline,
             |(_, body, _, _, kind)| kind == "work.person-done" && body["fields"]["resolved_by"] != "deadline",
             |(_, _, accepted, _, _)| accepted.parse().unwrap_or(0),
-            deadline,
+            cutoff,
         );
         if overridden && standing.iter().any(|(_, _, _, from_origin, _)| *from_origin) {
             view.constraints.push(format!(

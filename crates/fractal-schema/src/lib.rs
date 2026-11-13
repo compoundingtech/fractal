@@ -4328,6 +4328,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cost_microusd", integer()),
             ("reported_cost_microusd", integer()),
             ("unpriced_tokens", integer()),
+            ("unpriced_responses", integer()),
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
@@ -5288,7 +5289,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("harness.usage").unwrap().fields.remove("execution_id").unwrap();
+        for field in ["execution_id", "unpriced_responses"] {
+            current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

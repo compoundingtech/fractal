@@ -1034,12 +1034,9 @@ fn rollout_rechecks_pending_replies_and_the_physical_render_fence() {
     assert!(reconciler.rollout_render_guard(&seat.desired()).is_err());
 }
 
-/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
-/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
-#[tokio::test(start_paused = true)]
-async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
-    use futures_util::FutureExt;
-    let seat = Seat::new();
+/// A seat claims its step and asks `person/operator` from it with a one-hour deadline: the
+/// origin step, the ask's step and its stored deadline.
+fn ask_with_deadline(seat: &Seat) -> (String, String, u128) {
     seat.store.set_ask_deadlines(true);
     let run = seat.work();
     let origin = run.steps[0].subject.clone();
@@ -1057,6 +1054,7 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let ask = seat
         .store
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: Some(3_600_000),
             default_answer: None,
             legacy_request: None,
@@ -1077,6 +1075,16 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
             .as_u64()
             .unwrap(),
     );
+    (origin, ask.subject, deadline)
+}
+
+/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
+/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
+    use futures_util::FutureExt;
+    let seat = Seat::new();
+    let (origin, ask, deadline) = ask_with_deadline(&seat);
     let reconciler = Reconciler::new(
         seat.store.clone(),
         seat.runtime.clone(),
@@ -1104,10 +1112,56 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let resolved = reconciler.reconcile_person_asks();
     smallclaims::store::set_thread_clock(None);
     assert!(resolved.unwrap());
-    assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "completed");
     let resumed = seat.store.step_run(&origin).unwrap().unwrap();
     assert_eq!(resumed.status, "ready");
     assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
+}
+
+/// While the asked person holds their deadline clock no wake is armed for the ask; once it
+/// runs again the wake is armed for the stored deadline plus the time held.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_arms_the_ask_deadline_wake_past_the_time_the_clock_was_held() {
+    let seat = Seat::new();
+    let (_, ask, deadline) = ask_with_deadline(&seat);
+    let reconciler = Reconciler::new(
+        seat.store.clone(),
+        seat.runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
+    let clock = |deadline_clock: &str| {
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: "person/operator".into(),
+                kind: "person.deadline-clock-set".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([
+                    ("deadline_clock".into(), json!(deadline_clock)),
+                    ("source".into(), json!("host/amber")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let held = now_ms();
+    smallclaims::store::set_thread_clock(Some(held));
+    clock("hold-all");
+    assert!(!reconciler.reconcile_person_asks().unwrap());
+    assert_eq!(reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"), None, "a held clock arms nothing");
+    let resumed = held + 600_000;
+    smallclaims::store::set_thread_clock(Some(resumed));
+    clock("run");
+    let pass = reconciler.reconcile_person_asks();
+    smallclaims::store::set_thread_clock(None);
+    assert!(!pass.unwrap());
+    assert_eq!(
+        reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"),
+        Some(&(deadline + 600_000))
+    );
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "ready");
 }
 
 #[test]
@@ -1149,6 +1203,7 @@ mission "garden/cancel-ask" state="ready" {
         idempotency_key: "cancel-ask-claim".into(),
     }).unwrap();
     let ask = seat.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1229,6 +1284,7 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let ask = seat
             .store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

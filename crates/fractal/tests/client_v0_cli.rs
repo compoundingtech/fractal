@@ -857,7 +857,7 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
                 "entry_type":"usage","final":true,"driver":"codex",
                 "incarnation_id":"inc-one","sequence":1,
                 "body":{"semantics":"response","model":"gpt-6.1-sol",
-                    "input_tokens":1000,"output_tokens":100,"total_tokens":1100}
+                    "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100}
             }),
         );
         let rollup = store
@@ -5875,6 +5875,7 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     let update = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

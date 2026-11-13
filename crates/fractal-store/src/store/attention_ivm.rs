@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
+            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v4.urgent",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -366,7 +366,8 @@ pub fn resource(item: &AttentionItemView) -> Result<Value> {
       "title":item.title,"detail":item.detail,"priority":item.priority,"state":"open",
       "requested_at":crate::client_values::client_timestamp(item.requested_at_unix_ms),"targets":item.targets,
       "actions":crate::client_values::client_attention_actions(&item.kind,item.review_mode.as_deref()),
-      "operational":{"layer":"current","actionable":true,"reasons":[]},"alert":item.is_alert()});
+      "operational":{"layer":"current","actionable":true,"reasons":[]},"alert":item.is_alert(),
+      "urgent":item.is_urgent()});
     if item.conversation.is_some() {
         row["conversation_ids"] = json!(item.conversations());
     }

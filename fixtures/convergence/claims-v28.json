@@ -4552,6 +4552,12 @@
         "immutable": false,
         "reference": false
       },
+      "unpriced_responses": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "unpriced_tokens": {
         "value_type": "integer",
         "required": false,

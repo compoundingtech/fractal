@@ -2395,6 +2395,13 @@ impl AttentionItemView {
         attention_is_alert(&self.kind, self.is_update())
     }
 
+    /// Whether this item is urgent: the one server rule, priority `critical`
+    /// ([`fractal_schema::availability::urgent_priority`]). Interruptions `urgent`, the deadline
+    /// clock's `hold-routine` and spoken delivery read only this.
+    pub fn is_urgent(&self) -> bool {
+        fractal_schema::availability::urgent_priority(Some(&self.priority))
+    }
+
     /// Every agent conversation this item shows in: its own, and for a login, every seat that
     /// shares it, since one sign-in answers them all.
     pub fn conversations(&self) -> Vec<String> {
@@ -3607,6 +3614,11 @@ pub struct PersonAskRequest {
     /// the ask resolves as timed out with no answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_answer: Option<String>,
+    /// `critical`, `high`, `normal` or `low` ([`fractal_schema::availability::PRIORITIES`]);
+    /// absent is `normal`. Only `critical` is urgent: it keeps running under `hold-routine` and
+    /// may interrupt a person whose interruptions are `urgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub idempotency_key: String,
 }
 

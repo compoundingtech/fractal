@@ -557,6 +557,7 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1697,6 +1698,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -2703,6 +2705,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -3107,6 +3110,7 @@ async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_acti
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -4026,6 +4030,7 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -4145,6 +4150,7 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

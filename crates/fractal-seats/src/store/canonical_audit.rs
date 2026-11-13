@@ -936,6 +936,7 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
