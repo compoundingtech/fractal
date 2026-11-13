@@ -173,7 +173,11 @@ struct TrailingChevronDisclosureStyle: DisclosureGroupStyle {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
           configuration.label
           Spacer(minLength: 4)
-          DisclosureChevron(isExpanded: configuration.isExpanded)
+          Image(systemName: "chevron.right")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+            .accessibilityHidden(true)
         }
         .contentShape(.rect)
       }
@@ -186,17 +190,4 @@ struct TrailingChevronDisclosureStyle: DisclosureGroupStyle {
 
 extension DisclosureGroupStyle where Self == TrailingChevronDisclosureStyle {
   static var trailingChevron: TrailingChevronDisclosureStyle { .init() }
-}
-
-/// The chevron a disclosure or collapsible section header shows at its trailing edge.
-struct DisclosureChevron: View {
-  let isExpanded: Bool
-
-  var body: some View {
-    Image(systemName: "chevron.right")
-      .font(.caption.weight(.semibold))
-      .foregroundStyle(.secondary)
-      .rotationEffect(.degrees(isExpanded ? 90 : 0))
-      .accessibilityHidden(true)
-  }
 }

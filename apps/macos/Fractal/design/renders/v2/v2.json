@@ -1,0 +1,760 @@
+{
+  "dimensions": [
+    {
+      "id": "L",
+      "options": [
+        {
+          "description": "Inbox first: asks, updates and speech fill the panel; availability and objectives are chips below it that expand their section in place, one at a time",
+          "id": "L1",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A2-H3-S1-busy-light.png",
+                  "height": 2806,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A2-H3-S1-busy-dark.png",
+                  "height": 2806,
+                  "width": 800
+                }
+              ],
+              "title": "Inbox first"
+            }
+          ]
+        },
+        {
+          "description": "Segmented Inbox | Availability | Objectives: one page at a time",
+          "id": "L2",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S1-inbox-busy-light.png",
+                  "height": 1960,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S1-inbox-busy-dark.png",
+                  "height": 1960,
+                  "width": 800
+                }
+              ],
+              "title": "Inbox page"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S1-availability-busy-light.png",
+                  "height": 898,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S1-availability-busy-dark.png",
+                  "height": 898,
+                  "width": 800
+                }
+              ],
+              "title": "Availability page"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S1-objectives-busy-light.png",
+                  "height": 1076,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S1-objectives-busy-dark.png",
+                  "height": 1076,
+                  "width": 800
+                }
+              ],
+              "title": "Objectives page"
+            }
+          ]
+        },
+        {
+          "description": "One scroll: every section collapses to a one-line summary; sections that need you start open",
+          "id": "L3",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L3-A2-H3-S1-busy-light.png",
+                  "height": 2808,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L3-A2-H3-S1-busy-dark.png",
+                  "height": 2808,
+                  "width": 800
+                }
+              ],
+              "title": "One scroll"
+            }
+          ]
+        }
+      ],
+      "picked": "L1",
+      "shipped": "L1",
+      "title": "Information architecture"
+    },
+    {
+      "id": "A",
+      "options": [
+        {
+          "description": "Compact row with an Answer pop-up menu holding every choice",
+          "id": "A1",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A1-H3-S1-busy-light.png",
+                  "height": 2386,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A1-H3-S1-busy-dark.png",
+                  "height": 2386,
+                  "width": 800
+                }
+              ],
+              "title": "A1"
+            }
+          ]
+        },
+        {
+          "description": "Row with answer buttons and a text field always inline; the first ask's recommended answer is the one prominent default button",
+          "id": "A2",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A2-H3-S1-busy-light.png",
+                  "height": 2806,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A2-H3-S1-busy-dark.png",
+                  "height": 2806,
+                  "width": 800
+                }
+              ],
+              "title": "A2"
+            }
+          ]
+        },
+        {
+          "description": "Compact row with a disclosure; the first ask opens with its inline answer",
+          "id": "A3",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A3-H3-S1-busy-light.png",
+                  "height": 2462,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A3-H3-S1-busy-dark.png",
+                  "height": 2462,
+                  "width": 800
+                }
+              ],
+              "title": "A3"
+            }
+          ]
+        }
+      ],
+      "picked": "A3",
+      "shipped": "A2",
+      "title": "Ask row"
+    },
+    {
+      "id": "H",
+      "options": [
+        {
+          "description": "Title plus status chips (connection, availability, objectives) that expand their section at the top of the panel",
+          "id": "H1",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A2-H1-S1-busy-light.png",
+                  "height": 1998,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A2-H1-S1-busy-dark.png",
+                  "height": 1998,
+                  "width": 800
+                }
+              ],
+              "title": "H1"
+            }
+          ]
+        },
+        {
+          "description": "Toolbar header: title and freshness, a refresh button and a ⋯ menu with the version, Settings and Quit; no footer",
+          "id": "H2",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A2-H2-S1-busy-light.png",
+                  "height": 2744,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A2-H2-S1-busy-dark.png",
+                  "height": 2744,
+                  "width": 800
+                }
+              ],
+              "title": "H2"
+            }
+          ]
+        },
+        {
+          "description": "Minimal: title, freshness and refresh; version, Settings and Quit in the footer",
+          "id": "H3",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L1-A2-H3-S1-busy-light.png",
+                  "height": 2806,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L1-A2-H3-S1-busy-dark.png",
+                  "height": 2806,
+                  "width": 800
+                }
+              ],
+              "title": "H3"
+            }
+          ]
+        }
+      ],
+      "picked": "H3",
+      "shipped": "H3",
+      "title": "Header"
+    },
+    {
+      "id": "S",
+      "options": [
+        {
+          "description": "Mini 24-hour histogram beside every objective's value (shaded nearly-spent zone); hover a bar for its reading and time",
+          "id": "S1",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S1-objectives-busy-light.png",
+                  "height": 1076,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S1-objectives-busy-dark.png",
+                  "height": 1076,
+                  "width": 800
+                }
+              ],
+              "title": "S1 on the L2 Objectives page"
+            }
+          ]
+        },
+        {
+          "description": "Compact rows; a disclosure opens a full histogram with hour axis and the nearly-spent line",
+          "id": "S2",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S2-objectives-busy-light.png",
+                  "height": 1348,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S2-objectives-busy-dark.png",
+                  "height": 1348,
+                  "width": 800
+                }
+              ],
+              "title": "S2 on the L2 Objectives page"
+            }
+          ]
+        },
+        {
+          "description": "Grid of small-multiple histograms, missed objectives first",
+          "id": "S3",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/L2-A2-H3-S3-objectives-busy-light.png",
+                  "height": 1300,
+                  "width": 800
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/L2-A2-H3-S3-objectives-busy-dark.png",
+                  "height": 1300,
+                  "width": 800
+                }
+              ],
+              "title": "S3 on the L2 Objectives page"
+            }
+          ]
+        }
+      ],
+      "picked": "S2",
+      "shipped": "S1",
+      "title": "Objective history"
+    },
+    {
+      "id": "M",
+      "options": [
+        {
+          "description": "Symbol plus the open-ask count in a badge",
+          "id": "M1",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-idle-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-idle-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "idle",
+              "title": "Idle"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-one-light.png",
+                  "height": 48,
+                  "width": 116
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-one-dark.png",
+                  "height": 48,
+                  "width": 116
+                }
+              ],
+              "state": "one",
+              "title": "One ask"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-several-light.png",
+                  "height": 48,
+                  "width": 116
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-several-dark.png",
+                  "height": 48,
+                  "width": 116
+                }
+              ],
+              "state": "several",
+              "title": "Three asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-many-light.png",
+                  "height": 48,
+                  "width": 130
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-many-dark.png",
+                  "height": 48,
+                  "width": 130
+                }
+              ],
+              "state": "many",
+              "title": "Twelve asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-urgent-light.png",
+                  "height": 48,
+                  "width": 116
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-urgent-dark.png",
+                  "height": 48,
+                  "width": 116
+                }
+              ],
+              "state": "urgent",
+              "title": "Urgent"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-offline-light.png",
+                  "height": 48,
+                  "width": 104
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-offline-dark.png",
+                  "height": 48,
+                  "width": 104
+                }
+              ],
+              "state": "offline",
+              "title": "Offline"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M1-unconfigured-light.png",
+                  "height": 48,
+                  "width": 72
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M1-unconfigured-dark.png",
+                  "height": 48,
+                  "width": 72
+                }
+              ],
+              "state": "unconfigured",
+              "title": "Not configured"
+            }
+          ]
+        },
+        {
+          "description": "Symbol only; the symbol changes for asks and urgent asks",
+          "id": "M2",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-idle-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-idle-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "idle",
+              "title": "Idle"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-one-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-one-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "one",
+              "title": "One ask"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-several-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-several-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "several",
+              "title": "Three asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-many-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-many-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "many",
+              "title": "Twelve asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-urgent-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-urgent-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "urgent",
+              "title": "Urgent"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-offline-light.png",
+                  "height": 48,
+                  "width": 68
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-offline-dark.png",
+                  "height": 48,
+                  "width": 68
+                }
+              ],
+              "state": "offline",
+              "title": "Offline"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M2-unconfigured-light.png",
+                  "height": 48,
+                  "width": 72
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M2-unconfigured-dark.png",
+                  "height": 48,
+                  "width": 72
+                }
+              ],
+              "state": "unconfigured",
+              "title": "Not configured"
+            }
+          ]
+        },
+        {
+          "description": "Symbol plus the count as plain text, like the battery percentage",
+          "id": "M3",
+          "images": [
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-idle-light.png",
+                  "height": 48,
+                  "width": 80
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-idle-dark.png",
+                  "height": 48,
+                  "width": 80
+                }
+              ],
+              "state": "idle",
+              "title": "Idle"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-one-light.png",
+                  "height": 48,
+                  "width": 104
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-one-dark.png",
+                  "height": 48,
+                  "width": 104
+                }
+              ],
+              "state": "one",
+              "title": "One ask"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-several-light.png",
+                  "height": 48,
+                  "width": 104
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-several-dark.png",
+                  "height": 48,
+                  "width": 104
+                }
+              ],
+              "state": "several",
+              "title": "Three asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-many-light.png",
+                  "height": 48,
+                  "width": 120
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-many-dark.png",
+                  "height": 48,
+                  "width": 120
+                }
+              ],
+              "state": "many",
+              "title": "Twelve asks"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-urgent-light.png",
+                  "height": 48,
+                  "width": 104
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-urgent-dark.png",
+                  "height": 48,
+                  "width": 104
+                }
+              ],
+              "state": "urgent",
+              "title": "Urgent"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-offline-light.png",
+                  "height": 48,
+                  "width": 92
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-offline-dark.png",
+                  "height": 48,
+                  "width": 92
+                }
+              ],
+              "state": "offline",
+              "title": "Offline"
+            },
+            {
+              "renders": [
+                {
+                  "appearance": "light",
+                  "file": "v2/menubar-M3-unconfigured-light.png",
+                  "height": 48,
+                  "width": 72
+                },
+                {
+                  "appearance": "dark",
+                  "file": "v2/menubar-M3-unconfigured-dark.png",
+                  "height": 48,
+                  "width": 72
+                }
+              ],
+              "state": "unconfigured",
+              "title": "Not configured"
+            }
+          ]
+        }
+      ],
+      "picked": "M3",
+      "shipped": "M1",
+      "title": "Menu-bar item"
+    }
+  ],
+  "generator": "TrayGallery --explore (V2, frozen)",
+  "note": "V2 exploration as Ada picked from it: each dimension's options rendered one change at a time from the V2 design (L1-A2-H3-S1, M1). The variant code is gone; these images are history and are not regenerated.",
+  "scale": 2,
+  "scenario": {
+    "description": "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent.",
+    "id": "busy",
+    "title": "Busy inbox"
+  },
+  "source": "cacheDisplay: no window-server materials",
+  "trayRev": "src.2470040"
+}

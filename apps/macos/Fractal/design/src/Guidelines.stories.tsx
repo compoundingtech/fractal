@@ -113,7 +113,7 @@ const checklist: readonly Check[] = [
     item: 'Status item is a template symbol (no color), sized for the 24 pt bar',
     verdict: 'pass',
     evidence:
-      'TrayMenuBarLabel draws an isTemplate image; the M1 badge knocks its digits out instead of coloring them. One glyph plus the count; no second (gauge) glyph.',
+      'TrayMenuBarLabel draws an isTemplate image: one symbol and the open-ask count as plain text, like the battery percentage; no second (gauge) glyph.',
   },
   {
     item: 'Window-style extra only because the content is too complex for a menu',
@@ -146,9 +146,9 @@ const checklist: readonly Check[] = [
   },
   {
     item: 'Status never carried by color alone',
-    verdict: 'partial',
+    verdict: 'pass',
     evidence:
-      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; offline swaps the menu-bar glyph. In the S1 mini chart the nearly-spent zone is a shaded band only about 2 pt tall; S2’s full chart has the dashed rule and axes.',
+      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; offline swaps the menu-bar glyph. Histogram hours without a bar differ in shape (spent: cross, unmeasured: ring), named in a key under the chart; the nearly-spent zone is a dashed rule.',
   },
   {
     item: 'SF Symbols chosen per job; system symbols only',
@@ -160,13 +160,13 @@ const checklist: readonly Check[] = [
     item: 'One prominent action per view',
     verdict: 'partial',
     evidence:
-      'Only the first answerable ask’s recommended answer is .borderedProminent (never a recommended decline), and only while nothing is typed or focused; the note editor’s Save takes that role while open. No answer is the Return default: answers are irreversible. Flat fallbacks draw it untinted (inactive window); no V2 capture yet.',
+      'Only the first answerable ask’s recommended answer is .borderedProminent (never a recommended decline), and only while nothing is typed or focused; the note editor’s Save takes that role while open. No answer is the Return default: answers are irreversible. Flat fallbacks draw it untinted (inactive window).',
   },
   {
     item: 'No hover-only controls',
     verdict: 'pass',
     evidence:
-      'Mark Read, Open in Fractal and the A1 Answer menu are always in the hierarchy; no row reflows under the pointer (the full update summary is the help text).',
+      'Mark Read, Open in Fractal, Read Aloud and an open ask’s answers are always in the hierarchy; a closed ask opens with its disclosure from the keyboard; no row reflows under the pointer (the full update summary is the help text).',
   },
   {
     item: 'Control size set on the panel root (macOS 27 resets it in popovers)',
@@ -195,7 +195,7 @@ const checklist: readonly Check[] = [
     item: 'Charts: Swift Charts, visible threshold, per-bar accessibility, detail',
     verdict: 'partial',
     evidence:
-      'BarMark per hour with labelled bars for VoiceOver; dashed rule (full) or shaded band (mini) at nearly spent; spent hours carry a cross, unmeasured hours a grey stub. The reading and time per bar show on pointer hover only.',
+      'BarMark per hour with labelled bars for VoiceOver; dashed rule at nearly spent; spent hours carry a cross and unmeasured hours a ring on the baseline, with a key under the chart. The reading and time per bar show on pointer hover only.',
   },
   {
     item: 'Work survives the panel closing',
@@ -213,7 +213,7 @@ const checklist: readonly Check[] = [
     item: 'Light and dark verified on the real window server',
     verdict: 'partial',
     evidence:
-      'V1 was captured (busy light and dark, answering dark, the M1 status item); those captures no longer match the panel and were dropped. V2 shows flat fallbacks until the off-display capture pipeline renders it.',
+      'The panel and the status item show flat fallbacks until the headless VM capture pipeline renders them.',
   },
 ]
 
@@ -221,7 +221,7 @@ const checklist: readonly Check[] = [
 const benchmarks = [
   'Control Center modules: bold headline title, platters on glass, a trailing control per row — the tray’s grouped sections match this rhythm.',
   'Wi-Fi / Bluetooth: section headers small and secondary, rows of symbol + title + detail, settings link last — the tray’s section headers follow (subheadline semibold, secondary).',
-  'Battery: a percentage beside the glyph in the menu bar — the precedent for M3; M1 badges the count instead.',
+  'Battery: a percentage beside the glyph in the menu bar — the precedent for the plain count beside the tray’s symbol.',
   'Focus: the active mode as the row’s value with a menu to change it — the tray’s availability rows use the same pop-up pattern.',
   'Control Center: a module expands in place rather than opening another window — the tray’s status chips do the same.',
 ]

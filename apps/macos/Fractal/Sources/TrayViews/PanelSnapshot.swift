@@ -8,25 +8,15 @@ import SwiftUI
 /// panel sits on the plain window background instead. The window is never key, so controls draw
 /// inactive (the default button is not tinted). TrayGallery's capture mode has the real thing.
 @MainActor public enum PanelSnapshot {
-  public static func png(
-    model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name,
-    design: TrayDesign = .current, page: TrayDesign.Page = .inbox
-  ) async -> Data? {
-    await png(
-      TrayPanel(model: model, build: build)
-        .environment(\.panelMaxHeight, .infinity)
-        .environment(\.trayDesign, design)
-        .environment(\.trayInitialPage, page),
-      appearance: appearance)
+  public static func png(model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name) async -> Data? {
+    await png(TrayPanel(model: model, build: build).environment(\.panelMaxHeight, .infinity), appearance: appearance)
   }
 
   /// The status item as the menu bar tints its template image, on a flat bar of the appearance
   /// (no wallpaper or glass behind it). The same image the app installs.
-  public static func png(menuBar model: AttentionModel, style: TrayDesign.MenuBar, appearance: NSAppearance.Name)
-    -> Data?
-  {
+  public static func png(menuBar model: AttentionModel, appearance: NSAppearance.Name) -> Data? {
     let scale: CGFloat = 2
-    let glyph = TrayMenuBarLabel.image(MenuBarState(model: model), style: style, scale: scale)
+    let glyph = TrayMenuBarLabel.image(MenuBarState(model: model), scale: scale)
     let size = NSSize(width: ceil(glyph.size.width) + 16, height: 24)
     guard
       let bitmap = NSBitmapImageRep(

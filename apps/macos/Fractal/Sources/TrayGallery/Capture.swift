@@ -20,8 +20,6 @@ struct CaptureJob {
 
   let kind: Kind
   let scenario: Scenario
-  let design: TrayDesign
-  let page: TrayDesign.Page
   let appearance: GalleryAppearance
   let file: String
 }
@@ -35,8 +33,6 @@ struct GalleryAppearance: Sendable {
 
 struct CaptureManifest: Encodable {
   struct Panel: Codable {
-    let panel: String
-    let page: String?
     let scenario: String
     let appearance: String
     let file: String
@@ -45,7 +41,6 @@ struct CaptureManifest: Encodable {
   }
 
   struct MenuBarItem: Codable {
-    let menuBar: String
     let state: String
     let appearance: String
     let file: String
@@ -75,8 +70,6 @@ private struct PreviousCapture: Decodable {
   static let shared = CaptureStage()
 
   var model = AttentionModel(adapter: nil)
-  var design = TrayDesign.current
-  var page = TrayDesign.Page.inbox
   /// Bumped per job so per-row state (hover, disclosure) starts fresh.
   var generation = 0
 }
@@ -88,13 +81,11 @@ struct CaptureApp: App {
   var body: some Scene {
     MenuBarExtra {
       TrayPanel(model: stage.model, build: GalleryBuild.identity)
-        .environment(\.trayDesign, stage.design)
-        .environment(\.trayInitialPage, stage.page)
         // Every section in view: captures are for review, not for the scroll limit.
         .environment(\.panelMaxHeight, .infinity)
         .id(stage.generation)
     } label: {
-      TrayMenuBarLabel(model: stage.model).environment(\.trayDesign, stage.design)
+      TrayMenuBarLabel(model: stage.model)
     }
     .menuBarExtraStyle(.window)
   }
@@ -173,8 +164,6 @@ struct CaptureFailure: Error, CustomStringConvertible {
     for job in jobs {
       NSApp.appearance = NSAppearance(named: job.appearance.value)
       stage.model = await job.scenario.prepare(.now)
-      stage.design = job.design
-      stage.page = job.page
       stage.generation += 1
       try await Task.sleep(for: .milliseconds(400))
       guard let itemFrame = item.button?.window?.frame, let screen = Screen(containing: itemFrame) else {
@@ -219,14 +208,13 @@ struct CaptureFailure: Error, CustomStringConvertible {
       case .panel:
         manifest.panels.append(
           .init(
-            panel: job.design.panelID, page: job.design.layout == .l2 ? job.page.rawValue : nil,
             scenario: job.scenario.id, appearance: job.appearance.name, file: job.file, width: image.width,
             height: image.height))
       case .menuBar:
         manifest.menuBar.append(
           .init(
-            menuBar: job.design.menuBar.rawValue, state: job.scenario.id, appearance: job.appearance.name,
-            file: job.file, width: image.width, height: image.height))
+            state: job.scenario.id, appearance: job.appearance.name, file: job.file, width: image.width,
+            height: image.height))
       }
       print("captured \(job.file) \(image.width)×\(image.height)")
     }

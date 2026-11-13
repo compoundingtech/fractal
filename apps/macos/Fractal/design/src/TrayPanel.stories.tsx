@@ -16,8 +16,6 @@ const meta = {
   argTypes: {
     scenario: { control: 'select', options: availableScenarioIds },
     appearance: { control: false },
-    panel: { control: false },
-    page: { control: false },
     title: { control: false },
   },
   parameters: {

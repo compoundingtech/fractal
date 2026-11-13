@@ -1,13 +1,12 @@
 import AttentionCore
 import SwiftUI
 
-/// Asks the speech gate to read this ask's title aloud; shown only with a speech service. While
-/// the ask is being spoken it says so and stops it, so the row shows that state once. `compact`
-/// shows only the symbol (the title stays the help text and the accessibility label).
+/// Asks the speech gate to read this ask's title aloud; shown only with a speech service. Only
+/// the symbol shows (the title stays the help text and the accessibility label). While the ask is
+/// being spoken it says so and stops it, so the row shows that state once.
 struct ReadAloudButton: View {
   let record: AttentionRecord
   let model: AttentionModel
-  var compact = false
 
   var body: some View {
     if let speech = model.speech {
@@ -16,18 +15,10 @@ struct ReadAloudButton: View {
           .help("Stop reading this aloud; the queue goes on (\(SpeechHotkey.stop) from any app)")
       } else {
         Button { model.speakAloud(record) } label: { Label("Read Aloud", systemImage: "speaker.wave.2") }
-          .labelStyle(ReadAloudLabelStyle(compact: compact))
+          .labelStyle(.iconOnly)
           .help("Read Aloud: speak the title on this Mac if availability allows it")
       }
     }
-  }
-}
-
-private struct ReadAloudLabelStyle: LabelStyle {
-  let compact: Bool
-
-  func makeBody(configuration: Configuration) -> some View {
-    if compact { Label(configuration).labelStyle(.iconOnly) } else { Label(configuration) }
   }
 }
 
