@@ -84,6 +84,14 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
     return () => held?.close();
   }, [follow, load, read]));
 
+  // Exact detail streams can refresh a cached continuation row without adding
+  // it to the context's live head or changing its ordering/pagination boundary.
+  const replace = useCallback((item: T) => {
+    const update = (items: T[]) => items.map(previous => previous.id === item.id ? item : previous);
+    setResult(previous => previous?.read === read ? { ...previous, page: { ...previous.page, items: update(previous.page.items) } } : previous);
+    setLive(previous => previous?.read === read && previous.window ? { ...previous, window: { ...previous.window, items: update(previous.window.items) } } : previous);
+  }, [read]);
+
   const liveWindow = visibleLive?.window;
   const aligned = !liveWindow || !!visible && sameHead(visible.head, liveWindow.items);
   const tail = aligned && visible && liveWindow ? visible.page.items.slice(visible.head.length) : [];
@@ -92,6 +100,7 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
     items,
     issue: visibleLive?.issue || visible?.issue,
     loading,
+    replace,
     reload: () => void load(),
     more: aligned && !visibleLive?.refused && visible?.page.next_cursor ? () => void load(visible) : undefined,
   };
@@ -173,24 +182,15 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       <ThreadViewport viewport={scroll}>
       {threads.map(thread => {
         const open = expanded.has(thread.id);
-        return <View key={thread.id}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ expanded: open }}
-            accessibilityLabel={`${thread.title}, ${threadSummaryLine(thread)}`}
-            onPress={() => setExpanded(previous => {
-              const next = new Set(previous);
-              if (next.has(thread.id)) next.delete(thread.id);
-              else next.add(thread.id);
-              return next;
-            })}
-            style={{ minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6 }}
-          >
-            <T numberOfLines={1} color={theme.accent} style={{ flexShrink: 1 }}>{open ? '▾' : '▸'} {thread.title}</T>
-            <T dim numberOfLines={1}>· {threadSummaryLine(thread)}</T>
-          </Pressable>
-          {open ? <ThreadBody client={client} thread={thread} onOpen={() => openThread(thread.id)} revealComposer={revealComposer} /> : null}
-        </View>;
+        const toggle = () => setExpanded(previous => {
+          const next = new Set(previous);
+          if (next.has(thread.id)) next.delete(thread.id);
+          else next.add(thread.id);
+          return next;
+        });
+        return open ? <ExpandedContextThread key={thread.id} client={client} initial={thread} refresh={threadRefresh}
+          onSummary={page.replace} toggle={toggle} onOpen={() => openThread(thread.id)} revealComposer={revealComposer} />
+          : <ContextThreadHeader key={thread.id} thread={thread} open={false} toggle={toggle} />;
       })}
       </ThreadViewport>
       {page.issue ? <T color={theme.waiting}>{page.issue}</T> : null}
@@ -199,6 +199,30 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
         {page.more && !page.issue ? <Button label="More threads" onPress={page.more} disabled={page.loading} /> : null}
       </View>
     </ScrollView> : null}
+  </View>;
+}
+
+function ContextThreadHeader({ thread, open, toggle }: { thread: ThreadSummary; open: boolean; toggle: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }}
+    accessibilityLabel={`${thread.title}, ${threadSummaryLine(thread)}`} onPress={toggle}
+    style={{ minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    <T numberOfLines={1} color={theme.accent} style={{ flexShrink: 1 }}>{open ? '▾' : '▸'} {thread.title}</T>
+    <T dim numberOfLines={1}>· {threadSummaryLine(thread)}</T>
+  </Pressable>;
+}
+
+function ExpandedContextThread({ client, initial, refresh, onSummary, toggle, onOpen, revealComposer }: {
+  client: ThreadClient; initial: ThreadSummary; refresh: number; onSummary: (thread: ThreadSummary) => void; toggle: () => void; onOpen: () => void; revealComposer: (row: View) => void;
+}) {
+  // The context window only follows its head. An expanded older page needs the
+  // same exact summary stream as a standalone thread, including its action fence.
+  const page = useThreadSummary(client, initial.id, refresh, true, onSummary);
+  const thread = page.items[0];
+  return <View>
+    <ContextThreadHeader thread={thread ?? initial} open toggle={toggle} />
+    {thread ? <ThreadBody client={client} thread={thread} onOpen={onOpen} revealComposer={revealComposer} />
+      : page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Refresh thread" onPress={page.reload} disabled={page.loading} /></>
+      : <T dim>Loading thread…</T>}
   </View>;
 }
 
@@ -331,17 +355,26 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
 function InlineThread({ client, id, refresh, onOpen, start, embedded }: {
   client: ThreadClient; id?: string; refresh: number; onOpen?: () => void; start?: ThreadStartDraft; embedded?: boolean;
 }) {
+  const page = useThreadSummary(client, id, refresh, !start || start.accepted);
+  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} start={start} embedded={embedded} />;
+}
+
+function useThreadSummary(client: ThreadClient, id: string | undefined, refresh: number, accepted = true, onSummary?: (thread: ThreadSummary) => void) {
   const { feed } = useStore();
-  const accepted = !start || start.accepted;
   const read = useCallback(async (_cursor: string | undefined, signal: AbortSignal) => {
     if (!accepted || !id) return { value: { items: [], next_cursor: null } };
     const { value } = await client.threadGet(id, { signal });
     return { value: { items: [value], next_cursor: null } };
   }, [accepted, client, id]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadSummary>) =>
-    accepted && id && feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [accepted, client, feed, id]);
-  const page = useThreadPage<ThreadSummary>(read, refresh, follow);
-  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} start={start} embedded={embedded} />;
+    accepted && id && feed?.belongsTo(client) ? feed.followThreadSummary(id, {
+      ...handlers,
+      onWindow: window => {
+        handlers.onWindow(window);
+        if (window.items[0]) onSummary?.(window.items[0]);
+      },
+    }) : undefined, [accepted, client, feed, id, onSummary]);
+  return useThreadPage<ThreadSummary>(read, refresh, follow);
 }
 
 function threadTextIssue(content: string): string | undefined {
