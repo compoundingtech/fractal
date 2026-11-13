@@ -66,9 +66,9 @@ final class AttentionModelTests: XCTestCase {
   }
 
   func testMissingConfigurationNeverReads() async {
-    let model = AttentionModel(adapter: nil, configurationError: "Missing ATTENTION_FRACTAL_ENDPOINT")
+    let model = AttentionModel(adapter: nil, configurationError: "Missing ATTENTION_FRACTAL_SOCKET")
     await model.refresh(now: now)
-    XCTAssertEqual(model.connection, .unconfigured("Missing ATTENTION_FRACTAL_ENDPOINT"))
+    XCTAssertEqual(model.connection, .unconfigured("Missing ATTENTION_FRACTAL_SOCKET"))
     XCTAssertTrue(model.asks.isEmpty)
     XCTAssertNil(model.sloBoard)
   }

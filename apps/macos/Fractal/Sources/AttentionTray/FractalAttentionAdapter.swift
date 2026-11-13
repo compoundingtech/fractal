@@ -2,9 +2,13 @@ import AttentionCore
 import Foundation
 import FractalClient
 
+/// The tray talks to this Mac's Fractal member over its Unix socket as the person (local person
+/// trust, as `fractal note set` does): no endpoint, bearer or pairing.
 struct TrayConfiguration: Sendable {
-  let endpoint: URL
-  let credential: String
+  /// `ATTENTION_FRACTAL_SOCKET`: the member's local socket.
+  let socketPath: String
+  /// `ATTENTION_FRACTAL_PERSON`: the person the tray acts for (`person/<id>`).
+  let person: String
   let fractalURL: URL
   /// `ATTENTION_SPEECH_SOCKET`: the local speech service; unset leaves speech off.
   let speechSocket: String?
@@ -13,14 +17,17 @@ struct TrayConfiguration: Sendable {
     case missing(String)
     case invalidURL(String)
     case relativePath(String)
+    case invalidPerson(String)
     var description: String {
       switch self {
       case .missing(let key):
-        "Set \(key) explicitly before launching AttentionTray. No default endpoint is used."
+        "Set \(key) explicitly before launching AttentionTray. No default is used."
       case .invalidURL(let key):
         "\(key) must be an absolute HTTP(S) URL without credentials, query or fragment."
       case .relativePath(let key):
-        "\(key) must be an absolute path when set."
+        "\(key) must be an absolute path."
+      case .invalidPerson(let key):
+        "\(key) must name a person (person/<id>)."
       }
     }
   }
@@ -34,6 +41,11 @@ struct TrayConfiguration: Sendable {
       }
       return value
     }
+    func path(_ key: String) throws -> String {
+      let path = try value(key)
+      guard path.hasPrefix("/") else { throw ConfigurationError.relativePath(key) }
+      return path
+    }
     func url(_ key: String) throws -> URL {
       guard let url = URL(string: try value(key)),
         ["http", "https"].contains(url.scheme), url.host != nil,
@@ -43,13 +55,15 @@ struct TrayConfiguration: Sendable {
       }
       return url
     }
+    let person = try value("ATTENTION_FRACTAL_PERSON")
+    guard person.hasPrefix("person/"), person.count > "person/".count else {
+      throw ConfigurationError.invalidPerson("ATTENTION_FRACTAL_PERSON")
+    }
     let speechSocket = environment["ATTENTION_SPEECH_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
     if let speechSocket, !speechSocket.hasPrefix("/") { throw ConfigurationError.relativePath("ATTENTION_SPEECH_SOCKET") }
     return try Self(
-      endpoint: url("ATTENTION_FRACTAL_ENDPOINT"),
-      credential: value("ATTENTION_FRACTAL_CREDENTIAL"),
-      fractalURL: url("ATTENTION_FRACTAL_URL"),
-      speechSocket: speechSocket)
+      socketPath: path("ATTENTION_FRACTAL_SOCKET"), person: person,
+      fractalURL: url("ATTENTION_FRACTAL_URL"), speechSocket: speechSocket)
   }
 }
 
@@ -90,8 +104,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
 
   init(configuration: TrayConfiguration, clientName: String) {
     client = FractalClient(
-      fabricLoopbackURL: configuration.endpoint, credential: configuration.credential,
-      client: clientName)
+      localSocketPath: configuration.socketPath, person: configuration.person, client: clientName)
     fractalURL = configuration.fractalURL
   }
 
