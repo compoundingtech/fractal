@@ -85,7 +85,7 @@ const benchmarks: readonly {
   {
     what: 'Panel width',
     native: '≈306–310 pt (Tahoe CC and module pages)',
-    v4: '360 pt: a row carries title, asker and age on one line (n2)',
+    v4: '360 pt (W3): a row carries title, asker and age on one line (n2). Open: W1 320, W2 336',
   },
   { what: 'Content inset', native: '14 pt', v4: '14 pt' },
   { what: 'Row highlight', native: 'inset 6 pt, 10 pt continuous radius', v4: 'same' },
@@ -97,7 +97,7 @@ const benchmarks: readonly {
   {
     what: 'Tiles',
     native: '4-slot grid, 2×1 capsule 140 × 64 pt, 34–36 pt circle',
-    v4: 'three equal capsules ≈ 110 × 38 pt, 28 pt circle: one row for three modules that each toggle and drill',
+    v4: 'T1: three equal capsules ≈ 110 × 38 pt, 28 pt circle, each toggles and drills. Open: T2, the 4-slot grid',
   },
   { what: 'On state', native: 'white circle, tinted symbol', v4: 'same' },
   {
@@ -259,18 +259,77 @@ export const Overview: Story = {
   ),
 }
 
-/** Open question D: where an ask’s answers sit on its page. */
+/** One option of an open question: a scenario render, optionally captioned. */
+type Option = { readonly scenario: string; readonly title?: string }
+
+const Question = ({
+  title,
+  note,
+  rows,
+}: {
+  title: string
+  note: string
+  rows: readonly (readonly Option[])[]
+}) => (
+  <section className="at-gallery-row" aria-label={title}>
+    <h2 className="at-gallery-heading">{title}</h2>
+    <p className="at-gallery-description">{note}</p>
+    {rows.map((row) => (
+      <div key={row.map((option) => option.scenario).join(' ')} className="at-gallery-pair">
+        {row.map((option) => (
+          <RenderedPanel key={option.scenario} scenario={option.scenario} title={option.title} />
+        ))}
+      </div>
+    ))}
+  </section>
+)
+
+/**
+ * The open questions: answer placement (D), panel width (W) and tile layout (T). Until Johannes
+ * picks, the panel ships D1 · W3 · T1. Every option is the real panel at the live scroll limit.
+ */
 export const OpenVariants: Story = {
   render: () => (
     <div className="at-gallery">
       <p className="at-gallery-description">
-        Pick D1 or D2. Both at the live panel’s scroll limit. D1 is the order n3 asked for; D2 keeps
-        the answers in reach while the request and conversation scroll.
+        Pick one per question. Open: nothing here is decided; the panel ships D1 · W3 · T1 until
+        the pick.
       </p>
-      <div className="at-gallery-pair">
-        <RenderedPanel scenario="variant-d1" />
-        <RenderedPanel scenario="variant-d2" />
-      </div>
+      <Question
+        title="D · Where an ask’s answers sit"
+        note="D1 is the order n3 asked for, and at the live scroll limit its answers can sit below the fold. D2 pins them under the scrolling request and conversation, always in reach."
+        rows={[[{ scenario: 'variant-d1' }, { scenario: 'variant-d2' }]]}
+      />
+      <Question
+        title="W · Panel width"
+        note="Control Center is ≈306–310 pt. Narrower panels keep the 14 pt inset and the one-line rows: titles truncate at the tail, askers keep 18 (W3), 15 (W2) or 13 (W1) characters with the middle elided, and the tiles share what is left. Pages wrap to the column."
+        rows={[
+          [
+            { scenario: 'variant-w1-home' },
+            { scenario: 'variant-w2-home' },
+            { scenario: 'variant-w3-home' },
+          ],
+          [
+            { scenario: 'variant-w1-page' },
+            { scenario: 'variant-w2-page' },
+            { scenario: 'variant-w3-page' },
+          ],
+        ]}
+      />
+      <Question
+        title="T · Tiles"
+        note="T1: three equal capsules in one row; each circle toggles and each title opens the page. T2: Control Center’s 4-slot grid (≈64 pt slots, 12 pt apart). Availability is a Medium tile with Control Center’s 36 pt circle; speech and objectives are Small circles that open their pages, so muting moves to the speech page’s switch and objectives show a count badge. Shown at W3 and W1."
+        rows={[
+          [
+            { scenario: 'variant-w3-home', title: 'T1 at 360 pt: three capsules' },
+            { scenario: 'variant-t2-w3' },
+          ],
+          [
+            { scenario: 'variant-w1-home', title: 'T1 at 320 pt: three capsules' },
+            { scenario: 'variant-t2-w1' },
+          ],
+        ]}
+      />
     </div>
   ),
 }

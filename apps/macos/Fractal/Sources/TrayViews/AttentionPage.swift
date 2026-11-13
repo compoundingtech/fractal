@@ -507,8 +507,8 @@ private struct ConversationSection: View {
   let model: AttentionModel
 
   var body: some View {
-    if record.conversationID != nil {
-      let section = model.excerpts[record.id]
+    let section = model.excerpts[record.id]
+    if record.conversationID != nil, !Self.absent(section) {
       Field(title: "Recent conversation") {
         VStack(alignment: .leading, spacing: 8) {
           if let excerpt = section?.value ?? nil {
@@ -536,6 +536,12 @@ private struct ConversationSection: View {
       }
     }
   }
+
+  /// Read, and the asker has no conversation to show: no label over nothing.
+  private static func absent(_ section: LiveSection<ConversationExcerpt?>?) -> Bool {
+    guard let section, case .fresh = section.state, case .some(.none) = section.value else { return false }
+    return true
+  }
 }
 
 private struct TurnView: View {
@@ -546,9 +552,7 @@ private struct TurnView: View {
     VStack(alignment: .leading, spacing: 2) {
       HStack(spacing: 4) {
         Text(speaker).fontWeight(.semibold)
-        if let at = turn.at {
-          ShortAge(date: at).foregroundStyle(.tertiary)
-        }
+        if let at = turn.at { ShortAge(date: at) }
       }
       .font(.subheadline)
       .foregroundStyle(.secondary)

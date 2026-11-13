@@ -40,26 +40,61 @@ struct PanelScroll<Content: View>: View {
   }
 }
 
+/// How the top level lays out its modules. T1: three equal capsules in one row. T2: Control
+/// Center's 4-slot grid, availability as a Medium tile (two slots), speech and objectives as
+/// Small ones (a circle each, which opens the module's page).
+public enum TileLayout: String, Sendable, CaseIterable {
+  case capsules = "T1"
+  case grid = "T2"
+}
+
+private struct TileLayoutKey: EnvironmentKey {
+  static let defaultValue = TileLayout.capsules
+}
+
+extension EnvironmentValues {
+  public var tileLayout: TileLayout {
+    get { self[TileLayoutKey.self] }
+    set { self[TileLayoutKey.self] = newValue }
+  }
+}
+
 /// Availability, speech and objectives as Control Center modules: the circle toggles (where the
 /// module has an on and off), the rest of the tile opens its page.
 private struct TileRow: View {
   let model: AttentionModel
+  @Environment(\.tileLayout) private var layout
+  @Environment(\.panelWidth) private var width
 
   var body: some View {
-    HStack(spacing: 6) {
-      AvailabilityTile(model: model)
-      if let speech = model.speech { SpeechTile(model: model, speech: speech) }
-      ObjectivesTile(model: model)
+    let slot = PanelMetrics.gridSlot(width)
+    let grid = layout == .grid
+    HStack(spacing: grid ? PanelMetrics.gridGap : 6) {
+      AvailabilityTile(model: model, size: grid ? .medium(slot: slot) : .third)
+      if let speech = model.speech { SpeechTile(model: model, speech: speech, size: grid ? .small(slot: slot) : .third) }
+      ObjectivesTile(model: model, size: grid ? .small(slot: slot) : .third)
     }
-    .padding(.horizontal, 8)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, grid ? PanelMetrics.gridPadding : 8)
     .padding(.top, 8)
     .padding(.bottom, 4)
   }
 }
 
-/// One module: a circle and a title over its value, on a content-layer capsule (the panel is
-/// the glass; no glass on glass). On draws the circle white with a tinted symbol, as Tahoe does.
+/// One module, on a content-layer surface (the panel is the glass; no glass on glass). On draws
+/// the circle white with a tinted symbol, as Tahoe does.
+///
+/// - `third`: a circle and a title over its value on one of three equal capsules (T1).
+/// - `medium`: the same on a two-slot grid capsule with Control Center's larger circle (T2).
+/// - `small`: one grid slot, the circle alone; it opens the page, and the value is its help,
+///   its VoiceOver value and an optional badge (T2).
 struct ModuleTile: View {
+  enum Size {
+    case third
+    case medium(slot: CGFloat)
+    case small(slot: CGFloat)
+  }
+
   let title: String
   let value: String
   let symbol: String
@@ -68,25 +103,80 @@ struct ModuleTile: View {
   var symbolTint: Color?
   var toggleHelp = ""
   var toggle: () -> Void = {}
+  /// A Small tile's count, in place of its value line.
+  var badge: String?
   /// The person just went back from this module's page: VoiceOver returns here.
   var returnsFocus = false
+  let size: Size
   let open: () -> Void
 
   var body: some View {
+    switch size {
+    case .third:
+      wide(circle: 28)
+        .padding(5)
+        .padding(.trailing, 3)
+        .frame(maxWidth: .infinity)
+        .background(.fill.quaternary, in: .capsule)
+    case .medium(let slot):
+      wide(circle: 36)
+        .padding(.horizontal, (PanelMetrics.gridTileHeight - 36) / 2)
+        .frame(width: 2 * slot + PanelMetrics.gridGap, height: PanelMetrics.gridTileHeight)
+        .background(.fill.quaternary, in: .capsule)
+    case .small(let slot):
+      Button(action: open) {
+        Image(systemName: symbol)
+          .font(.title2)
+          .symbolRenderingMode(.hierarchical)
+          .foregroundStyle(glyphStyle)
+          .frame(width: PanelMetrics.gridTileHeight, height: PanelMetrics.gridTileHeight)
+          .background(isOn == true ? AnyShapeStyle(.white) : AnyShapeStyle(.fill.quaternary), in: .circle)
+          .overlay(alignment: .topTrailing) {
+            if let badge {
+              Text(badge)
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .frame(minWidth: 20, minHeight: 20)
+                .background(symbolTint ?? .accentColor, in: .capsule)
+            }
+          }
+          .contentShape(.circle)
+          .contentTransition(.symbolEffect(.replace))
+      }
+      .buttonStyle(.plain)
+      .frame(width: slot, height: PanelMetrics.gridTileHeight)
+      .help("\(title): \(value). Open for more")
+      .accessibilityLabel(title)
+      .accessibilityValue(value)
+      .accessibilityHint("Opens its page")
+      .focusOnArrival(returnsFocus)
+    }
+  }
+
+  private var glyphStyle: AnyShapeStyle {
+    isOn == true ? AnyShapeStyle(.tint) : symbolTint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary)
+  }
+
+  /// The circle, then the title over its value.
+  private func wide(circle: CGFloat) -> some View {
     HStack(spacing: 6) {
       Button(action: isOn == nil ? open : toggle) {
         Image(systemName: symbol)
           .symbolRenderingMode(.hierarchical)
-          .foregroundStyle(isOn == true ? AnyShapeStyle(.tint) : symbolTint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
-          .frame(width: 28, height: 28)
+          .foregroundStyle(glyphStyle)
+          .frame(width: circle, height: circle)
           .background(isOn == true ? AnyShapeStyle(.white) : AnyShapeStyle(.fill.secondary), in: .circle)
           .contentShape(.circle)
           .contentTransition(.symbolEffect(.replace))
       }
       .buttonStyle(.plain)
       .help(isOn == nil ? "\(title): open" : toggleHelp)
-      .accessibilityLabel(isOn == nil ? "\(title), \(value)" : toggleHelp)
+      // Without an on and off the circle repeats the title's button: VoiceOver reads only that.
+      .accessibilityHidden(isOn == nil)
+      .accessibilityLabel(toggleHelp)
       .accessibilityValue(isOn.map { $0 ? "On" : "Off" } ?? "")
+      .accessibilityAddTraits(isOn == nil ? [] : .isToggle)
       Button(action: open) {
         VStack(alignment: .leading, spacing: 0) {
           Text(title).font(.callout).fontWeight(.semibold)
@@ -102,15 +192,12 @@ struct ModuleTile: View {
       .accessibilityHint("Opens its page")
       .focusOnArrival(returnsFocus)
     }
-    .padding(5)
-    .padding(.trailing, 3)
-    .frame(maxWidth: .infinity)
-    .background(.fill.quaternary, in: .capsule)
   }
 }
 
 private struct AvailabilityTile: View {
   let model: AttentionModel
+  let size: ModuleTile.Size
 
   var body: some View {
     let availability = model.availability.value?.availability
@@ -123,6 +210,7 @@ private struct AvailabilityTile: View {
       toggleHelp: available ? "Set Away until you change it" : "Set Available",
       toggle: { if let availability { AvailabilitySwitch.flip(availability, model) } },
       returnsFocus: model.backFrom == .availability,
+      size: size,
       open: { open(.availability) }
     )
     .disabled(model.isWritingAvailability)
@@ -147,6 +235,7 @@ private struct AvailabilityTile: View {
 private struct SpeechTile: View {
   let model: AttentionModel
   let speech: SpeechCoordinator
+  let size: ModuleTile.Size
 
   var body: some View {
     let now = Date.now
@@ -161,6 +250,7 @@ private struct SpeechTile: View {
         if muted { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
       },
       returnsFocus: model.backFrom == .speech,
+      size: size,
       open: { PanelMotion.open(.speech, in: model) }
     )
   }
@@ -176,6 +266,7 @@ private struct SpeechTile: View {
 /// Missed objectives first, then budgets nearly spent: the same counts the page's sections give.
 private struct ObjectivesTile: View {
   let model: AttentionModel
+  let size: ModuleTile.Size
 
   var body: some View {
     let board = model.sloBoard
@@ -189,7 +280,9 @@ private struct ObjectivesTile: View {
       symbol: missed > 0 ? "xmark.octagon.fill" : strained > 0 ? "exclamationmark.triangle.fill" : "checkmark.seal",
       isOn: nil,
       symbolTint: missed > 0 ? .red : strained > 0 ? .orange : nil,
+      badge: missed > 0 ? "\(missed)" : strained > 0 ? "\(strained)" : nil,
       returnsFocus: model.backFrom == .objectives,
+      size: size,
       open: { PanelMotion.open(.objectives, in: model) }
     )
   }
@@ -243,6 +336,7 @@ private struct InboxList: View {
 struct InboxRow: View {
   let record: AttentionRecord
   let model: AttentionModel
+  @Environment(\.panelWidth) private var width
 
   var body: some View {
     let write = WriteMark.state(record, model)
@@ -251,17 +345,16 @@ struct InboxRow: View {
     } label: {
       HStack(spacing: PanelMetrics.symbolSpacing) {
         RecordSymbol(record: record)
-        // The title gives way: the asker (up to 18 characters) and the age keep their width.
+        // The title gives way: the asker (up to `askerLimit` characters) and the age keep their
+        // width.
         Text(record.title)
           .lineLimit(1)
           .truncationMode(.tail)
         Spacer(minLength: 4)
         HStack(spacing: 5) {
           WriteMark(state: write)
-          Text(Self.short(record.from))
-          if let asked = record.requestedAt {
-            ShortAge(date: asked).foregroundStyle(.tertiary)
-          }
+          Text(Self.short(record.from, limit: PanelMetrics.askerLimit(width)))
+          if let asked = record.requestedAt { ShortAge(date: asked) }
         }
         .lineLimit(1)
         .fixedSize()
@@ -301,9 +394,11 @@ struct InboxRow: View {
     return "\(record.title)\nRefused: \(reason)"
   }
 
-  /// Long names keep their start and end: `TrayStac…r2.FastTop`.
-  static func short(_ name: String) -> String {
-    name.count <= 18 ? name : "\(name.prefix(8))…\(name.suffix(9))"
+  /// Long names keep their start and end: `TrayStac…r2.FastTop` at 18 characters.
+  static func short(_ name: String, limit: Int) -> String {
+    guard name.count > limit else { return name }
+    let head = (limit - 1) / 2
+    return "\(name.prefix(head))…\(name.suffix(limit - 1 - head))"
   }
 }
 

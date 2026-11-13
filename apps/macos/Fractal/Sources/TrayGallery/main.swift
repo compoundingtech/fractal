@@ -148,14 +148,15 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
     print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
   }
 }
-// The open design question, at the live panel's scroll limit so the fold shows.
-for (scenario, placement) in variantScenarios where wanted.isEmpty || wanted.contains(scenario.id) {
+// The open design questions, at the live panel's scroll limit so the fold shows.
+for entry in variantScenarios where wanted.isEmpty || wanted.contains(entry.scenario.id) {
+  let scenario = entry.scenario
   manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))
   for appearance in GalleryAppearance.all {
     let model = await scenario.prepare(.now)
     guard
       let png = await PanelSnapshot.png(
-        model: model, build: GalleryBuild.identity, appearance: appearance.value, placement: placement,
+        model: model, build: GalleryBuild.identity, appearance: appearance.value, variant: entry.variant,
         scrollHeight: PanelSnapshot.liveScrollHeight),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
