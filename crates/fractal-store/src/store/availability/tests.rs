@@ -168,6 +168,23 @@ fn only_transitions_are_recorded_and_the_daemon_says_when_to_report_again() {
 }
 
 #[test]
+fn a_report_observed_before_the_recorded_one_is_not_recorded() {
+    let store = store();
+    let t2 = T0 + 2 * MINUTE;
+    report(&store, "mac", DeviceState::Active, t2);
+    assert_eq!(presence_claims(&store), 1);
+    // A delayed locked report observed before the recorded activity arrives after it.
+    let late = {
+        let _clock = Clock::at(t2 + MINUTE);
+        store.report_person_presence(ADA, "mac", device(DeviceState::Locked, None, T0), t2 + MINUTE).unwrap()
+    };
+    assert_eq!(presence_claims(&store), 1);
+    assert_eq!((late.availability.status, late.availability.presence), (Status::Available, Some(Presence::Present)));
+    assert_eq!(late.availability.presence_observed_at, rfc3339(t2));
+    assert_eq!(late.report_again_at, rfc3339(t2 + PRESENCE_IDLE_MS), "the deadline is the recorded activity's");
+}
+
+#[test]
 fn interruptions_and_the_deadline_clock_expire_to_their_defaults() {
     let store = store();
     let initial = store.person_availability(ADA, T0).unwrap();
