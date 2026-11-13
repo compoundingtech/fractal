@@ -1,7 +1,8 @@
 // The person's availability as Now shows it, above the alerts as `fractal now` prints it: the
 // effective status and where it comes from, the interruptions they accept, their deadline clock and
-// their directive note, each with its end. Agents read all of it; only the person changes it.
-import type { Capabilities, DirectiveNote, PersonAvailability } from '../../clients/typescript/fractal-client';
+// their directive note, each with its end. Agents read all of it; only the person changes it, here
+// by picking a value and then how long it holds.
+import { ClientError, plainError, type AvailabilitySet, type Capabilities, type DirectiveNote, type PersonAvailability } from '../../clients/typescript/fractal-client';
 
 export type AvailabilityRow = { key: 'status' | 'interruptions' | 'deadline_clock' | 'note'; title: string; context: string };
 
@@ -84,4 +85,56 @@ export function availabilityRows(availability: PersonAvailability, note: Directi
       ? { key: 'note', title: note.text, context: joined('Note for agents', note.expires_at ? until(note.expires_at, now) : 'until you clear it') }
       : { key: 'note', title: 'No note', context: 'A note tells agents what matters to you now' },
   ];
+}
+
+export type Axis = 'status' | 'interruptions' | 'deadline_clock';
+/** Each axis's choices, as its action sheet lists them. */
+export const AXES = {
+  status: { title: 'Status', choices: [['Available', 'available'], ['Away', 'away'], ['Follow my devices', null]] },
+  interruptions: { title: 'Interruptions', choices: [['All', 'all'], ['Urgent only', 'urgent'], ['None', 'none']] },
+  deadline_clock: { title: 'Deadline clock', choices: [['Run', 'run'], ['Hold routine asks', 'hold-routine'], ['Hold every ask', 'hold-all']] },
+} as const;
+/** The value that clears an axis, so it takes no end: status follows the devices, every ask may interrupt, the clock runs. */
+export const CLEARED = { status: null, interruptions: 'all', deadline_clock: 'run' } as const;
+
+/** One axis's change, with a value the generated change type for that axis accepts. An absent `until` holds until the person changes it. */
+export function axisChange<A extends Axis>(axis: A, value: NonNullable<AvailabilitySet[A]>['value'], until: Date | null): AvailabilitySet {
+  return { [axis]: { value, ...(until ? { until: until.toISOString() } : {}) } };
+}
+
+export const UNTIL_PRESETS = ['30 minutes', '1 hour', '2 hours', 'Until tomorrow 9:00'] as const;
+
+/** When a preset ends: 30 minutes, one or two hours from now, or 09:00 local time tomorrow. */
+export function presetUntil(preset: typeof UNTIL_PRESETS[number], now: Date): Date {
+  switch (preset) {
+    case '30 minutes': return new Date(now.getTime() + 30 * 60_000);
+    case '1 hour': return new Date(now.getTime() + 60 * 60_000);
+    case '2 hours': return new Date(now.getTime() + 120 * 60_000);
+    case 'Until tomorrow 9:00': return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9);
+  }
+}
+
+export const CUSTOM_HINT = 'A time such as 17:30, or a span such as 45m, 3h or 1h30m.';
+
+/** A typed end: a local clock time, the next one to come, or a span from now. Anything else is the hint. */
+export function customUntil(text: string, now: Date): Date | string {
+  const typed = text.trim().toLowerCase();
+  const clock = /^(\d{1,2})[:.](\d{2})$/.exec(typed);
+  if (clock) {
+    const hours = Number(clock[1]), minutes = Number(clock[2]);
+    if (hours > 23 || minutes > 59) return CUSTOM_HINT;
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+    return today > now ? today : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, minutes);
+  }
+  const span = /^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$/.exec(typed);
+  const minutes = span ? Number(span[1] ?? 0) * 60 + Number(span[2] ?? 0) : 0;
+  return minutes > 0 ? new Date(now.getTime() + minutes * 60_000) : CUSTOM_HINT;
+}
+
+export const REPAIR_FOR_AVAILABILITY = 'This phone’s pairing cannot change availability or the note. Re-pair it in Fleet › this connection › re-pair this device to change them here.';
+
+/** A refused write as the person can act on it: a pairing without the write scope is re-paired. */
+export function writeRefusal(error: unknown): string {
+  if (!(error instanceof ClientError) || error.status !== 403) return plainError(error);
+  return /not granted `write\./.test(error.response.message) ? REPAIR_FOR_AVAILABILITY : 'Only a person changes their own availability and note, and this connection is not signed in as one.';
 }
