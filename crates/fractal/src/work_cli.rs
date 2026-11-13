@@ -147,6 +147,8 @@ pub(super) async fn run_work(
                 .as_deref()
                 .map(|deadline| fractal_daemon::graph::parse_duration(deadline, true))
                 .transpose()?;
+            let (person, actor) = (args.person.clone(), args.actor.clone());
+            let urgent = fractal_schema::availability::urgent_priority(Some(&args.priority));
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
@@ -168,7 +170,36 @@ pub(super) async fn run_work(
                     },
                 )
                 .await?;
-            print_value(&result, json_output)
+            // A separate read as the asker: the ask stands whether or not it answers.
+            let availability = match generated_client(endpoint, Some(&actor)) {
+                Ok(reader) => reader.availability_list(Some(&person)).await.map_err(anyhow::Error::from),
+                Err(error) => Err(error),
+            };
+            let availability = match availability {
+                Ok(read) => read.value.people.into_iter().find(|entry| entry.person == person),
+                Err(error) => {
+                    stderr_message("st", format_args!("could not read {person}'s availability: {error:#}"));
+                    None
+                }
+            };
+            if json_output {
+                let mut value = serde_json::to_value(&result)?;
+                value["urgent"] = urgent.into();
+                if let Some(availability) = &availability {
+                    value["person_availability"] = serde_json::to_value(availability)?;
+                    // Only an ask that named `--deadline` is known to have one to hold.
+                    if deadline_ms.is_some() {
+                        value["deadline_held"] = availability::holds_deadline(availability, urgent).into();
+                    }
+                }
+                return print_value(&value, true);
+            }
+            print_value(&result, false)?;
+            if let Some(availability) = &availability {
+                println!("{}", availability::summary_line(availability));
+            }
+            println!("{}", availability::ask_line(urgent, deadline_ms.is_some(), availability.as_ref()));
+            Ok(())
         }
         WorkCommand::Update(args) => {
             reject_foreign_agent_actor(&args.actor)?;

@@ -3,8 +3,9 @@ use fractal_daemon::{cli_print as print, cli_println as println};
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use fractal_client::{
-    AvailabilityDeadlineClockChange, AvailabilityInterruptionsChange, AvailabilitySet,
-    AvailabilityStatusChange, AvailabilityStatusSource, PersonAvailability, PresenceReport,
+    AvailabilityDeadlineClock, AvailabilityDeadlineClockChange, AvailabilityInterruptions,
+    AvailabilityInterruptionsChange, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange,
+    AvailabilityStatusSource, PersonAvailability, PresenceReport,
 };
 use fractal_daemon::client::Endpoint;
 
@@ -185,6 +186,81 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
     block
 }
 
+/// Whether `fractal now` should name this availability: only when something departs from the
+/// default. Any away shows, set or derived from presence: the asker should park. No device
+/// reporting (`unreported`) is the default, available, and stays quiet. A word this client does
+/// not know departs from the default and shows.
+pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
+    matches!(availability.status_source, AvailabilityStatusSource::Override | AvailabilityStatusSource::Unknown)
+        || availability.status != AvailabilityStatus::Available
+        || availability.interruptions != AvailabilityInterruptions::All
+        || availability.deadline_clock != AvailabilityDeadlineClock::Run
+}
+
+/// One line for someone about to wait on the person: the status always, the rest only when it
+/// differs from the default.
+pub(super) fn summary_line(availability: &PersonAvailability) -> String {
+    let at = |label: &str, time: &Option<String>| {
+        time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
+    };
+    let mut line = format!(
+        "{} is {}{}",
+        availability.person,
+        availability.status,
+        at("until", &availability.status_until)
+    );
+    if availability.interruptions != AvailabilityInterruptions::All {
+        line.push_str(&format!(
+            "; interruptions: {}{}",
+            availability.interruptions,
+            at("until", &availability.interruptions_until)
+        ));
+    }
+    if availability.deadline_clock != AvailabilityDeadlineClock::Run {
+        line.push_str(&format!(
+            "; deadline clock: {}{}{}",
+            availability.deadline_clock,
+            at("since", &availability.deadline_clock_since),
+            at("until", &availability.deadline_clock_until)
+        ));
+    }
+    line
+}
+
+/// Whether the person's deadline clock holds an ask's deadline now: `hold-all` holds every ask,
+/// `hold-routine` every ask that is not urgent. `None` for a clock word this client does not know.
+pub(super) fn holds_deadline(availability: &PersonAvailability, urgent: bool) -> Option<bool> {
+    match availability.deadline_clock {
+        AvailabilityDeadlineClock::Run => Some(false),
+        AvailabilityDeadlineClock::HoldRoutine => Some(!urgent),
+        AvailabilityDeadlineClock::HoldAll => Some(true),
+        AvailabilityDeadlineClock::Unknown => None,
+    }
+}
+
+/// The asker's line about its own ask: whether it is urgent and, when the ask is known to have a
+/// deadline (`--deadline` names one; a daemon with ask deadlines off refuses it) and the person's
+/// availability was read, whether their deadline clock holds that deadline. Without `--deadline`
+/// the client cannot tell whether the fleet gave the ask a default deadline, so it says nothing
+/// about one.
+pub(super) fn ask_line(urgent: bool, deadline: bool, availability: Option<&PersonAvailability>) -> String {
+    let mut line = if urgent {
+        "this ask is urgent (priority critical)".to_owned()
+    } else {
+        "this ask is not urgent".to_owned()
+    };
+    let Some(availability) = availability.filter(|_| deadline) else { return line };
+    match holds_deadline(availability, urgent) {
+        Some(true) => line.push_str(&format!("; {} holds its deadline", availability.deadline_clock)),
+        Some(false) if availability.deadline_clock == AvailabilityDeadlineClock::HoldRoutine => {
+            line.push_str("; its deadline runs through hold-routine")
+        }
+        Some(false) => {}
+        None => line.push_str("; deadline clock not known to this client"),
+    }
+    line
+}
+
 pub(super) async fn run(
     endpoint: &Endpoint,
     configured_person: Option<&str>,
@@ -279,6 +355,7 @@ mod tests {
     use clap::Parser as _;
     use serde_json::json;
     use super::*;
+    use fractal_client::AvailabilityPresence;
 
     fn parse(argv: &[&str]) -> AvailabilityArgs {
         let mut full = vec!["st", "availability"];
@@ -436,5 +513,100 @@ mod tests {
         }))
         .unwrap();
         assert!(render_block(&newer).contains("  status          unknown (source not known to this client)\n"));
+    }
+
+    #[test]
+    fn availability_summary_names_status_always_and_only_non_default_rest() {
+        let available = PersonAvailability {
+            person: "person/ada".into(),
+            status: AvailabilityStatus::Available,
+            status_source: AvailabilityStatusSource::Presence,
+            status_until: None,
+            presence: None,
+            presence_observed_at: None,
+            interruptions: AvailabilityInterruptions::All,
+            interruptions_until: None,
+            deadline_clock: AvailabilityDeadlineClock::Run,
+            deadline_clock_since: None,
+            deadline_clock_until: None,
+        };
+        assert_eq!(summary_line(&available), "person/ada is available");
+        assert!(!worth_showing(&available));
+        let unreported = PersonAvailability {
+            status_source: AvailabilityStatusSource::Unreported,
+            presence: Some(AvailabilityPresence::Unreported),
+            ..available.clone()
+        };
+        assert!(!worth_showing(&unreported), "no device reporting is the default: agents ask normally");
+        assert_eq!(summary_line(&unreported), "person/ada is available");
+        let presence_away = PersonAvailability { status: AvailabilityStatus::Away, ..available.clone() };
+        assert!(worth_showing(&presence_away), "presence-derived away shows: the asker should park");
+        assert!(worth_showing(&PersonAvailability { status: AvailabilityStatus::Unknown, ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability {
+            status_source: AvailabilityStatusSource::Override,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
+            status_source: AvailabilityStatusSource::Unknown,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
+            interruptions: AvailabilityInterruptions::Urgent,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
+            deadline_clock: AvailabilityDeadlineClock::HoldRoutine,
+            ..available.clone()
+        }));
+        let away = PersonAvailability {
+            status: AvailabilityStatus::Away,
+            status_source: AvailabilityStatusSource::Override,
+            status_until: Some("2026-11-12T18:00:00.000Z".into()),
+            interruptions: AvailabilityInterruptions::Urgent,
+            interruptions_until: Some("2026-11-12T18:00:00.000Z".into()),
+            deadline_clock: AvailabilityDeadlineClock::HoldAll,
+            deadline_clock_since: Some("2026-11-12T17:00:00.000Z".into()),
+            deadline_clock_until: Some("2026-11-12T18:00:00.000Z".into()),
+            ..available
+        };
+        assert!(worth_showing(&away));
+        assert_eq!(
+            summary_line(&away),
+            "person/ada is away until 2026-11-12T18:00:00.000Z; interruptions: urgent until 2026-11-12T18:00:00.000Z; deadline clock: hold-all since 2026-11-12T17:00:00.000Z until 2026-11-12T18:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn ask_line_says_whether_the_ask_is_urgent_and_whether_the_clock_holds_it() {
+        let with_clock = |deadline_clock| PersonAvailability {
+            person: "person/ada".into(),
+            status: AvailabilityStatus::Available,
+            status_source: AvailabilityStatusSource::Presence,
+            status_until: None,
+            presence: None,
+            presence_observed_at: None,
+            interruptions: AvailabilityInterruptions::All,
+            interruptions_until: None,
+            deadline_clock,
+            deadline_clock_since: None,
+            deadline_clock_until: None,
+        };
+        let routine = with_clock(AvailabilityDeadlineClock::HoldRoutine);
+        assert_eq!(ask_line(false, true, Some(&routine)), "this ask is not urgent; hold-routine holds its deadline");
+        assert_eq!(
+            ask_line(true, true, Some(&routine)),
+            "this ask is urgent (priority critical); its deadline runs through hold-routine"
+        );
+        let all = with_clock(AvailabilityDeadlineClock::HoldAll);
+        assert_eq!(ask_line(true, true, Some(&all)), "this ask is urgent (priority critical); hold-all holds its deadline");
+        let run = with_clock(AvailabilityDeadlineClock::Run);
+        assert_eq!(holds_deadline(&run, false), Some(false));
+        assert_eq!(ask_line(false, true, Some(&run)), "this ask is not urgent");
+        let newer = with_clock(AvailabilityDeadlineClock::Unknown);
+        assert_eq!(holds_deadline(&newer, false), None);
+        assert_eq!(ask_line(false, true, Some(&newer)), "this ask is not urgent; deadline clock not known to this client");
+        // Without a known deadline there is nothing to hold; without a read, only the urgency is known.
+        assert_eq!(ask_line(false, false, Some(&all)), "this ask is not urgent");
+        assert_eq!(ask_line(true, true, None), "this ask is urgent (priority critical)");
     }
 }
