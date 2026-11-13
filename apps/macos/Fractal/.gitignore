@@ -2,3 +2,7 @@
 .swiftpm/
 result
 result-*
+# Generated locally by `TrayGallery --explore` for the Exploration story; not committed.
+design/renders/explore/
+design/renders/explore.json
+design/renders/capture.partial/

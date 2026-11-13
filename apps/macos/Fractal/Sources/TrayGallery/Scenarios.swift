@@ -7,8 +7,6 @@ struct Scenario: Sendable {
   let id: String
   let title: String
   let description: String
-  /// Show every card's answer controls, as on hover.
-  let reveal: Bool
   let prepare: @MainActor @Sendable (Date) async -> AttentionModel
 }
 
@@ -172,8 +170,7 @@ let scenarios: [Scenario] = [
   Scenario(
     id: "busy", title: "Busy inbox",
     description:
-      "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent.",
-    reveal: true
+      "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent."
   ) { now in
     let content = Content(now: now)
     let fractal = FixtureFractal(
@@ -187,8 +184,7 @@ let scenarios: [Scenario] = [
   Scenario(
     id: "answering", title: "Answering",
     description:
-      "Answers in flight and settled: one still sending, one committed by Fractal, one refused by Fractal with its reason.",
-    reveal: true
+      "Answers in flight and settled: one still sending, one committed by Fractal, one refused by Fractal with its reason."
   ) { now in
     let content = Content(now: now)
     let asks = Array(content.asks.prefix(3))
@@ -208,8 +204,7 @@ let scenarios: [Scenario] = [
   },
   Scenario(
     id: "quiet", title: "Quiet",
-    description: "Nothing needs the person; away until tomorrow 9:00 with urgent interruptions only and routine deadlines held.",
-    reveal: false
+    description: "Nothing needs the person; away until tomorrow 9:00 with urgent interruptions only and routine deadlines held."
   ) { now in
     let content = Content(now: now)
     let model = model(
@@ -221,8 +216,7 @@ let scenarios: [Scenario] = [
   },
   Scenario(
     id: "read-only", title: "Read-only device",
-    description: "The device may read but not answer: native asks link to Fractal and the panel says why.",
-    reveal: true
+    description: "The device may read but not answer: native asks link to Fractal and the panel says why."
   ) { now in
     let content = Content(now: now)
     let model = model(
@@ -234,8 +228,7 @@ let scenarios: [Scenario] = [
   },
   Scenario(
     id: "degraded", title: "Fractal unreachable",
-    description: "The last read failed: every section is marked stale and keeps the data it last had.",
-    reveal: false
+    description: "The last read failed: every section is marked stale and keeps the data it last had."
   ) { now in
     let content = Content(now: now)
     let fractal = FixtureFractal(
@@ -249,9 +242,59 @@ let scenarios: [Scenario] = [
   },
   Scenario(
     id: "unconfigured", title: "Not configured",
-    description: "The tray started without its Fractal configuration and says what to set.",
-    reveal: false
+    description: "The tray started without its Fractal configuration and says what to set."
   ) { _ in
     AttentionModel(adapter: nil)
   },
+]
+
+/// The scenarios the Exploration story compares variants in.
+let exploreScenarioIDs = ["busy", "quiet", "degraded"]
+
+/// Menu-bar status item states; the panel stays closed while these are captured.
+@MainActor private func menuBarModel(
+  _ asks: @escaping @Sendable (Content) -> [AttentionRecord],
+  slo: @escaping @Sendable (Content) -> SloSnapshot = { $0.calmSlo }, failing: Bool = false
+) -> @MainActor @Sendable (Date) async -> AttentionModel {
+  { now in
+    let content = Content(now: now)
+    let fractal = FixtureFractal(
+      page: AttentionPage(records: asks(content), canAnswer: true), slo: slo(content),
+      histories: content.calmHistories, availability: content.present)
+    let model = model(fractal)
+    await model.refresh()
+    if failing {
+      await fractal.fail("The Fractal member did not answer: connection refused")
+      await model.refresh()
+    }
+    return model
+  }
+}
+
+@MainActor let menuBarStates: [Scenario] = [
+  Scenario(id: "idle", title: "Idle", description: "No open asks; objectives met.", prepare: menuBarModel { _ in [] }),
+  Scenario(
+    id: "one", title: "One ask", description: "One routine ask.",
+    prepare: menuBarModel { Array($0.asks.dropFirst().prefix(1)) }),
+  Scenario(
+    id: "several", title: "Three asks", description: "Three routine asks.",
+    prepare: menuBarModel { Array($0.asks.dropFirst()) }),
+  Scenario(
+    id: "many", title: "Twelve asks", description: "A backlog of twelve routine asks.",
+    prepare: menuBarModel { content in
+      (0..<12).map { index in
+        content.record(
+          "backlog-\(index)", title: "Backlog question \(index + 1)?", from: "agent/janitor",
+          askedAgo: Double(index + 1) * 600)
+      }
+    }),
+  Scenario(
+    id: "urgent", title: "Urgent", description: "Four asks, one due within the hour; an objective missed.",
+    prepare: menuBarModel(\.asks, slo: \.strainedSlo)),
+  Scenario(
+    id: "offline", title: "Offline", description: "Fractal unreachable: the last count stays; the symbol says the refresh failed.",
+    prepare: menuBarModel(\.asks, failing: true)),
+  Scenario(
+    id: "unconfigured", title: "Not configured", description: "Started without its Fractal configuration."
+  ) { _ in AttentionModel(adapter: nil, configurationError: "ATTENTION_FRACTAL_ENDPOINT is not set") },
 ]

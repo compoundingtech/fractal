@@ -10,8 +10,12 @@ collection, but `FractalClient` has no typed attention or availability stream.
   `data/attention.ts` does) are answered in the panel: a decision's or choice's
   named answers (recommended first; request-changes takes words), a choice's
   custom words or feedback text, Yes/No for an untyped question, or Nothing to
-  do when there are no named answers. Custom forms and harness prompts link to
-  Fractal. Controls appear on hover or focus.
+  Do when there are no named answers. Custom forms and harness prompts link to
+  Fractal. Every control is always in place, for the keyboard and VoiceOver as
+  much as the pointer. The first answerable ask's recommended answer is the one
+  prominent button and the default action (Return) while nothing is being typed.
+  Typed answers and the note draft live on the model, so closing the panel keeps
+  them.
 - The tray offers no Dismiss and no snooze. Web's Dismiss sends a `work.done`
   that the asker reads as an answer; dismissing and snoozing are person
   attention controls, distinct from answering and shared by every client.
@@ -22,11 +26,12 @@ collection, but `FractalClient` has no typed attention or availability stream.
   same answer replays Fractal's first receipt. A card shows "Sending…", then
   "committed" only after Fractal's result, or Fractal's refusal verbatim; it is
   never removed optimistically.
-- **Updates** are listed apart and not counted; Mark read sends the server's
+- **Updates** are listed apart and not counted; Mark Read sends the server's
   prefilled `work.done` (`Read`, answer `read`).
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
-  The menu bar adds a gauge when any objective is missed or budget nearly spent.
+  They stay in the panel: the status item shows asks only (one template glyph
+  and the count; offline swaps in the sync-problem glyph, keeping the count).
 - **Objective history** (`GET v1/client/slo/history`): for every listed row,
   what was left over the last 24 hours in 24 hourly steps (Fractal's default
   period; a row's `window` is display text and is not parsed). Each step holds
@@ -109,7 +114,10 @@ collection, but `FractalClient` has no typed attention or availability stream.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
-  identity; launch and each change of refresh outcome are logged to stderr.
+  identity, Settings… and Quit; launch and each change of refresh outcome are
+  logged to stderr.
+- Settings holds Show in Menu Bar (`MenuBarExtra(isInserted:)`). With the item
+  hidden the tray keeps running; opening AttentionTray again brings it back.
 
 ## Packaging and configuration
 
@@ -142,7 +150,7 @@ does): no endpoint, bearer, pairing or gateway, and so no App Transport Security
 exception. The application loads no keychain, 1Password item or device profile.
 `ATTENTION_SPEECH_SOCKET` (optional, absolute) turns speech on.
 `ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
-file and exits (`ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's controls).
+file and exits.
 Snapshot mode starts no presence reporter, so its speech gate stays quiet.
 
 On review-host, `services.attentionTray.enable = true` with
@@ -212,17 +220,34 @@ notification still lands in Notification Center.
 The panel's views live in the `TrayViews` target and read only `AttentionCore`.
 `TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
 answering, quiet, read-only, degraded, unconfigured; speech: speaking, in a
-call, muted) and renders the real panel in light and dark to `@2x` PNGs plus
-`manifest.json`, for the design Storybook in `design/`. The notification
-scenarios render its content model (`SpeechNoticeView`: text fields and
-actions), not macOS notification chrome, which only Notification Center draws.
-`devenv tasks run attention-tray:gallery` regenerates
-`design/renders/` from the Nix-built gallery (`nix run
-./flakes/attention-tray#gallery -- <dir> [scenario…]`); the manifest records the
-source rev. Rendering needs a Mac with a login session. The renders use the same
-`NSHostingView` + `cacheDisplay` path as snapshot mode, so window-server
-materials (the menu-bar window's glass) are not captured; judge those on the
-running panel.
+call, muted) for the design Storybook in `design/`, from the Nix-built gallery
+(`nix run ./flakes/attention-tray#gallery -- <dir> …`). Every manifest records
+the source rev. It needs a Mac with a login session and has three outputs:
+
+- `devenv tasks run attention-tray:gallery`: the shipped design in every
+  scenario, light and dark, as `@2x` PNGs plus `manifest.json`, via the same
+  `NSHostingView` + `cacheDisplay` path as snapshot mode. Window-server
+  materials (the menu-bar window's Liquid Glass) are not in these renders; the
+  Storybook labels them "no materials". The notification scenarios render
+  its content model (`SpeechNoticeView`: text fields and actions), not macOS
+  notification chrome, which only Notification Center draws. Committed.
+- `devenv tasks run attention-tray:gallery-explore`: every combination of the
+  open design variants (`TrayDesign`: L layout, A ask row, H header, S objective
+  history; each L2 page) in the busy, quiet and degraded scenarios, flat, into
+  `renders/explore/` for the Exploration story. Gitignored.
+- `devenv tasks run attention-tray:gallery-capture`: real captures. The gallery
+  runs the actual `MenuBarExtra`, opens it under its status item and captures
+  the region with ScreenCaptureKit over a fixed backdrop, other apps' menu-bar
+  items masked: the shipped design in every scenario, one variant change at a
+  time in the busy scenario (`--all`: every combination), and each menu-bar
+  variant (M) in every status state, into `renders/capture/` plus
+  `capture.json`. Committed. Captures show windows on the real screen, so they
+  run only with the person's consent (`ATTENTION_TRAY_CAPTURE_CONSENT=1`,
+  `--consent`), wait until the Mac has had no input for ten minutes
+  (`--away <seconds>`), abort and write nothing on any input, and need Screen
+  Recording for the terminal they run from (System Settings › Privacy &
+  Security › Screen & System Audio Recording). `--only <text>` redoes the
+  captures whose file name contains it.
 
 ## review-host rollout: root agent and Ada only
 

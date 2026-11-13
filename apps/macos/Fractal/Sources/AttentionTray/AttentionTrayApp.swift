@@ -6,15 +6,45 @@ import TrayViews
 @main
 struct AttentionTrayApp: App {
   @NSApplicationDelegateAdaptor(TrayAppDelegate.self) private var delegate
+  @AppStorage(TraySettings.showInMenuBar) private var showInMenuBar = true
 
   var body: some Scene {
     // The window-style MenuBarExtra toggles: a second click on the icon closes the panel.
-    MenuBarExtra {
+    MenuBarExtra(isInserted: $showInMenuBar) {
       TrayPanel(model: delegate.model, build: delegate.build)
     } label: {
-      TrayLabel(model: delegate.model)
+      TrayMenuBarLabel(model: delegate.model)
     }
     .menuBarExtraStyle(.window)
+    Settings {
+      TraySettingsView()
+    }
+  }
+}
+
+enum TraySettings {
+  /// Whether the status item is in the menu bar; opening the app again puts it back.
+  static let showInMenuBar = "showInMenuBar"
+}
+
+/// People choose whether the extra takes menu-bar space. With it hidden the tray keeps
+/// running (counts, speech, presence); opening AttentionTray again brings it back.
+private struct TraySettingsView: View {
+  @AppStorage(TraySettings.showInMenuBar) private var showInMenuBar = true
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("Show in Menu Bar", isOn: $showInMenuBar)
+      } footer: {
+        Text("When hidden, open AttentionTray again (Spotlight or Finder) to bring it back.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .formStyle(.grouped)
+    .frame(width: 380)
+    .fixedSize()
   }
 }
 
@@ -106,6 +136,12 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     stopHotkey?.unregister()
   }
 
+  /// Opening the app again (Spotlight, Finder) puts a hidden status item back.
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+    UserDefaults.standard.set(true, forKey: TraySettings.showInMenuBar)
+    return true
+  }
+
   /// One line per change of outcome, never per poll, and never request content.
   private func logOutcome() {
     func describe(_ state: ConnectionState) -> String {
@@ -130,12 +166,11 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   /// Verification: refresh once against the configured member, render the open panel to a
-  /// PNG and exit. `ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's answer controls.
+  /// PNG and exit.
   private func snapshot(to path: String) async {
     await model.refresh()
     logOutcome()
-    let reveal = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT_REVEAL"] == "1"
-    let png = await PanelSnapshot.png(model: model, build: build, reveal: reveal, appearance: .darkAqua)
+    let png = await PanelSnapshot.png(model: model, build: build, appearance: .darkAqua)
     try? png?.write(to: URL(fileURLWithPath: path))
     exit(0)
   }
@@ -164,34 +199,5 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     notifications.show(SpeechNotice(record: record, state: .speaking, canAnswer: true))
     try? await Task.sleep(for: .seconds(60))
     exit(0)
-  }
-}
-
-// MARK: - Menu bar label
-
-private struct TrayLabel: View {
-  let model: AttentionModel
-
-  var body: some View {
-    if model.configurationError != nil {
-      Image(systemName: "exclamationmark.bubble")
-        .accessibilityLabel("Attention: configuration needed")
-    } else {
-      let count = model.openAskCount
-      let slo = model.sloBoard?.needsAttention ?? 0
-      HStack(spacing: 3) {
-        Image(
-          systemName: count > 0
-            ? "bubble.left.and.exclamationmark.bubble.right.fill" : "bubble.left.and.bubble.right")
-        if count > 0 { Text("\(count)").monospacedDigit() }
-        if slo > 0 { Image(systemName: "gauge.with.dots.needle.bottom.100percent") }
-      }
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(
-        [
-          count == 1 ? "Attention: 1 open ask" : "Attention: \(count) open asks",
-          slo > 0 ? "\(slo) objectives or budgets need attention" : nil,
-        ].compactMap { $0 }.joined(separator: ", "))
-    }
   }
 }

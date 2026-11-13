@@ -222,7 +222,7 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
         choices.append(.init(kind: .no, label: "No", words: .none, tone: .secondary))
       }
       choices.append(.init(kind: .words, label: "Send", words: .required, tone: yesNo ? .secondary : .primary))
-      choices.append(.init(kind: .nothing, label: "Nothing to do", words: .none, tone: .secondary))
+      choices.append(.init(kind: .nothing, label: "Nothing to Do", words: .none, tone: .secondary))
       return choices
     }
     let named = request.answers.map { answer in
@@ -239,7 +239,7 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
       choices.append(.init(kind: .words, label: "Send", words: .required, tone: named.isEmpty ? .primary : .secondary))
     }
     if request.answers.isEmpty {
-      choices.append(.init(kind: .nothing, label: "Nothing to do", words: .none, tone: .secondary))
+      choices.append(.init(kind: .nothing, label: "Nothing to Do", words: .none, tone: .secondary))
     }
     return choices
   }
