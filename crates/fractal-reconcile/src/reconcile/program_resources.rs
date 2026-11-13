@@ -88,15 +88,25 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn retire_program_membership(&self, record: &Membership) -> Result<bool> {
+        let mut retirement_errors = Vec::new();
         for child in &record.child_runs {
             smallclaims::touched::note_read(|| child.clone());
-            if !matches!(self.store.mission_run_status(child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
-                self.store.request_mission_run_cancellation(child, "its resource membership scope closed")?;
-            }
+            let cancellation = (|| -> Result<()> {
+                if !matches!(self.store.mission_run_status(child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
+                    self.store.request_mission_run_cancellation(child, "its resource membership scope closed")?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = cancellation { retirement_errors.push(format!("{child}: {error:#}")); }
         }
-        let retired = self.runtime.retire_resource_lane(&self.store, &record.request)?;
+        // A child cancellation failure must not prevent cleanup of the remaining execution roots.
+        let retired = match self.runtime.retire_resource_lane(&self.store, &record.request) {
+            Ok(retired) => retired,
+            Err(error) => { retirement_errors.push(format!("{error:#}")); false }
+        };
         let current = self.store.resource_membership_record(&record.request.id, &record.request.owner)?;
         if retired || current.state != record.state { self.resource_changed(&record.request); }
+        anyhow::ensure!(retirement_errors.is_empty(), "resource retirement failed: {}", retirement_errors.join("; "));
         anyhow::ensure!(current.state != "uncertain", "resource retirement is uncertain; host custody retained");
         Ok(retired)
     }
@@ -322,5 +332,88 @@ impl<R: RuntimeControl> Reconciler<R> {
             "code": observation.exit_code.unwrap_or(128), "signal": signal, "stdout": stdout, "stderr": stderr
         })))?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fractal_store::store::resource_membership::Fit;
+
+    #[test]
+    fn scope_release_awaits_child_cancellation_and_reacts_to_terminal_run() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        super::super::tests::apply_source(&store, r#"version 2
+mission "resource-child" state="ready" {
+  goal "Stop when the enclosing scope closes."
+  step "work" { agentless }
+}"#, "resource-child-source");
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        reconciler.ensure_resource_authority().unwrap();
+        let lane = LaneRequest {
+            id: "scope-holder".into(), name: "child-scope".into(), host: "node".into(),
+            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
+                attempt: 1, invocation: None },
+        };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, Fit::default(), 1).unwrap() else {
+            panic!("scope must acquire custody");
+        };
+        let child = store.mission_run_subject_for_idempotency_key("scope-child");
+        store.attach_resource_child(&grant, &lane.owner, &child).unwrap();
+        store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "resource-child".into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: "scope-child".into(),
+        }).unwrap();
+        let record = store.resource_membership_for_grant(&grant).unwrap();
+        let (result, reads) = smallclaims::touched::record(|| reconciler.retire_program_membership(&record));
+        assert!(!result.unwrap(), "normal asynchronous cancellation must not refuse scope release");
+        assert!(reads.contains(&child));
+        let pending = store.resource_membership_for_grant(&grant).unwrap();
+        assert_eq!(pending.state, "retiring");
+        assert_eq!(pending.retired_at, None);
+        let mut waiter = lane.clone();
+        waiter.id = "scope-waiter".into();
+        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+        reconciler.incremental.observe(&store).unwrap();
+        reconciler.incremental.evaluated("scope-release", reads, None);
+        assert!(!reconciler.incremental.needs("scope-release", now_ms()));
+        for _ in 0..3 { reconciler.reconcile_once().unwrap(); }
+        assert_eq!(store.mission_run_status(&child).unwrap().as_deref(), Some("cancelled"));
+        reconciler.incremental.observe(&store).unwrap();
+        assert!(reconciler.incremental.needs("scope-release", now_ms()), "terminal child must wake pending release");
+        assert!(reconciler.retire_program_membership(&pending).unwrap());
+        assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state, "retired");
+        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 3).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn scope_release_refuses_unknown_child_without_releasing_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let lane = LaneRequest {
+            id: "unknown-scope".into(), name: "child-scope".into(), host: "node".into(),
+            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
+                attempt: 1, invocation: None },
+        };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, Fit::default(), 1).unwrap() else {
+            panic!("scope must acquire custody");
+        };
+        store.attach_resource_child(&grant, &lane.owner, "mission-run/missing-child").unwrap();
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        let record = store.resource_membership_for_grant(&grant).unwrap();
+        assert!(reconciler.retire_program_membership(&record).is_err());
+        let uncertain = store.resource_membership_for_grant(&grant).unwrap();
+        assert_eq!(uncertain.state, "uncertain");
+        assert_eq!(uncertain.retired_at, None);
+        let mut waiter = lane;
+        waiter.id = "blocked-scope".into();
+        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
     }
 }
