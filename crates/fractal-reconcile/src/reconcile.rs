@@ -50,7 +50,7 @@ use crate::model::{
 };
 use crate::resource::{
     LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
-    RegisteredResourceProvider, ResourceProvider,
+    RegisteredResourceProvider, ResourceProvider, WorkflowRunLedger,
 };
 use crate::store::Store;
 use crate::store::model_drift::{
@@ -205,6 +205,30 @@ fn owned_schedule_spec(
         return Ok(None);
     };
     Ok(crate::graph::schedule_spec(&schedule.desired, &origin))
+}
+
+/// The largest occurrence reached by this schedule's stable identity: whole history, which
+/// both hosts write and catch-up can skip. A run that supersedes another starts under a new
+/// run subject, so its schedule continues the history of the same-named schedule in every
+/// run it supersedes; publishing a new parent revision never replays a reached tick.
+fn schedule_last_reached(store: &Store, schedule: &DesiredSubject) -> Result<Option<u64>> {
+    let mut subjects = vec![schedule.subject.clone()];
+    if let Some(owner) = schedule.owner_run.as_deref() {
+        let owner = owner.strip_prefix("mission-run/").unwrap_or(owner);
+        if let Some(local) = schedule.subject.strip_prefix(&format!("schedule/{owner}/")) {
+            for ancestor in store.mission_run_supersession_ancestry(owner)?.into_iter().skip(1) {
+                let ancestor = ancestor.strip_prefix("mission-run/").unwrap_or(&ancestor);
+                subjects.push(format!("schedule/{ancestor}/{local}"));
+            }
+        }
+    }
+    let mut last = None;
+    for subject in subjects {
+        for claim in store.claims_for(&subject, Some("schedule.occurrence-reached"))? {
+            last = last.max(claim.body["fields"]["occurrence"].as_u64());
+        }
+    }
+    Ok(last)
 }
 
 /// On a fleet member's cold start, occurrence history may still be elsewhere. Require a fresh
@@ -12712,6 +12736,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|mission| mission.state == MissionState::Ready))
     }
 
+    /// Track both sides of a capacity-refused start: a holder ending during the start must
+    /// still wake the parent, and a newly admitted holder must wake it on the next release.
+    fn note_mission_capacity_holders(&self, mission: &str) -> Result<()> {
+        for holder in self.store.active_mission_runs_for_mission(mission)? {
+            smallclaims::touched::note_read(|| holder.subject.clone());
+        }
+        Ok(())
+    }
+
     fn evaluate_used_mission(
         &self,
         run: &MissionRunView,
@@ -12773,6 +12806,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(child) = self.store.mission_run_for_parent_step(&view.subject)? {
                 (child, false)
             } else {
+                self.note_mission_capacity_holders(&mission)?;
                 let selector = step_run_selector(view);
                 let idempotency_key = format!(
                     "uses-mission:{}:{}:mission/{mission}@{revision}", view.subject, view.attempt,
@@ -12797,13 +12831,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &view.subject,
                     Some(&selector),
                 ) {
-                    Ok(child) => child,
+                    Ok(child) => {
+                        // A newly created view did not pass through the annotated child lookup.
+                        // Follow its outcome now, including a child that ends before our next read.
+                        smallclaims::touched::note_read(|| child.subject.clone());
+                        child
+                    }
                     Err(error) => {
                         if let Some(context) = &context {
                             let grant = context.grant.as_ref().context("inherited resource context lacks grant")?;
                             self.store.reject_resource_child(grant, &context.request.owner, &child_subject, &error)?;
                         }
                         if error.code == "mission-run-capacity" {
+                            self.note_mission_capacity_holders(&mission)?;
                             return Ok((false, UsedMissionOutcome::Pending));
                         }
                         return Err(error.into());
@@ -15118,22 +15158,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
-            // The runs holding the mission's capacity are read before the start and again after a
-            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
-            let note_holders = || -> Result<()> {
-                for holder in self.store.active_mission_runs_for_mission(mission)? {
-                    smallclaims::touched::note_read(|| holder.subject.clone());
-                }
-                Ok(())
-            };
-            note_holders()?;
+            self.note_mission_capacity_holders(mission)?;
             return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
                 }
                 Err(error) if error.code == "mission-run-capacity" => {
-                    note_holders()?;
+                    self.note_mission_capacity_holders(mission)?;
                     Ok(false)
                 }
                 // A store failure or contention (a run-mutation fence while projections catch up)
@@ -16826,20 +16858,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else {
             return Ok(());
         };
-        // Whole history: the largest occurrence reached, which both hosts write and catch-up can
-        // skip, so it need not be the newest claim's.
-        let reached = self
-            .store
-            .claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-        let last = reached
-            .iter()
-            .filter_map(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/occurrence")
-                    .and_then(Value::as_u64)
-            })
-            .max();
+        let last = schedule_last_reached(&self.store, schedule)?;
         let now = now_ms() as i64;
         let (occurrence, scheduled_at) = if let Some(at) = spec.at_unix_ms {
             if last.is_some() {
@@ -17074,11 +17093,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
-                // Whole history: the largest occurrence reached, as in reconcile_schedule.
-                let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
-                let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
-                    .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
-                let already_reached = reached_history.is_err() || last_reached.is_some_and(|last| last >= occurrence);
+                // The schedule's whole history, as in reconcile_schedule.
+                let last_reached = schedule_last_reached(&store, &schedule_declaration);
+                let already_reached = match &last_reached {
+                    Ok(last) => last.is_some_and(|last| last >= occurrence),
+                    Err(_) => true,
+                };
+                let last_reached = last_reached.ok().flatten();
                 let candidate_current = takeover.is_none() || current_spec.as_ref().is_some_and(|spec|
                     Self::standby_candidate_current(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false));
                 if !ready || already_reached || !candidate_current {
@@ -18590,6 +18611,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                     webhook_covered,
+                    // A repository observer records each completed CI run it reads in the graph.
+                    workflow_runs: (spec.provider == "github.repository").then(|| {
+                        Arc::new(GraphWorkflowRuns { store: store.clone(), observer: observer_subject.clone() })
+                            as Arc<dyn WorkflowRunLedger>
+                    }),
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
                 let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
@@ -20648,6 +20674,38 @@ fn mirror_observation(
     }
 }
 
+/// The graph as a repository observer's [`WorkflowRunLedger`]. A run is written once its subject
+/// holds a claim, this member's or one replicated from another; each write is one
+/// `github.workflow-run` claim within the GitHub plugin's allowlist, naming the observer that
+/// polled the run.
+struct GraphWorkflowRuns {
+    store: Arc<Store>,
+    observer: String,
+}
+
+impl WorkflowRunLedger for GraphWorkflowRuns {
+    fn written(&self, subject: &str) -> Result<bool> {
+        Ok(self.store.latest_claim_id(subject)?.is_some())
+    }
+
+    fn write(&self, subject: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+        let mut fields = fields.clone();
+        fields.insert("observer".to_owned(), Value::String(self.observer.clone()));
+        github_plugin_store::MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, &fields)?;
+        let key = github_events::workflow_run_observation_key(subject, &fields)?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.to_owned(),
+            kind: fractal_schema::github_plugin::WORKFLOW_RUN.into(),
+            actor: None,
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key),
+        }).map_err(|error| anyhow::anyhow!(error.message))?;
+        Ok(())
+    }
+}
+
 /// What a repository's poller lays beside a look it records, from a filled mirror: each listed
 /// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
 /// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
@@ -20735,6 +20793,7 @@ async fn refill_mirror(
         every_ms: spec.every_ms,
         refresh: false,
         webhook_covered: false,
+        workflow_runs: None,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
@@ -42173,6 +42232,59 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(observers.len(), 1);
         assert_eq!(crate::graph::observer_spec(&observers[0].desired).unwrap().fields, ["issues"]);
         assert!(store.messages(None, true).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_repository_observer_records_each_completed_ci_run_once_in_the_graph() {
+        const RUN: &str = "github-workflow-run/example/repo/9001";
+        struct Recorder {
+            calls: Arc<AtomicUsize>,
+            written: Arc<Mutex<Vec<bool>>>,
+        }
+        impl ResourceProvider for Recorder {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let ledger = request.workflow_runs.expect("a repository observer is given the graph's ledger");
+                let fields = BTreeMap::from([
+                    ("version".to_owned(), serde_json::json!(1)), ("repository".to_owned(), serde_json::json!("example/repo")),
+                    ("workflow".to_owned(), serde_json::json!("Workspace CI")), ("run_id".to_owned(), serde_json::json!(9001)),
+                    ("attempt".to_owned(), serde_json::json!(1)), ("event".to_owned(), serde_json::json!("merge_group")),
+                    ("conclusion".to_owned(), serde_json::json!("failure")), ("head_sha".to_owned(), serde_json::json!("a".repeat(40))),
+                    ("created_at".to_owned(), serde_json::json!("2026-11-13T10:00:00Z")),
+                    ("started_at".to_owned(), serde_json::json!("2026-11-13T10:00:30Z")),
+                    ("completed_at".to_owned(), serde_json::json!("2026-11-13T10:09:30Z")),
+                    ("duration_ms".to_owned(), serde_json::json!(540_000)), ("flaky_tests".to_owned(), serde_json::json!(0)),
+                    ("flakes".to_owned(), serde_json::json!(1)),
+                ]);
+                let mut written = self.written.lock().unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                drop(written);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                    cursor: Some("runs".into()),
+                    next_check_unix_ms: now_ms().saturating_add(60_000),
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "record-runs");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()))
+            .with_resource_provider(Arc::new(Recorder { calls: calls.clone(), written: written.clone() }));
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(*written.lock().unwrap(), [false, true], "a written run reads as written");
+        let claims = store.claims_for(RUN, None).unwrap();
+        assert_eq!(claims.len(), 1, "an identical second write is the same claim");
+        assert_eq!(claims[0].kind, fractal_schema::github_plugin::WORKFLOW_RUN);
+        assert_eq!(claims[0].body["fields"]["observer"], "observer/repo");
+        assert_eq!(claims[0].body["fields"]["flakes"], 1);
     }
 
     fn failure_for_item(

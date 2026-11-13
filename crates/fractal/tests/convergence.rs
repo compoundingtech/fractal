@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v26.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1188,6 +1188,7 @@ impl World {
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
             "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
+            "github-workflow-run" => format!("github-workflow-run/convergence/repo-{small}/{}", self.fresh("run")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -1518,6 +1519,32 @@ impl World {
             }
         }
         false
+    }
+
+    /// What a quiesced fleet that never trimmed does next: a person excuses the old build, if
+    /// there is one, and a day passes so a new cut falls due; then exchange and checkpoint work
+    /// run until nothing moves. Whether every modern node then trims.
+    fn trims_after_excuse_and_cut(&mut self) -> bool {
+        let count = self.nodes.len();
+        if let Some(old) = self.nodes.iter().position(|node| node.old_build)
+            && let Some(person) = self.nodes.iter().position(|node| !node.old_build)
+        {
+            let writer = self.nodes[old].name.clone();
+            self.excuse_writer(person, writer, "an old build");
+        }
+        self.days += 1;
+        for node in 0..count {
+            self.set_clock(node);
+        }
+        self.note(format!("day {}", self.days));
+        if !self.quiesce() {
+            self.fail("the nodes did not stop moving after the next cut".into());
+        }
+        self.check();
+        self.nodes
+            .iter()
+            .filter(|node| !node.old_build)
+            .all(|node| node.store.trimmed_checkpoint().unwrap().is_some())
     }
 
     fn check(&mut self) {
@@ -1916,6 +1943,9 @@ struct Outcome {
     failure: Option<String>,
     written: BTreeMap<String, usize>,
     trimmed: bool,
+    /// For a run carried on past a quiesce that left it untrimmed: whether every modern node
+    /// trimmed once the old build was excused and the next cut fell due.
+    trims_after_excuse_and_cut: Option<bool>,
     sabotaged: bool,
     /// The schedule and every store's authority digest, to show that a seed runs the same
     /// every time.
@@ -1923,6 +1953,12 @@ struct Outcome {
 }
 
 fn run(seed: u64, sabotage: Sabotage) -> Outcome {
+    run_with(seed, sabotage, false)
+}
+
+/// `run`, and with `carry_on` a run left untrimmed goes on to the old build's excusal and the
+/// next cut (`World::trims_after_excuse_and_cut`).
+fn run_with(seed: u64, sabotage: Sabotage, carry_on: bool) -> Outcome {
     let _identity = smallclaims::store::checkpoint_test_identity(
         "seeded-convergence-v1",
         "seeded-convergence-executable-v1",
@@ -1938,6 +1974,7 @@ fn run(seed: u64, sabotage: Sabotage) -> Outcome {
         .nodes
         .iter()
         .any(|node| node.store.trimmed_checkpoint().unwrap().is_some());
+    let trims_after_excuse_and_cut = (carry_on && !trimmed).then(|| world.trims_after_excuse_and_cut());
     let mut fingerprint = world.schedule.clone();
     for store in std::iter::once(&world.oracle).chain(world.nodes.iter().map(|node| &node.store)) {
         let status = store.replication_status(true, Some(FLEET), &[]).unwrap();
@@ -1963,6 +2000,7 @@ fn run(seed: u64, sabotage: Sabotage) -> Outcome {
         failure,
         written: world.written,
         trimmed,
+        trims_after_excuse_and_cut,
         sabotaged: world.sabotaged,
         fingerprint,
     }
@@ -1994,15 +2032,40 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Every fixed seed must converge and trim a checkpoint with corpus v25.
-/// A new kind-selection schedule must earn its own checkpoint coverage.
+/// Corpus v26 adds the four person-availability kinds and new optional fields (a note's `source`
+/// and an ask's `priority`) to v25's kind selection, shifting the shared RNG schedule.
+/// Hosted burst run 43455339387 observed every fixed seed trim, including v25's seeds 2 and
+/// 233. The exact never-trim set is empty; no older corpus's schedule exceptions carry forward.
+const NEVER_TRIMS: &[u64] = &[];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
+
+/// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does;
+/// such a seed trims on every modern node once its old build is excused and the next cut is due.
 fn seed_converges(seed: u64) {
-    let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v25 seed {seed}: trimmed={}", outcome.trimmed);
+    let never = NEVER_TRIMS.contains(&seed);
+    let outcome = run_with(seed, Sabotage::None, never);
+    eprintln!(
+        "convergence corpus v26 seed {seed}: trimmed={} after excuse and cut={:?}",
+        outcome.trimmed, outcome.trims_after_excuse_and_cut
+    );
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
-    assert!(outcome.trimmed, "corpus v25 seed {seed} did not trim a checkpoint");
+    assert_eq!(
+        outcome.trimmed,
+        !never,
+        "corpus v26 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        if outcome.trimmed { "trimmed" } else { "did not trim" },
+        if never { "one of" } else { "not one of" }
+    );
+    if never {
+        assert_eq!(
+            outcome.trims_after_excuse_and_cut,
+            Some(true),
+            "corpus v26 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+        );
+    }
 }
 
 /// The seeds are independent, so each is its own test and the test runner spreads them over its
@@ -2213,7 +2276,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v26.json"
         }))
         .unwrap(),
     )
