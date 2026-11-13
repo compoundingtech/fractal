@@ -1323,7 +1323,9 @@ impl NativeRuntime {
                         release()
                     })
                 };
-                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, &lane, &binding, &guarded, &authorize) {
+                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
+                }) {
                     Ok(execution) => execution,
                     Err(error) => {
                         if let Some(proof) = error.downcast_ref::<fractal_runtime::StartRejected>() {
