@@ -156,7 +156,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case idempotencyConflict
     case agentsPublicationRowTooLarge
     case attentionMigrated
-    case invalidAnswer, notAnswerable
+    case invalidAnswer, notAnswerable, attentionDismissUnsupported
     case issuerRequired
     case pairingOriginRequired
     case pairingRestartRequired
@@ -252,7 +252,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "issuer-required": .issuerRequired
         case "pairing-origin-required": .pairingOriginRequired
         case "pairing-restart-required": .pairingRestartRequired
-        case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
+        case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable; case "attention-dismiss-unsupported": .attentionDismissUnsupported
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
         case "arrangement-exists": .arrangementExists
@@ -346,7 +346,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .issuerRequired: "issuer-required"
         case .pairingOriginRequired: "pairing-origin-required"
         case .pairingRestartRequired: "pairing-restart-required"
-        case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
+        case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"; case .attentionDismissUnsupported: "attention-dismiss-unsupported"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
         case .arrangementExists: "arrangement-exists"

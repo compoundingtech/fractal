@@ -91,6 +91,7 @@ pub struct ErrorEnvelope {
 pub enum ErrorCode {
     InvalidAnswer,
     NotAnswerable,
+    AttentionDismissUnsupported,
     RecipientRetired,
     IdentityCycle,
     IdentityOccupied,

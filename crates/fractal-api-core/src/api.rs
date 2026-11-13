@@ -2075,6 +2075,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
+        | "attention-dismiss-unsupported"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"

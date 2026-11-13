@@ -303,9 +303,12 @@ fn published_attention_projection_allowlists_metadata_and_keeps_rich_content_on_
     assert_eq!(metadata["agent_id"], AGENT);
     assert_eq!(metadata["mission_id"], MISSION);
     assert_eq!(metadata["waiting_since"], source["requested_at"]);
+    // The person's own controls ride along read-only; this row has none.
+    assert_eq!(metadata["seen_at"], Value::Null);
+    assert_eq!(metadata["snoozed_until"], Value::Null);
     assert_eq!(keys(&metadata), BTreeSet::from([
         "id", "attention_kind", "person_id", "agent_id", "mission_id", "mission_run_id",
-        "revision", "episode", "waiting_since",
+        "revision", "episode", "waiting_since", "seen_at", "snoozed_until",
     ]));
     let rich = attention_row(&source, true).unwrap();
     assert_eq!(rich["title"], SECRET);

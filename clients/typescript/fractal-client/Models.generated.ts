@@ -1976,6 +1976,7 @@ export type ErrorCode = (
   | "private-notes-indeterminate"
   | "invalid-answer"
   | "not-answerable"
+  | "attention-dismiss-unsupported"
   | "internal"
  | string);
 

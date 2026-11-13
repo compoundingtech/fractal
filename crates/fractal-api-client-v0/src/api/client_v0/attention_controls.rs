@@ -125,7 +125,8 @@ pub(super) async fn control(
 async fn dismiss(state: &AppState, session: &ClientSession, person: &str, request: &ActionRequest) -> Result<Controlled, ApiError> {
     let Dismiss { attention_id, text } = parameters(request)?;
     let row = open_row(state, person, &attention_id).await?;
-    if row["attention_kind"] != "person-step" {
+    // A mission step assigned to the person has no asker: it is their work, not an ask.
+    if row["attention_kind"] != "person-step" || row.get("requester_id").is_none() {
         return Err(ApiError::bad(FractalError::new(
             "attention-dismiss-unsupported",
             format!(
@@ -135,6 +136,17 @@ async fn dismiss(state: &AppState, session: &ClientSession, person: &str, reques
                     actions.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
                 }),
             ),
+        )));
+    }
+    // An ask that offers its own `dismiss` answer keeps it (person_request::answer), so this
+    // action could only pick the asker's answer: the person answers it with work.done instead.
+    let own_dismiss = row["request"]["answers"].as_array().is_some_and(|answers| {
+        answers.iter().any(|answer| answer["id"] == crate::person_request::DISMISS)
+    });
+    if own_dismiss {
+        return Err(ApiError::bad(FractalError::new(
+            "attention-dismiss-unsupported",
+            "this ask offers its own `dismiss` answer: answer it with work.done",
         )));
     }
     let update = row.get("update").is_some();
