@@ -1252,7 +1252,9 @@ person-step attention card then includes the same `request`; a card without one 
 ask, and clients should not infer answers from its title. A card with `update` instead brings
 information the person asked for and asks nothing: show it, and send `work.done` with
 `answer: {"id": "read"}` (its `action_parameters` already carry it) when the person opens it
-or presses read. Agents post updates with `fractal work update`.
+or presses read. Agents post updates with `fractal work update`. An update's optional `speech`
+(1 to 300 characters) is set only when the person asked to be told that outcome: a client that
+speaks reads `update.speech` aloud, and speaks no update without it.
 
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
