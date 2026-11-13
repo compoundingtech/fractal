@@ -1760,7 +1760,7 @@ mod tests {
             json!({"type":"user","uuid":"turn-b","sessionId":"native-current"}),
             json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":7,"output_tokens":5,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}}}),
             json!({"type":"user","uuid":"tool-result-b","sessionId":"native-current","message":{"content":[{"type":"tool_result","tool_use_id":"tool-b","content":"done"}]}}),
-            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":17}}}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":3,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":17}}}),
             json!({"type":"user","uuid":"turn-c","sessionId":"native-current"}),
         ];
         fs::write(
@@ -2275,7 +2275,8 @@ mod tests {
                 "type":"timeline", "event":event, "payload":{"message":message}
             })).unwrap();
         }
-        assert!(usage_bodies(temporary.path()).is_empty());
+        assert!(read(&timeline_path(temporary.path()))
+            .is_none_or(|record| record.operations.iter().all(|operation| operation.entry_type != "usage")));
         observe_channel_frame(&mut writer, &json!({
             "type":"timeline", "event":"message_end", "payload":{"message":message}
         })).unwrap();

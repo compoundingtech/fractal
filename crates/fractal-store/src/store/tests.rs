@@ -8360,6 +8360,7 @@ fn metadata_only_response_is_evidence_not_zero_spend() {
     let connection = store.connection.lock().unwrap();
     for table in ["local_usage_responses", "local_usage_spend", "local_usage_provenance"] {
         let count: u64 = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h94f5986a16ef owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */
             &format!("SELECT COUNT(*) FROM {table} WHERE subject=?1"),
             [subject],
             |row| row.get(0),
