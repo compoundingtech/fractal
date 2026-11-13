@@ -66,7 +66,7 @@ mod tests {
             delegation: None, subject: ask.subject, actor: "person/operator".into(),
             summary: "Approved".into(), evidence: vec![], episode: None,
             idempotency_key: "hold-ask-answer".into(), answer: None,
-        }).unwrap();
+        }, false).unwrap();
         assert_eq!(state.store.host_holds(None, false).unwrap(), vec![hold]);
     }
     #[tokio::test]
