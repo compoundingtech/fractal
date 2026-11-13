@@ -495,7 +495,10 @@ impl ProgramEngine {
         {
             let mut inner = self.lock();
             let generation = inner.running.get(step).filter(|running| running.dispatch.attempt == attempt)
-                .map(|running| running.generation);
+                .map(|running| {
+                    running._trace.failed();
+                    running.generation
+                });
             if let Some(generation) = generation
                 && forget(&mut inner, step, attempt, generation)
             {
@@ -934,9 +937,10 @@ impl ProgramEngine {
         ]);
         let traces = self.store.claims_for_subject_kind_at(step, "program.attempt.trace", None, true, 1)
             .map_err(smallclaims::error::typed)?;
-        if let Some(trace) = traces.claims.first().filter(|claim| claim.body["fields"]["attempt"].as_u64() == Some(u64::from(attempt))) {
-            fields.insert("trace".to_owned(), trace.body["fields"]["trace"].clone());
-        }
+        let evidence = traces.claims.first()
+            .filter(|claim| claim.body["fields"]["attempt"].as_u64() == Some(u64::from(attempt)))
+            .map(|trace| vec![trace.id.clone()])
+            .unwrap_or_default();
         for name in ["value", "error", "ms"] {
             if let Some(value) = result.get(name).filter(|value| !value.is_null()) {
                 fields.insert(name.to_owned(), value.clone());
@@ -952,7 +956,7 @@ impl ProgramEngine {
             kind: JOURNAL_KIND.to_owned(),
             actor: run,
             fields,
-            evidence: Vec::new(),
+            evidence,
             expected_subject: None,
             idempotency_key: (status != "started").then(|| format!("program:{step}:{attempt}:{key}:result")),
         })
@@ -993,15 +997,18 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        if !self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success") {
+        let Some(trace) = self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success") else {
             return Ok(());
-        }
+        };
         let exit = &message["exit"];
         let written = self.settle(step, attempt, || {
             let (status, reason) = match exit["_tag"].as_str() {
                 Some("Success") => match self.write_journal(step, attempt, program, RESULT_KEY, "completed", &json!({"value": exit["value"]}), None) {
                     Ok(_) => ("completed", None),
-                    Err(error) => ("failed", Some(format!("the program's result could not be journaled: {error}"))),
+                    Err(error) => {
+                        trace.failed();
+                        ("failed", Some(format!("the program's result could not be journaled: {error}")))
+                    }
                 },
                 _ => ("failed", Some(failure_reason(&exit["error"]))),
             };
@@ -1028,9 +1035,9 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        if !self.end(step, attempt, generation, Some(&reason), true) {
+        let Some(_trace) = self.end(step, attempt, generation, Some(&reason), true) else {
             return Ok(());
-        }
+        };
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
         self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(&reason)))?;
         self.cancel_waits(step, attempt, &reason)?;
@@ -1038,23 +1045,21 @@ impl ProgramEngine {
         Ok(())
     }
 
-    /// Forget `attempt` of `step` as ended by this engine, with the `fault` that stopped it; false
-    /// when this engine no longer runs exactly that attempt on that host generation.
-    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>, failed: bool) -> bool {
+    /// Forget exactly this host attempt, returning its span owner so terminal journal
+    /// writes can still mark it failed before it closes.
+    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>, failed: bool) -> Option<crate::otel::AttemptTrace> {
         let mut inner = self.lock();
-        if failed && let Some(running) = inner.running.get(step)
-            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
-        {
+        inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)?;
+        let running = inner.running.remove(step)?;
+        if failed {
             running._trace.failed();
-        }
-        if !forget(&mut inner, step, attempt, generation) {
-            return false;
         }
         if let Some(fault) = fault {
             inner.faults.insert(step.to_owned(), (attempt, fault.to_owned()));
         }
         inner.ended.insert(step.to_owned(), attempt);
-        true
+        Some(running._trace)
     }
 
     /// Write the new state of a step whose `attempt` this engine just ended, unless the step
@@ -1261,6 +1266,7 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
     };
     let title = text("title")?;
     Ok(Wait::Ask(Box::new(PersonAskRequest {
+        priority: None,
         legacy_request: None,
         person: text("for")?,
         reason: title.clone(),

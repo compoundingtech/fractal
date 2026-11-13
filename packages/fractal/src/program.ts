@@ -26,6 +26,7 @@ import {
   type Tagged,
 } from './program-engine.ts'
 import type { SubjectDefinition } from './subject-ref.ts'
+import { StepExecution } from './step-execution.ts'
 
 /** A schema without decoding or encoding services. */
 type Codec = Schema.Codec<any, any>
@@ -39,6 +40,7 @@ export const ChildRun = Schema.Struct({
   run: Schema.String,
   status: Schema.Literal('completed'),
   products: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  executions: Schema.optionalKey(Schema.Array(StepExecution)),
 })
 export type ChildRun = typeof ChildRun.Type
 
@@ -47,6 +49,7 @@ export class ChildFailed extends Schema.TaggedError<ChildFailed>()('ChildFailed'
   run: Schema.String,
   status: Schema.String,
   reason: Schema.String,
+  executions: Schema.optionalKey(Schema.Array(StepExecution)),
 }) {}
 
 /** A person's answer to an ask; `resolved_by` is the person or `deadline`. */
@@ -242,12 +245,20 @@ export function step<ES extends Codec, S extends Codec = typeof Schema.Void, R =
   effect: Effect.Effect<S['Type'], ES['Type'], R>,
 ): Effect.Effect<S['Type'], ES['Type'], R | ProgramServices>
 export function step<S extends Codec = typeof Schema.Void>(
-  options: StepOptions & { readonly success?: S },
+  options: StepOptions & { readonly success?: S; readonly execution: true },
+): Effect.Effect<
+  { readonly value: S['Type']; readonly executions?: readonly StepExecution[] },
+  ChildFailed,
+  Worker | ProgramServices
+>
+export function step<S extends Codec = typeof Schema.Void>(
+  options: StepOptions & { readonly success?: S; readonly execution?: false },
 ): Effect.Effect<S['Type'], ChildFailed, Worker | ProgramServices>
 export function step(
   options: StepOptions & {
     readonly success?: Codec | undefined
     readonly error?: Codec | undefined
+    readonly execution?: boolean | undefined
   },
   effect?: Effect.Effect<unknown, unknown, unknown>,
 ): Effect.Effect<unknown, unknown, unknown> {
@@ -264,15 +275,23 @@ export function step(
     )
   return Effect.flatMap(Effect.service(Worker), (worker) =>
     Effect.flatMap(child(options.id, worker.mission, worker.input ?? {}), (done) => {
-      if (success === undefined) return Effect.void
-      // The daemon keys products by full subject: `resource/<child run>/<path>`.
-      const subject = `resource/${done.run}/${worker.product}`
-      const value = worker.product === undefined ? undefined : done.products?.[subject]
-      if (value === undefined)
-        return Effect.die(
-          new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`),
-        )
-      return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
+      const decode = () => {
+        if (success === undefined) return Effect.void
+        // The daemon keys products by full subject: `resource/<child run>/<path>`.
+        const subject = `resource/${done.run}/${worker.product}`
+        const value = worker.product === undefined ? undefined : done.products?.[subject]
+        if (value === undefined)
+          return Effect.die(
+            new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`),
+          )
+        return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
+      }
+      return options.execution === true
+        ? Effect.map(decode(), (value) => ({
+          value,
+          ...(done.executions === undefined ? {} : { executions: done.executions }),
+        }))
+        : decode()
     }),
   )
 }

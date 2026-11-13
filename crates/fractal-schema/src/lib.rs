@@ -3631,7 +3631,6 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("error", any()),
             ("ms", integer()),
             ("child", string()),
-            ("trace", any()),
         ],
         "work.person-asked" => &[
             ("run", reference()),
@@ -3688,6 +3687,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("worker_reported", boolean()),
             ("claimant", reference()),
             ("claim_incarnation", string()),
+            ("declared_model", string()),
+            ("trace_id", string()),
+            ("fallback", boolean()),
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
@@ -4298,9 +4300,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cost_microusd", integer()),
             ("reported_cost_microusd", integer()),
             ("unpriced_tokens", integer()),
+            ("unpriced_responses", integer()),
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
+            ("execution_id", string()),
             (
                 "semantics",
                 required_enum(&[
@@ -5247,6 +5251,15 @@ mod tests {
             .fields.remove("exit_evidence").unwrap();
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
+            "work.failed", "work.released", "work.extended"] {
+            for field in ["declared_model", "trace_id", "fallback"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
+        for field in ["execution_id", "unpriced_responses"] {
+            current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();

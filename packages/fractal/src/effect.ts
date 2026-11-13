@@ -27,3 +27,4 @@ export {
   type ResourceRequest,
 } from './program-engine.ts'
 export { LaneMembership, type Lane, type LaneOptions, type LaneCommandOptions } from './resources.ts'
+export { StepExecution, StepExecutionUsage } from './step-execution.ts'

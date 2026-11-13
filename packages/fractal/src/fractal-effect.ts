@@ -6,3 +6,4 @@
 export * from './fractal.ts'
 export { ask, command, cwd, env, mission, run, step, Worker } from './program.ts'
 export { resources } from './resources.ts'
+export { StepExecution, StepExecutionUsage } from './step-execution.ts'

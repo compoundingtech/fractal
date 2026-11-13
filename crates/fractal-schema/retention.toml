@@ -365,7 +365,7 @@ min_age = "5d"
 [[rules]]
 kind = "harness.usage"
 when = ["semantics=response_rollup"]
-slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]
+slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"]
 keep = "newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that"
 
 [[rules]]

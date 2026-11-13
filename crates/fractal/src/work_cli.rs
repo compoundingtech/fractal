@@ -147,10 +147,14 @@ pub(super) async fn run_work(
                 .as_deref()
                 .map(|deadline| fractal_daemon::graph::parse_duration(deadline, true))
                 .transpose()?;
+            let (person, actor) = (args.person.clone(), args.actor.clone());
+            let urgent = fractal_schema::availability::urgent_priority(Some(&args.priority));
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        // `normal` is what an ask has without a priority, so it is not sent.
+                        priority: (args.priority != "normal").then_some(args.priority),
                         deadline_ms,
                         default_answer: args.default_answer,
                         legacy_request: None,
@@ -166,7 +170,36 @@ pub(super) async fn run_work(
                     },
                 )
                 .await?;
-            print_value(&result, json_output)
+            // A separate read as the asker: the ask stands whether or not it answers.
+            let availability = match generated_client(endpoint, Some(&actor)) {
+                Ok(reader) => reader.availability_list(Some(&person)).await.map_err(anyhow::Error::from),
+                Err(error) => Err(error),
+            };
+            let availability = match availability {
+                Ok(read) => read.value.people.into_iter().find(|entry| entry.person == person),
+                Err(error) => {
+                    stderr_message("st", format_args!("could not read {person}'s availability: {error:#}"));
+                    None
+                }
+            };
+            if json_output {
+                let mut value = serde_json::to_value(&result)?;
+                value["urgent"] = urgent.into();
+                if let Some(availability) = &availability {
+                    value["person_availability"] = serde_json::to_value(availability)?;
+                    // Only an ask that named `--deadline` is known to have one to hold.
+                    if deadline_ms.is_some() {
+                        value["deadline_held"] = availability::holds_deadline(availability, urgent).into();
+                    }
+                }
+                return print_value(&value, true);
+            }
+            print_value(&result, false)?;
+            if let Some(availability) = &availability {
+                println!("{}", availability::summary_line(availability));
+            }
+            println!("{}", availability::ask_line(urgent, deadline_ms.is_some(), availability.as_ref()));
+            Ok(())
         }
         WorkCommand::Update(args) => {
             reject_foreign_agent_actor(&args.actor)?;
@@ -178,6 +211,7 @@ pub(super) async fn run_work(
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        priority: None,
                         deadline_ms: None,
                         default_answer: None,
                         legacy_request: None,
@@ -903,5 +937,32 @@ mod wait_lease_tests {
         let requests = requests.lock().unwrap();
         assert!(requests.iter().any(|path| path.starts_with("/v1/client/")));
         assert!(!requests.iter().any(|path| path.starts_with("/v1/work-items/")));
+    }
+}
+
+#[cfg(test)]
+mod ask_priority_tests {
+    use clap::Parser as _;
+
+    fn priority(extra: &[&str]) -> Result<String, clap::Error> {
+        let mut argv = vec![
+            "st", "work", "ask", "--for", "person/avery", "--title", "Ship?", "--reason", "Release",
+            "--as", "agent/example", "--idempotency-key", "ship",
+        ];
+        argv.extend(extra);
+        let cli = super::super::Cli::try_parse_from(argv)?;
+        let super::super::Command::Work { command: super::super::WorkCommand::Ask(args) } = cli.command else {
+            panic!("expected work ask")
+        };
+        Ok(args.priority)
+    }
+
+    #[test]
+    fn work_ask_priority_defaults_to_normal_and_offers_only_the_four_priorities() {
+        assert_eq!(priority(&[]).unwrap(), "normal");
+        for named in ["critical", "high", "normal", "low"] {
+            assert_eq!(priority(&["--priority", named]).unwrap(), named);
+        }
+        assert!(priority(&["--priority", "urgent"]).is_err());
     }
 }

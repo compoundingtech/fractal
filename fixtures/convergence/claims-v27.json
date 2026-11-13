@@ -7031,12 +7031,6 @@
         "immutable": false,
         "reference": false
       },
-      "trace": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "value": {
         "value_type": "any",
         "required": false,

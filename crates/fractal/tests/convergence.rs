@@ -2032,11 +2032,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v27 adds durable run/attempt trace kinds and the merged program-step schema to v26.
-/// The changed draw schedule converges for every fixed seed, but seeds 13 and 21 do not trim
-/// before the old build is excused and the next cut falls due. The scoped 32-seed characterization
-/// found no other non-trimming seeds; each exception still has to prove that later trim.
-const NEVER_TRIMS: &[u64] = &[13, 21];
+/// Corpus v27 adds durable attempt trace correlation to the merged registry.
+/// The fixed sweep observed only seed 21 without a trim. It must still trim on every
+/// modern node after excusing the old build and advancing to the next cut.
+const NEVER_TRIMS: &[u64] = &[21];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 

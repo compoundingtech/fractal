@@ -437,7 +437,27 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
 
 `title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
-`fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
+`fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. The replacement does not receive the predecessor's session-start handoff, held-work summary or unread-mail summary. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
+
+Context retention remains the default: standing workers can intentionally carry knowledge between ordinary steps. A fresh harness session alone does **not** make a standing worker independent: its identity, mailbox and accessible documents are unchanged. For an independent agent turn, declare a separate run-owned agent with a subject such as `agent/${ST_MISSION_RUN}/worker`, select that exact subject, and set `fresh-context` on the step. Do not reuse the author seat or explicitly select an existing native session in the agent's launch settings. The run-owned identity has its own mailbox and handoff namespace; the fresh reset prevents native conversation continuation and automatic predecessor handoff injection.
+
+```kdl
+mission "independent-turn" state="ready" {
+  goal "Produce an independent result from the supplied inputs."
+  agent "agent/${ST_MISSION_RUN}/worker" {
+    workspace "${ST_WORKSPACE}"
+    harness "omp" {}
+    one-shot
+  }
+  step "work" {
+    assigned-to "agent/${ST_MISSION_RUN}/worker"
+    fresh-context
+    goal "Use the declared inputs, not another agent's conversation."
+  }
+}
+```
+
+`one-shot` retires the agent when its process exits; it is not a context-isolation policy by itself. Each child run created by a program worker turn gets the same run-owned identity and fresh-context behavior when its worker mission declares this pattern. This isolates automatic conversation/mailbox inheritance, not workspace files, shared documents, or messages deliberately addressed to the new agent.
 
 `keep-open` is a bare node. It marks a step that only holds its run open while the mission's observers watch, such as an intake or a retirement step: the step is not work. A mission whose only running steps are agentless keep-open steps reads as watching. Mission rows carry it on each step as `keep_open`. For revisions published before the flag existed, steps named `keep-watch`, `retire`, `steward-intake`, `standing`, `keep-open` or `*-retirement` still count.
 
@@ -1202,18 +1222,38 @@ answer is that default exactly as the person's choice of it would read (its `id`
 own outcome, such as `decline`); without one there is no answer object. No new outcome is added,
 so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
 entry as `timed_out`. A retry with the same idempotency key must name the same deadline
-(recorded as `deadline_ms` when the asker named one) and default, or it is refused with
-`idempotency-conflict`. The reconciler arms one wake for the earliest deadline among the asks it
-resolves, so nothing polls for them.
+(recorded as `deadline_ms` when the asker named one), default and priority, or it is refused
+with `idempotency-conflict`. The reconciler arms one wake for the earliest effective deadline among
+the asks it resolves, so nothing polls for them.
+
+An ask carries a priority: `critical`, `high`, `normal` or `low` (`work ask --priority`,
+`normal` when omitted). The claim records `priority` only when it is not `normal`, so naming
+`normal` is the same ask as naming none; an update has no priority, and an unknown one is refused
+with `invalid-ask-priority`. The person-step row on the person's home carries it as `priority`.
+There is one urgency rule, `fractal_schema::availability::urgent_priority`: an ask is urgent
+when its priority is `critical`, whatever its deadline. Each client-v0 attention row says so as
+`urgent`; the deadline clock reads the same rule, and clients decide interruptions (`urgent`
+admits only urgent rows) and speech from that field alone.
+
+The asked person's deadline clock (`person.deadline-clock-set`) moves deadlines. `hold-all`
+holds every ask and `hold-routine` every ask that is not urgent. An ask's effective deadline is
+its stored deadline plus the time a hold that
+applies to it was in force since it was asked: a hold `until` a time counts until then, and one
+the person ends with `run` counts until that claim. While an open hold with no end applies,
+the ask has no deadline: nothing resolves it, the reconciler arms no wake for it, and the
+person's home shows none. Resuming the clock is a claim that wakes the reconciler, which then
+arms the wake for the moved deadline. A browser pairing request always expires on time. Only
+the ask's own member resolves it, so an ask taken by a member on a build without the deadline
+clock resolves at its stored deadline until that member upgrades.
 
 Only the ask's own member applies the default, but the person may answer on any member. A member
-with deadlines on refuses a person's answer stored at or after the ask's `deadline_unix_ms` with
+with deadlines on refuses a person's answer stored at or after the ask's effective deadline with
 `stale-fence`: the time the answer's claim is written decides, not when it was sent, and the
 refusal rolls that write back. A member with deadlines off accepts it, so the refusal holds
 everywhere only once deadlines are on on every member; such a late answer is then dropped as below.
 An answer made before the deadline can still reach the ask's member after the default was applied
 there. Then the person's answer stands and the default does not: every member keeps, of an ask's
-responses, a person's answer accepted before the deadline (or, for an ask made without one, before
+responses, a person's answer accepted before the effective deadline (or, for an ask made without one, before
 the default was applied) over the default, and drops a person's answer accepted after it. Members
 hold the same claims with the same accept times, so they agree. The asking step's `person_answers`
 then lists only the person's answer, its constraints say the answer replaces the default, and when
@@ -1229,7 +1269,7 @@ removes it, so turning them on again counts afresh), or from when it was
 asked, whichever is later. Old asks therefore do not all resolve at once when deadlines are
 turned on. An update waits for nobody and has no deadline.
 
-The person's home shows each ask's deadline and default. The attention row carries
+The person's home shows each ask's effective deadline and default. The attention row carries
 `deadline_at` and, when the ask names one, `default_answer` (`{id, label}`). The web app, the
 terminal interface and the phone word it the same way, for example `answer within 3h, or
 “Keep it open” applies` or `answer within 2d, or it times out`. The member keeps its
