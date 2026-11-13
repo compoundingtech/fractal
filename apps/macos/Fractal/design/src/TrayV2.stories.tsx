@@ -1,7 +1,7 @@
 /**
  * Attention tray V2, kept as history: the open variant dimensions Ada picked from, each
  * option rendered one change at a time from the V2 design. The variant code is gone; the images
- * are frozen in `renders/v2/` and never regenerated. V3 is what the tray ships.
+ * are frozen in `renders/v2/` and never regenerated. V3 shipped the picks; V4 ships now.
  */
 import type { Meta, StoryObj } from '@storybook/react'
 
@@ -120,7 +120,7 @@ const HistoryView = () =>
         <p className="at-gallery-description">
           Ada picked{' '}
           <strong>{v2History.dimensions.map((dimension) => dimension.picked).join(' ')}</strong> on
-          2026-11-13; V3 ships them.
+          2026-11-13; V3 shipped them, and the native round (V4) replaced V3.
         </p>
       </section>
       <section className="at-gallery-row" aria-label="Locked in V2">
@@ -147,7 +147,7 @@ const meta = {
     docs: {
       description: {
         component:
-          'History: the V2 exploration Ada picked L1 A3 H3 S2 M3 from. Each option is a frozen flat render of the V2 design with one dimension changed; nothing here is regenerated. AttentionTray/V3 shows what ships.',
+          'History: the V2 exploration Ada picked L1 A3 H3 S2 M3 from. Each option is a frozen flat render of the V2 design with one dimension changed; nothing here is regenerated. V3 shipped the picks; AttentionTray/V4 shows what ships now.',
       },
     },
   },

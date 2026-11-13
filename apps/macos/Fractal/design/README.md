@@ -17,11 +17,16 @@ Appearance menu forces Light or Dark.
 
 ## Stories
 
-- `AttentionTray/V3`: the shipped design. `Locked` lists Ada' picks (L1 A3 H3 S2 M3) and the
-  decisions carried from V2 (K1–K12) and added since (K13), then the status item in every state
-  and every scenario; `LightAndDark` puts the busy inbox side by side.
+- `AttentionTray/V4`: the shipped design, the native round (n1–n4): a Control Center module with
+  tiles, one-line inbox rows and pages drilled into within the panel. `Overview` lists the round's
+  decisions, the K decisions it keeps, the Control Center benchmark and V3's heights next to V4's;
+  `OpenVariants` the open answer placement (D1, D2); `TopLevel`, `AskPages` and `TilePages` every
+  scenario.
 - `AttentionTray/Panel`: the shipped design per scenario, plus `AllStates` (light and dark).
 - `AttentionTray/MenuBar`: the status item per state, plus `AllStates` (light and dark).
+- `AttentionTray/V3`: history. `Locked` lists Ada' picks (L1 A3 H3 S2 M3) and K1–K13 as #9344
+  shipped them, with the frozen V3 renders; `LightAndDark` puts the busy inbox side by side. Its
+  views are gone.
 - `AttentionTray/V2`: history. `Exploration` shows the V2 options per dimension (L, A, H, S, M) as
   frozen renders, the pick marked; the variant code that drew them is gone.
 - `AttentionTray/Guidelines`: the HIG/WWDC sources the design follows, first-party benchmarks and a
@@ -29,13 +34,14 @@ Appearance menu forces Light or Dark.
 
 ## Renders
 
-`renders/` holds three sets, each with its manifest:
+`renders/` holds four sets, each with its manifest:
 
 | Set           | Files                                                                              | Committed | Regenerate (on a Mac)                                                                                              |
 | ------------- | ---------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ |
 | Fallback      | `<scenario>-<appearance>.png`, `menubar-<state>-<appearance>.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                          |
 | Real captures | `capture/*.png`, `capture.json`                                                    | when run  | `devenv tasks run attention-tray:gallery-capture-vm` (headless macOS VM; `capture.json` records the guest's macOS) |
 | V2 history    | `v2/*.png`, `v2/v2.json`                                                           | yes       | never: frozen from the V2 variant code                                                                             |
+| V3 history    | `v3/*.png`, `v3/v3.json`                                                           | yes       | never: frozen from the V3 views (#9344)                                                                            |
 
 On this Mac's own screen instead (unattended Mac only):
 `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture`.

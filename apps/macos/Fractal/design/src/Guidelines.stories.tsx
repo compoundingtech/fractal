@@ -118,25 +118,26 @@ const checklist: readonly Check[] = [
   {
     item: 'Window-style extra only because the content is too complex for a menu',
     verdict: 'pass',
-    evidence: 'Asks need inline answers and text entry; a menu cannot hold them.',
+    evidence:
+      'An ask’s page needs its whole request, the answers and text entry; a menu cannot hold them.',
   },
   {
     item: 'Panel draws no background; the system Liquid Glass is the surface',
     verdict: 'pass',
     evidence:
-      'TrayPanel has no .background/glassEffect; the V1 captures showed the menu-bar window’s glass behind the grouped sections.',
+      'TrayPanel has no .background/glassEffect; tiles, platters and conversation turns are content-layer fills on the menu-bar window’s glass.',
   },
   {
     item: 'No glass on glass; no popover cascading from the panel',
     verdict: 'pass',
     evidence:
-      'Status chips are toggles that expand their section in place inside the same Form (no .popover); the chart tooltip uses a content-layer fill (.background.secondary), not a material.',
+      'Rows and tiles push their page within the same panel (no .popover, no second window); the chart tooltip uses a content-layer fill (.background.secondary), not a material.',
   },
   {
-    item: 'One leading edge for title, sections, rows and footer',
+    item: 'One leading edge for titles, labels, rows, groups and footers',
     verdict: 'pass',
     evidence:
-      'PanelMetrics.inset is the grouped Form’s content inset (30 pt), shared by the header, the status strip and the footer.',
+      'PanelMetrics.inset (14 pt) holds the top level’s rows and section labels, the page header’s hairline, an ask page’s labels and platters, and a module page’s groups, section labels and footers: PanelForm takes back the grouped Form’s own 20 pt margin and header indent.',
   },
   {
     item: 'Text styles only, no fixed point sizes; clear hierarchy',
@@ -148,7 +149,7 @@ const checklist: readonly Check[] = [
     item: 'Status never carried by color alone',
     verdict: 'pass',
     evidence:
-      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; offline swaps the menu-bar glyph. Histogram hours without a bar differ in shape (spent: cross, unmeasured: ring); a key under the chart names them and the dashed nearly-spent rule.',
+      'Symbols + text for connection, objectives, availability; urgency is a symbol plus semibold text; a refused row says “Refused” beside its triangle; a pull request whose head moved says “New commits”; offline swaps the menu-bar glyph. Histogram hours without a bar differ in shape (spent: cross, unmeasured: ring); a key under the chart names them and the dashed nearly-spent rule.',
   },
   {
     item: 'SF Symbols chosen per job; system symbols only',
@@ -157,16 +158,16 @@ const checklist: readonly Check[] = [
       'Ask kind and availability symbols use .hierarchical; the urgent bubble is .monochrome so it does not wash out; status symbols use filled variants.',
   },
   {
-    item: 'One prominent action per view',
+    item: 'One prominent action per page',
     verdict: 'partial',
     evidence:
-      'Only the first answerable ask’s recommended answer is .borderedProminent (never a recommended decline), and only while nothing is typed or focused; the note editor’s Save takes that role while open. No answer is the Return default: answers are irreversible. Flat fallbacks draw it untinted (inactive window).',
+      'An ask’s recommended answer is its page’s one .borderedProminent (never a decline, never one that needs words), only while nothing is typed or focused; an update’s Mark Read is its page’s; the note editor’s Save takes that role while open. No answer is the Return default: answers are irreversible. Flat fallbacks draw it untinted (inactive window).',
   },
   {
     item: 'No hover-only controls',
     verdict: 'pass',
     evidence:
-      'Mark Read, Snooze, Dismiss, Open in Fractal, Read Aloud and an open ask’s answers are always in the hierarchy; Snooze and Dismiss are icon-only with their names as help and VoiceOver labels; a closed ask opens with its disclosure from the keyboard; no row reflows under the pointer (the full update summary is the help text).',
+      'Every action sits on its page: answers, Mark Read, Snooze, Dismiss, Open in Fractal and Read Aloud are always in the hierarchy; Snooze and Dismiss are icon-only with their names as help and VoiceOver labels; rows highlight under the pointer as feedback only and open their page from the keyboard; Esc goes back.',
   },
   {
     item: 'Control size set on the panel root (macOS 27 resets it in popovers)',
@@ -177,7 +178,19 @@ const checklist: readonly Check[] = [
     item: 'Keyboard reaches every control; frequent actions have shortcuts',
     verdict: 'partial',
     evidence:
-      '⌘R refresh, ⌘, Settings, ⌘Q quit, Return sends the focused field or saves the note; Tab reaches every control. No arrow-key navigation between asks.',
+      '⌘R refresh, ⌘, Settings, ⌘Q quit (in Settings), Esc back, Return sends the focused field or saves the note; Tab reaches rows and controls with Full Keyboard Access on. No arrow-key navigation between rows.',
+  },
+  {
+    item: 'Reduce Motion respected',
+    verdict: 'pass',
+    evidence:
+      'TrayPanel reads accessibilityReduceMotion: pages cross-fade in place instead of sliding.',
+  },
+  {
+    item: 'VoiceOver follows page changes; rows say what they show',
+    verdict: 'partial',
+    evidence:
+      'AccessibilityFocusState: a push focuses the page title, Back and Esc the row or tile that opened the page, a commit the receipt row. A row’s label carries its kind, title, asker, age and write state (Draft, Sending, Refused). Not yet checked with VoiceOver running.',
   },
   {
     item: 'Reduce Transparency / Increase Contrast respected',
@@ -201,7 +214,7 @@ const checklist: readonly Check[] = [
     item: 'Work survives the panel closing',
     verdict: 'pass',
     evidence:
-      'Typed answers, the picked option and the note draft live on AttentionModel; a commit or the card leaving Fractal clears them.',
+      'Typed answers, the picked option and the note draft live on AttentionModel; a commit or the card leaving Fractal clears them. The panel reopens at the top level, as Control Center does.',
   },
   {
     item: 'People can hide the extra (isInserted, Settings)',
@@ -219,11 +232,11 @@ const checklist: readonly Check[] = [
 
 /** First-party menu-bar extras the panel is compared against. */
 const benchmarks = [
-  'Control Center modules: bold headline title, platters on glass, a trailing control per row — the tray’s grouped sections match this rhythm.',
+  'Control Center modules: bold headline title, platters on glass, a trailing control per row — the tray’s tiles and pages match this rhythm.',
   'Wi-Fi / Bluetooth: section headers small and secondary, rows of symbol + title + detail, settings link last — the tray’s section headers follow (subheadline semibold, secondary).',
   'Battery: a percentage beside the glyph in the menu bar — the precedent for the plain count beside the tray’s symbol.',
   'Focus: the active mode as the row’s value with a menu to change it — the tray’s availability rows use the same pop-up pattern.',
-  'Control Center: a module expands in place rather than opening another window — the tray’s status chips do the same.',
+  'Control Center: a module drills into its page within the same panel and reopens at the top level — the tray’s tiles and rows do the same, with a back chevron and Esc.',
 ]
 
 const GuidelinesView = () => (
