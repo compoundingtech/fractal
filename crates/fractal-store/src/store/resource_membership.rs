@@ -164,6 +164,7 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
         kind: "resource-membership.changed".into(), actor: None,
         fields: BTreeMap::from([("membership".into(), json!(member.request.id)), ("state".into(), json!(member.state))]),
         evidence: Vec::new(), idempotency_key: None,
+        expected_subject: None,
     }, now_ms())?;
     Ok(())
 }
