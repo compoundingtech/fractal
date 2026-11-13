@@ -217,6 +217,65 @@ advertisement from every active member. Pending unsigned local membership change
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 
+### Person availability
+
+A person's availability informs agents; it never grants authority. It has three axes and a
+derived status, all folded when read from claims on `person/NAME`, so expiry needs no writes:
+
+- `status`: an `available` or `away` override with optional `until`. With no override in
+  force, status is `available` while some device is `present`, `away` while devices report but
+  none is present, and `available` with `status_source: "unreported"` when no device's state
+  counts (nobody runs a reporter, or every report is over 24 hours old). An unreported person
+  is not treated as away: agents ask as usual.
+- `interruptions`: `all`, `urgent` or `none`, with optional `until`; `all` when unset.
+- `deadline_clock`: `run`, `hold-routine` or `hold-all`, with optional `until`; `run` when
+  unset. A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of
+  every ask (`hold-all`). An ask is urgent exactly when its priority is `critical`.
+- `presence`: derived by the daemon, the same way for every device, from each device's newest
+  raw state. An `active` device is `present` until 10 minutes after its last input, then
+  `idle`; `inactive` is `idle`; `locked` and `sleeping` are `locked`. A device's state counts
+  for 24 hours after it was observed (the earlier of `observed_at` and acceptance). `present`
+  anywhere wins, then `idle`, then `locked`; with no counting device presence is `unreported`.
+
+The response words (`status`, `status_source`, `presence`, `interruptions`, `deadline_clock`)
+are open: readers keep a word they do not know as Unknown (`AvailabilityStatus` and siblings
+in Rust and Swift; open string unions in TypeScript), so a later daemon can add one.
+
+`GET /v1/client/availability` (`availability.list`) requires `read.projections` and a person
+or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` it reads that
+person. Without it, a person reads themselves and an agent reads the people whose directive
+notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
+gets them as `null` and sees only the effective status with `status_until`, the interruptions
+and the deadline clock. A local harness or peer (an agent harness or its descendant, a bound
+run, a native delivery peer) is another reader even when it names the person.
+
+Writes act as the session's own person, which the body never names; agent sessions are refused
+with `403` even though a local agent session holds every scope, and so is a local harness or
+peer that names the person. The daemon records the source
+of every write on its claim: the exact pairing grant for a paired device, otherwise
+`host/<member>`; a body never names it. `PUT /v1/client/availability` (`availability.set`,
+scope `write.availability`) takes an `AvailabilitySet`: each present axis names its `value`
+and optional future `until`, and an absent axis is unchanged. A status `value` of `null`
+clears the override and takes no `until`; it answers the person's full `PersonAvailability`.
+
+`POST /v1/client/presence` (`presence.report`, scope `write.presence`) takes a
+`PresenceReport`: the device's raw `state` (`active`, `inactive`, `locked` or `sleeping`), its
+optional `last_input_at` and its `observed_at`, which must be within the last 15 minutes and at
+most 2 minutes ahead of this member's clock; `last_input_at` may not be later than
+`observed_at`. Devices apply no idle threshold and send no heartbeat. A device reports on every
+state change, and again at the `report_again_at` of its last `PresenceReportResult` with its
+current `last_input_at`: while it is present, that is the instant it would turn idle without
+newer input. A null `report_again_at` means: report on the next state change, or on the next
+input after an idle stretch. Reporting more often is harmless: the daemon records a device's
+report only when it changes the device's state or derived presence, or moves an active
+device's last input forward by at least 5 minutes. The answer is a `PresenceReportResult`:
+the person's full `availability` and `report_again_at`. Invalid input is `validation-failed`.
+The generated Rust `availability_list`, `availability_set` and `presence_report`, and Swift
+and TypeScript `availabilityList`, `availabilitySet` and `presenceReport` methods use these
+routes. See the [read fixture](fixtures/person-availability.json), the
+[write fixture](fixtures/availability-set.json) and the
+[presence fixture](fixtures/presence-report.json) with its
+[result](fixtures/presence-report-result.json).
 
 ### Phone observations
 
@@ -633,6 +692,36 @@ Request bodies never select an actor. Device credentials are scoped, individuall
 different from fleet replication secrets. A remote client is always online: v0 has no offline
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
+
+### A person's desktop app on the local socket
+
+A native app the person runs on the member's own host, such as a menu-bar tray, calls this API over
+the trusted local `fractal.sock`, as `fractal note set` does: no pairing and no bearer credential.
+Each request names the person with `x-st3-person: person/NAME` (`x-fractal-person` is also
+accepted). That session acts as the person and holds every scope; without the header the session is
+the read-only `client/local/read-only`. Every `/v1/client/` route is served, WebSocket streams
+included. The daemon ignores the HTTP `Host`; send `localhost`.
+
+Trust comes from the host, not from a credential:
+
+- The socket is mode 0600, owned by the daemon's Unix user, so only that user (or root) can connect.
+- For each connection the daemon asks the kernel for the peer process (`LOCAL_PEERPID` on macOS,
+  `SO_PEERCRED` on Linux) and reads the exec-time environment of it and each same-user ancestor. An
+  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent: it keeps the
+  agent's free-mode reads, so ordinary GETs and stream upgrades are still served, but a write or an
+  owner-administration read whose person header names anyone but that agent is refused with code
+  `forbidden`. A run credential binds its mission run the same way. An ancestry the daemon cannot
+  read refuses every request that carries a person header. An app launched by launchd (a login
+  item, Finder, `open`) has launchd as its parent, binds to no agent, and is taken for the person.
+- This is cooperative attribution between processes of one Unix user
+  ([replication.md](../replication.md)), not a boundary against code already running as that user.
+  Never forward this socket to TCP. A device on another host pairs and uses `fractal-client.sock`.
+
+The socket is `run/fractal.sock` in the daemon's state directory
+(`~/.local/state/st3/run/fractal.sock` on a default install); the daemon links it there even when
+it binds under `XDG_RUNTIME_DIR`. The Swift client connects with
+`FractalClient(localSocketPath:person:client:)`, which carries every request and stream over that
+socket; the Rust client's `Client::unix_as` does the same.
 
 ### Native Fabric carrier
 
@@ -1236,7 +1325,9 @@ person-step attention card then includes the same `request`; a card without one 
 ask, and clients should not infer answers from its title. A card with `update` instead brings
 information the person asked for and asks nothing: show it, and send `work.done` with
 `answer: {"id": "read"}` (its `action_parameters` already carry it) when the person opens it
-or presses read. Agents post updates with `fractal work update`.
+or presses read. Agents post updates with `fractal work update`. An update's optional `speech`
+(1 to 300 characters) is set only when the person asked to be told that outcome: a client that
+speaks reads `update.speech` aloud, and speaks no update without it.
 
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
@@ -1930,10 +2021,11 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-client diagnostics writes, glasses reads and control, terminal reads, attention control,
+client diagnostics writes, availability and presence writes for the paired person, glasses
+reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`read.glasses`, `control.glasses`, `terminal.read`,
+`write.availability`, `write.presence`, `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so

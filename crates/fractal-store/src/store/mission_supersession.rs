@@ -432,6 +432,12 @@ impl Store {
         runtime_execution_quiescent(&self.readers.get(), subject)
     }
 
+    /// This run and every run it supersedes, nearest first.
+    pub fn mission_run_supersession_ancestry(&self, run: &str) -> Result<Vec<String>, FractalError> {
+        let subject = format!("mission-run/{}", run.strip_prefix("mission-run/").unwrap_or(run));
+        supersession_ancestry(&self.readers.get(), &subject)
+    }
+
     /// Follow only explicit supersession edges; ordinary historical run reads stay exact.
     pub fn mission_run_supersession_successor(&self, run: &str) -> Result<String, FractalError> {
         let connection = self.readers.get();

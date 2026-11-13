@@ -83,6 +83,9 @@
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
 "github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
+# One claim per completed Workspace CI run, written once by a repository's poller; CI's declared
+# objectives read the last day of them.
+"github.workflow-run" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.
@@ -143,6 +146,10 @@
 "owned-set.revised" = { class = "durable" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
+"person.status-set" = { class = "durable" }
+"person.interruptions-set" = { class = "durable" }
+"person.deadline-clock-set" = { class = "durable" }
+"person.presence-observed" = { class = "current", pending = "the presence fold reads each source's newest report; no per-source checkpoint slot yet" }
 "person.rename.completed" = { class = "durable" }
 "planning-session.approved" = { class = "durable" }
 "planning-session.cancelled" = { class = "durable" }
@@ -156,6 +163,9 @@
 "principal.key-revoked" = { class = "durable" }
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
+# Invocation correlation must outlive collector sampling and trace-backend retention.
+"mission.run.trace" = { class = "durable" }
+"program.attempt.trace" = { class = "durable" }
 "publication.operation" = { class = "durable" }
 # Only each person's largest position per conversation matters, but a newest-per-slot rule could
 # drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.

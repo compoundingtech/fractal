@@ -4243,6 +4243,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     assert_eq!(
         attention_heading(&item, now),
@@ -4309,6 +4310,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     update.alert = Some(false);
     let now = render_now_page(&updates, "fractal now");
