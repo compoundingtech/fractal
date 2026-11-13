@@ -61,7 +61,7 @@ Pairing and grant administration are explicit owner operations, not adapter star
      --consent-evidence CONSENT_RECORD
    ```
 
-   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
+   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope read.assistant.slo` for the SLO tools; it reads operational objective and budget rows, not conversation content. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
 
 2. Before the single-use challenge expires (five minutes), complete it on the adapter machine. `MEMBER_ORIGIN` is the issuer gateway's HTTP or HTTPS origin, without a path. The code is read privately from stdin:
 
@@ -162,6 +162,8 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_conversation_search` | `read.assistant.conversation` | Read | Search bounded plain conversation text snippets. |
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
+| `fractal_slo_list` | `read.assistant.slo` | Read | Page every objective and budget row: target, current measurement, window, remaining budget, status and forecast. Continue with `value.page.next_cursor`. |
+| `fractal_slo_history` | `read.assistant.slo` | Read | Chart what was left of one row (`id` from `fractal_slo_list`) across a period of at most 7 days, in 1 to 1000 steps. |
 
 The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 

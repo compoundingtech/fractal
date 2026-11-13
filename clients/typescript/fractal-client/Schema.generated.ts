@@ -503,6 +503,7 @@ export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals([
   "read.assistant.agents",
   "read.assistant.conversation",
   "read.assistant.terminal",
+  "read.assistant.slo",
   "write.assistant.messages",
   "write.assistant.custom-reply",
   "write.assistant.answers"

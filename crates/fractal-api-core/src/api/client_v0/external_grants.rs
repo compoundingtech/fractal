@@ -13,6 +13,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("conversation-timeline", "read.assistant.conversation"),
     ("conversation-search", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
+    ("slo", "read.assistant.slo"), ("slo-history", "read.assistant.slo"),
 ];
 pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
@@ -141,6 +142,7 @@ pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 pub const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
+    "read.assistant.slo",
     "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
 ];
 // Serializes code consumption and grant policy transitions. Subject fences also protect

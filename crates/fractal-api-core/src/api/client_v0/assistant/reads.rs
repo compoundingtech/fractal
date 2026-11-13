@@ -41,6 +41,14 @@ const CONVERSATION_FIELDS: &[&str] = &[
 const TERMINAL_FIELDS: &[&str] = &[
     "agent_id", "terminal_id", "incarnation_id", "screen_revision", "max_response_bytes",
 ];
+const SLO_HISTORY_FIELDS: &[&str] = &["id", "since_ms", "until_ms", "steps", "max_response_bytes"];
+/// The objective and budget row fields an assistant reads. `explain` is long derived prose and
+/// diagnostic fields (evidence, source, coverage, host, provider) stay on the person surface.
+const SLO_ROW_FIELDS: &[&str] = &[
+    "id", "kind", "account", "about", "target", "current", "window", "remaining_percent",
+    "status", "tone", "resets_at_unix_ms", "measured_at_unix_ms", "forecast_used_percent",
+    "forecast_basis_minutes", "runs_out_at_unix_ms",
+];
 
 #[allow(clippy::too_many_arguments)]
 pub async fn project_with_context(
@@ -75,8 +83,43 @@ pub async fn project_with_context(
         },
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
+        "slo" => page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
+        "slo-history" => {
+            allow(parameters, SLO_HISTORY_FIELDS, max_bytes)?;
+            Ok((snapshot.clone(), slo_history(state, parameters).await?))
+        }
         _ => Err(ApiError::not_found("unknown assistant projection")),
     }
+}
+
+/// One objective or budget row with only the allowlisted fields.
+fn slo_item(row: &Value) -> Value {
+    Value::Object(SLO_ROW_FIELDS.iter()
+        .filter_map(|field| row.get(*field).map(|value| ((*field).to_owned(), value.clone())))
+        .collect())
+}
+
+/// What was left of one exactly named objective or budget across a period.
+async fn slo_history(state: &AppState, parameters: &BTreeMap<String, String>) -> Result<Value, ApiError> {
+    fn number<T: std::str::FromStr>(parameters: &BTreeMap<String, String>, name: &str) -> Result<Option<T>, ApiError> {
+        parameters.get(name).map(|value| value.parse::<T>()
+            .map_err(|_| validation(format!("query parameter `{name}` must be an unsigned integer"))))
+            .transpose()
+    }
+    let id = required(parameters, "id")?;
+    if !identifier_allowed(id) {
+        return Err(validation("id must be an exact objective or budget id from the SLO list"));
+    }
+    let query = crate::api::SloHistoryQuery {
+        id: id.to_owned(),
+        since_ms: number(parameters, "since_ms")?,
+        until_ms: number(parameters, "until_ms")?,
+        steps: number(parameters, "steps")?,
+    };
+    let axum::Json(mut body) = crate::api::operations::get_slo_history(
+        axum::extract::State(state.clone()), axum::extract::Query(query)).await?;
+    body["kind"] = json!("slo-history");
+    Ok(body)
 }
 
 /// Every parameter is named by the projection; a stated budget must be the one enforced.
