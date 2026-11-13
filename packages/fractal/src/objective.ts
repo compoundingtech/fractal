@@ -1,6 +1,6 @@
 /**
- * Objectives (docs/st3/objectives.md): an indicator that measures samples, the targets that bound
- * them, the window an interval is judged over and who a miss is delivered to. `objective` checks
+ * Objectives (docs/st3/objectives.md): an indicator that measures samples or counts events, the
+ * targets that bound them, the window they are judged over and who a miss is delivered to. `objective` checks
  * the rules the native reader (`fractal_kernel::objective`) enforces, so a declaration fails where
  * it is written; `objectiveNode` lowers it to the `objective` KDL node.
  *
@@ -36,6 +36,17 @@ export interface Interval {
   readonly exclude?: readonly { readonly field: string; readonly values: readonly string[] }[]
 }
 
+/** Events in claims per hour, one per subject under `subjectPrefix` at its earliest `event` claim. */
+export interface Count {
+  readonly subjectPrefix: string
+  /** `at` is required: a retry carries the same time, so it is deduplicated or before the window. */
+  readonly event: ClaimEvent & { readonly at: string }
+  /** Fields of the event claim that split the rows. */
+  readonly labels?: readonly string[]
+  /** Leave out an event whose claim has one of `values` in `field`. */
+  readonly exclude?: readonly { readonly field: string; readonly values: readonly string[] }[]
+}
+
 /** How a sample is measured; `kind` is the KDL indicator name. */
 export type Indicator =
   | { readonly kind: 'latency'; readonly paths: readonly string[] }
@@ -49,17 +60,19 @@ export type Indicator =
   | { readonly kind: 'ci-duration'; readonly series: string }
   | { readonly kind: 'ci-count'; readonly series: string }
   | ({ readonly kind: 'interval' } & Interval)
+  | ({ readonly kind: 'count' } & Count)
 
 type IndicatorOf<K extends Indicator['kind']> = Extract<Indicator, { readonly kind: K }>
 
 /** One statistic and its bound; `scope: 'remote'` is a latency target for reads served remotely. */
 export type Target = { readonly stat: string; readonly scope?: 'remote' } & (
-  | { readonly within: Duration; readonly max?: never; readonly minPercent?: never }
-  | { readonly max: number; readonly within?: never; readonly minPercent?: never }
-  | { readonly minPercent: number; readonly within?: never; readonly max?: never }
+  | { readonly within: Duration; readonly max?: never; readonly min?: never; readonly minPercent?: never }
+  | { readonly max: number; readonly within?: never; readonly min?: never; readonly minPercent?: never }
+  | { readonly min: number; readonly within?: never; readonly max?: never; readonly minPercent?: never }
+  | { readonly minPercent: number; readonly within?: never; readonly max?: never; readonly min?: never }
 )
 
-/** The span an interval's budget is measured over, and the samples it needs to be met or missed. */
+/** The span a budget over claims is measured over, and the samples an interval needs to be met or missed. */
 export interface Window {
   readonly span: Duration
   readonly minSamples?: number
@@ -93,8 +106,10 @@ const freeze = <T extends object>(value: T): T => Object.freeze(value)
 
 /** The indicators an objective measures with. */
 export const indicator = {
-  /** Work that starts and stops in claims (the one kind a fleet declares). */
+  /** Work that starts and stops in claims (a fleet declares this or `count`). */
   interval: (input: Interval): IndicatorOf<'interval'> => freeze({ kind: 'interval', ...input }),
+  /** Events in claims per hour, one per subject (a fleet declares this or `interval`). */
+  count: (input: Count): IndicatorOf<'count'> => freeze({ kind: 'count', ...input }),
   /** Daemon routes, stream first snapshots, publications or phone reports, by `METHOD /route`. */
   latency: ({ paths }: { readonly paths: readonly string[] }): IndicatorOf<'latency'> =>
     freeze({ kind: 'latency', paths }),
@@ -206,15 +221,10 @@ const event = ({
   return value as Fields & ClaimEvent
 }
 
-const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'interval'> => {
-  only({
-    value,
-    allowed: ['kind', 'subjectPrefix', 'start', 'expect', 'stop', 'cancel', 'pause', 'labels', 'exclude'],
-    what: 'indicator `interval`',
-    fail,
-  })
+const eventOf = (e: ClaimEvent): ClaimEvent => ({ kind: e.kind, ...(e.at === undefined ? {} : { at: e.at }) })
+
+const checkPrefix = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): void => {
   const prefix = value.subjectPrefix
-  if (prefix === undefined) fail('an interval needs `subjectPrefix`')
   if (
     typeof prefix !== 'string' ||
     prefix.endsWith('/') === false ||
@@ -223,23 +233,9 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
   ) {
     fail(`subjectPrefix ${JSON.stringify(prefix)} must name subjects and end with \`/\``)
   }
-  if (value.start === undefined) fail('an interval needs `start`')
-  const start = event({ value: value.start, name: 'start', extra: [], fail })
-  const expect =
-    value.expect === undefined
-      ? undefined
-      : event({ value: value.expect, name: 'expect', extra: ['set'], fail })
-  if (expect !== undefined && isField(expect.set) === false) fail('`expect` needs `set` naming a field')
-  if (value.stop === undefined) fail('an interval needs `stop`')
-  const stop = event({ value: value.stop, name: 'stop', extra: ['member'], fail })
-  if (stop.member !== undefined && isField(stop.member) === false) fail('`member` is not a field name')
-  if (value.cancel !== undefined && typeof value.cancel !== 'string') fail('`cancel` needs one string')
-  const pause = value.pause
-  if (pause !== undefined) {
-    if (isRecord(pause) === false || typeof pause.kind !== 'string') return fail('`pause` needs one string')
-    only({ value: pause, allowed: ['kind', 'resume'], what: '`pause`', fail })
-    if (typeof pause.resume !== 'string' || pause.resume === '') fail('`pause` needs `resume`')
-  }
+}
+
+const checkLabels = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): readonly unknown[] => {
   const labels = value.labels ?? []
   if (Array.isArray(labels) === false) return fail('`labels` is a list of fields')
   labels.forEach((label: unknown, index) => {
@@ -261,6 +257,56 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
     }
     only({ value: exclude as Fields, allowed: ['field', 'values'], what: '`exclude`', fail })
   }
+  return labels
+}
+
+const labelsAndExcludes = (value: Pick<Count, 'labels' | 'exclude'>) => ({
+  ...(value.labels === undefined ? {} : { labels: freeze([...value.labels]) }),
+  ...(value.exclude === undefined
+    ? {}
+    : { exclude: freeze(value.exclude.map(({ field, values }) => freeze({ field, values: freeze([...values]) }))) }),
+})
+
+const parseCount = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'count'> => {
+  only({ value, allowed: ['kind', 'subjectPrefix', 'event', 'labels', 'exclude'], what: 'indicator `count`', fail })
+  if (value.subjectPrefix === undefined) fail('a count needs `subjectPrefix`')
+  checkPrefix({ value, fail })
+  if (value.event === undefined) fail('a count needs `event`')
+  const counted = event({ value: value.event, name: 'event', extra: [], fail })
+  if (counted.at === undefined) fail('`event` needs `at`: a retry carries the same time, so it never counts twice')
+  checkLabels({ value, fail })
+  // Every field was checked above.
+  const count = value as unknown as IndicatorOf<'count'>
+  return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze({ kind: count.event.kind, at: count.event.at }), ...labelsAndExcludes(count) })
+}
+
+const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'interval'> => {
+  only({
+    value,
+    allowed: ['kind', 'subjectPrefix', 'start', 'expect', 'stop', 'cancel', 'pause', 'labels', 'exclude'],
+    what: 'indicator `interval`',
+    fail,
+  })
+  if (value.subjectPrefix === undefined) fail('an interval needs `subjectPrefix`')
+  checkPrefix({ value, fail })
+  if (value.start === undefined) fail('an interval needs `start`')
+  const start = event({ value: value.start, name: 'start', extra: [], fail })
+  const expect =
+    value.expect === undefined
+      ? undefined
+      : event({ value: value.expect, name: 'expect', extra: ['set'], fail })
+  if (expect !== undefined && isField(expect.set) === false) fail('`expect` needs `set` naming a field')
+  if (value.stop === undefined) fail('an interval needs `stop`')
+  const stop = event({ value: value.stop, name: 'stop', extra: ['member'], fail })
+  if (stop.member !== undefined && isField(stop.member) === false) fail('`member` is not a field name')
+  if (value.cancel !== undefined && typeof value.cancel !== 'string') fail('`cancel` needs one string')
+  const pause = value.pause
+  if (pause !== undefined) {
+    if (isRecord(pause) === false || typeof pause.kind !== 'string') return fail('`pause` needs one string')
+    only({ value: pause, allowed: ['kind', 'resume'], what: '`pause`', fail })
+    if (typeof pause.resume !== 'string' || pause.resume === '') fail('`pause` needs `resume`')
+  }
+  const labels = checkLabels({ value, fail })
   if (expect !== undefined && stop.member === undefined) fail('with `expect`, `stop` needs `member`')
   if (labels.includes('member') && stop.member === undefined) {
     fail('`label "member"` needs `stop.member`')
@@ -277,7 +323,6 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
   ]
   const repeated = kinds.find((kind, index) => kinds.indexOf(kind) !== index)
   if (repeated !== undefined) fail(`claim kind ${JSON.stringify(repeated)} has two roles`)
-  const eventOf = (e: ClaimEvent) => ({ kind: e.kind, ...(e.at === undefined ? {} : { at: e.at }) })
   return freeze({
     kind: 'interval',
     subjectPrefix: interval.subjectPrefix,
@@ -293,14 +338,7 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
     ...(interval.pause === undefined
       ? {}
       : { pause: freeze({ kind: interval.pause.kind, resume: interval.pause.resume }) }),
-    ...(interval.labels === undefined ? {} : { labels: freeze([...interval.labels]) }),
-    ...(interval.exclude === undefined
-      ? {}
-      : {
-          exclude: freeze(
-            interval.exclude.map(({ field, values }) => freeze({ field, values: freeze([...values]) })),
-          ),
-        }),
+    ...labelsAndExcludes(interval),
   })
 }
 
@@ -350,6 +388,8 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
     }
     case 'interval':
       return parseInterval({ value, fail })
+    case 'count':
+      return parseCount({ value, fail })
     default:
       return fail(`has an unknown indicator \`${kind}\``)
   }
@@ -360,10 +400,10 @@ type CheckedTarget = { readonly target: Target; readonly ms?: number; readonly n
 
 const parseTarget = ({ value, fail }: { readonly value: unknown; readonly fail: Fail }): CheckedTarget => {
   if (isRecord(value) === false || typeof value.stat !== 'string') return fail('a target needs a `stat`')
-  only({ value, allowed: ['stat', 'within', 'max', 'minPercent', 'scope'], what: '`target`', fail })
+  only({ value, allowed: ['stat', 'within', 'max', 'min', 'minPercent', 'scope'], what: '`target`', fail })
   const stat = value.stat
-  const bounds = (['within', 'max', 'minPercent'] as const).filter((name) => value[name] !== undefined)
-  if (bounds.length !== 1) return fail(`target \`${stat}\` needs one bound: \`within\`, \`max\` or \`minPercent\``)
+  const bounds = (['within', 'max', 'min', 'minPercent'] as const).filter((name) => value[name] !== undefined)
+  if (bounds.length !== 1) return fail(`target \`${stat}\` needs one bound: \`within\`, \`max\`, \`min\` or \`minPercent\``)
   if (value.scope !== undefined && value.scope !== 'remote') {
     return fail(`target \`${stat}\` has an unknown scope ${JSON.stringify(value.scope)}`)
   }
@@ -382,6 +422,7 @@ const parseTarget = ({ value, fail }: { readonly value: unknown; readonly fail: 
     if ((raw > 0 && raw <= 100) === false) return fail(`target \`${stat}\`'s \`minPercent\` is not between 0 and 100`)
     return { target: freeze({ stat, minPercent: raw, ...scope }), number: raw }
   }
+  if (bound === 'min') return { target: freeze({ stat, min: raw, ...scope }), number: raw }
   return { target: freeze({ stat, max: raw, ...scope }), number: raw }
 }
 
@@ -437,6 +478,8 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
       return target.stat === 'open' && max({ integer: true, zero: true })
     case 'ci-count':
       return target.stat === 'per-hour' && max({ integer: true, zero: true })
+    case 'count':
+      return target.stat === 'per-hour' && ('min' in target ? number !== undefined && number > 0 : max({ integer: false, zero: true }))
     case 'ci-duration':
     case 'interval':
       return percentile(target.stat) !== undefined && within
@@ -455,6 +498,7 @@ const requiredStats: Readonly<Record<Indicator['kind'], readonly string[]>> = {
   'ci-duration': [],
   'ci-count': ['per-hour'],
   interval: [],
+  count: ['per-hour'],
 }
 
 const checkTargets = ({
@@ -491,12 +535,13 @@ const checkTargets = ({
   if (indicator.kind === 'cpu' && indicator.idleMinMinutes > 60) {
     fail('its idle minimum is not between 1 and 60 minutes')
   }
-  if (indicator.kind === 'interval' && hasWindow === false) fail('an interval needs a `window`')
-  if (indicator.kind !== 'interval' && hasWindow) {
-    fail('only an interval takes a `window`; native telemetry keeps its own')
+  const claims = indicator.kind === 'interval' || indicator.kind === 'count'
+  if (claims && hasWindow === false) fail(`a \`${indicator.kind}\` indicator needs a \`window\``)
+  if (claims === false && hasWindow) {
+    fail('only an interval or a count takes a `window`; native telemetry keeps its own')
   }
-  if (indicator.kind !== 'interval' && hasBreach) {
-    fail('only an interval takes `onBreach`; native objectives respond as they are built')
+  if (claims === false && hasBreach) {
+    fail('only an interval or a count takes `onBreach`; native objectives respond as they are built')
   }
 }
 
@@ -534,6 +579,9 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
   const targets = input.targets.map((value) => parseTarget({ value, fail }))
   const onBreach = input.onBreach === undefined ? undefined : parseBreach({ value: input.onBreach, fail })
   checkTargets({ indicator, targets, hasWindow: window !== undefined, hasBreach: onBreach !== undefined, fail })
+  if (indicator.kind === 'count' && input.window?.minSamples !== undefined) {
+    fail("a count's window takes no `minSamples`: an empty window is a real 0")
+  }
   return freeze({
     ...(name === undefined ? {} : { name: name as string }),
     about: input.about,
@@ -596,6 +644,13 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
       return [node({ name: 'series', args: [indicator.series] })]
     case 'interval':
       return intervalChildren(indicator)
+    case 'count':
+      return [
+        node({ name: 'subject-prefix', args: [indicator.subjectPrefix] }),
+        node({ name: 'event', args: [indicator.event.kind], props: { at: indicator.event.at } }),
+        ...(indicator.labels ?? []).map((label) => node({ name: 'label', args: [label] })),
+        ...(indicator.exclude ?? []).map(({ field, values }) => node({ name: 'exclude', args: [field, ...values] })),
+      ]
     case 'statement':
     case 'transaction':
     case 'writer-hold':
@@ -608,6 +663,7 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
 const targetProps = (target: Target): Record<string, Value> => ({
   ...(target.within === undefined ? {} : { within: target.within }),
   ...(target.max === undefined ? {} : { max: target.max }),
+  ...(target.min === undefined ? {} : { min: target.min }),
   ...(target.minPercent === undefined ? {} : { 'min-percent': target.minPercent }),
   ...(target.scope === undefined ? {} : { scope: target.scope }),
 })
