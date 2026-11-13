@@ -420,10 +420,11 @@ const styles = stylex.create({
   scroller: { flexGrow: 1, minHeight: 0, overflow: 'auto', backgroundColor: surface.codeBg, fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.codeLeading, color: ink.fgSoft, scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   code: { display: 'flex', flexDirection: 'column', width: 'max-content', minWidth: '100%', paddingBlock: s.sm },
   row: { display: 'flex', alignItems: 'stretch', minWidth: '100%', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent', cursor: 'default' },
-  // Tinted rows raise muted syntax ink (strings, comments) to fgSoft so it keeps AA contrast on the tint.
-  rowFrame: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
-  rowEnclosing: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
-  rowLinked: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: interaction.wash },
+  // Tinted rows raise syntax ink 20% toward the code ink: every Pierre token then clears AA on the 14% frame tint
+  // (light #d6ddf1: deleted 5.06:1, keyword 5.46:1), the darkest of these tints.
+  rowFrame: { '--fractal-syntax-raise': '20%', backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
+  rowEnclosing: { '--fractal-syntax-raise': '20%', backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
+  rowLinked: { '--fractal-syntax-raise': '20%', backgroundColor: interaction.wash },
   lineNumber: { position: 'sticky', left: 0, flexShrink: 0, minWidth: g.gutter40, boxSizing: 'border-box', paddingInlineEnd: s.md, textAlign: 'right', color: ink.fgMuted, backgroundColor: surface.codeBg, fontVariantNumeric: 'tabular-nums', userSelect: 'none' },
   lineText: { flexGrow: 1, paddingInlineEnd: s.lg, fontFamily: 'inherit', whiteSpace: 'pre' },
   footer: { margin: 0, minHeight: t.metaLeading, paddingInline: s.lg, paddingBlock: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, color: ink.fgMuted, fontSize: t.denseSize, overflowWrap: 'anywhere' },
@@ -444,8 +445,8 @@ const styles = stylex.create({
   diffScroller: { flexGrow: 0, overflowY: 'hidden' },
   gap: { color: ink.fgMuted, backgroundColor: surface.washSubtle },
   diffGutter: { display: 'flex', justifyContent: 'space-between', gap: s.xs2 },
-  addRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
-  delRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: status.diffRemovedWash },
+  addRow: { '--fractal-syntax-raise': '20%', backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
+  delRow: { '--fractal-syntax-raise': '20%', backgroundColor: status.diffRemovedWash },
   addGutter: { color: diffColor.added },
   delGutter: { color: diffColor.removed },
 })

@@ -532,14 +532,14 @@ const styles = stylex.create({
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
   // One palette with the kit DiffView (syntaxVars: Pierre's default theme), so code blocks and diffs never disagree.
-  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
-  // `--fractal-syntax-muted` so comments and strings keep AA contrast on the tint.
-  syntaxComment: { color: `var(--fractal-syntax-muted, ${syntax.comment})`, fontStyle: 'italic' },
-  syntaxKeyword: { color: syntax.keyword },
-  syntaxString: { color: `var(--fractal-syntax-muted, ${syntax.string})` },
-  syntaxLiteral: { color: syntax.constant },
-  syntaxFunction: { color: syntax.func },
-  syntaxDeleted: { color: syntax.deleted },
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) set `--fractal-syntax-raise`, a
+  // percentage that mixes every token toward the code ink (darker in light, lighter in dark) so it keeps AA on the tint.
+  syntaxComment: { color: `color-mix(in srgb, ${syntax.comment}, ${syntax.fg} var(--fractal-syntax-raise, 0%))`, fontStyle: 'italic' },
+  syntaxKeyword: { color: `color-mix(in srgb, ${syntax.keyword}, ${syntax.fg} var(--fractal-syntax-raise, 0%))` },
+  syntaxString: { color: `color-mix(in srgb, ${syntax.string}, ${syntax.fg} var(--fractal-syntax-raise, 0%))` },
+  syntaxLiteral: { color: `color-mix(in srgb, ${syntax.constant}, ${syntax.fg} var(--fractal-syntax-raise, 0%))` },
+  syntaxFunction: { color: `color-mix(in srgb, ${syntax.func}, ${syntax.fg} var(--fractal-syntax-raise, 0%))` },
+  syntaxDeleted: { color: `color-mix(in srgb, ${syntax.deleted}, ${syntax.fg} var(--fractal-syntax-raise, 0%))` },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
   tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },
