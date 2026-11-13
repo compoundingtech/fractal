@@ -43,6 +43,7 @@ pub async fn recover(State(state): State<AppState>, bound: Option<BoundActor>, J
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_reconcile::PersonWorkStore as _;
     #[tokio::test]
     async fn answered_asks_do_not_release_host_holds() {
         let root = tempfile::tempdir().unwrap();
