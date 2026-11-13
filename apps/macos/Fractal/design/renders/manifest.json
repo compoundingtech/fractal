@@ -381,14 +381,14 @@
     {
       "appearance" : "light",
       "file" : "busy-light.png",
-      "height" : 2822,
+      "height" : 2806,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "busy-dark.png",
-      "height" : 2822,
+      "height" : 2806,
       "scenario" : "busy",
       "width" : 800
     },
@@ -437,14 +437,14 @@
     {
       "appearance" : "light",
       "file" : "degraded-light.png",
-      "height" : 2756,
+      "height" : 2740,
       "scenario" : "degraded",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "degraded-dark.png",
-      "height" : 2756,
+      "height" : 2740,
       "scenario" : "degraded",
       "width" : 800
     },
@@ -610,5 +610,5 @@
       "title" : "Answered from the notification"
     }
   ],
-  "trayRev" : "src.a8feb58"
+  "trayRev" : "src.2470040"
 }
