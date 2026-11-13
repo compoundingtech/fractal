@@ -163,6 +163,9 @@
 "principal.key-revoked" = { class = "durable" }
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
+# Invocation correlation must outlive collector sampling and trace-backend retention.
+"mission.run.trace" = { class = "durable" }
+"program.attempt.trace" = { class = "durable" }
 "publication.operation" = { class = "durable" }
 # Only each person's largest position per conversation matters, but a newest-per-slot rule could
 # drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.
@@ -362,7 +365,7 @@ min_age = "5d"
 [[rules]]
 kind = "harness.usage"
 when = ["semantics=response_rollup"]
-slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]
+slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"]
 keep = "newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that"
 
 [[rules]]

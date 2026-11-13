@@ -11,6 +11,7 @@
 #[path = "resource_lane.rs"]
 mod resource_lane;
 pub use resource_lane::{LaneIdentity, LaneOutcome, LanePhase, LanePhaseKind, LaneTelemetry};
+pub use crate::attempt_trace::{AttemptTrace, AttemptTraceContext};
 
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;

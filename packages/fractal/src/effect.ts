@@ -24,3 +24,4 @@ export {
   type ProgramExit,
   type ProgramServices,
 } from './program-engine.ts'
+export { StepExecution, StepExecutionUsage } from './step-execution.ts'
