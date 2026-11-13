@@ -30,6 +30,7 @@ public struct TrayPanel: View {
           VStack(alignment: .leading, spacing: 18) {
             AsksSection(model: model)
             if !model.updates.isEmpty { UpdatesSection(model: model) }
+            if let speech = model.speech { SpeechControlsSection(speech: speech) }
             AvailabilitySection(model: model)
             SloSection(model: model)
           }

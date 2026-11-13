@@ -142,6 +142,9 @@ public enum AnswerState: Sendable, Equatable {
     speech.consider(asks, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
   }
 
+  /// The open card with this attention ID, at its latest read revision.
+  public func record(id: String) -> AttentionRecord? { attention.value?.records.first { $0.id == id } }
+
   /// The person asked to hear this ask; the speech gate still decides.
   public func speakAloud(_ record: AttentionRecord, now: Date = .now) {
     speech?.request(record, availability: freshAvailability, macPresence: macPresence, now: now)
