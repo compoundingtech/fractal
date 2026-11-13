@@ -426,8 +426,11 @@ impl Sample {
             };
             // A `stop` naming the `start` kind takes no `member=`.
             let stop = if stops { Some(time(&interval.stop.0.at)?) } else { None };
+            let selected = start.is_some_and(|at| {
+                self.start.as_ref().is_none_or(|(start, id, _)| (at, claim.id.as_str()) < (*start, id.as_str()))
+            });
             if let Some(at) = start
-                && self.start.as_ref().is_none_or(|(start, id, _)| (at, claim.id.as_str()) < (*start, id.as_str()))
+                && selected
             {
                 self.start = Some((at, claim.id.clone(), kept_fields(&interval.labels, &interval.excludes, &interval.only, fields)));
             }
@@ -438,7 +441,15 @@ impl Sample {
                 self.expect = Some(Expect { at, id: claim.id.clone(), set, fields: kept_fields(&interval.labels, &interval.excludes, &interval.only, fields) });
             }
             if let Some(at) = stop {
-                self.stops.entry(String::new()).or_default().insert(at);
+                if starts {
+                    // One claim is the whole sample: only the start claim's own stop closes it, so a
+                    // sample never pairs one claim's start with another's stop.
+                    if selected {
+                        self.stops.insert(String::new(), BTreeSet::from([at]));
+                    }
+                } else {
+                    self.stops.entry(String::new()).or_default().insert(at);
+                }
             }
             latest
         } else if stops {

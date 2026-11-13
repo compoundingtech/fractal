@@ -116,3 +116,35 @@ fn a_row_no_longer_judged_ends_its_fault_and_a_judged_or_foreign_one_keeps_it() 
     assert_eq!(end_unjudged(&store, |_| false, &BTreeSet::new()).unwrap(), 0);
     assert_eq!(open(&store).len(), 1);
 }
+
+#[test]
+fn an_upgrade_ends_the_retired_ci_objectives_faults_and_keeps_every_other() {
+    let store = Store::open_memory("node").unwrap();
+    with_reviewer(&store);
+    // Faults an older build opened for its shipped CI objectives, beside a declared objective's
+    // and the successor's under fractal/.
+    let retired = ["merge-latency/p95", "flakes"];
+    let kept = [ROLLOUT, "fractal/merge-latency/p95"];
+    let ids: BTreeSet<String> = retired.iter().chain(&kept).map(|id| (*id).to_owned()).collect();
+    let rows: Vec<Value> = ids.iter().map(|id| row(id, "missed")).collect();
+    let old = ObjectiveResponse { reviewer: "agent/node.ops", condition: "slo-objective-missed", title: "CI" };
+    assert_eq!(check_with_response(&store, &rows, &ids, old).unwrap().opened, 4);
+
+    assert_eq!(end_retired_ci_objectives(&store).unwrap(), 2);
+    let still: Vec<String> = kept.iter().map(|id| format!("slo-objective/node/{id}")).collect();
+    assert_eq!(open(&store).into_keys().collect::<BTreeSet<_>>(), still.into_iter().collect());
+    for id in retired {
+        let episode = format!("slo-objective/node/{id}");
+        assert_eq!(store.operational_failure(&episode).unwrap().unwrap().status, "resolved", "{episode}");
+    }
+    let recovered = store.claims_for("daemon/node", Some("operational.recovered")).unwrap();
+    let reason = recovered
+        .iter()
+        .find(|claim| claim.body["fields"]["episode"] == "slo-objective/node/flakes")
+        .map(|claim| claim.body["fields"]["reason"].as_str().unwrap().to_owned())
+        .unwrap();
+    assert!(reason.starts_with("The objective flakes is retired"), "{reason}");
+    // Idempotent: a second start ends nothing.
+    assert_eq!(end_retired_ci_objectives(&store).unwrap(), 0);
+    assert_eq!(open(&store).len(), 2);
+}

@@ -126,6 +126,25 @@ pub(crate) fn check_with_response(
 /// holds: a row that is no longer evaluated, or that carries no goal, is never met again, so its
 /// fault would otherwise stay open. Returns the episodes ended.
 pub(crate) fn end_unjudged(store: &Store, owns: impl Fn(&str) -> bool, judged: &BTreeSet<String>) -> Result<usize, FractalError> {
+    end_open(store, |id| !judged.contains(id) && owns(id), |id| {
+        format!("The objective {id} is no longer judged: its row is gone or carries no goal.")
+    })
+}
+
+/// The CI objectives `slo/objectives.kdl` shipped before `slo/fractal-ci.kdl` declared them under
+/// `fractal/`. Nothing evaluates them any more, so a fault one opened would never be met again.
+const RETIRED_CI_OBJECTIVES: [&str; 4] = ["merge-latency/p50", "merge-latency/p95", "ci-critical-path/p95", "flakes"];
+
+/// End this member's open faults of the retired shipped CI objectives. Idempotent: each failure
+/// is recovered once. Returns the episodes ended.
+pub fn end_retired_ci_objectives(store: &Store) -> Result<usize, FractalError> {
+    end_open(store, |id| RETIRED_CI_OBJECTIVES.contains(&id), |id| {
+        format!("The objective {id} is retired: Fractal no longer ships it, and slo/fractal-ci.kdl declares its successor under fractal/.")
+    })
+}
+
+/// End each open objective episode of this member whose id `ends` picks, with `reason`'s reason.
+fn end_open(store: &Store, ends: impl Fn(&str) -> bool, reason: impl Fn(&str) -> String) -> Result<usize, FractalError> {
     let local = store.origin().to_owned();
     let subject = format!("daemon/{local}");
     let prefix = episode(&local, "");
@@ -134,10 +153,10 @@ pub(crate) fn end_unjudged(store: &Store, owns: impl Fn(&str) -> bool, judged: &
         let Some(id) = episode.strip_prefix(&prefix) else {
             continue;
         };
-        if fault.open.is_empty() || judged.contains(id) || !owns(id) {
+        if fault.open.is_empty() || !ends(id) {
             continue;
         }
-        let reason = format!("The objective {id} is no longer judged: its row is gone or carries no goal.");
+        let reason = reason(id);
         for failure in &fault.open {
             recover(store, &subject, &episode, failure, &reason)?;
         }

@@ -387,6 +387,29 @@ fn two_claims_starting_one_sample_at_the_same_time_keep_the_same_one_in_any_orde
 }
 
 #[test]
+fn a_sample_takes_its_stop_from_its_start_claim_not_from_another_claim_that_stopped_earlier() {
+    let document = crate::objective::parse_document(&run_declaration("    only \"attempt\" \"1\"\n")).unwrap();
+    let Indicator::Interval(interval) = &document[0].indicator else { panic!("an interval") };
+    let created = *NOW - 10 * MINUTE;
+    let attempt = |id: &str, attempt: u64, created: u64, completed: u64| ClaimRecord {
+        id: id.into(),
+        ..record(RUN, *NOW, json!({"created_at": created, "completed_at": completed, "attempt": attempt}))
+    };
+    // The start claim (earliest by time, then id) completes after one `only` leaves out, which
+    // starts later or ties and stops first: its earlier stop must not close the start claim's sample.
+    let start = attempt("claim-b", 1, created, created + 90_000);
+    for other in [attempt("claim-c", 2, created + 10_000, created + 30_000), attempt("claim-c", 2, created, created + 30_000)] {
+        for order in [[&start, &other], [&other, &start]] {
+            let mut sample = Sample::default();
+            for claim in order {
+                sample.observe(interval, claim).unwrap();
+            }
+            assert_eq!(sample.class(interval, None, *NOW), Class::Closed { value: 90_000, stop: created + 90_000 });
+        }
+    }
+}
+
+#[test]
 fn only_leaves_out_a_sample_whose_start_claim_has_another_value_or_none() {
     let store = store_with(&run_declaration("    only \"event\" \"merge_group\"\n    only \"attempt\" \"1\"\n"));
     run(&store, "kept", 30 * MINUTE, 2 * MINUTE, json!({"event": "merge_group", "attempt": 1}));
