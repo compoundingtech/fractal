@@ -2412,10 +2412,10 @@ impl AttentionItemView {
 
 /// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
 /// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
-/// person published that is broken all are. An update asks nothing, and a message stays in its
-/// conversation.
+/// person published that is broken all are. An update asks nothing, a model-drift summary
+/// waits on nothing (its seats keep working), and a message stays in its conversation.
 pub fn attention_is_alert(kind: &str, update: bool) -> bool {
-    !update && kind != "unread-message"
+    !update && kind != "unread-message" && kind != "model-drift"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

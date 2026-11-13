@@ -458,6 +458,77 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     server.abort();
 }
 
+// Re-executed by the transport test below, so the socket connector has a real exec-time
+// environment rather than process-global test mutations.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scratch_attributed_client_probe() {
+    let Ok(socket) = std::env::var("FRACTAL_SCRATCH_PROBE_SOCKET") else { return; };
+    let body: Value = serde_json::from_str(&std::env::var("FRACTAL_SCRATCH_PROBE_BODY").unwrap()).unwrap();
+    let result: anyhow::Result<Value> = crate::client::Client::unix(Path::new(&socket))
+        .post("/v1/intent/apply", &body).await;
+    if std::env::var("FRACTAL_SCRATCH_PROBE_ALLOWED").unwrap() == "yes" {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("foreign-agent-actor"), "{error}");
+    }
+}
+
+/// A private instance cannot resolve its creator's outer mission credential. Its clients
+/// use an explicit agent identity instead of claiming that the exec is a person.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_agent() {
+    use std::os::unix::process::CommandExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("scratch.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    for (index, marker, actor, allowed) in [
+        (0, false, "person/operator", false),
+        (1, true, "person/operator", false),
+        (2, true, "agent/fixture/foreign", false),
+        (3, true, "agent/fixture/scratch", true),
+    ] {
+        let source = format!("version 2\nmission \"fixture/scratch-{index}\" state=\"ready\" {{\n  goal \"Exercise scratch attribution.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = apply_request(&state, &source, actor, &format!("scratch-{index}"));
+        let before = store.index().unwrap();
+        // The shell models an outer mission exec, in a different process group with no TTY.
+        // The leaf exec removes the foreign credential; without its own identity the walk
+        // still finds that credential in the parent. With one it binds to that agent.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "env -u ST_RUN_CREDENTIAL \"$@\"; result=$?; exit \"$result\"", "scratch-probe"]);
+        if marker { command.arg("ST_AGENT=agent/fixture/scratch"); }
+        command.arg(std::env::current_exe().unwrap())
+            .args(["--exact", "api::tests::scratch_attributed_client_probe", "--nocapture"])
+            .env("ST_RUN_CREDENTIAL", "foreign-instance-credential")
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            .env("FRACTAL_SCRATCH_PROBE_SOCKET", &socket)
+            .env("FRACTAL_SCRATCH_PROBE_BODY", serde_json::to_string(&body).unwrap())
+            .env("FRACTAL_SCRATCH_PROBE_ALLOWED", if allowed { "yes" } else { "no" })
+            .stdin(std::process::Stdio::null()).process_group(0);
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "probe did not execute: {}", String::from_utf8_lossy(&output.stdout));
+        let claim = store.latest_claim(&format!("mission/fixture/scratch-{index}"), Some("mission.published")).unwrap();
+        if allowed {
+            assert_eq!(claim.unwrap().actor.as_deref(), Some(actor));
+        } else {
+            assert!(claim.is_none());
+            assert_eq!(store.index().unwrap(), before);
+        }
+    }
+    server.abort();
+}
+
 #[tokio::test]
 async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     use http_body_util::BodyExt as _;
@@ -12226,6 +12297,71 @@ mission "agent-human" state="ready" {
     assert!(resumed.blocked_on.is_none());
     assert!(resumed.ask.is_none());
     assert!(resumed.reason.is_none());
+}
+
+#[test]
+fn a_run_seats_drift_item_resolves_its_person_without_rebuilding_the_run() {
+    use crate::store::model_drift::{MODEL_DRIFT_CONDITION, MODEL_DRIFT_TITLE, ModelDrift, model_drift_episode};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"drift-owner\" state=\"ready\" {\n  goal \"Exercise drift ownership.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "drift-owner-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "drift-owner".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "drift-owner-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reason = ModelDrift { declared: "anthropic/claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 1 }.reason();
+    store.record_failure(&model_drift_episode(&subject), &crate::model::AttentionRequest {
+        reviewer: subject.clone(), title: MODEL_DRIFT_TITLE.into(), reason, severity: "error".into(),
+        targets: vec![subject.clone()], actor: "agent/st3/reconciler".into(),
+        idempotency_key: "drift-owner:attention".into(),
+    }, MODEL_DRIFT_CONDITION).unwrap();
+    // The person comes from the run's requester header: no step of the run is enriched.
+    crate::store::STEPS_ENRICHED.with(|enriched| enriched.set(0));
+    let items = store.model_drift_attention_items(Some("person/test"), u128::MAX).unwrap();
+    assert_eq!(crate::store::STEPS_ENRICHED.with(std::cell::Cell::get), 0);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].person, "person/test");
+    assert_eq!(items[0].targets, [subject]);
+}
+
+#[test]
+fn only_a_client_that_negotiated_model_drift_reads_the_kind_as_it_is() {
+    let row = json!({"kind": "attention", "attention_kind": "model-drift", "source_kind": "model-drift",
+        "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
+    let negotiated = AttentionCompatibility { custom_forms: true, model_drift: true };
+    let mut current = vec![row.clone()];
+    client_attention_compatibility(&mut current, negotiated);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0], row);
+    // A client with custom forms but without the model-drift feature (an existing TypeScript
+    // client) and a client with neither both read a request without actions.
+    for custom_forms in [true, false] {
+        let mut older = vec![row.clone()];
+        client_attention_compatibility(&mut older, AttentionCompatibility { custom_forms, model_drift: false });
+        assert_eq!(older[0]["attention_kind"], "agent-request", "custom_forms={custom_forms}");
+        assert_eq!(older[0]["actions"], json!([]));
+        assert_eq!(older[0]["title"], "2 agents declared a run b since 09:14Z (oldest agent/example.a)");
+    }
 }
 
 #[test]

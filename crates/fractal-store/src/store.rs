@@ -31,6 +31,7 @@ pub mod observer_refresh;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
+pub mod model_drift;
 mod notice_authority;
 mod transaction_work;
 pub mod assistant_write;
@@ -19367,6 +19368,19 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     if claim.kind == "step-run.state" {
+        // Native cancellation is projected from the response itself with its attempt and
+        // asking-episode fence. Older writers also emitted an unfenced derived state claim;
+        // replay must not let that redundant effect fail a resumed origin or erase its lease.
+        if matches!(status, "failed" | "ready") && claim.actor.as_deref() == Some("daemon/runtime") {
+            for predecessor in &claim.predecessors {
+                if transaction.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
+                ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0)).map_err(internal)?
+                {
+                    return Ok(());
+                }
+            }
+        }
         // A retained completed projection can outlive its admission claim. A duplicate
         // completion is not a new admission and must not manufacture a fresh budget.
         let previously_completed = if status == "completed"

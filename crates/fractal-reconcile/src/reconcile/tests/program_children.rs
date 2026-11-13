@@ -41,6 +41,11 @@ export default {
       if (published._tag === 'Failure') return published
       return { _tag: 'Success', value: { published: published.value, gate: await gate(ctx) } }
     }
+    if (ctx.payload.mode === 'uncaught-ask') {
+      void wait(ctx, 'still-open', () => ctx.ask({ key: 'still-open', for: 'person/owner', title: 'Another question', request: null }))
+      const exit = await wait(ctx, 'withdrawn', () => ctx.ask({ key: 'withdrawn', for: 'person/owner', title: 'Still needed?', request: null }))
+      return exit
+    }
     const asks = await Promise.all([
       wait(ctx, 'approve', () => ctx.ask({ key: 'approve', for: 'person/owner', title: 'Ship it?', request: DECISION, deadline: '2m', default: 'ship' })),
       wait(ctx, 'note', () => ctx.ask({ key: 'note', for: 'person/owner', title: 'Anything to add?', request: null })),
@@ -98,6 +103,13 @@ mission "program-parent" state="ready" {{
     retry {{ attempts 2 }}
     program "{0}" sha256="{hash}"
   }}
+}}
+mission "program-uncaught-ask" state="ready" {{
+  goal "Fail an uncaught ask cancellation and run cleanup."
+  input "mode" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{0}" sha256="{hash}" }}
+  finally {{ step "cleanup" {{ agentless }} }}
 }}
 mission "program-unauthorized" state="ready" {{
   goal "Start a child run it holds no authority to start."
@@ -541,5 +553,40 @@ fn a_cancelled_program_step_cancels_the_latest_superseding_child() {
     fixture.store.set_step_state(&parent.step, "cancelled", Some("the work is withdrawn")).unwrap();
     fixture.reconciler.evaluate_changed_mission_runs().unwrap();
     fixture.until("the replacement child is cancelled", || fixture.run_status(&successor) == "cancelled");
+}
+
+#[test]
+fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
+    let fixture = fixture();
+    let parent = fixture.start_mission("program-uncaught-ask", "uncaught", "uncaught-ask");
+    fixture.until("both asks are waiting", || {
+        fixture.child(&parent.step, "withdrawn", 1).is_some()
+            && fixture.child(&parent.step, "still-open", 1).is_some()
+            && fixture.status(&parent.step) == "waiting-person"
+    });
+    let withdrawn = fixture.child(&parent.step, "withdrawn", 1).unwrap();
+    let still_open = fixture.child(&parent.step, "still-open", 1).unwrap();
+    fixture.store.finish_person_step(&PersonStepResponse {
+        delegation: None,
+        subject: withdrawn.clone(),
+        actor: PROGRAM_ASKER.into(),
+        summary: "No longer needed.".into(),
+        evidence: Vec::new(),
+        episode: None,
+        answer: None,
+        idempotency_key: "withdraw-uncaught".into(),
+    }, true).unwrap();
+    fixture.until("uncaught cancellation ends the run", || fixture.run_status(&parent.run) == "failed");
+    let cancelled = json!({"_tag": "AskCancelled", "ask": withdrawn});
+    assert_eq!(fixture.result(&parent.step, "withdrawn", 1), Some(("failed".into(), cancelled.clone())));
+    // Failed program exits retain the typed error as the step's reason; only successful
+    // program exits write RESULT_KEY.
+    let failed = fixture.store.step_run(&parent.step).unwrap().unwrap();
+    assert_eq!(failed.status, "failed");
+    assert_eq!(serde_json::from_str::<Value>(failed.blocked_reason.as_deref().unwrap()).unwrap(), cancelled);
+    let run = fixture.store.mission_run(&parent.run).unwrap().unwrap();
+    assert_eq!(run.phase, "terminal");
+    assert_eq!(run.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
+    assert_eq!(fixture.status(&still_open), "cancelled");
     assert!(fixture.engine.requests(&parent.run).is_empty());
 }

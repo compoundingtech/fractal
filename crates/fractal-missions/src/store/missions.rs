@@ -6874,7 +6874,7 @@ impl MissionsStore for Store {
                     return Ok(false);
                 };
                 if attempt != reviewed_attempt
-                    || !matches!(status.as_str(), "verifying" | "working" | "blocked")
+                    || !matches!(status.as_str(), "ready" | "claimed" | "verifying" | "working" | "blocked")
                     || step_owner_is_terminal_tx(transaction, &subject)?
                 {
                     return Ok(false);
