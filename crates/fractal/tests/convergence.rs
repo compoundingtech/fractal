@@ -1994,7 +1994,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v25 adds the four person-availability kinds to kind selection, shifting the shared RNG
+/// Corpus v25 adds the four person-availability kinds (and main's newer optional fields) to kind selection, shifting the shared RNG
 /// schedule: a local run at the v25 corpus change leaves seeds 17 and 21 untrimmed and trims every
 /// other fixed seed. Hosted CI characterizes the exact set; a lightly loaded runner diverges (#6210).
 const NEVER_TRIMS: &[u64] = &[17, 21];
