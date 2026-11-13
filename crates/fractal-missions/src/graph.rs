@@ -700,10 +700,12 @@ mission "example/train" state="ready" {{
                 "{lane}"
             );
         }
-        let in_step = source("").replace("step \"drive\" {", "step \"drive\" {\n    lane \"app\";");
+        // A step's `lane` is a resource lane, not a workflow lane declaration.
+        let in_step = source("").replace("step \"drive\" {", &format!("step \"drive\" {{\n    {valid}"));
+        let error = parse_intent(&in_step, "node").unwrap_err();
         assert_eq!(
-            parse_intent(&in_step, "node").unwrap_err().code,
-            "lane-inside-step"
+            error.code,
+            "invalid-step-lane"
         );
         assert!(parse_intent("version 2\nlane \"app\"", "node").is_err());
     }
