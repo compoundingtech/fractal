@@ -304,6 +304,7 @@ async fn ready_work_person_ask_blocks_until_answered() {
     ready_count(&state, PATH, 1).await;
     claim(&state, &step);
     let ask = state.store.ask_person(&PersonAskRequest {
+        priority: None,
         deadline_ms: None, default_answer: None, legacy_request: None,
         person: "person/operator".into(), title: "Choose a planting date".into(),
         reason: "The owner must choose.".into(), actor: ASH.into(), step: Some(step.clone()),

@@ -1571,6 +1571,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   /** Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it. */
   "update": optionalKey(PersonUpdate),
   "updated_at": Timestamp,
+  /** Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent. */
+  "urgent": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." }),
   "variant_id": optionalKey(Id),
   "what": optionalKey(Schema.String)
 }).annotate({ identifier: "Attention" }))()
@@ -1608,6 +1610,31 @@ export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AttentionBudgetReport" }))()
 export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
 export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
+
+/** A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown. */
+export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","hold-routine","hold-all"]).annotate({ identifier: "AvailabilityDeadlineClock", description: "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown." }))()
+export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
+export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
+
+/** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
+export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
+export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
+export type AvailabilityInterruptionsEncoded = typeof AvailabilityInterruptions.Encoded
+
+/** Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown. */
+export const AvailabilityPresence = /*#__PURE__*/ (() => openEnum(["present","idle","locked","unreported"]).annotate({ identifier: "AvailabilityPresence", description: "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown." }))()
+export type AvailabilityPresence = typeof AvailabilityPresence.Type
+export type AvailabilityPresenceEncoded = typeof AvailabilityPresence.Encoded
+
+/** A person's effective status. Readers retain future values as Unknown. */
+export const AvailabilityStatus = /*#__PURE__*/ (() => openEnum(["available","away"]).annotate({ identifier: "AvailabilityStatus", description: "A person's effective status. Readers retain future values as Unknown." }))()
+export type AvailabilityStatus = typeof AvailabilityStatus.Type
+export type AvailabilityStatusEncoded = typeof AvailabilityStatus.Encoded
+
+/** Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown. */
+export const AvailabilityStatusSource = /*#__PURE__*/ (() => openEnum(["override","presence","unreported"]).annotate({ identifier: "AvailabilityStatusSource", description: "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown." }))()
+export type AvailabilityStatusSource = typeof AvailabilityStatusSource.Type
+export type AvailabilityStatusSourceEncoded = typeof AvailabilityStatusSource.Encoded
 
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
@@ -2630,6 +2657,10 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** New runs created by retrying this run; omitted when empty. */
+  "retried_by": optionalKey(Schema.Array(MissionRunId)).annotate({ description: "New runs created by retrying this run; omitted when empty." }),
+  /** Source run for this new-run retry; omitted for an ordinary start. */
+  "retry_of": optionalKey(MissionRunId),
   /** The mission revision this run is pinned to. Older daemons omit it. */
   "revision": optionalKey(Revision),
   /** Run creation, in Unix milliseconds. */
@@ -2637,7 +2668,13 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "state_since": Timestamp,
   "status": Schema.String,
   /** The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read. */
-  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." })
+  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." }),
+  /** Fresh replacement created after a newer revision was published; omitted when absent. */
+  "superseded_by": optionalKey(MissionRunId),
+  /** Predecessor replaced by this fresh run after publication; omitted when absent. */
+  "supersedes": optionalKey(MissionRunId),
+  /** Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent. */
+  "supersession_fault": optionalKey(Schema.String).annotate({ description: "Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent." })
 }).annotate({ identifier: "MissionRunSummary" }))()
 export type MissionRunSummary = typeof MissionRunSummary.Type
 export type MissionRunSummaryEncoded = typeof MissionRunSummary.Encoded
@@ -4307,19 +4344,17 @@ export type PageEncoded = typeof Page.Encoded
 
 /** A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person. */
 export const PersonAvailability = /*#__PURE__*/ (() => Schema.Struct({
-  /** A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask (`hold-all`). */
-  "deadline_clock": Schema.Literals(["run","hold-routine","hold-all"]).annotate({ description: "A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask (`hold-all`)." }),
+  "deadline_clock": AvailabilityDeadlineClock,
   "deadline_clock_since": Schema.OptionFromNullOr(Timestamp),
   "deadline_clock_until": Schema.OptionFromNullOr(Timestamp),
-  "interruptions": Schema.Literals(["all","urgent","none"]),
+  "interruptions": AvailabilityInterruptions,
   "interruptions_until": Schema.OptionFromNullOr(Timestamp),
   "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
-  /** The person's fresh device reports folded: `present` anywhere wins, then `idle`, then `locked`; `unknown` without a fresh report. */
-  "presence": Schema.OptionFromNullOr(Schema.Literals(["present","idle","locked","unknown"])).annotate({ description: "The person's fresh device reports folded: `present` anywhere wins, then `idle`, then `locked`; `unknown` without a fresh report." }),
+  "presence": Schema.OptionFromNullOr(AvailabilityPresence),
   "presence_observed_at": Schema.OptionFromNullOr(Timestamp),
-  /** The override while one is in force; otherwise `available` only while presence is `present`. */
-  "status": Schema.Literals(["available","away"]).annotate({ description: "The override while one is in force; otherwise `available` only while presence is `present`." }),
-  "status_source": Schema.Literals(["override","presence"]),
+  /** The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present. */
+  "status": AvailabilityStatus,
+  "status_source": AvailabilityStatusSource,
   "status_until": Schema.OptionFromNullOr(Timestamp)
 }).annotate({ identifier: "PersonAvailability", description: "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person." }))()
 export type PersonAvailability = typeof PersonAvailability.Type
@@ -4496,7 +4531,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   /** When the allowance runs out at that rate, present only when that is before it resets. */
   "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
-  "status": Schema.Literals(["met","missed","no-data","stale"]),
+  /** met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown. */
+  "status": openEnum(["met","missed","no-data","stale"]).annotate({ description: "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." }),
   "target": Schema.String,
   /** How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule. */
   "tone": optionalKey(Schema.String).annotate({ description: "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." }),
