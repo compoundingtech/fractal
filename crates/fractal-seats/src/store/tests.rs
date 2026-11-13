@@ -2473,11 +2473,11 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
         tx.commit().unwrap();
     };
     let first = event("work.claimed", at,
-        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old"}));
+        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old","claim_expires_at_unix_ms":at+600_000}));
     bind_execution(&first, "turn-old", "old", 1);
     event("work.failed", at + 200, json!({"attempt":1}));
     let second = event("work.claimed", at + 300,
-        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new"}));
+        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new","claim_expires_at_unix_ms":at+600_300}));
     bind_execution(&second, "turn-new", "new", 2);
     let respond = |entry: &str, source: &str, incarnation: &str, time: u128, body: Value| {
         let mut input = timeline_observation(agent, incarnation, entry);

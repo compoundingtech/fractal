@@ -178,6 +178,12 @@ Response attribution resolves the immutable work claim held at the response's
 observed time and exact incarnation, then joins its receipt `event_key` to the
 turn's `invocation_id`. Simultaneous live claims on different steps are ambiguous:
 neither the newest claim nor the current desired owner supplies a guessed join.
+The response must precede the effective lease expiry, including published
+renewals/extensions and matching local quiet-renewal evidence recorded no later
+than the response. A delayed ready receipt never extends an expired lease.
+Missing historical expiry stays unknown; a future or different-episode renewal
+cannot supply it. Reclaiming under an uninterrupted renewed lease retains the
+original turn even when its first claim's expiry has passed.
 Without a work claim, only a unique verified launch receipt for the exact
 incarnation supplies a process invocation join. Missing historical receipts stay
 unknown. Identity-only responses keep these joins without creating zero-token or
@@ -237,6 +243,9 @@ requires `read.projections` and the artifact's agent or configured owning person
 Unix harness reads use the serving boundary's actual agent/native-peer binding,
 not the claimed identity header. Bound runs, unverifiable ancestry and mismatched
 agents cannot read private bytes by naming the artifact's agent or owning person.
+The Unix accept boundary forwards its positive person classification to the
+handler, so verified owning-person reads work without treating missing ancestry
+as person authority.
 `DELETE` at the same route also requires `control.runtimes` and revokes only that
 reference, not another invocation's shared bytes. Reads are private/no-store;
 deleted or expired references return Gone.
