@@ -12,15 +12,22 @@ guard let clientPath = ProcessInfo.processInfo.environment["FRACTAL_CLIENT_PATH"
 let package = Package(
   name: "AttentionTray",
   platforms: [.macOS(.v14)],
-  products: [.executable(name: "AttentionTray", targets: ["AttentionTray"])],
+  products: [
+    .executable(name: "AttentionTray", targets: ["AttentionTray"]),
+    .executable(name: "TrayGallery", targets: ["TrayGallery"]),
+  ],
   dependencies: [.package(name: "FractalClient", path: clientPath)],
   targets: [
     .target(name: "AttentionCore"),
+    // The panel's views; they read only AttentionCore, so fixtures can drive them.
+    .target(name: "TrayViews", dependencies: ["AttentionCore"]),
     .executableTarget(
       name: "AttentionTray",
       dependencies: [
-        "AttentionCore", .product(name: "FractalClient", package: "FractalClient"),
+        "AttentionCore", "TrayViews", .product(name: "FractalClient", package: "FractalClient"),
       ]),
+    // Renders the real panel from fixture scenarios to PNGs for the design Storybook.
+    .executableTarget(name: "TrayGallery", dependencies: ["AttentionCore", "TrayViews"]),
     // AttentionTray: the adapter's mapping onto FractalClient's request types.
     .testTarget(
       name: "AttentionCoreTests",

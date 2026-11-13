@@ -1,6 +1,7 @@
 import AppKit
 import AttentionCore
 import SwiftUI
+import TrayViews
 
 @main
 struct AttentionTrayApp: App {
@@ -113,25 +114,8 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     await model.refresh()
     logOutcome()
     let reveal = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT_REVEAL"] == "1"
-    // NSHostingView (not ImageRenderer) so AppKit-backed controls draw.
-    let host = NSHostingView(
-      rootView: TrayPanel(model: model, build: build)
-        .environment(\.revealControls, reveal)
-        .environment(\.panelMaxHeight, .infinity)
-        // cacheDisplay draws the view only, not the window: paint the panel background.
-        .background(Color(nsColor: .windowBackgroundColor)))
-    host.appearance = NSAppearance(named: .darkAqua)
-    let window = NSWindow(
-      contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless],
-      backing: .buffered, defer: false)
-    window.backgroundColor = .windowBackgroundColor
-    window.contentView = host
-    host.layoutSubtreeIfNeeded()
-    try? await Task.sleep(for: .milliseconds(300))
-    if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-      host.cacheDisplay(in: host.bounds, to: bitmap)
-      try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-    }
+    let png = await PanelSnapshot.png(model: model, build: build, reveal: reveal, appearance: .darkAqua)
+    try? png?.write(to: URL(fileURLWithPath: path))
     exit(0)
   }
 }

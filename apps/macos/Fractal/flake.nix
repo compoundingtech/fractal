@@ -18,12 +18,32 @@
       version = "0.2.0";
       clientPath = "${fractal}/clients/swift/FractalClient";
       fractalRev = fractal.rev or null;
+      # Only the Swift package (its manifest names the test target): docs and the design
+      # Storybook's renders never rebuild the tray.
+      src = pkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = pkgs.lib.fileset.unions [
+          ./Package.swift
+          ./Sources
+          ./Tests
+        ];
+      };
       # The build-identity rev names this tray's own source closure (its sources plus the
       # FractalClient revision), not the enclosing repository commit: unrelated commits must
       # neither rebuild nor restart the tray. A relative path input has no rev of its own.
       sourceRev = builtins.substring 0 7 (
-        builtins.hashString "sha256" "${./.}:${if fractalRev == null then "unknown" else fractalRev}"
+        builtins.hashString "sha256" "${src}:${if fractalRev == null then "unknown" else fractalRev}"
       );
+      # Host Apple SDK boundary, as Boss's unsigned Swift app bundle: one release product.
+      swiftBuild = product: ''
+        set -euo pipefail
+        cp -R ${src} source
+        chmod -R u+w source
+        cd source
+        export HOME="$TMPDIR" FRACTAL_CLIENT_PATH=${clientPath}
+        export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+        /usr/bin/swift build --configuration release --jobs 2 --disable-sandbox --product ${product}
+      '';
       buildStamp = builtins.toJSON {
         type = "nix";
         inherit version;
@@ -58,13 +78,7 @@
             meta.platforms = [ system ];
           }
           ''
-            set -euo pipefail
-            cp -R ${./.} source
-            chmod -R u+w source
-            cd source
-            export HOME="$TMPDIR" FRACTAL_CLIENT_PATH=${clientPath}
-            export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-            /usr/bin/swift build --configuration release --jobs 2 --disable-sandbox
+            ${swiftBuild "AttentionTray"}
             app="$out/Applications/AttentionTray.app"
             mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
             install -m 0755 .build/release/AttentionTray "$app/Contents/MacOS/AttentionTray"
@@ -72,11 +86,31 @@
             install -m 0644 ${pkgs.writeText "nix-build-stamp.json" buildStamp} \
               "$app/Contents/Resources/nix-build-stamp.json"
           '';
+      # `gallery <out-dir> [scenario…]` renders the real panel from fixture scenarios for the
+      # design Storybook (README.md, Design gallery). Rendering needs a macOS login session.
+      gallery =
+        pkgs.runCommand "attention-tray-gallery-${version}"
+          {
+            __noChroot = true;
+            meta.platforms = [ system ];
+            meta.mainProgram = "attention-tray-gallery";
+          }
+          ''
+            ${swiftBuild "TrayGallery"}
+            mkdir -p "$out/libexec" "$out/bin"
+            install -m 0755 .build/release/TrayGallery "$out/libexec/TrayGallery"
+            cat > "$out/bin/attention-tray-gallery" <<EOF
+            #!/bin/sh
+            TRAY_GALLERY_REV=src.${sourceRev} exec "$out/libexec/TrayGallery" "\$@"
+            EOF
+            chmod 0755 "$out/bin/attention-tray-gallery"
+          '';
     in
     {
       packages.${system} = {
         default = tray;
         attention-tray = tray;
+        inherit gallery;
       };
       devShells.${system}.default = pkgs.mkShellNoCC {
         FRACTAL_CLIENT_PATH = clientPath;
