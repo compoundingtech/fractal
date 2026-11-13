@@ -4,7 +4,7 @@
   "replay": {"status": "changed", "detail": "Host holds persist independently of runs and daemon lifetimes; terminal runs and answered asks never release them."},
   "schema": {"status": "changed", "detail": "An authoritative local_host_holds table stores owner, revision, reason, affected operations, originating run and receipt. Holds are not replicated launch capabilities."},
   "rules": {"status": "changed", "detail": "Only the owning execution host writes holds. Release requires authenticated owner identity and an exact expected revision. Each hold mutation commits a host-hold.changed local observation in the same transaction; its subject invalidates the exact incremental admission read dependency before the notified pass selects work."},
-  "compatibility": {"status": "changed", "detail": "Attention and now show active host-hold source rows; the hosts API uses native local authenticated identities rather than trusting a payload actor."},
+  "compatibility": {"status": "changed", "detail": "Attention and now show active host-hold source rows; the hosts API uses native local authenticated identities rather than trusting a payload actor. Durable holds operate independently of the native resource-lane telemetry integration."},
   "downtime": {"status": "none", "detail": "No restart or migration of existing execution records is required."},
   "manual": {"status": "none", "detail": "No holds or host policies are created automatically."},
   "recovery": {"status": "changed", "detail": "Holds retain no executor capacity. Owners resolve their persisted hold revision explicitly after recovery; no lease expiry clears quarantine."}
