@@ -359,3 +359,11 @@ observed every fixed seed converge and trim a checkpoint, including v25's non-tr
 and 233 and the earlier availability corpus's seed 21. The exact v26 `NEVER_TRIMS` set is empty:
 no previous corpus's schedule-specific exception carries forward. There are no untrimmed seeds
 requiring the old-build excusal and next-cut continuation in this corpus.
+
+`claims-v27.json` captures the merged registry with the system-only `mission.run.trace` and
+`program.attempt.trace` correlation claims. Versions 1 through 26 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v27.json`;
+do not hand-edit it. The simulation and audit reports select v27. The fixed local sweep observed
+only seed 21 without a checkpoint trim; all other fixed seeds trimmed. Its test additionally
+requires every modern node to trim after the old build is excused and the next cut falls due.
+This characterization belongs to v27, not an inherited older corpus schedule.
