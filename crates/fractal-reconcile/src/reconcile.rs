@@ -205,6 +205,30 @@ fn owned_schedule_spec(
     Ok(crate::graph::schedule_spec(&schedule.desired, &origin))
 }
 
+/// The largest occurrence reached by this schedule's stable identity: whole history, which
+/// both hosts write and catch-up can skip. A run that supersedes another starts under a new
+/// run subject, so its schedule continues the history of the same-named schedule in every
+/// run it supersedes; publishing a new parent revision never replays a reached tick.
+fn schedule_last_reached(store: &Store, schedule: &DesiredSubject) -> Result<Option<u64>> {
+    let mut subjects = vec![schedule.subject.clone()];
+    if let Some(owner) = schedule.owner_run.as_deref() {
+        let owner = owner.strip_prefix("mission-run/").unwrap_or(owner);
+        if let Some(local) = schedule.subject.strip_prefix(&format!("schedule/{owner}/")) {
+            for ancestor in store.mission_run_supersession_ancestry(owner)?.into_iter().skip(1) {
+                let ancestor = ancestor.strip_prefix("mission-run/").unwrap_or(&ancestor);
+                subjects.push(format!("schedule/{ancestor}/{local}"));
+            }
+        }
+    }
+    let mut last = None;
+    for subject in subjects {
+        for claim in store.claims_for(&subject, Some("schedule.occurrence-reached"))? {
+            last = last.max(claim.body["fields"]["occurrence"].as_u64());
+        }
+    }
+    Ok(last)
+}
+
 /// On a fleet member's cold start, occurrence history may still be elsewhere. Require a fresh
 /// complete exchange before admitting schedules, then hold while known history is missing.
 fn schedule_admission_ready(
@@ -16658,20 +16682,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else {
             return Ok(());
         };
-        // Whole history: the largest occurrence reached, which both hosts write and catch-up can
-        // skip, so it need not be the newest claim's.
-        let reached = self
-            .store
-            .claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-        let last = reached
-            .iter()
-            .filter_map(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/occurrence")
-                    .and_then(Value::as_u64)
-            })
-            .max();
+        let last = schedule_last_reached(&self.store, schedule)?;
         let now = now_ms() as i64;
         let (occurrence, scheduled_at) = if let Some(at) = spec.at_unix_ms {
             if last.is_some() {
@@ -16906,11 +16917,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
-                // Whole history: the largest occurrence reached, as in reconcile_schedule.
-                let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
-                let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
-                    .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
-                let already_reached = reached_history.is_err() || last_reached.is_some_and(|last| last >= occurrence);
+                // The schedule's whole history, as in reconcile_schedule.
+                let last_reached = schedule_last_reached(&store, &schedule_declaration);
+                let already_reached = match &last_reached {
+                    Ok(last) => last.is_some_and(|last| last >= occurrence),
+                    Err(_) => true,
+                };
+                let last_reached = last_reached.ok().flatten();
                 let candidate_current = takeover.is_none() || current_spec.as_ref().is_some_and(|spec|
                     Self::standby_candidate_current(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false));
                 if !ready || already_reached || !candidate_current {
