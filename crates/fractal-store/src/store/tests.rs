@@ -8434,6 +8434,92 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
 }
 
 #[test]
+fn metadata_only_response_is_evidence_not_zero_spend() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    let mut claim = timeline_observation(subject, "inc-one", "metadata-only");
+    claim.fields.insert("entry_type".into(), json!("usage"));
+    claim.fields.insert("body".into(), json!({
+        "semantics":"response", "model":"claude-opus-5-5", "provider":"anthropic",
+        "response_id":"response-metadata-only", "duration_ms":12.5
+    }));
+    let stored = store.append_claim_outcome(&claim).unwrap().0;
+    assert_eq!(stored.body["fields"]["body"]["response_id"], "response-metadata-only");
+    assert_eq!(stored.body["fields"]["body"]["duration_ms"], 12.5);
+    assert!(stored.body["fields"].get("spend").is_none());
+    let connection = store.connection.lock().unwrap();
+    for table in ["local_usage_responses", "local_usage_spend", "local_usage_provenance"] {
+        let count: u64 = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h94f5986a16ef owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */
+            &format!("SELECT COUNT(*) FROM {table} WHERE subject=?1"),
+            [subject],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "{table} must not count unknown usage as spend");
+    }
+}
+
+#[test]
+fn incomplete_response_counters_are_unpriced_not_zero_filled_estimates() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage) in [
+        ("missing-buckets", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "input_tokens":10, "total_tokens":20
+        })),
+        ("unknown-write-ttl", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":1, "output_tokens":1, "cached_tokens":0,
+            "cache_write_tokens":10, "total_tokens":12
+        })),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], "unpriced");
+    }
+    let connection = store.connection.lock().unwrap();
+    let (cost, unpriced): (u64, u64) = connection.query_row(
+        "SELECT SUM(cost_microusd), SUM(unpriced_tokens) FROM local_usage_spend WHERE subject=?1",
+        [subject],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cost, 0);
+    assert_eq!(unpriced, 32);
+}
+
+#[test]
+fn observed_zero_cost_or_complete_zero_counters_are_accounting_evidence() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage, basis) in [
+        ("reported-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "cost":0
+        }), "reported"),
+        ("complete-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":0, "output_tokens":0, "cached_tokens":0,
+            "cache_write_tokens":0, "total_tokens":0
+        }), "estimated"),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], basis);
+        assert_eq!(stored.body["fields"]["spend"]["cost_microusd"], 0);
+    }
+    let connection = store.connection.lock().unwrap();
+    let count: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM local_usage_responses WHERE subject=?1",
+        [subject],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn a_timeline_page_merges_claims_from_older_builds_with_local_observations() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/node.worker";

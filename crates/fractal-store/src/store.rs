@@ -22,6 +22,7 @@ mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod step_executions;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
@@ -594,7 +595,7 @@ impl UsageFold {
             }
             Some("response_rollup") => {
                 let group = self.spend.entry(claim_incarnation.to_owned()).or_default();
-                let key = ["model", "account", "owner_run", "owner_step", "host"]
+                let key = ["model", "account", "owner_run", "owner_step", "host", "execution_id"]
                     .iter()
                     .map(|key| fields.get(*key).and_then(Value::as_str).unwrap_or(""))
                     .collect::<Vec<_>>()
@@ -631,6 +632,7 @@ impl UsageFold {
                                     .and_then(Value::as_u64)
                                     .unwrap_or(0)
                                     == 0
+                                    && fields.get("unpriced_responses").and_then(Value::as_u64).unwrap_or(0) == 0
                             }),
                     },
                 );
@@ -722,7 +724,7 @@ impl UsageFold {
                             unknown_cost = true;
                         }
                         summary.currency.get_or_insert_with(|| "USD".into());
-                    } else if rollup.total > 0 {
+                    } else {
                         unknown_cost = true;
                     }
                 }
@@ -821,7 +823,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0f50685697d0 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -970,6 +972,12 @@ WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT N
 -- of other kinds plan as they did.
 CREATE INDEX IF NOT EXISTS claims_runtime_subject_index ON claims(subject, store_index)
 WHERE kind='runtime.observed';
+CREATE INDEX IF NOT EXISTS claims_execution_actor_index
+ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), CAST(accepted_at_unix_ms AS INTEGER))
+WHERE kind='work.claimed';
+CREATE INDEX IF NOT EXISTS claims_execution_usage_index
+ON claims(subject, json_extract(body, '$.fields.execution_id'), store_index)
+WHERE kind='harness.usage';
 -- An already-open raw stream revalidates the original paired actor, never a full graph scan.
 CREATE INDEX IF NOT EXISTS claims_client_pairing_actor_index
 ON claims(json_extract(body, '$.fields.session_actor'))
@@ -1492,6 +1500,24 @@ CREATE TABLE IF NOT EXISTS local_usage_spend (
     unpriced_tokens INTEGER NOT NULL DEFAULT 0,
     observed_at_unix_ms INTEGER NOT NULL,
     PRIMARY KEY(subject, incarnation_id, model, account, owner_run, owner_step, host)
+);
+-- Exact invocation partitions start here; older already-replicated aggregate series remain intact.
+CREATE TABLE IF NOT EXISTS local_step_execution_spend (
+    execution_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    host TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_microusd INTEGER NOT NULL DEFAULT 0,
+    reported_cost_microusd INTEGER NOT NULL DEFAULT 0,
+    unpriced_tokens INTEGER NOT NULL DEFAULT 0,
+    observed_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY(execution_id, model, account, host)
 );
 -- Provenance shares the existing cumulative spend slot; individual responses remain local.
 CREATE TABLE IF NOT EXISTS local_usage_provenance (
@@ -9996,6 +10022,16 @@ pub fn insert_local_observation_tx(
             .and_then(|body| body.get("semantics"))
             .and_then(Value::as_str)
             == Some("response")
+        // A terminal response may carry identity/timing but no accounting observations.
+        // Keep that timeline evidence without reserving a spend receipt or inventing a
+        // zero-token, zero-cost response from missing counters.
+        && input.fields.get("body").is_some_and(|usage| {
+            ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "total_tokens"]
+                .iter()
+                .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                || usage.get("cost").and_then(Value::as_f64)
+                    .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
+        })
     {
         let desired: Option<(Option<String>, Option<String>, Option<String>)> = transaction
             .query_row(
@@ -10031,20 +10067,31 @@ pub fn insert_local_observation_tx(
             )
             .optional()
             .map_err(internal)?;
-        let owner_run = active_step
+        let execution = step_executions::response_execution(transaction, &input.subject, incarnation, responded_at)
+            .map_err(internal)?;
+        let execution_owner: Option<(String, String)> = if let Some((_, step)) = &execution {
+            transaction.query_row(
+                "SELECT 'mission-run/' || run_id, 'run-generation/' || generation_id FROM step_runs WHERE subject=?1",
+                [step], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(internal)?
+        } else { None };
+        let owner_run = if execution.is_some() {
+            execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("")
+        } else {
+            active_step.as_ref().map(|item| item.1.as_str())
+                .or_else(|| desired.as_ref().and_then(|item| item.0.as_deref())).unwrap_or("")
+        };
+        let owner_step = execution.as_ref().map(|item| item.1.as_str()).or_else(|| active_step
             .as_ref()
-            .map(|item| item.1.as_str())
-            .or_else(|| desired.as_ref().and_then(|item| item.0.as_deref()))
-            .unwrap_or("");
-        let owner_step = active_step
-            .as_ref()
-            .map(|item| item.0.as_str())
+            .map(|item| item.0.as_str()))
             .or_else(|| desired.as_ref().and_then(|item| item.2.as_deref()))
             .unwrap_or("");
-        let owner_generation = active_step
-            .as_ref()
-            .map(|item| item.2.as_str())
-            .or_else(|| desired.as_ref().and_then(|item| item.1.as_deref()));
+        let owner_generation = if execution.is_some() {
+            execution_owner.as_ref().map(|item| item.1.as_str())
+        } else {
+            active_step.as_ref().map(|item| item.2.as_str())
+                .or_else(|| desired.as_ref().and_then(|item| item.1.as_deref()))
+        };
         let usage = &input.fields["body"];
         let model = usage
             .get("model")
@@ -10065,17 +10112,30 @@ pub fn insert_local_observation_tx(
             .and_then(Value::as_f64)
             .filter(|cost| cost.is_finite() && *cost >= 0.0)
             .map(|cost| (cost * 1_000_000.0).round() as u64);
-        let estimated_cost = crate::pricing::cost_microusd(
-            model,
-            crate::pricing::Tokens {
-                input: input_tokens,
-                output: output_tokens,
-                cache_read: cached_tokens,
-                cache_write: cache_write_tokens,
-                cache_write_1h: cache_write_1h_tokens,
-            },
-        );
+        // Rate-card pricing requires observed disjoint buckets. An absent bucket
+        // is not zero; an unknown cache-write TTL is not a five-minute write.
+        let complete_tokens = ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+            && (cache_write_tokens == 0
+                || usage.get("cache_write_1h_tokens").and_then(Value::as_u64).is_some());
+        let estimated_cost = if complete_tokens {
+            crate::pricing::cost_microusd(
+                model,
+                crate::pricing::Tokens {
+                    input: input_tokens,
+                    output: output_tokens,
+                    cache_read: cached_tokens,
+                    cache_write: cache_write_tokens,
+                    cache_write_1h: cache_write_1h_tokens,
+                },
+            )
+        } else {
+            None
+        };
         let cost_microusd = reported_cost.or(estimated_cost).unwrap_or(0);
+        // Count responses separately: missing totals must never masquerade as a known free bill.
+        let unpriced_responses = u64::from(reported_cost.or(estimated_cost).is_none());
         let unpriced_tokens = if reported_cost.or(estimated_cost).is_some() {
             0
         } else {
@@ -10086,6 +10146,7 @@ pub fn insert_local_observation_tx(
             "mission_run_id": if owner_run.is_empty() { None } else { Some(owner_run) },
             "generation_id": owner_generation,
             "step_id": if owner_step.is_empty() { None } else { Some(owner_step) },
+            "execution_id": execution.as_ref().map(|item| item.0.as_str()),
         });
         body["fields"]["host"] = Value::String(origin.to_owned());
         // What st charged this response, so the OpenTelemetry history carries the same cost
@@ -10118,6 +10179,12 @@ pub fn insert_local_observation_tx(
                 .map_err(internal)?
                 != 0;
         if new_response {
+            if let Some((execution_id, _)) = &execution {
+                step_executions::accumulate_response(transaction, execution_id, model, account, origin,
+                    [input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cached_tokens,
+                     total_tokens, cost_microusd, reported_cost.unwrap_or(0), unpriced_tokens],
+                    observed_at).map_err(internal)?;
+            } else {
             transaction.execute(
                 /* sqlite-large-value: allow-for-now lv-h3509d7d81e3a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_usage_spend(subject, incarnation_id, model, account, owner_run, owner_step, host,
                     input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cached_tokens,
@@ -10139,6 +10206,7 @@ pub fn insert_local_observation_tx(
                     total_tokens, cost_microusd, reported_cost.unwrap_or(0), unpriced_tokens,
                     observed_at as i64],
             ).map_err(internal)?;
+            }
             // Keep each distinct price/source/effective-rate combination cumulative. A later
             // table revision or long-context response must not relabel earlier spend.
             let mut key_fields = BTreeMap::from([
@@ -10149,6 +10217,9 @@ pub fn insert_local_observation_tx(
                 ("owner_step".into(), json!(owner_step)),
                 ("host".into(), json!(origin)),
             ]);
+            if let Some((execution_id, _)) = &execution {
+                key_fields.insert("execution_id".into(), json!(execution_id));
+            }
             if !account.is_empty() {
                 key_fields.insert("account".into(), json!(account));
             }
@@ -10182,7 +10253,7 @@ pub fn insert_local_observation_tx(
             if reported_cost.is_none() {
                 entry["price_table_id"] = json!(crate::pricing::PRICE_TABLE_ID);
                 entry["price_table_version"] = json!(crate::pricing::price_table_version());
-                if let Some(rates) = crate::pricing::applied_rates(model, tokens) {
+                if complete_tokens && let Some(rates) = crate::pricing::applied_rates(model, tokens) {
                     let mut rates = serde_json::to_value(rates).map_err(internal)?;
                     rates.as_object_mut().unwrap().remove("long_context");
                     entry["rates_usd_per_million_tokens"] = rates;
@@ -10204,6 +10275,7 @@ pub fn insert_local_observation_tx(
                 cost_microusd,
                 reported_cost.unwrap_or(0),
                 unpriced_tokens,
+                unpriced_responses,
             ]) {
                 entry[name] = json!(entry[name].as_u64().unwrap_or(0).saturating_add(value));
             }
@@ -10555,7 +10627,7 @@ pub fn usage_native_session(
     Ok(previous.flatten().filter(|id| !id.trim().is_empty()))
 }
 
-pub const USAGE_BUCKETS: [&str; 9] = [
+pub const USAGE_BUCKETS: [&str; 10] = [
     "total_tokens",
     "input_tokens",
     "output_tokens",
@@ -10565,6 +10637,7 @@ pub const USAGE_BUCKETS: [&str; 9] = [
     "cost_microusd",
     "reported_cost_microusd",
     "unpriced_tokens",
+    "unpriced_responses",
 ];
 
 pub fn pricing_identity(entry: &Value) -> String {
@@ -10582,7 +10655,7 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
         // Each rollup key is its own cumulative series. Sharing one slot per incarnation would
         // let a pending rollup of the next step or account replace the previous one's final
         // totals before they replicated.
-        return json!([
+        let mut slot = json!([
             fields.get("incarnation_id"),
             fields.get("semantics"),
             fields.get("model"),
@@ -10590,8 +10663,12 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
             fields.get("owner_run"),
             fields.get("owner_step"),
             fields.get("host"),
-        ])
-        .to_string();
+        ]);
+        // Preserve existing slot bytes for older aggregate series and their held readings.
+        if let Some(execution) = fields.get("execution_id").filter(|value| value.is_string()) {
+            slot.as_array_mut().expect("usage slot is an array").push(execution.clone());
+        }
+        return slot.to_string();
     }
     json!([fields.get("incarnation_id"), fields.get("semantics")]).to_string()
 }
@@ -11994,6 +12071,9 @@ pub fn append_receipt_claim_tx(
     key: &str,
 ) -> Result<ClaimRecord> {
     let mut body = body.clone();
+    if kind == "work.claimed" {
+        step_executions::snapshot_claim(transaction, actor, &mut body)?;
+    }
     smallclaims::store::idempotency::attach(&mut body, key)?;
     let record = append_claim_tx(
         transaction,
@@ -21012,50 +21092,48 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         .nth(1)
         .map(|id| format!("run-generation/{id}"))
         .unwrap_or_default();
-    Ok(StepRunView {
-        subject,
-        run: format!("mission-run/{}", row.get::<_, String>(1)?),
-        generation,
-        step: row.get(2)?,
-        fresh_context: false,
-        queue: None,
-        queue_position: None,
-        definition_hash: row.get(3)?,
-        status: row.get(4)?,
-        attempt: row.get::<_, u32>(5)?,
-        assigned_to: row.get(6)?,
-        available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-        agentless: row.get(8)?,
-        title: row.get(9)?,
-        goals: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
-        constraints: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
-        under: Vec::new(),
-        worker_reported: row.get::<_, bool>(11)?,
-        claimant: row.get(12)?,
-        claim_incarnation: row.get(13)?,
-        submitted_incarnation: None,
-        claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
-        carried_claimant: None,
-        execution_started_at_unix_ms: None,
-        execution_paused_until_unix_ms: None,
-        execution_waited_ms: 0,
-        execution_elapsed_ms: 0,
-        timeout_ms: None,
-        timeout_extension_ms: 0,
-        ready_age_ms: None,
-        wake: None,
-        progress_summary: None,
-        progress_at_unix_ms: None,
-        completion_summary: None,
-        readiness_epoch: row.get(19)?,
-        blocked_reason: row.get(15)?,
-        blockers: Vec::new(),
-        not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
-        nudged_at_unix_ms: None,
-        created_at_unix_ms: created.parse().unwrap_or(0),
-        updated_at_unix_ms: updated.parse().unwrap_or(0),
-        person_answers: Vec::new(),
-    })
+    Ok(StepRunView { executions: None, subject,
+    run: format!("mission-run/{}", row.get::<_, String>(1)?),
+    generation,
+    step: row.get(2)?,
+    fresh_context: false,
+    queue: None,
+    queue_position: None,
+    definition_hash: row.get(3)?,
+    status: row.get(4)?,
+    attempt: row.get::<_, u32>(5)?,
+    assigned_to: row.get(6)?,
+    available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+    agentless: row.get(8)?,
+    title: row.get(9)?,
+    goals: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+    constraints: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
+    under: Vec::new(),
+    worker_reported: row.get::<_, bool>(11)?,
+    claimant: row.get(12)?,
+    claim_incarnation: row.get(13)?,
+    submitted_incarnation: None,
+    claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
+    carried_claimant: None,
+    execution_started_at_unix_ms: None,
+    execution_paused_until_unix_ms: None,
+    execution_waited_ms: 0,
+    execution_elapsed_ms: 0,
+    timeout_ms: None,
+    timeout_extension_ms: 0,
+    ready_age_ms: None,
+    wake: None,
+    progress_summary: None,
+    progress_at_unix_ms: None,
+    completion_summary: None,
+    readiness_epoch: row.get(19)?,
+    blocked_reason: row.get(15)?,
+    blockers: Vec::new(),
+    not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
+    nudged_at_unix_ms: None,
+    created_at_unix_ms: created.parse().unwrap_or(0),
+    updated_at_unix_ms: updated.parse().unwrap_or(0),
+    person_answers: Vec::new(), })
 }
 
 /// What `work extend` has added to one step attempt's execution budget as of `snapshot_unix_ms`.

@@ -361,6 +361,7 @@ fn usage() -> Vec<fractal_client::UsageRow> {
         cost_microusd: cost,
         reported_cost_microusd: 0,
         unpriced_tokens: 0,
+        unpriced_responses: 0,
     };
     let atlas = Some("mission-run/fleet/atlas/store-move/2026-10-01");
     let release = Some("mission-run/fleet/release/weekly/2026-10-01");
