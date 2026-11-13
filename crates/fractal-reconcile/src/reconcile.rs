@@ -532,6 +532,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
         Ok(PtyRegistrySnapshot { observations, start_operations })
     }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// Retained, redacted terminal evidence for exactly this runtime incarnation.
+    fn exit_evidence(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
+        Ok(None)
+    }
     /// Inspect the resulting runtime. Callers must still verify its operation provenance.
     fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
         if member.terminal {
@@ -808,6 +812,10 @@ impl RuntimeControl for NativeRuntime {
 
     fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
         self.snapshot_pty_registry(true)
+    }
+
+    fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
+        self.pty()?.exit_evidence(runtime_id, incarnation)
     }
 
     fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
@@ -6649,10 +6657,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         if selected != *subject {
             return Ok(());
         }
-        let intent = crate::graph::parse_internal_intent(
+        let mut intent = crate::graph::parse_internal_intent(
             &format!("version 2\nstop {:?}\n", subject.subject),
             &self.host,
         )?;
+        let stopped = intent.subjects.get_mut(&subject.subject)
+            .context("one-shot stop lacks its subject")?;
+        stopped.owner_run.clone_from(&subject.owner_run);
+        stopped.owner_generation.clone_from(&subject.owner_generation);
+        stopped.owner_step.clone_from(&subject.owner_step);
         let result = self.store.apply_as(
             &intent,
             &BTreeMap::from([(subject.subject.clone(), vec![token.clone()])]),
@@ -6664,7 +6677,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             Some("daemon/runtime"),
         );
         match result {
-            Ok(_) => self.signal_changed(),
+            Ok(_) => {
+                self.signal_changed();
+                if let Some(actual) = self.store.latest_actual_value(&subject.subject)?
+                    && let Some(reason) = runtime_exit_reason(&actual)
+                {
+                    self.record_once(&subject.subject, "runtime.reconcile-decision", BTreeMap::from([
+                        ("key".into(), Value::String("one-shot-retirement".into())),
+                        ("decision".into(), Value::String("retire".into())),
+                        ("reason".into(), Value::String(reason)),
+                    ]))?;
+                }
+            }
             Err(error) if error.code == "stale-subject" => {}
             Err(error) => return Err(error.into()),
         }
@@ -6959,6 +6983,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(timeout) = fields.get("shutdown_timeout_ms") {
                 observed_fields.insert("shutdown_timeout_ms".into(), timeout.clone());
             }
+            self.retain_exit_evidence(
+                &subject.subject,
+                runtime_id,
+                terminal,
+                observation.incarnation_id.as_deref(),
+                &mut observed_fields,
+            )?;
             self.record_once(&subject.subject, "runtime.observed", observed_fields)?;
         }
         // A run's end never stops a seat that still has someone's mail or another run's work.
@@ -7583,6 +7614,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(incarnation) = incarnation {
                 fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
             }
+            self.retain_exit_evidence(subject, runtime_id, terminal, incarnation, &mut fields)?;
             // A confirmed explicit stop can fence a later move even while this host is offline.
             // Stops for a restart of a still-live declaration cannot release a placement fence.
             let evidence = Vec::from_iter(stop);
@@ -10396,6 +10428,50 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(running.then_some(incarnation))
     }
 
+    /// Carry terminal evidence only within its incarnation, including stop projections after the
+    /// runtime registry has forgotten the handle. A new incarnation must never inherit an old exit.
+    fn retain_exit_evidence(
+        &self,
+        subject: &str,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: Option<&str>,
+        fields: &mut BTreeMap<String, Value>,
+    ) -> Result<()> {
+        for key in ["exit_code", "exit_signal", "exit_evidence"] {
+            fields.entry(key.into()).or_insert(Value::Null);
+        }
+        if matches!(fields.get("status").and_then(Value::as_str), Some("running" | "starting")) {
+            return Ok(());
+        }
+        let Some(incarnation) = incarnation else { return Ok(()); };
+        if terminal
+            && let Some(evidence) = self.runtime.exit_evidence(runtime_id, incarnation)?
+            && evidence.incarnation == incarnation
+        {
+            if let Some(code) = evidence.exit_code {
+                fields.insert("exit_code".into(), Value::from(code));
+            }
+            if let Some(signal) = evidence.signal {
+                fields.insert("exit_signal".into(), Value::from(signal));
+            }
+            fields.insert("exit_evidence".into(), serde_json::to_value(evidence)?);
+            return Ok(());
+        }
+        if let Some(previous) = self.store.latest_observation(subject, "runtime.observed")?
+            && previous.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == Some(incarnation)
+        {
+            for key in ["exit_code", "exit_signal", "exit_evidence"] {
+                if fields.get(key).is_none_or(Value::is_null)
+                    && let Some(value) = previous.body["fields"].get(key)
+                {
+                    fields.insert(key.into(), value.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn record_member(
         &self,
         subject: &DesiredSubject,
@@ -10432,6 +10508,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }
+        self.retain_exit_evidence(
+            &subject.subject,
+            &member.runtime_id,
+            member.terminal,
+            observation.incarnation_id.as_deref(),
+            &mut fields,
+        )?;
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
@@ -11778,9 +11861,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                             } else {
                                 (
                                     "blocked",
-                                    format!(
-                                        "no eligible agent is present in the desired graph: {eligible}"
-                                    ),
+                                    {
+                                        let mut reason = format!(
+                                            "no eligible agent is present in the desired graph: {eligible}"
+                                        );
+                                        for agent in view.assigned_to.iter().chain(view.available_to.iter()) {
+                                            if let Some(actual) = self.store.latest_actual_value(agent)?
+                                                && let Some(exit) = runtime_exit_reason(&actual)
+                                            {
+                                                reason.push_str(&format!("; `{agent}` {exit}"));
+                                            }
+                                        }
+                                        reason
+                                    },
                                 )
                             };
                             changed |=
@@ -12030,8 +12123,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let (status, reason) = if advancing {
                 ("running", None)
-            } else if missing_agent.is_some() {
-                ("blocked", Some("the mission has no eligible desired agent"))
+            } else if let Some(view) = missing_agent {
+                ("blocked", view.blocked_reason.as_deref())
             } else if failed {
                 ("blocked", Some("the mission has no available step"))
             } else if mission.completion.is_none() && !changed {
@@ -15062,7 +15155,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         && crate::graph::declared_uri(&desired.desired).is_some())
             });
         }
-        self.keep_stops_by_hand(&mut intent, run)?;
+        self.keep_stopped_seats(&mut intent, run)?;
         if assigned_agents_only && intent.subjects.is_empty() {
             return Ok(false);
         }
@@ -15250,10 +15343,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
-    /// Leave out of `intent` each seat a person or an agent stopped while this generation of
-    /// `run` declared it. Declaring it again would undo that stop on the next daemon start,
-    /// or on the next pass for a step's seat; `st agents start` starts it again.
-    fn keep_stops_by_hand(
+    /// Preserve manual stops and automatic one-shot retirement for this generation. Re-declaring
+    /// either would revive a finished seat on the next pass or daemon start; an explicit
+    /// `st agents start` replaces the stop and allows materialization again.
+    fn keep_stopped_seats(
         &self,
         intent: &mut crate::model::NormalizedIntent,
         run: &MissionRunView,
@@ -15267,9 +15360,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         if agents.is_empty() {
             return Ok(());
         }
-        let stopped = self
+        let mut stopped = self
             .store
             .stopped_by_hand(&agents, &run.subject, &run.generation)?;
+        // Runtime retirement retains its run ownership for history and missing-agent evidence,
+        // so it is intentionally not one of the root stops returned by stopped_by_hand.
+        for desired in self.store.desired_subjects_named(&agents)? {
+            if desired.kind == "stop"
+                && desired.owner_run.as_deref() == Some(run.subject.as_str())
+                && desired.owner_generation.as_deref() == Some(run.generation.as_str())
+                && let Some(ended) = self.store.declaration_ended_by_stop(&desired.subject)?
+                && ended.writer.as_deref() == Some("daemon/runtime")
+                && ended.declaration.owner_run.as_deref() == Some(run.subject.as_str())
+                && ended.declaration.owner_generation.as_deref() == Some(run.generation.as_str())
+                && ended.declaration.member.as_ref().is_some_and(|member| member.one_shot)
+            {
+                stopped.insert(desired.subject);
+            }
+        }
         intent
             .subjects
             .retain(|subject, _| !stopped.contains(subject));
@@ -15391,7 +15499,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && current.owner_generation.as_deref() == Some(run.generation.as_str())
             })
         });
-        self.keep_stops_by_hand(&mut intent, run)?;
+        self.keep_stopped_seats(&mut intent, run)?;
         for subject in intent.subjects.values_mut() {
             if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
                 continue;
@@ -21380,6 +21488,11 @@ fn member_fields(
             Value::String(member.runtime_id.clone()),
         ),
         ("terminal".into(), Value::Bool(member.terminal)),
+        // Runtime observations append and fold field-by-field. Clear incarnation-scoped
+        // evidence explicitly; terminal recording fills or retains only the matching exit.
+        ("exit_code".into(), Value::Null),
+        ("exit_signal".into(), Value::Null),
+        ("exit_evidence".into(), Value::Null),
         (
             "incarnation_id".into(),
             incarnation_id.map_or(Value::Null, Value::from),
@@ -21411,6 +21524,36 @@ fn launch_in_restart_window(
 ) -> bool {
     store_index > reset_index
         && (mode != "fail" || accepted_at_unix_ms > now.saturating_sub(interval_ms as u128))
+}
+
+/// Human-readable evidence shared by retirement decisions and missing-agent mission faults.
+fn runtime_exit_reason(actual: &Value) -> Option<String> {
+    let incarnation = actual_field(actual, "incarnation_id").and_then(Value::as_str);
+    let evidence = actual_field(actual, "exit_evidence").filter(|value| {
+        value.is_object() && value.get("incarnation").and_then(Value::as_str) == incarnation
+    });
+    let code = actual_field(actual, "exit_code").and_then(Value::as_i64);
+    let signal = actual_field(actual, "exit_signal").and_then(Value::as_i64);
+    if evidence.is_none() && code.is_none() && signal.is_none() {
+        return None;
+    }
+    let mut reason = String::from("exited");
+    if let Some(code) = code {
+        reason.push_str(&format!(" with code {code}"));
+    }
+    if let Some(signal) = signal {
+        reason.push_str(&format!(" (signal {signal})"));
+    }
+    if let Some(incarnation) = incarnation {
+        reason.push_str(&format!(" [incarnation `{incarnation}`]"));
+    }
+    if let Some(tail) = evidence.and_then(|value| value.get("outputTail")).and_then(Value::as_str)
+        && !tail.is_empty()
+    {
+        reason.push_str(": ");
+        reason.push_str(tail);
+    }
+    Some(reason)
 }
 
 fn actual_field<'a>(actual: &'a Value, path: &str) -> Option<&'a Value> {
@@ -22376,6 +22519,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
         pub failed_starts: Mutex<std::collections::HashSet<String>>,
@@ -22401,6 +22545,265 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         pub lane_held: Mutex<Option<u64>>,
         pub lane_live: Mutex<Option<fractal_runtime::Capacity>>,
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_one_shot_failure_is_retained_on_run_owned_agent_and_waiting_mission() {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap_or_default())]);
+        let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"),
+                "hosted CI must install the real pty binary for retained exit evidence");
+            eprintln!("skipped: no pty binary outside hosted CI");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("release");
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, &binary));
+        struct Cleanup {
+            runtime: Arc<NativeRuntime>,
+            release: PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.release, "");
+                if let Ok(pty) = self.runtime.pty()
+                    && let Ok(sessions) = pty.snapshot()
+                {
+                    for session in sessions {
+                        let _ = pty.stop(&session.name);
+                    }
+                }
+            }
+        }
+        let _cleanup = Cleanup { runtime: runtime.clone(), release: release.clone() };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let command = format!(
+            "while [ ! -f '{}' ]; do sleep 0.01; done; printf 'fatal: fixture launch failed\\n' >&2; exit 23",
+            release.display(),
+        );
+        apply_source(&store, &format!(r#"version 2
+mission "native-exit-evidence" state="ready" {{
+  goal "Inspect a failed run-owned worker."
+  agent "worker" {{
+    workspace {}
+    command {}
+    one-shot
+  }}
+  step "work" {{ assigned-to "agent/${{ST_MISSION_RUN}}/worker" }}
+}}
+"#, serde_json::to_string(&root.path().to_string_lossy()).unwrap(),
+            serde_json::to_string(&command).unwrap()), "native-exit-evidence");
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "native-exit-evidence".into(), revision: None,
+            workspace: root.path().to_string_lossy().into_owned(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "native-exit-evidence-run".into(),
+        }).unwrap();
+        let agent = format!("agent/{}/worker", run.id);
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let (runtime_id, incarnation) = loop {
+            reconciler.reconcile_once().unwrap();
+            if let Some(actual) = store.latest_actual_value(&agent).unwrap()
+                && actual_field(&actual, "status").and_then(Value::as_str) == Some("running")
+                && let Some(incarnation) = actual_field(&actual, "incarnation_id").and_then(Value::as_str)
+                && reconciler.member_was_launched_for_selected_desired(&agent).unwrap()
+            {
+                break (
+                    actual_field(&actual, "runtime_id").and_then(Value::as_str).unwrap().to_owned(),
+                    incarnation.to_owned(),
+                );
+            }
+            assert!(std::time::Instant::now() < deadline, "run-owned worker never became running");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let before_exit = store.mission_run(&run.id).unwrap().unwrap();
+        assert!(matches!(before_exit.steps[0].status.as_str(), "ready" | "claimed" | "working"));
+        std::fs::write(&release, "").unwrap();
+        // Let the PTY reap its registry entry before reconciliation, exercising retained lookup.
+        loop {
+            if matches!(runtime.pty().unwrap().keyed_observation(&runtime_id).unwrap(), fractal_runtime::PtyLookup::Missing) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "failed PTY handle was not reaped");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        loop {
+            reconciler.reconcile_once().unwrap();
+            let view = store.mission_run(&run.id).unwrap().unwrap();
+            if view.steps[0].blocked_reason.as_deref().is_some_and(|reason| reason.contains("code 23"))
+                && store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().is_some()
+                && store.latest_claim(&run.subject, Some("operational.failure")).unwrap().is_some()
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline,
+                "mission never retained all failure surfaces: run={view:?}; faults={:?}",
+                store.observations_for(&run.subject, "reconcile.fault").unwrap());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&agent).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("stopped"));
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(23));
+        let evidence = actual_field(&actual, "exit_evidence").unwrap();
+        assert_eq!(evidence["incarnation"], incarnation);
+        assert!(evidence["outputTail"].as_str().unwrap().contains("fatal: fixture launch failed"));
+        // Subject show serializes this same status surface, without a field whitelist.
+        let inspected = serde_json::to_string(&store.status(Some(&agent)).unwrap()).unwrap();
+        assert!(inspected.contains("\"exit_code\":23") && inspected.contains("fatal: fixture launch failed"));
+        let view = store.mission_run(&run.id).unwrap().unwrap();
+        let reason = view.steps[0].blocked_reason.as_deref().unwrap();
+        assert!(reason.contains(&incarnation) && reason.contains("fatal: fixture launch failed"), "{reason}");
+        for kind in ["mission-run.state", "operational.failure"] {
+            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
+                .unwrap_or_else(|| panic!("missing {kind}: run={view:?}; faults={:?}",
+                    store.observations_for(&run.subject, "reconcile.fault").unwrap()));
+            let reason = claim.body["fields"]["reason"].as_str().unwrap();
+            assert!(reason.contains("code 23") && reason.contains(&incarnation)
+                && reason.contains("fatal: fixture launch failed"), "{kind}: {reason}");
+        }
+    }
+
+    #[test]
+    fn one_shot_exit_evidence_survives_stop_and_explains_missing_mission_agent() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"version 2
+agent "worker" { workspace "/tmp"; command "printf 'worker failed\n' >&2; exit 23"; one-shot }
+mission "exit-evidence" state="ready" {
+  goal "Inspect a failed worker."
+  step "work" { assigned-to "agent/node.worker" }
+}
+"#, "exit-evidence");
+        let subject = store.desired_subjects().unwrap().into_iter()
+            .find(|subject| subject.subject == "agent/node.worker").unwrap();
+        let member = subject.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.exit_evidence.lock().unwrap().insert(
+            (member.runtime_id.clone(), "worker-one".into()),
+            fractal_runtime::PtyExitEvidence {
+                incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
+                output_tail: Some("worker failed".into()),
+            },
+        );
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        // The registry already lost the handle. Retained evidence must still be captured.
+        let ended = RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "vanished".into(),
+            exit_code: None, incarnation_id: Some("worker-one".into()),
+        };
+        reconciler.record_member(&subject, &ended, false).unwrap();
+        reconciler.retire_one_shot(&subject, &ended).unwrap();
+        runtime.exit_evidence.lock().unwrap().clear();
+        assert!(reconciler.reconcile_runtime_stop(
+            &subject.subject, &member.runtime_id, true, Some("worker-one"),
+            0, Some(&ended),
+        ).unwrap());
+        let actual = store.latest_actual_value(&subject.subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("stopped"));
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(23));
+        assert_eq!(actual_field(&actual, "exit_evidence").unwrap()["outputTail"], "worker failed");
+        let decision = store.latest_observation(&subject.subject, "runtime.reconcile-decision").unwrap().unwrap();
+        let reason = decision.body["fields"]["reason"].as_str().unwrap();
+        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "exit-evidence".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "exit-evidence-run".into(),
+        }).unwrap();
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        let step = &run.steps[0];
+        assert_eq!(step.status, "blocked");
+        let reason = step.blocked_reason.as_deref().unwrap();
+        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        for kind in ["operational.failure", "mission-run.state"] {
+            let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
+                .unwrap_or_else(|| panic!("missing {kind}: run={run:?}; faults={:?}",
+                    store.observations_for(&run.subject, "reconcile.fault").unwrap()));
+            let reason = claim.body["fields"]["reason"].as_str().unwrap();
+            assert!(reason.contains("code 23") && reason.contains("worker failed"), "{kind}: {reason}");
+        }
+        let replica = Store::open_memory("replica").unwrap();
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        let replicated = replica.latest_actual_value(&subject.subject).unwrap().unwrap();
+        assert_eq!(actual_field(&replicated, "exit_evidence"), actual_field(&actual, "exit_evidence"));
+        let replicated = replica.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(replicated.steps[0].blocked_reason, step.blocked_reason);
+        // A replacement discovered while desired is still stop also clears the predecessor.
+        let stopped = store.desired_subjects().unwrap().into_iter()
+            .find(|item| item.subject == subject.subject).unwrap();
+        let replacement = RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-two".into()),
+        };
+        reconciler.reconcile_stop(
+            &stopped,
+            Some(&HashMap::from([(member.runtime_id.clone(), replacement)])),
+        ).unwrap();
+        let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
+        assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
+        assert!(actual_field(&replacement, "exit_code").is_none_or(Value::is_null));
+        assert!(actual_field(&replacement, "exit_signal").is_none_or(Value::is_null));
+        // A new live incarnation cannot inherit the previous registered exit fields.
+        reconciler.record_member(&subject, &RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-two".into()),
+        }, false).unwrap();
+        let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
+        assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
+        assert!(actual_field(&replacement, "exit_code").is_none_or(Value::is_null));
+    }
+
+    #[test]
+    fn blocked_mission_reason_retains_new_exit_evidence_without_a_status_change() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, r#"version 2
+mission "retained-reason" state="ready" {
+  goal "Retain new evidence on a blocked run."
+  step "work" { assigned-to "agent/node.worker" }
+}
+"#, "retained-reason");
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "retained-reason".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "retained-reason-run".into(),
+        }).unwrap();
+        assert!(store.set_mission_run_state(
+            &run.id, "blocked", "normal", Some("no eligible agent is present"),
+        ).unwrap());
+        let reason = "no eligible agent is present; worker exited with code 23: worker failed";
+        assert!(store.set_mission_run_state(&run.id, "blocked", "normal", Some(reason)).unwrap());
+        let claim = store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["reason"], reason);
+        let index = store.index().unwrap();
+        assert!(!store.set_mission_run_state(&run.id, "blocked", "normal", Some(reason)).unwrap());
+        assert_eq!(store.index().unwrap(), index);
+    }
+
+    #[test]
+    fn retained_exit_signal_is_incarnation_fenced() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.exit_evidence.lock().unwrap().insert(("worker".into(), "one".into()),
+            fractal_runtime::PtyExitEvidence {
+                incarnation: "another".into(), exit_code: Some(99), signal: Some(9),
+                output_tail: Some("unrelated failure".into()),
+            });
+        let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let mut fields = BTreeMap::from([("status".into(), Value::from("exited"))]);
+        reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
+        assert!(fields.get("exit_evidence").is_none_or(Value::is_null));
+        runtime.exit_evidence.lock().unwrap().get_mut(&("worker".into(), "one".into())).unwrap().incarnation = "one".into();
+        reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
+        let reason = runtime_exit_reason(&serde_json::to_value(fields).unwrap()).unwrap();
+        assert!(reason.contains("code 99") && reason.contains("signal 9"), "{reason}");
+    }
+
 
     #[test]
     fn one_shot_old_exit_cannot_retire_a_newer_declaration() {
@@ -22507,6 +22910,10 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
+            Ok(self.exit_evidence.lock().unwrap()
+                .get(&(runtime_id.into(), incarnation.into())).cloned())
+        }
         fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
             Ok(self.process_identities.lock().unwrap_or_else(PoisonError::into_inner)
                 .get(&(member.runtime_id.clone(), incarnation.into())).copied())

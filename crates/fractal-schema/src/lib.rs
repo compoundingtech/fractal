@@ -4054,6 +4054,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("exit_code", integer()),
             ("exit_signal", integer()),
+            ("exit_evidence", object()),
             ("incarnation_id", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
@@ -5110,7 +5111,7 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
+        // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
@@ -5131,6 +5132,8 @@ mod tests {
         }
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.observed").unwrap()
+            .fields.remove("exit_evidence").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
