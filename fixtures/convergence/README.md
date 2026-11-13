@@ -353,3 +353,9 @@ optional `source` of `person.directive-note-set` and the optional `priority` of
 do not hand-edit it. The simulation and audit reports select v26. Draws use the generic append
 path: only the subject person's own claims are admitted, as on every admission path. The new
 kinds and fields shift the shared random schedule.
+
+Hosted [burst run 43455339387](https://github.com/compoundingtech/fractal/actions/runs/43455339387)
+observed every fixed seed converge and trim a checkpoint, including v25's non-trimming seeds 2
+and 233 and the earlier availability corpus's seed 21. The exact v26 `NEVER_TRIMS` set is empty:
+no previous corpus's schedule-specific exception carries forward. There are no untrimmed seeds
+requiring the old-build excusal and next-cut continuation in this corpus.

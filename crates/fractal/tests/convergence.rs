@@ -2034,6 +2034,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 
 /// Corpus v26 adds the four person-availability kinds and new optional fields (a note's `source`
 /// and an ask's `priority`) to v25's kind selection, shifting the shared RNG schedule.
+/// Hosted burst run 43455339387 observed every fixed seed trim, including v25's seeds 2 and
+/// 233. The exact never-trim set is empty; no older corpus's schedule exceptions carry forward.
 const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
