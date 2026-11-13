@@ -2994,6 +2994,47 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(deadline)
     }
 
+    fn reconcile_projection_recovery(&self) -> Result<()> {
+        const TITLE: &str = "Replication projection requires explicit recovery";
+        let daemon = format!("daemon/{}", self.host);
+        let pending = self.store.pending_operational_failures(RECONCILER_ACTOR, &self.host)?
+            .into_iter().filter(|request| request.title == TITLE && request.targets == [daemon.as_str()])
+            .collect::<Vec<_>>();
+        let recovery = self.store.projection_recovery()?;
+        if let Some(recovery) = recovery {
+            if !pending.is_empty() {
+                return Ok(());
+            }
+            let key = format!("projection-recovery-required:{}:{}", self.host, recovery.updated_at_unix_ms);
+            let digest = hex::encode(sha2::Sha256::digest(key.as_bytes()));
+            self.store.record_operational_failure(
+                &format!("attention/{}", &digest[..32]),
+                &AttentionRequest {
+                    reviewer: "person/operator".into(),
+                    title: TITLE.into(),
+                    reason: format!("projection-recovery-required on {}: last-good frontier {:?}; reason {}; current admitted target {}; {}. Durable delivery is retained, but projection is parked. Automatic retry cannot recover this state; explicit local operator recovery is required.",
+                        self.host, recovery.frontier, recovery.reason_code, recovery.current_target,
+                        recovery.message.as_deref().unwrap_or("no reason recorded")),
+                    severity: "error".into(),
+                    targets: vec![daemon],
+                    actor: RECONCILER_ACTOR.into(),
+                    idempotency_key: key,
+                },
+            )?;
+            self.signal_changed();
+        } else {
+            for request in pending {
+                self.store.recover_operational_failure(
+                    &request.subject,
+                    "projection no longer requires explicit recovery",
+                    &format!("projection-recovered:{}", request.request),
+                )?;
+                self.signal_changed();
+            }
+        }
+        Ok(())
+    }
+
     pub fn reconcile_once(&self) -> Result<()> {
         self.reconcile_once_with_cause(crate::reconcile_telemetry::WakeCause::Other)
     }
@@ -3057,6 +3098,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
+        self.reconcile_projection_recovery()?;
         self.refresh_seat_admission();
         // Before any room is judged: the raised slices a restart left (lane_bursts.rs).
         if let Err(error) = self.find_raised_lanes() {
@@ -21898,6 +21940,7 @@ pub mod tests {
     mod channel_recovery;
     mod differential;
     mod fault_dismiss_tests;
+    mod projection_recovery;
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;

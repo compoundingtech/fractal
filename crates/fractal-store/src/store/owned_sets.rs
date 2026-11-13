@@ -2159,15 +2159,68 @@ pub fn commit_tx(
     Ok(receipt)
 }
 
+/// Project only the set dependency closure affected by this admitted prefix.
+/// Historical losing branches still own their members: a late branch can add an
+/// implicit retirement or hold another set through overlapping ownership.
+pub(super) fn project_incremental_tx(
+    transaction: &Transaction<'_>,
+    through: u64,
+    claims: &[ClaimRecord],
+) -> Result<(), FractalError> {
+    let current = rows(transaction, Some(through))?;
+    let mut affected = BTreeSet::new();
+    let mut members = BTreeSet::new();
+    for view in &current {
+        if claims.iter().any(|claim| {
+            claim.subject == view.id
+                || view.receipt.members.iter().chain(&view.receipt.retired).any(|(subject, member)| {
+                    claim.subject == *subject || claim.id == member.claim
+                })
+        }) {
+            affected.insert(view.id.clone());
+        }
+    }
+    loop {
+        let before = affected.len();
+        for view in current.iter().filter(|view| affected.contains(&view.id)) {
+            members.extend(view.receipt.members.keys().chain(view.receipt.retired.keys()).cloned());
+        }
+        for view in &current {
+            if view.receipt.members.keys().chain(view.receipt.retired.keys())
+                .any(|subject| members.contains(subject))
+            {
+                affected.insert(view.id.clone());
+            }
+        }
+        if affected.len() == before {
+            break;
+        }
+    }
+    if affected.is_empty() {
+        return Ok(());
+    }
+    let selected = selected(transaction, Some(through))?
+        .into_iter().filter(|view| affected.contains(&view.id)).collect();
+    project_selected_tx(transaction, selected, Some(through))
+}
+
 /// Rebuild the existing desired and mission projections through exact set member references.
 pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
-    for view in selected(transaction, None)? {
+    project_selected_tx(transaction, selected(transaction, None)?, None)
+}
+
+fn project_selected_tx(
+    transaction: &Transaction<'_>,
+    selected: Vec<View>,
+    at: Option<u64>,
+) -> Result<(), FractalError> {
+    for view in selected {
         if !view.blockers.is_empty() {
             continue;
         } // Existing runtimes hold; callers fence actions below.
-        for (s, (m, retired, implicit)) in effective_members(transaction, &view, None)? {
+        for (s, (m, retired, implicit)) in effective_members(transaction, &view, at)? {
             if m.kind == "mission" {
-                let Some(c) = claim(transaction, &m.claim, None)? else {
+                let Some(c) = claim(transaction, &m.claim, at)? else {
                     continue;
                 };
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-h6647239614f1 owner=fractal_store::store::owned_sets TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_definitions(mission_id,revision,state,claim_id) VALUES (?1,?2,?3,?4)
@@ -2177,7 +2230,7 @@ pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
                 let desired: DesiredSubject = if implicit {
                     stop_declaration(&s)?
                 } else {
-                    serde_json::from_value(claim(transaction, &m.claim, None)?.unwrap().body)
+                    serde_json::from_value(claim(transaction, &m.claim, at)?.unwrap().body)
                         .map_err(internal)?
                 };
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-hdde00d54b9e6 owner=fractal_store::store::owned_sets TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step) VALUES (?1,?2,?3,?4,?5,?6,NULL,NULL,NULL)

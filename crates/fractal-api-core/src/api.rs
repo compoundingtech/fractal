@@ -8504,6 +8504,16 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     {
         health["messages_store_index"] = json!(index);
     }
+    if let Some(recovery) = state.store.projection_recovery().map_err(ApiError::internal)? {
+        health["checks"] = json!([{
+            "id": "replication-projection-recovery-required",
+            "aggregate": "graph",
+            "frontier": recovery.frontier,
+            "reason_code": recovery.reason_code,
+            "current_target": recovery.current_target,
+            "phase": "projection",
+        }]);
+    }
     Ok(Json(health))
 }
 
@@ -10407,6 +10417,21 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
+    });
+    checks.check_alone("replication-projection-recovery-required", || {
+        let recovery = state.store.projection_recovery().map_err(ApiError::internal)?;
+        Ok(recovery.into_iter().map(|recovery| DoctorCheck {
+            name: "replication-projection-recovery-required".into(),
+            status: "fail".into(),
+            message: match recovery.frontier {
+                Some(frontier) => format!("projection recovery required at last-good frontier {frontier}; reason {}; current admitted target {}; automatic retry is parked: {}",
+                    recovery.reason_code, recovery.current_target,
+                    recovery.message.as_deref().unwrap_or("no reason recorded")),
+                None => format!("projection recovery required; last-good frontier unknown; reason {}; current admitted target {}; automatic retry is parked: {}",
+                    recovery.reason_code, recovery.current_target,
+                    recovery.message.as_deref().unwrap_or("no reason recorded")),
+            },
+        }).collect())
     });
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])

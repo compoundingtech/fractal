@@ -947,7 +947,7 @@ fn persistent_store_uses_bounded_sqlite_page_caches() {
 }
 
 #[test]
-fn replication_projection_retries_missing_and_stale_health_only() {
+fn replication_projection_parks_missing_health_until_explicit_recovery() {
     let store = Store::open_memory("node").unwrap();
     // A store that holds no claims has projected them all.
     assert!(!store.replication_projection_needs_recovery().unwrap());
@@ -958,8 +958,25 @@ fn replication_projection_retries_missing_and_stale_health_only() {
         .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
         .unwrap();
     assert!(store.replication_projection_needs_recovery().unwrap());
-    assert!(store.project_replication_backlog().unwrap());
+    assert!(!store.project_replication_backlog().unwrap());
+    assert!(store.replication_projection_recovery_required().unwrap());
+    let stored_frontier: u64 = store.connection.lock().unwrap().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(stored_frontier, 0, "fresh NOT NULL schema keeps its existing default");
+    let recovery = store.projection_recovery().unwrap().unwrap();
+    assert_eq!(recovery.frontier, None);
+    assert_eq!(recovery.reason_code, "missing-health");
+    assert!(!store.project_replication_backlog().unwrap());
+    store.replay_replication_graph().unwrap();
     assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(store.projection_recovery().unwrap().is_none());
+    let frontier: Option<u64> = store.connection.lock().unwrap().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(frontier, Some(store.index().unwrap()));
     store
         .connection
         .lock()
@@ -1093,7 +1110,9 @@ fn a_replay_quarantines_claims_it_cannot_project_and_projects_the_rest() {
         .receive_replication_exchange("source", FLEET, &exchange)
         .unwrap();
     target.validate_replication_backlog().unwrap();
-    target.project_replication_backlog().unwrap();
+    assert!(!target.project_replication_backlog().unwrap());
+    assert!(target.replication_projection_recovery_required().unwrap());
+    target.replay_replication_graph().unwrap();
     let connection = target.readers.get();
     let quarantined: i64 = connection
         .query_row(
@@ -1340,7 +1359,9 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
             .unwrap();
         bad_claim
     };
-    assert!(store.project_replication_backlog().unwrap());
+    assert!(!store.project_replication_backlog().unwrap());
+    assert!(store.replication_projection_recovery_required().unwrap());
+    store.replay_replication_graph().unwrap();
     let desired = store.desired_subjects().unwrap();
     assert!(
         desired
@@ -1377,7 +1398,8 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
             )
             .unwrap();
     }
-    assert!(store.project_replication_backlog().unwrap());
+    assert!(!store.project_replication_backlog().unwrap());
+    store.replay_replication_graph().unwrap();
     assert_eq!(
         store
             .replication_status(false, None, &[])
@@ -1699,11 +1721,19 @@ fn replay_progress_reports_work_without_advancing_an_uncommitted_frontier() {
     }
     let target = store.index().unwrap();
     let mut events = Vec::new();
-    assert!(
-        store
-            .project_replication_backlog_with_progress("test", |event| events.push(event))
-            .unwrap()
-    );
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        replay_graph_from_nothing_with_progress_tx(&transaction, &mut |event| {
+            let frontier: u64 = transaction.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(frontier, 0, "replay progress is not a committed frontier");
+            events.push(event);
+        }).unwrap();
+        transaction.rollback().unwrap();
+    }
     let claims = events
         .iter()
         .filter(|event| event.phase == "full-replay/base-claims")
@@ -1715,12 +1745,9 @@ fn replay_progress_reports_work_without_advancing_an_uncommitted_frontier() {
             .collect::<Vec<_>>(),
         [0]
     );
-    assert!(claims.iter().all(|event| event.frontier == 0
-        && event.target == target
-        && event.total == Some(0)));
-    let committed = events.last().unwrap();
-    assert_eq!(committed.phase, "projection-committed");
-    assert_eq!(committed.frontier, target);
+    assert!(claims.iter().all(|event| event.total == Some(0)));
+    assert_eq!(store.index().unwrap(), target);
+    store.replay_replication_graph().unwrap();
     let digest = store
         .replication_status(true, None, &[])
         .unwrap()
@@ -2301,7 +2328,7 @@ fn planning_replication_keeps_malformed_operation_and_unknown_kind_guards() {
 }
 
 #[test]
-fn full_replay_logs_every_guard_and_incremental_error_once() {
+fn live_projection_parks_every_guard_and_incremental_error_once() {
     for reason in [
         "missing-health",
         "unhealthy-projection",
@@ -2375,11 +2402,11 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         let target = store.index().unwrap();
         let mut lines = Vec::new();
         assert!(
-            store
+            !store
                 .project_replication_backlog_with_log(
                     "startup/project-replication-backlog",
                     |line| {
-                        // The log sink runs before any full-replay tables are changed.
+                        // Logging must not mutate admitted input.
                         assert_eq!(store.index().unwrap(), target);
                         lines.push(line.to_owned());
                     }
@@ -2388,21 +2415,23 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             "{reason}"
         );
         let expected_frontier = match reason {
-            "missing-health" => 0,
-            "frontier-ahead" => 999999,
-            _ => frontier,
+            "missing-health" => Value::Null,
+            "frontier-ahead" => json!(999999),
+            _ => json!(frontier),
         };
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|line| line.starts_with("fractal: projection full replay "))
-                .cloned()
-                .collect::<Vec<_>>(),
-            [format!(
-                "fractal: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
-            )],
-            "{reason}"
-        );
+        assert!(!lines.iter().any(|line|
+            line.starts_with("fractal: projection full replay ")), "{reason}");
+        let transitions = lines.iter()
+            .filter_map(|line| line.strip_prefix("fractal: projection recovery required "))
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 1, "{reason}");
+        assert_eq!(transitions[0]["event"], "replication.projection.recovery_required");
+        assert_eq!(transitions[0]["code"], "projection-recovery-required");
+        assert_eq!(transitions[0]["reason_code"],
+            if reason == "incremental-error:internal" { "internal" } else { reason });
+        assert_eq!(transitions[0]["frontier"], expected_frontier);
+        assert_eq!(transitions[0]["target"], target);
         let details = lines
             .iter()
             .filter_map(|line| line.strip_prefix("fractal: projection failure detail "))
@@ -2438,18 +2467,27 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                 assert_eq!(details[0]["claim_kind"], expected_kind);
                 let detail_position = lines.iter().position(|line|
                     line.starts_with("fractal: projection failure detail ")).unwrap();
-                let replay_position = lines.iter().position(|line|
-                    line.starts_with("fractal: projection full replay ")).unwrap();
-                assert!(detail_position < replay_position);
+                let transition_position = lines.iter().position(|line|
+                    line.starts_with("fractal: projection recovery required ")).unwrap();
+                assert!(detail_position < transition_position);
             }
         } else {
-            assert!(details.is_empty(), "{reason}");
+            assert_eq!(details.len(), 1, "{reason}");
+            assert_eq!(details[0]["code"], reason);
         }
         assert_eq!(
             FULL_REPLAYS.with(std::cell::Cell::get),
-            1,
-            "the fallback alone; a store with no claims sets up without one: {reason}"
+            0,
+            "live receive must never fall back to replay: {reason}"
         );
+        assert!(store.replication_projection_recovery_required().unwrap());
+        let parked = store.projection_recovery().unwrap().unwrap();
+        lines.clear();
+        assert!(!store.project_replication_backlog_with_log("automatic", |line|
+            lines.push(line.to_owned())).unwrap());
+        assert!(lines.is_empty(), "a durable park must not emit repeat transitions");
+        assert_eq!(store.projection_recovery().unwrap().unwrap().frontier, parked.frontier);
+        store.replay_replication_graph().unwrap();
         let digest = store
             .replication_status(true, None, &[])
             .unwrap()
@@ -2579,7 +2617,7 @@ fn simple_replication_registers_unambiguous_event_operations() {
 }
 
 #[test]
-fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
+fn simple_replication_parks_structural_operation_conflicts_until_explicit_replay() {
     let store = Store::open_memory("node").unwrap();
     store.project_replication_backlog().unwrap();
     for (index, digest) in ["digest-one", "digest-two"].into_iter().enumerate() {
@@ -2606,11 +2644,13 @@ fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
         transaction.commit().unwrap();
         drop(connection);
         let replays = FULL_REPLAYS.with(std::cell::Cell::get);
-        store.project_replication_backlog().unwrap();
-        assert_eq!(
-            FULL_REPLAYS.with(std::cell::Cell::get),
-            replays + usize::from(index == 1)
-        );
+        assert_eq!(store.project_replication_backlog().unwrap(), index == 0);
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays);
+        if index == 1 {
+            assert!(store.replication_projection_recovery_required().unwrap());
+            store.replay_replication_graph().unwrap();
+            assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays + 1);
+        }
     }
     assert_eq!(
         operation_tx(&store.readers.get(), "op/structural-event")

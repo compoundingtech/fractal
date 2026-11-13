@@ -1381,6 +1381,91 @@ async fn native_session_reports_cannot_replace_a_successor_binding() {
     assert_eq!(state.store.claims_for(subject, Some("harness.session-file")).unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn health_reports_parked_projection_without_repair_until_operator_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_client_claim(&ClaimInput {
+        subject: "resource/health-projection-recovery".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.health-projection-recovery"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("health-projection-recovery".into()),
+    }).unwrap();
+    let admitted = state.store.index().unwrap();
+    assert!(admitted > 0);
+    let current_target: u64 = state.store.readers.get().query_row(
+        "SELECT value FROM meta WHERE key='replication_admitted_index'", [],
+        |row| row.get::<_, String>(0),
+    ).unwrap().parse().unwrap();
+    // Test-only primary-key graph row removal; no variable producer values are bound.
+    state.store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hdce4da60a9eb owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [],
+    ).unwrap();
+    assert!(!state.store.project_replication_backlog().unwrap());
+    assert!(state.store.replication_projection_recovery_required().unwrap());
+    let parked = state.store.projection_recovery().unwrap().unwrap();
+    assert_eq!(parked.frontier, None);
+    assert_eq!(parked.reason_code, "missing-health");
+    assert_eq!(parked.current_target, current_target);
+
+    // get_request unwraps successful native responses; inspect the actual wire envelope here.
+    let response = router(state.clone()).oneshot(
+        Request::builder().method("GET").uri("/v1/health").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(envelope["api_version"], "st3.v1");
+    assert_eq!(envelope["store_index"], admitted);
+    assert_eq!(envelope["value"]["status"], "ready");
+    assert_eq!(envelope["value"]["store_index"], admitted);
+    assert_eq!(envelope["value"]["checks"], json!([{
+        "id": "replication-projection-recovery-required",
+        "aggregate": "graph",
+        "frontier": null,
+        "reason_code": "missing-health",
+        "current_target": current_target,
+        "phase": "projection",
+    }]));
+    assert_eq!(state.store.index().unwrap(), admitted);
+    assert!(state.store.replication_projection_recovery_required().unwrap());
+    let after_health = state.store.projection_recovery().unwrap().unwrap();
+    assert_eq!(
+        (&after_health.frontier, &after_health.reason_code, &after_health.current_target,
+            &after_health.message, &after_health.updated_at_unix_ms),
+        (&parked.frontier, &parked.reason_code, &parked.current_target,
+            &parked.message, &parked.updated_at_unix_ms),
+        "health must not retry, clear, or rewrite the durable park",
+    );
+
+    let doctor = doctor_report(&state).unwrap().0;
+    assert!(doctor.checks.iter().any(|check| check.name == "replication"));
+    let recovery_checks = doctor.checks.iter()
+        .filter(|check| check.name == "replication-projection-recovery-required")
+        .collect::<Vec<_>>();
+    assert_eq!(recovery_checks.len(), 1);
+    assert_eq!(recovery_checks[0].status, "fail");
+    assert_eq!(recovery_checks[0].message, format!(
+        "projection recovery required; last-good frontier unknown; reason missing-health; current admitted target {current_target}; automatic retry is parked: {}",
+        parked.message.as_deref().unwrap_or("no reason recorded"),
+    ));
+
+    state.store.replay_replication_graph().unwrap();
+    assert!(!state.store.replication_projection_recovery_required().unwrap());
+    assert!(state.store.projection_recovery().unwrap().is_none());
+    let repaired_index = state.store.index().unwrap();
+    let (status, health) = get_request(router(state.clone()), "/v1/health").await;
+    assert_eq!(status, StatusCode::OK, "{health}");
+    assert_eq!(health["status"], "ready");
+    assert_eq!(health["store_index"], repaired_index);
+    assert!(health.get("checks").is_none(), "the recovered check must be absent, not null or empty: {health}");
+    assert_eq!(state.store.index().unwrap(), repaired_index);
+    assert!(state.store.projection_recovery().unwrap().is_none());
+}
+
 #[test]
 fn doctor_flags_low_descriptor_limits_and_high_usage() {
     let low = descriptor_usage_check(256, 8192, Some(92));

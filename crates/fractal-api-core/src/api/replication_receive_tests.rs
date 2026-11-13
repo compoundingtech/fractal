@@ -106,7 +106,7 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
 }
 
 #[tokio::test]
-async fn replication_receive_final_drain_failure_retains_marker_and_retry_commits_rebuild() {
+async fn replication_receive_final_drain_failure_parks_until_explicit_recovery() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     crate::api::published_lists::tests_shared_client_v0_tests::publish(
@@ -119,9 +119,8 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
         requester: Some("person/operator".into()), mode: Some("run".into()),
         inputs: BTreeMap::new(), idempotency_key: "summary-drain-run".into(),
     }).unwrap();
-    // The first receive otherwise appends transport.observed, moving the target beyond
-    // this pending marker's frontier and correctly selecting an unhealthy full replay.
-    // Seed that ordinary receive side effect before arming a final-drain-only failure.
+    // Seed the ordinary transport side effect before arming a final-drain-only
+    // failure so receive does not move the target beyond the pending frontier.
     state.store.record_transport_observation("summary-source", "up", None, None).unwrap();
     state.store.project_replication_backlog().unwrap();
     let step = &run.steps[0].subject;
@@ -151,8 +150,10 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
              BEGIN SELECT RAISE(ABORT,'injected final drain failure'); END;",
         ).unwrap();
     }
-    // Arm the existing deferred state without a new production/test-only injection API.
-    assert!(!state.store.project_replication_backlog().unwrap());
+    // Reopen with the durable pending marker so the first failure occurs inside
+    // the metrics-bearing receive, not in an earlier unobserved projection pass.
+    drop(state);
+    let state = self::state(root.path());
     assert!(state.store.replication_projection_deferred());
     let drain_cut = state.store.index().unwrap();
     assert_eq!(state.store.projection_frontier().unwrap(), drain_cut);
@@ -194,6 +195,11 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
                 connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4bc9d78adbcf owner=fractal_api_core::api::replication_receive_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER receive_drain_fail").unwrap();
             }
             drop(connection);
+            if !retry {
+                assert!(state.store.replication_projection_recovery_required().unwrap());
+                state.store.replay_replication_graph().unwrap();
+                assert!(!state.store.replication_projection_recovery_required().unwrap());
+            }
             let bytes = logs.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let captured = String::from_utf8_lossy(&bytes);
             let summaries: Vec<_> = captured.lines()
@@ -203,7 +209,7 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
             if retry {
                 assert!(summary.contains("outcome=ok"), "{summary}");
                 assert!(summary.contains("projection_stage=-"), "{summary}");
-                assert!(summary.contains("projection_chunks=1"), "{summary}");
+                assert!(summary.contains("projection_chunks=0"), "{summary}");
             } else {
                 assert!(summary.contains("outcome=internal"), "{summary}");
                 assert!(summary.contains("projection_stage=final-drain"), "{summary}");

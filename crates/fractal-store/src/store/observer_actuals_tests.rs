@@ -330,11 +330,12 @@ fn observer_actuals_full_replay_invalidates_a_warm_changed_subject() {
         /* sqlite-large-value: allow-for-now lv-h270a0a1ecf8b owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
     assert_eq!(read(&store).1, 0, "health deletion alone does not mutate the actual fold");
     let mut logs = Vec::new();
-    assert!(store.project_replication_backlog_with_log(
-        "observer-reuse/forced-replay", |line| logs.push(line.to_owned()),
+    assert!(!store.project_replication_backlog_with_log(
+        "observer-reuse/park", |line| logs.push(line.to_owned()),
     ).unwrap());
-    assert!(logs.iter().any(|line| line.contains("reason=missing-health")),
-        "fixture must exercise full replay: {logs:?}");
+    assert!(logs.iter().any(|line| line.contains("\"reason_code\":\"missing-health\"")),
+        "fixture must exercise the live replay fence: {logs:?}");
+    store.replay_replication_graph().unwrap();
     let replayed = read(&store);
     assert_eq!(replayed.0, admitted);
     assert_ne!(replayed.0, old);
