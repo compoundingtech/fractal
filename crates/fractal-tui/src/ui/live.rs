@@ -1608,7 +1608,7 @@ pub fn run(context: Context) -> Result<()> {
                 continue;
             }
             ui.note_acted(&effect);
-            if let Effect::Attention { id, .. } = &effect {
+            if let Effect::Attention { id, .. } | Effect::Dismiss { id, .. } = &effect {
                 if answers.len() < 256 || answers.contains_key(id) || ui.pending_answers.contains_key(id) {
                     answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
                 } else {
@@ -1933,7 +1933,7 @@ pub fn run(context: Context) -> Result<()> {
                 other => (other, None, None),
             };
             let alert = match &effect {
-                Effect::Attention { id, .. } => Some(id.clone()),
+                Effect::Attention { id, .. } | Effect::Dismiss { id, .. } => Some(id.clone()),
                 _ => None,
             };
             let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
@@ -1996,6 +1996,10 @@ pub fn run(context: Context) -> Result<()> {
             }
             None => offline_drawn = false,
             Some(_) => {}
+        }
+        // A row put off comes back on its own clock: adapt again when its snooze ends.
+        if ui.world.snooze_ends().is_some_and(|end| chrono::Utc::now() >= end) {
+            changed = true;
         }
         if changed {
             ui.content.index(&timelines);
@@ -2990,6 +2994,23 @@ async fn perform(
             crate::attention_action(client, person, &id, seen, &action, reason, answer, option_notes)
                 .await
                 .map(|notice| (notice, None))
+        }
+        Effect::Snooze { id, until } => {
+            let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+            let (action, idem) = crate::action_pair();
+            let back = until.is_none();
+            client
+                .attention_snooze(action, idem, fence, fractal_client::AttentionSnoozeParameters { attention_id: id, until })
+                .await?;
+            Ok((if back { "Back in Inbox" } else { "Put off on every device" }.into(), None))
+        }
+        Effect::Dismiss { id, text } => {
+            let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+            let (action, idem) = crate::action_pair();
+            client
+                .attention_dismiss(action, idem, fence, fractal_client::AttentionDismissParameters { attention_id: id, text })
+                .await?;
+            Ok(("Dismissed".into(), None))
         }
         Effect::LaunchRevise { id, feedback } => {
             let current = client.attention_get(&id).await?;
@@ -4415,6 +4436,35 @@ mod tests {
         assert!(reads.due(now, true).is_empty(), "nothing st does not already keep");
         assert!(read_positions(&client, "person/robin", false).await.is_err(), "another person's positions are refused");
         server.abort();
+    }
+
+    /// l and x reach st as the person's own controls, through the dispatch every action uses:
+    /// the row st serves carries the snooze, null brings it back, and a dismissal st does not
+    /// take for this kind is refused in st's words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snooze_and_dismiss_reach_st_as_the_persons_own_controls() {
+        let gate = crate::tests::WaitingGate::start().await;
+        let id = gate.card().await.expect("the gate waits on the person").header.id;
+        let model = Model::default();
+        let until = chrono::Utc::now() + super::super::SNOOZE;
+        let snooze = Effect::Snooze {
+            id: id.clone(),
+            until: Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        };
+        let (notice, _) = perform(&gate.client, "person/avery", &model, snooze, None).await.unwrap();
+        assert_eq!(notice, "Put off on every device");
+        let served = gate.card().await.unwrap().snoozed_until.expect("st serves the snooze");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&served).unwrap().timestamp_millis(),
+            until.timestamp_millis()
+        );
+        let back = Effect::Snooze { id: id.clone(), until: None };
+        perform(&gate.client, "person/avery", &model, back, None).await.unwrap();
+        assert_eq!(gate.card().await.unwrap().snoozed_until, None);
+        let dismiss = Effect::Dismiss { id, text: None };
+        let refused = perform(&gate.client, "person/avery", &model, dismiss, None).await.unwrap_err();
+        assert!(super::plain(&refused).contains("not an ask"), "{}", super::plain(&refused));
+        assert!(gate.card().await.is_some(), "a refused dismissal leaves the gate asking");
     }
 
     #[tokio::test]
