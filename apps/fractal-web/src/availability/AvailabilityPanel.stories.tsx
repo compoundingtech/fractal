@@ -55,7 +55,7 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<typeof meta>
 export const AwayUntil: Story = { args: { state: 'away' }, play: shows('Away · until', 'Set by you', 'Ship the release notes first.', 'Expires') }
 export const PresenceAvailable: Story = { args: { state: 'available', scheme: 'light' }, play: shows('Available', 'Follows your presence: present', 'No note') }
-export const UrgentOnly: Story = { args: { state: 'urgent' }, play: shows('Urgent asks only · until', 'deadline within an hour') }
+export const UrgentOnly: Story = { args: { state: 'urgent' }, play: shows('Urgent asks only · until', 'priority critical') }
 export const HoldRoutine: Story = { args: { state: 'holdRoutine' }, play: shows('Held for routine asks · since', 'urgent asks keep running', 'Ship the release notes first.') }
 export const ReadRefused: Story = {
   args: { state: 'refused' },
