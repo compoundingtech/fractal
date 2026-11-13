@@ -598,28 +598,41 @@ impl Store {
         // Closing the state first prevents any new preparation; read roots after that commit.
         let member = read(&self.readers.get(), &grant.membership_id)?;
         let mut empty = true;
+        let mut uncertain = false;
         let mut retirement_errors = Vec::new();
         for child in &member.child_runs {
             smallclaims::touched::note_read(|| child.clone());
-            let status: Option<String> = self.readers.get().query_row("SELECT status FROM mission_runs WHERE id=?1",
-                [child.strip_prefix("mission-run/").unwrap_or(child)], |row| row.get(0)).optional()?;
-            empty &= status.is_some_and(|status| matches!(status.as_str(), "completed" | "failed" | "cancelled"));
+            let status = self.readers.get().query_row("SELECT status FROM mission_runs WHERE id=?1",
+                [child.strip_prefix("mission-run/").unwrap_or(child)], |row| row.get::<_, String>(0)).optional();
+            match status {
+                Ok(Some(status)) if matches!(status.as_str(), "completed" | "failed" | "cancelled") => {}
+                Ok(Some(_)) => empty = false,
+                Ok(None) => { empty = false; uncertain = true; }
+                Err(error) => {
+                    empty = false;
+                    uncertain = true;
+                    retirement_errors.push(format!("{child}: {error:#}"));
+                }
+            }
         }
         for root in &member.roots {
             if let Some(execution) = &root.execution {
                 if let Err(error) = self.retire_resource_root(grant, runtime, &root.runtime_id, &execution.generation_id) {
                     empty = false;
+                    uncertain = true;
                     retirement_errors.push(format!("{}: {error:#}", root.runtime_id));
                 }
             } else {
                 empty = false; // A prepared generation with unknown launch outcome retains custody.
+                uncertain = true;
             }
         }
         let teardown_error = (!retirement_errors.is_empty()).then(|| retirement_errors.join("; "));
         self.update_resource_membership(grant, |member| {
             if empty { member.state = "retired".into(); member.retired_at = Some(now_ms); member.reason = "execution tree confirmed empty".into(); }
-            else { member.state = "uncertain".into(); member.reason = teardown_error.clone()
+            else if uncertain { member.state = "uncertain".into(); member.reason = teardown_error.clone()
                 .unwrap_or_else(|| "execution retirement unconfirmed; custody retained".into()); }
+            else { member.state = "retiring".into(); member.reason = "awaiting linked child termination; custody retained".into(); }
             Ok(())
         })?;
         if let Some(error) = teardown_error { anyhow::bail!("resource tree retirement failed: {error}"); }
@@ -739,6 +752,64 @@ mod tests {
         assert!(store.prepare_resource_membership(&grant, "runtime-a").is_ok());
         store.withdraw_resource_membership(&holder.id, &holder.owner, 14).unwrap();
         assert!(store.prepare_resource_membership(&grant, "runtime-b").is_err());
+    }
+
+    #[test]
+    fn linked_child_retirement_waits_with_custody_and_tracks_terminal_dependency() {
+        let store = fixture();
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path());
+        let mut holder = request("child-holder");
+        holder.capacity = Some(Capacity { cores: 1, memory: 1024 });
+        let fit = Fit { room: holder.capacity, ..Fit::default() };
+        let Admission::Admitted(current) = store.request_resource_membership(&holder, fit, 1).unwrap() else {
+            panic!("holder must acquire physical custody");
+        };
+        let child = "mission-run/linked-child";
+        store.attach_resource_child(&current, &holder.owner, child).unwrap();
+        store.connection.write().execute(
+            "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES('linked-child','generation','working','running')", [],
+        ).unwrap();
+        let (retired, reads) = smallclaims::touched::record(|| {
+            store.retire_resource_membership(&current, &holder.owner, &runtime, 2).unwrap()
+        });
+        assert!(!retired);
+        assert!(reads.contains(child), "release must subscribe to the child's terminal transition");
+        let pending = store.resource_membership_for_grant(&current).unwrap();
+        assert_eq!(pending.state, "retiring");
+        assert_eq!(pending.retirement_requested_at, Some(2));
+        assert_eq!(pending.retired_at, None);
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 1024);
+        assert!(store.prepare_resource_membership(&current, "late-root").is_err());
+        let waiter = request("child-waiter");
+        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 3).unwrap(), Admission::Queued { .. }));
+        store.connection.write().execute("UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id='linked-child'", []).unwrap();
+        assert!(store.retire_resource_membership(&current, &holder.owner, &runtime, 4).unwrap());
+        let retired = store.resource_membership_for_grant(&current).unwrap();
+        assert_eq!(retired.state, "retired");
+        assert_eq!(retired.retired_at, Some(4));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+        grant(&store, &waiter, 5);
+    }
+
+    #[test]
+    fn missing_child_or_unknown_preparation_retains_uncertain_custody() {
+        for preparation in [false, true] {
+            let store = fixture();
+            let root = tempfile::tempdir().unwrap();
+            let holder = request("unknown-holder");
+            let current = grant(&store, &holder, 1);
+            if preparation {
+                store.prepare_resource_membership(&current, "unknown-root").unwrap();
+            } else {
+                store.attach_resource_child(&current, &holder.owner, "mission-run/missing-child").unwrap();
+            }
+            assert!(!store.retire_resource_membership(&current, &holder.owner, &runtime(root.path()), 2).unwrap());
+            let record = store.resource_membership_for_grant(&current).unwrap();
+            assert_eq!(record.state, "uncertain");
+            assert_eq!(record.retired_at, None);
+            assert!(matches!(store.request_resource_membership(&request("blocked"), Fit::default(), 3).unwrap(), Admission::Queued { .. }));
+        }
     }
 
     #[test]
