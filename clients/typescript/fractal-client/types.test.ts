@@ -42,6 +42,14 @@ void cancellationClient.notesList(cancellationOptions);
 void cancellationClient.customSubjectsList({}, cancellationOptions);
 void cancellationClient.publicationDefinition('mission/example', cancellationOptions);
 void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
+void cancellationClient.availabilityList(undefined, cancellationOptions);
+void cancellationClient.availabilityList('person/ada', cancellationOptions);
+void cancellationClient.availabilitySet({ status: { value: null } }, cancellationOptions);
+void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-11-12T09:57:30Z', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
+// @ts-expect-error a client reports raw device state, never derived presence
+void cancellationClient.presenceReport({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' });
+// @ts-expect-error interruptions are all, urgent or none
+void cancellationClient.availabilitySet({ interruptions: { value: 'focus' } });
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',

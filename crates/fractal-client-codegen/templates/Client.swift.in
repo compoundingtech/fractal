@@ -333,6 +333,10 @@ public actor FractalClient {
     }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+    /// Set or clear the session person's own availability. Requires write.availability; agent sessions are refused.
+    public func availabilitySet(_ request: AvailabilitySet) async throws -> Envelope<PersonAvailability> { try await self.request("v1/client/availability", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
+    /// Report one device's raw state for the session person, on every state change and again at `reportAgainAt`; the daemon derives presence and assigns the source. Requires write.presence.
+    public func presenceReport(_ report: PresenceReport) async throws -> Envelope<PresenceReportResult> { try await post("v1/client/presence", report) }
 
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }

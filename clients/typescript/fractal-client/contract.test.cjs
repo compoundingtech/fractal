@@ -452,6 +452,38 @@ test('notesList reads the typed advisory current notes endpoint', async () => {
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('availability reads select a person and writes send the session person nothing but the change', async () => {
+    const read = require('../../../docs/st3/client-v0/fixtures/person-availability.json');
+    const written = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json');
+    const set = require('../../../docs/st3/client-v0/fixtures/availability-set.json');
+    const report = require('../../../docs/st3/client-v0/fixtures/presence-report.json');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(init.method === 'GET' ? read : init.method === 'POST' ? reported : written);
+        },
+    });
+    assert.deepEqual(await client.availabilityList(), read);
+    assert.deepEqual(await client.availabilityList('person/ada'), read);
+    assert.deepEqual(await client.availabilitySet(set), written);
+    assert.deepEqual(await client.presenceReport(report), reported);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.deepEqual(sent.map(([url, init]) => [init.method, url]), [
+        ['GET', 'https://example.test/v1/client/availability'],
+        ['GET', 'https://example.test/v1/client/availability?person=person%2Fada'],
+        ['PUT', 'https://example.test/v1/client/availability'],
+        ['POST', 'https://example.test/v1/client/presence'],
+    ]);
+    assert.deepEqual(JSON.parse(sent[2][1].body), set);
+    assert.deepEqual(JSON.parse(sent[3][1].body), report);
+    assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
+});
+
 const validTraceparent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';
 const traceCases = [
     ['absent callback', undefined, undefined],
