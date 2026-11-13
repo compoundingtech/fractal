@@ -1178,7 +1178,42 @@ public struct TimelineToolResultBody: Codable, Sendable { public let blocks: [Ti
 public struct TimelineStatusBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let status: TimelineStatus; public let detail: String? }
 public struct TimelineErrorBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let code: String; public let message: String; public let retryable: Bool; public let details: [String: JSONValue] }
 public struct TimelineAttribution: Codable, Sendable { public let agentID: String; public let missionRunID: String?; public let generationID: String?; public let stepID: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", missionRunID = "mission_run_id", generationID = "generation_id", stepID = "step_id" } }
-public struct TimelineUsageBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let semantics: TimelineUsageSemantics; public let driver: String; public let model: String?; public let inputTokens: UInt64?; public let outputTokens: UInt64?; public let cachedTokens: UInt64?; public let totalTokens: UInt64?; public let contextUsedTokens: UInt64?; public let contextWindowTokens: UInt64?; public let contextUsedPercent: Double?; public let compactions: UInt64?; public let lastCompactionMs: UInt64?; public let lastCompactionTrigger: String?; public let cost: Double?; public let currency: String?; public let attribution: TimelineAttribution; enum CodingKeys: String, CodingKey { case blocks; case semantics, driver, model, inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent", compactions, lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", cost, currency, attribution } }
+public struct TimelineUsageBody: Codable, Sendable {
+    public let blocks: [TimelineBlock]?
+    public let semantics: TimelineUsageSemantics
+    public let driver: String
+    public let model, provider, account, responseID, api, stopReason: String?
+    public let startedAtUnixMs, completedAtUnixMs: UInt64?
+    public let durationMs, ttftMs: Double?
+    public let inputTokens, outputTokens, cachedTokens, cacheWriteTokens, cacheWrite1hTokens, reasoningTokens, totalTokens: UInt64?
+    public let turnID: String?
+    public let contextUsedTokens, contextWindowTokens: UInt64?
+    public let contextUsedPercent: Double?
+    public let compactions, lastCompactionMs: UInt64?
+    public let lastCompactionTrigger: String?
+    public let cost: Double?
+    public let costComponents: TimelineResponseCostComponents?
+    public let currency: String?
+    public let providerQuota: TimelineProviderQuota?
+    public let attribution: TimelineAttribution
+    enum CodingKeys: String, CodingKey {
+        case blocks, semantics, driver, model, provider, account, api, cost, currency, compactions, attribution
+        case responseID = "response_id", stopReason = "stop_reason", startedAtUnixMs = "started_at_unix_ms", completedAtUnixMs = "completed_at_unix_ms"
+        case durationMs = "duration_ms", ttftMs = "ttft_ms", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens"
+        case cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", reasoningTokens = "reasoning_tokens", totalTokens = "total_tokens", turnID = "turn_id"
+        case contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent"
+        case lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", costComponents = "cost_components", providerQuota = "provider_quota"
+    }
+}
+public struct TimelineResponseCostComponents: Codable, Sendable {
+    public let input, output, cacheRead, cacheWrite: Double?
+    enum CodingKeys: String, CodingKey { case input, output, cacheRead = "cache_read", cacheWrite = "cache_write" }
+}
+public enum TimelineProviderQuotaUnit: String, Codable, Sendable { case premiumRequests = "premium_requests" }
+public struct TimelineProviderQuota: Codable, Sendable {
+    public let unit: TimelineProviderQuotaUnit
+    public let quantity: Double
+}
 public struct TimelineRedactionBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let withheldBytes: UInt64; public let withheldItems: UInt64?; enum CodingKeys: String, CodingKey { case blocks; case reason, withheldBytes = "withheld_bytes", withheldItems = "withheld_items" } }
 public struct TimelineTruncationBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let omittedFromSequence: UInt64; public let omittedToSequence: UInt64; public let continuationCursor: String?; enum CodingKeys: String, CodingKey { case blocks; case reason, omittedFromSequence = "omitted_from_sequence", omittedToSequence = "omitted_to_sequence", continuationCursor = "continuation_cursor" } }
 public enum TimelineBody: Sendable { case message(TimelineMessageBody), content(TimelineContentBody), toolCall(TimelineToolCallBody), toolResult(TimelineToolResultBody), status(TimelineStatusBody), error(TimelineErrorBody), usage(TimelineUsageBody), redaction(TimelineRedactionBody), truncation(TimelineTruncationBody) }
