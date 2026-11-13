@@ -53,7 +53,7 @@ mod tests {
             "version 2\nagent \"asker\" { workspace \"/workspace\"; command \"true\" }", &state.node).unwrap();
         state.store.apply_internal(&intent, "hold-asker").unwrap();
         let ask = state.store.ask_person(&PersonAskRequest {
-            deadline_ms: None, default_answer: None, legacy_request: None,
+            deadline_ms: None, default_answer: None, legacy_request: None, priority: None,
             person: "person/operator".into(), title: "Repair approved?".into(), reason: "Operator decides".into(),
             actor: format!("agent/{}.asker", state.node), step: None, new_run: Some("hold-ask".into()),
             incarnation: None, idempotency_key: "hold-ask".into(), request: None,

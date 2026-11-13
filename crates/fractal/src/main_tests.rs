@@ -3626,7 +3626,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
-        ("hosts", include_str!("hosts_cli.rs")),
+        ("hosts", /* sqlite-large-value: allow-for-now lv-h04ee6ce18457 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("hosts_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
