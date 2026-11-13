@@ -154,7 +154,6 @@ impl Store {
             |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
         member.map(|member| serde_json::from_str(&member).map_err(Into::into)).transpose()
     }
-
     fn read_invocation_receipts(&self, agent: Option<&str>, invocation_id: Option<&str>) -> Result<Vec<InvocationReceipt>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
@@ -197,7 +196,6 @@ impl Store {
             .map_err(|error| anyhow::anyhow!("{error}"))??;
         Ok(())
     }
-
     /// A terminal runtime observation may close only an already verified exact incarnation.
     /// The source observation can be local; the resulting receipt remains durable.
     pub fn record_invocation_runtime_end(&self, observation: &ClaimRecord) -> Result<()> {

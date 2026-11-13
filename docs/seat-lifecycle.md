@@ -251,7 +251,6 @@ reference, not another invocation's shared bytes. Reads are private/no-store;
 deleted or expired references return Gone.
 
 
-
 The graph retains claimed work and pending mail.
 
 On relaunch, Fractal tries to continue the harness's last native session: `fractal agents restart`, a
