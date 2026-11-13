@@ -321,3 +321,17 @@ focused lineage regression validates, admits, and replicates both retry and supe
 inputs through the existing generic paths. No old-build admission or checkpoint comparison
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
+
+`claims-v26.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
+kinds (docs/st3/schema.md, "Person attention controls") on top of everything the previous
+snapshot covers, plus any optional fields main added since. Earlier versions stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v26.json`;
+do not hand-edit it. The simulation and audit reports select v26. Control draws use the person's
+native admission path over a few rows, with a snooze that sometimes ends; the focused regression
+admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
+converge. Every fixed seed trims except 610 and 1597, the exact never-trim set observed by hosted
+[burst run 43423546514](https://github.com/compoundingtech/fractal/actions/runs/43423546514)
+(nextest, every `convergence::seed_` test at the head). The cause is the schedule, not the new
+kinds: the shifted draws give both seeds an old-build node that is never excused, neither during
+the schedule nor by quiesce's half-the-runs excusal, so it holds every checkpoint. Excusing it
+after quiesce lets every new-build node trim with the control claims in place, with no failure.

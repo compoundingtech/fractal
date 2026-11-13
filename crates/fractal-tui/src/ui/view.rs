@@ -134,6 +134,16 @@ pub struct World {
     pub inventory_supported: Option<bool>,
     #[serde(skip)]
     pub inventory_partial: Vec<String>,
+    /// The clock this world was adapted at: ages, deadlines and snoozes are all told against it.
+    #[serde(skip)]
+    pub at: chrono::DateTime<chrono::FixedOffset>,
+}
+
+impl World {
+    /// When the next row put off comes back: the world must be adapted again then to show it.
+    pub fn snooze_ends(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        self.attention.items().iter().filter_map(|item| item.snoozed_until).filter(|until| *until > self.at).min()
+    }
 }
 
 /// A client connected to this member, as it describes itself.
@@ -211,6 +221,10 @@ pub struct Attention {
     /// Every agent conversation this item shows in, as st names them: the item is an alert in
     /// each. Empty when st does not name one (an older st), and then `agent` is the guess.
     pub conversations: Vec<String>,
+    /// Until when the person put it off (`attention.snooze`), as st says on every device of
+    /// theirs. It stays open meanwhile, and its deadline does not move.
+    #[serde(skip)]
+    pub snoozed_until: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
 
 impl Attention {
@@ -227,6 +241,11 @@ impl Attention {
         } else {
             self.conversations.iter().any(|conversation| conversation == agent)
         }
+    }
+
+    /// Whether its person put it off past `now`: it stays off Home and out of triage until then.
+    pub fn snoozed(&self, now: chrono::DateTime<chrono::FixedOffset>) -> bool {
+        self.snoozed_until.is_some_and(|until| until > now)
     }
 }
 

@@ -35,10 +35,11 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
         live: true, missions_followed: true, attention_live: true, agents_live: true,
         inventory_supported: Some(true), ..Default::default()
     };
+    let clock = chrono::DateTime::from_timestamp_millis(now).context("invalid demo clock")?.fixed_offset();
     let snapshot = Snapshot {
         id: "snapshot/scenario-demo".into(), host_id: "host/meadow".into(),
         store_index: 1, projection_version: "scenario-demo".into(),
-        created_at: chrono::DateTime::from_timestamp_millis(now).context("invalid demo clock")?.to_rfc3339(),
+        created_at: clock.to_rfc3339(),
         published_at: None,
     };
     for collection in [&mut model.now, &mut model.messages, &mut model.launches,
@@ -99,7 +100,7 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
     for (agent, entries) in conversations {
         extras.conversations.insert(agent, Load::Ready(adapt::conversation(&entries, &names)));
     }
-    let mut world = adapt::world_at(&model, person, &extras, &snapshot.created_at);
+    let mut world = adapt::world_at(&model, person, &extras, clock);
     world.worktrees = Load::Failed("The scenario kit does not model worktrees".into());
     Ok(DemoWorld { world, terminals, arrangements })
 }

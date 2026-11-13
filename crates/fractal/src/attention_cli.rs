@@ -334,5 +334,75 @@ pub(super) async fn run_attention(
             )
             .await
         }
+        AttentionCommand::Seen(target) => {
+            run_attention_control(endpoint, configured_person, target, AttentionControl::Seen, json_output).await
+        }
+        AttentionCommand::Snooze(args) => {
+            let until = if args.clear {
+                None
+            } else if let Some(until) = args.until {
+                Some(until)
+            } else {
+                let duration = args.duration.as_deref().context("name --for, --until or --clear")?;
+                let ms = fractal_daemon::graph::parse_duration(duration, true)?;
+                let until = i64::try_from(now_ms() + u128::from(ms)).ok()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .context("--for reaches past the last representable time")?;
+                Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            };
+            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Snooze(until), json_output).await
+        }
+        AttentionCommand::Dismiss(args) => {
+            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Dismiss(args.text), json_output).await
+        }
     }
+}
+
+enum AttentionControl {
+    Seen,
+    Snooze(Option<String>),
+    Dismiss(Option<String>),
+}
+
+/// A person's own control over one of their alerts, as every client of theirs sees it.
+async fn run_attention_control(
+    endpoint: &Endpoint,
+    configured_person: Option<&str>,
+    target: AttentionControlArgs,
+    control: AttentionControl,
+    json_output: bool,
+) -> Result<()> {
+    let actor = configured_human(target.actor.as_deref(), configured_person, "alerts")?;
+    let attention_id = resolve_member_subject(
+        endpoint,
+        &target.subject,
+        "attention",
+        Entity::Attention,
+        completion::Matching::Fuzzy,
+    )
+    .await?;
+    let client = generated_client(endpoint, Some(&actor))?;
+    let fence = ClientFence { snapshot_id: client.capabilities().await?.snapshot.id, ..Default::default() };
+    let key = uuid::Uuid::now_v7();
+    let (id, idempotency_key) = (format!("action/attention-{key}"), format!("attention-control-{key}"));
+    let (verb, result) = match control {
+        AttentionControl::Seen => ("seen", client.attention_seen(id, idempotency_key, fence,
+            fractal_client::AttentionSeenParameters { attention_id: attention_id.clone() }).await?),
+        AttentionControl::Snooze(until) => (if until.is_some() { "snoozed" } else { "back" }, client.attention_snooze(id, idempotency_key, fence,
+            fractal_client::AttentionSnoozeParameters { attention_id: attention_id.clone(), until }).await?),
+        AttentionControl::Dismiss(text) => ("dismissed", client.attention_dismiss(id, idempotency_key, fence,
+            fractal_client::AttentionDismissParameters { attention_id: attention_id.clone(), text }).await?),
+    };
+    if json_output {
+        return print_value(&result.value, true);
+    }
+    match &result.value.attention_control {
+        Some(state) => println!(
+            "{verb}\t{attention_id}\tseen {}\tsnoozed until {}",
+            state.seen_at.as_deref().unwrap_or("never"),
+            state.snoozed_until.as_deref().unwrap_or("-"),
+        ),
+        None => println!("{verb}\t{attention_id}"),
+    }
+    Ok(())
 }

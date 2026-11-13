@@ -178,11 +178,12 @@ pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
-    world_at(model, person, extras, &chrono::Utc::now().to_rfc3339())
+    world_at(model, person, extras, chrono::Utc::now().fixed_offset())
 }
 
 /// Adapt a snapshot using one explicit clock for all timestamp presentation.
-pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) -> World {
+pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, at: chrono::DateTime<chrono::FixedOffset>) -> World {
+    let now = &at.to_rfc3339();
     let restarting = extras
         .offline_since
         .is_some_and(|since| since.elapsed() < offline_grace());
@@ -320,6 +321,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         },
         inventory_supported: extras.inventory_supported,
         inventory_partial: extras.inventory_partial.clone(),
+        at,
     }
 }
 
@@ -638,6 +640,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
                 requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
+                snoozed_until: item.snoozed_until.as_deref().and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok()),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
@@ -2504,6 +2507,30 @@ mod tests {
                 .iter()
                 .all(|item| item.raised_by.is_none() && item.waiting.is_none())
         );
+    }
+
+    /// st's snooze on a row (`snoozed_until`) is the row's: it is told against the clock the
+    /// world was adapted at, and the world says when the next one ends.
+    #[test]
+    fn a_row_carries_the_snooze_st_serves_and_the_world_knows_when_it_ends() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        for row in [
+            row("attention/later", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T13:00:00Z"})),
+            row("attention/ended", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T11:00:00Z"})),
+            row("attention/open", "human-gate", serde_json::json!({})),
+        ] {
+            model.now.items.push(serde_json::from_value(row).unwrap());
+        }
+        model.now.snapshot = Some(fractal_client::Snapshot {
+            id: "snapshot/one".into(), host_id: "host/one".into(), store_index: 1,
+            projection_version: "test".into(), created_at: "2026-10-15T12:00:00Z".into(), published_at: None,
+        });
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-15T12:00:00Z").unwrap();
+        let world = world_at(&model, "person/example", &Extras::default(), at);
+        let snoozed = world.attention.items().iter().map(|item| (item.id.as_str(), item.snoozed(world.at))).collect::<Vec<_>>();
+        assert_eq!(snoozed, [("attention/later", true), ("attention/ended", false), ("attention/open", false)]);
+        assert_eq!(world.snooze_ends(), chrono::DateTime::parse_from_rfc3339("2026-10-15T13:00:00Z").ok());
     }
 
     /// A newer st may name a group or card this client does not know: the row still shows, as
