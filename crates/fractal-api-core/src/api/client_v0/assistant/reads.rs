@@ -21,6 +21,7 @@ pub const DEFAULT_RESPONSE_BYTES: usize = 4 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 const ATTENTION_KINDS: &[&str] = &[
+    "host-hold",
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
     "agent-request", "fault", "harness-login", "harness-prompt", "model-drift",
 ];
