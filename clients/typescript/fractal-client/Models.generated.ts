@@ -246,6 +246,7 @@ export type AgentMessageDay = {
   low_percent?: number | null;
   messages: number;
   since_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   until_ms: number;
   usage_cost_microusd: number;
@@ -4086,6 +4087,7 @@ export type StepExecutionUsage = {
   output_tokens: number;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4847,6 +4849,7 @@ export type UsageContext = {
 export type UsageCredits = {
   budget_microusd: number;
   period_start_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   used_microusd: number;
 };
@@ -4905,6 +4908,7 @@ export type UsagePricing = {
   rates_usd_per_million_tokens?: UsagePricingRates;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4935,6 +4939,7 @@ export type UsageRow = {
   reported_cost_microusd: number;
   step?: Id;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 

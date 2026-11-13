@@ -986,6 +986,8 @@ pub struct AgentMessageDay {
     pub usage_cost_microusd: u64,
     pub unpriced_tokens: u64,
     #[serde(default)]
+    pub unpriced_responses: u64,
+    #[serde(default)]
     pub low_percent: Option<f64>,
     #[serde(default)]
     pub high_percent: Option<f64>,
@@ -1019,6 +1021,8 @@ pub struct UsageCredits {
     pub budget_microusd: u64,
     pub used_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
     pub period_start_ms: u64,
 }
 /// An account's 5-hour and weekly limits, as the seat that measured it most recently read them.
@@ -1080,6 +1084,8 @@ pub struct UsageRow {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 
 /// Effective USD-per-million rates applied to the disjoint token buckets.
@@ -1111,6 +1117,8 @@ pub struct UsagePricing {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 
 /// A normalized KDL node. Empty optional collections are omitted just as in the stored AST.
@@ -1842,6 +1850,8 @@ pub struct StepExecutionUsage {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionStepProgram {

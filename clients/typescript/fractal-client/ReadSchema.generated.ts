@@ -696,6 +696,7 @@ export const AgentMessageDay = /*#__PURE__*/ (() => Schema.Struct({
   "low_percent": Schema.OptionFromOptionalNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "messages": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "usage_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
@@ -2561,6 +2562,7 @@ export const StepExecutionUsage = /*#__PURE__*/ (() => Schema.Struct({
   "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "StepExecutionUsage" }))()
 export type StepExecutionUsage = typeof StepExecutionUsage.Type
@@ -2915,6 +2917,7 @@ export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 export const UsageCredits = /*#__PURE__*/ (() => Schema.Struct({
   "budget_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "period_start_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "used_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageCredits", description: "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free." }))()
@@ -2978,6 +2981,7 @@ export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
   "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
 export type UsagePricing = typeof UsagePricing.Type
@@ -3003,6 +3007,7 @@ export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "step": optionalKey(Id),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageRow" }))()
 export type UsageRow = typeof UsageRow.Type
