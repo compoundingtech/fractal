@@ -217,6 +217,94 @@ final class AttentionModelTests: XCTestCase {
     await model.refresh(now: later.addingTimeInterval(30))
     XCTAssertEqual(model.sloHistory.value, [:], "a row no longer listed drops its history")
   }
+
+  func testSnoozedRowsHideUntilTheirSnoozeEndsAndAreNotSpoken() async {
+    let snoozedAsk = Fixture.record(id: "attention/later", from: "release-captain", urgent: true, snoozedUntil: now + 3600)
+    let urgent = Fixture.record(id: "attention/now", from: "observability", urgent: true)
+    let update = Fixture.record(
+      id: "attention/update", update: UpdateNote(about: "run/1", summary: nil), snoozedUntil: now + 1800)
+    let page = AttentionPage(records: [snoozedAsk, urgent, update], canAnswer: true, canControl: true)
+    let lines = Lines()
+    let speech = SpeechCoordinator(output: ScriptedSpeech(), clock: { [now] in now }, log: { lines.append($0) })
+    let model = AttentionModel(adapter: FakeAdapter(attention: [.success(page)], slo: [.success(slo)]), speech: speech)
+
+    await model.refresh(now: now)
+    XCTAssertEqual(model.asks, [urgent])
+    XCTAssertEqual(model.updates, [])
+    XCTAssertEqual(model.openAskCount, 1, "a snoozed ask is not counted")
+    XCTAssertEqual(model.snoozed.map(\.id), [snoozedAsk.id, update.id])
+    XCTAssertFalse(lines.all.contains { $0.contains(snoozedAsk.id) }, "the speech gate never sees a snoozed ask")
+    XCTAssertEqual(model.nextSnoozeEnd, now + 1800, "the panel re-renders at the earliest end")
+
+    model.snoozeEnded(at: now + 1800)
+    XCTAssertEqual(model.updates, [update])
+    XCTAssertEqual(model.nextSnoozeEnd, now + 3600)
+    model.snoozeEnded(at: now + 3600)
+    XCTAssertEqual(model.asks, [snoozedAsk, urgent])
+    XCTAssertNil(model.nextSnoozeEnd)
+  }
+
+  func testSeenIsSentOncePerRevisionAndOnlyWhenFractalLacksIt() async {
+    let unseen = Fixture.record(id: "attention/unseen")
+    let seen = Fixture.record(id: "attention/seen", seenAt: now - 60)
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [unseen, seen], canAnswer: true, canControl: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+
+    await model.markSeen(unseen)
+    await model.markSeen(unseen)
+    await model.markSeen(seen)
+    var controlled = await adapter.controlled
+    XCTAssertEqual(controlled, [AttentionControlSubmission(record: unseen, control: .seen)])
+
+    await adapter.refuseSubmissions("Fractal is restarting.")
+    let next = Fixture.record(id: "attention/unseen", revision: "claim/2")
+    await model.markSeen(next)
+    await adapter.acceptSubmissions()
+    await model.markSeen(next)
+    controlled = await adapter.controlled
+    XCTAssertEqual(controlled.dropFirst().map(\.revision), ["claim/2", "claim/2"], "a failed mark is tried again")
+  }
+
+  func testSnoozeAndDismissShowOnlyFractalsResultAndAreKeyedLikeAnswers() async throws {
+    let start = Date()
+    let ask = Fixture.record()
+    let snoozed = Fixture.record(snoozedUntil: start + 3600)
+    let adapter = FakeAdapter(
+      attention: [
+        .success(.init(records: [ask], canAnswer: true, canControl: true)),
+        .success(.init(records: [snoozed], canAnswer: true, canControl: true)),
+      ],
+      slo: [.success(slo), .success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: start)
+
+    let ended = await model.snooze(ask, .hours(1), now: start)
+    XCTAssertEqual(ended, .committed("Snooze for 1 hour"))
+    var controlled = await adapter.controlled
+    XCTAssertEqual(controlled, [AttentionControlSubmission(record: ask, control: .snooze(until: start + 3600))])
+    XCTAssertEqual(model.asks, [], "the committed snooze hides the card on the next read")
+    XCTAssertNil(model.controls[ask.id])
+
+    let refusal = "a harness-prompt row is not an ask: use its own actions (prompt.respond) (attention-dismiss-unsupported)."
+    await adapter.refuseSubmissions(refusal)
+    let refused = await model.dismiss(snoozed)
+    XCTAssertEqual(refused, .refused(refusal))
+    XCTAssertEqual(model.controls[snoozed.id], .refused(refusal), "Fractal's refusal, verbatim")
+    let reads = await adapter.attentionReads
+    XCTAssertEqual(reads, 2, "a refusal is neither refreshed nor retried")
+    controlled = await adapter.controlled
+    XCTAssertEqual(controlled.last?.control, .dismiss)
+
+    let snooze = AttentionControlSubmission(record: ask, control: .snooze(until: start + 3600))
+    XCTAssertEqual(snooze.actionID, AttentionControlSubmission(record: ask, control: .snooze(until: start + 3600)).actionID)
+    XCTAssertNotEqual(snooze.actionID, AttentionControlSubmission(record: ask, control: .snooze(until: start + 7200)).actionID)
+    XCTAssertNotEqual(snooze.actionID, AttentionControlSubmission(record: snoozed, control: .dismiss).actionID)
+    XCTAssertNotEqual(
+      AttentionControlSubmission(record: ask, control: .seen).actionID,
+      AttentionControlSubmission(record: Fixture.record(revision: "claim/2"), control: .seen).actionID)
+  }
 }
 
 private struct FakeError: Error, CustomStringConvertible {
@@ -297,6 +385,13 @@ private actor FakeAdapter: AttentionAdapter {
       arrived?.resume()
       arrived = nil
     }
+  }
+
+  private(set) var controlled: [AttentionControlSubmission] = []
+
+  func control(_ submission: AttentionControlSubmission) async throws {
+    controlled.append(submission)
+    if let refusal { throw AnswerRefused(refusal) }
   }
 
   func refuseSubmissions(_ reason: String) { refusal = reason }

@@ -103,15 +103,21 @@ actor FractalAttentionAdapter: AttentionAdapter {
   private let fractalURL: URL
 
   init(configuration: TrayConfiguration, clientName: String) {
-    client = FractalClient(
-      localSocketPath: configuration.socketPath, person: configuration.person, client: clientName)
-    fractalURL = configuration.fractalURL
+    self.init(
+      client: FractalClient(localSocketPath: configuration.socketPath, person: configuration.person, client: clientName),
+      fractalURL: configuration.fractalURL)
+  }
+
+  init(client: FractalClient, fractalURL: URL) {
+    self.client = client
+    self.fractalURL = fractalURL
   }
 
   func readAttention() async throws -> AttentionPage {
     do {
       let capabilities = try await client.capabilities().value.capabilities
-      let canAnswer = capabilities.contains { $0.id == "work.done" && $0.state == "granted" }
+      let granted = Set(capabilities.filter { $0.state == "granted" }.map(\.id))
+      let canControl = granted.isSuperset(of: [AttentionControl.seen, .snooze(until: .now), .dismiss].map(\.action))
       // Publish only after every cursor page succeeds, never an incomplete count.
       var cursor: String?
       var records: [AttentionRecord] = []
@@ -119,7 +125,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
         let page = try await client.attentionList(cursor: cursor, limit: Self.pageLimit).value
         for resource in page.items {
           guard case .attention(let item) = resource else { continue }
-          let record = try record(item)
+          let record = try Self.record(item, fractalURL: fractalURL)
           if record.role != .ignored { records.append(record) }
         }
         if page.page.hasMore {
@@ -131,7 +137,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
           cursor = nil
         }
       } while cursor != nil
-      return AttentionPage(records: records, canAnswer: canAnswer)
+      return AttentionPage(records: records, canAnswer: granted.contains("work.done"), canControl: canControl)
     } catch {
       throw ReadFailure(error)
     }
@@ -171,9 +177,66 @@ actor FractalAttentionAdapter: AttentionAdapter {
   /// still offering `work.done` and at the revision the person read; then submit once,
   /// fenced on that read. A failure is never retried here: the person sees why.
   func submit(_ submission: WorkDoneSubmission) async throws {
+    let write = Write(noun: "answer", doing: "answering")
+    let fence = try await fence(submission.attentionID, revision: submission.revision, offering: "work.done", write)
+    let answer = submission.answer
+    let parameters = PersonStepParameters(
+      targetID: submission.targetID, summary: answer.summary, episode: submission.episode,
+      answer: answer.hasTypedAnswer ? PersonAnswerInput(id: answer.answerID, text: answer.answerText) : nil)
+    try await commit(write) {
+      try await client.workDone(
+        id: submission.actionID, idempotencyKey: submission.actionID, fence: fence, parameters: parameters
+      ).value
+    }
+  }
+
+  /// The person's own controls: implied for every open row of theirs by `control.attention`,
+  /// never listed in its `actions`. Fenced and keyed as `work.done` is; Fractal's refusal (a
+  /// stale fence, `attention-dismiss-unsupported`) reaches the person verbatim.
+  func control(_ submission: AttentionControlSubmission) async throws {
+    let id = submission.actionID
+    let attention = submission.attentionID
+    switch submission.control {
+    case .seen:
+      let write = Write(noun: "seen mark", doing: "marking it seen")
+      let fence = try await fence(attention, revision: submission.revision, offering: nil, write)
+      try await commit(write) {
+        try await client.attentionSeen(
+          id: id, idempotencyKey: id, fence: fence, parameters: AttentionSeenParameters(attentionID: attention)
+        ).value
+      }
+    case .snooze(let until):
+      let write = Write(noun: "snooze", doing: "snoozing")
+      let fence = try await fence(attention, revision: submission.revision, offering: nil, write)
+      let parameters = AttentionSnoozeParameters(attentionID: attention, until: Self.rfc3339(until))
+      try await commit(write) {
+        try await client.attentionSnooze(id: id, idempotencyKey: id, fence: fence, parameters: parameters).value
+      }
+    case .dismiss:
+      let write = Write(noun: "dismissal", doing: "dismissing")
+      let fence = try await fence(attention, revision: submission.revision, offering: nil, write)
+      try await commit(write) {
+        try await client.attentionDismiss(
+          id: id, idempotencyKey: id, fence: fence, parameters: AttentionDismissParameters(attentionID: attention)
+        ).value
+      }
+    }
+  }
+
+  /// What a refusal names: the write (`answer`) and doing it (`answering`).
+  struct Write {
+    let noun: String
+    let doing: String
+  }
+
+  /// The fence for one write: the card read again, still open (and offering `action`, when the
+  /// write is one of its actions) at the revision the person read.
+  private func fence(_ attentionID: String, revision: String, offering action: String?, _ write: Write) async throws
+    -> Fence
+  {
     let current: Envelope<Resource>
     do {
-      current = try await client.attentionGet(id: submission.attentionID)
+      current = try await client.attentionGet(id: attentionID)
     } catch let envelope as ErrorEnvelope where envelope.code == .notFound {
       throw AnswerRefused("This was already answered or closed.")
     } catch {
@@ -182,40 +245,37 @@ actor FractalAttentionAdapter: AttentionAdapter {
     guard case .attention(let item) = current.value, item.state == "open" else {
       throw AnswerRefused("This was already answered or closed.")
     }
-    guard item.actions.contains("work.done") else {
-      throw AnswerRefused("Fractal no longer offers this answer here.")
+    if let action, !item.actions.contains(action) {
+      throw AnswerRefused("Fractal no longer offers this \(write.noun) here.")
     }
-    guard item.revision == submission.revision else {
-      throw AnswerRefused("This changed since you read it. Read it again before answering.")
+    guard item.revision == revision else {
+      throw AnswerRefused("This changed since you read it. Read it again before \(write.doing).")
     }
-    let answer = submission.answer
-    let parameters = PersonStepParameters(
-      targetID: submission.targetID, summary: answer.summary, episode: submission.episode,
-      answer: answer.hasTypedAnswer ? PersonAnswerInput(id: answer.answerID, text: answer.answerText) : nil)
+    return Fence(snapshotID: current.snapshot.id, subjectRevisions: [attentionID: revision])
+  }
+
+  /// Sends once and returns only when Fractal took it; never retried here.
+  private func commit(_ write: Write, _ send: () async throws -> ActionResult) async throws {
     let result: ActionResult
     do {
-      result = try await client.workDone(
-        id: submission.actionID, idempotencyKey: submission.actionID,
-        fence: Fence(snapshotID: current.snapshot.id, subjectRevisions: [submission.attentionID: submission.revision]),
-        parameters: parameters
-      ).value
+      result = try await send()
     } catch let envelope as ErrorEnvelope {
       throw AnswerRefused("\(ReadFailure.describe(envelope)).")
     } catch {
       throw AnswerRefused(
-        "The answer could not be confirmed (\(ReadFailure(error))); check the ask before answering again. It was not sent again.")
+        "The \(write.noun) could not be confirmed (\(ReadFailure(error))); check the ask before \(write.doing) again. It was not sent again.")
     }
     switch result.status {
     case "accepted", "completed": return
-    case "rejected": throw AnswerRefused("Fractal did not take this answer.")
+    case "rejected": throw AnswerRefused("Fractal did not take this \(write.noun).")
     default:
-      throw AnswerRefused("Fractal did not say whether it took this answer; check the ask before answering again.")
+      throw AnswerRefused("Fractal did not say whether it took this \(write.noun); check the ask before \(write.doing) again.")
     }
   }
 
   // MARK: Mapping
 
-  private func record(_ item: AttentionResource) throws -> AttentionRecord {
+  static func record(_ item: AttentionResource, fractalURL: URL) throws -> AttentionRecord {
     // Same association rule as Fractal web `homeView.ts` alertConversations.
     let conversations = [item.conversationID].compactMap { $0 } + (item.conversationIDs ?? [])
     let candidates = conversations.isEmpty ? [item.requesterID, item.sourceID].compactMap { $0 } : conversations
@@ -242,7 +302,8 @@ actor FractalAttentionAdapter: AttentionAdapter {
       },
       update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary, speech: $0.speech) },
       workDoneDefaults: Self.workDoneDefaults(parameters["work.done"]),
-      url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef), isUrgent: item.urgent == true)
+      url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef), isUrgent: item.urgent == true,
+      seenAt: item.seenAt.flatMap(Self.date(iso:)), snoozedUntil: item.snoozedUntil.flatMap(Self.date(iso:)))
   }
 
   /// The server-filled `work.done` summary and answer (an update's `Read` / `{id: read}`).

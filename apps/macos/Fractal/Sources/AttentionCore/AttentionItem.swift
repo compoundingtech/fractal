@@ -30,13 +30,16 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   /// Fractal's `urgent`, its one urgency rule (an ask its asker gave priority `critical`); never
   /// derived from a deadline here. A daemon that predates the field omits it: not urgent.
   public let isUrgent: Bool
+  /// The person's own controls on this row (`seen_at`, `snoozed_until`), on every client.
+  public let seenAt: Date?
+  public let snoozedUntil: Date?
 
   public init(
     id: String, revision: String, kind: String, state: String, sourceID: String,
     episode: String?, title: String, detail: String, from: String, requestedAt: Date?,
     deadlineAt: Date?, defaultAnswerLabel: String?, actions: [String], promptAnswers: [String],
     request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL,
-    isUrgent: Bool = false
+    isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil
   ) {
     self.id = id
     self.revision = revision
@@ -57,7 +60,12 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     self.workDoneDefaults = workDoneDefaults
     self.url = url
     self.isUrgent = isUrgent
+    self.seenAt = seenAt
+    self.snoozedUntil = snoozedUntil
   }
+
+  /// Fractal still lists a snoozed row; the tray hides it until its snooze ends.
+  public func isSnoozed(at now: Date) -> Bool { snoozedUntil.map { $0 > now } ?? false }
 
   /// What the tray does with this card. Mirrors Fractal web `data/attention.ts`
   /// `isWaitingForAnswer`: classify wire discriminants and offered actions, never text.
@@ -325,14 +333,58 @@ public struct WorkDoneSubmission: Sendable, Equatable {
   /// same answer to the same revision twice replays the first receipt instead of answering
   /// twice, and a different answer can never collide with it.
   public var actionID: String {
-    let fields = [
+    actionKey([
       "work.done", attentionID, revision, targetID, episode, answer.summary, answer.answerID ?? "",
       answer.answerText ?? "",
-    ]
-    let canonical = fields.map { "\($0.utf8.count):\($0)" }.joined()
-    let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
-    return "action/attention-tray-\(digest.prefix(40))"
+    ])
   }
+}
+
+/// A person's own control over one attention row (`control.attention`): never an answer.
+public enum AttentionControl: Sendable, Equatable {
+  /// The row was shown to the person.
+  case seen
+  /// Hidden on every client of the person until then; its deadline does not move.
+  case snooze(until: Date)
+  /// Fractal's person dismissal: an ask's asker reads `dismissed`; anything but a person-step
+  /// ask or update is refused (`attention-dismiss-unsupported`).
+  case dismiss
+
+  /// The action type on `v1/client/actions`.
+  public var action: String {
+    switch self {
+    case .seen: "attention.seen"
+    case .snooze: "attention.snooze"
+    case .dismiss: "attention.dismiss"
+    }
+  }
+}
+
+/// One fenced control for one attention revision, keyed as `work.done` is.
+public struct AttentionControlSubmission: Sendable, Equatable {
+  public let attentionID: String
+  public let revision: String
+  public let control: AttentionControl
+
+  public init(record: AttentionRecord, control: AttentionControl) {
+    attentionID = record.id
+    revision = record.revision
+    self.control = control
+  }
+
+  /// Action ID and idempotency key: the same control on the same revision replays Fractal's
+  /// first receipt; a snooze to another time is another action.
+  public var actionID: String {
+    var fields = [control.action, attentionID, revision]
+    if case .snooze(let until) = control { fields.append(String(Int64(until.timeIntervalSince1970 * 1000))) }
+    return actionKey(fields)
+  }
+}
+
+private func actionKey(_ fields: [String]) -> String {
+  let canonical = fields.map { "\($0.utf8.count):\($0)" }.joined()
+  let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+  return "action/attention-tray-\(digest.prefix(40))"
 }
 
 /// The answer for reading an update: the server's prefilled `work.done` parameters.
