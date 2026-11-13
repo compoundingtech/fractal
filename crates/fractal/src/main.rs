@@ -1391,35 +1391,23 @@ struct MissionShowArgs {
     limit: usize,
 }
 
-#[derive(Args)]
 struct MissionPublishArgs {
-    /// KDL file to publish; use `-` to read standard input.
-    file: PathBuf,
     /// Print the resolved publication preview without applying or running exec gates.
     /// Add --check to run mission and step gates during the preview; until scripts run after rounds.
-    #[arg(long, visible_alias = "preview")]
     dry_run: bool,
     /// Preview against this exact store index.
-    #[arg(long, visible_alias = "at")]
     at_index: Option<u64>,
     /// Complete person, agent or run subject authoring the publication.
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", value_parser = parse_mission_publication_actor)]
     actor: String,
     /// The workspace a run would use, where publish checks mission and step exec gates.
-    #[arg(long, default_value = ".")]
     workspace: PathBuf,
     /// Publish without checking mission and step exec gates for broken commands.
-    #[arg(long)]
     no_gate_check: bool,
     /// Check mission and step exec gates during a dry run. Until scripts run after each round.
-    #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// Mission input values for exec gate checks.
-    #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     /// Set by `fractal apply --force --reason`.
-    #[arg(skip)]
     force_reason: Option<String>,
 }
 
@@ -3554,7 +3542,6 @@ async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Resul
         client,
         intent,
         MissionPublishArgs {
-            file: PathBuf::new(),
             dry_run: args.dry_run,
             at_index: args.at_index,
             actor,
@@ -3715,7 +3702,6 @@ async fn run_owned_sets(
         }
     }
 }
-
 
 #[derive(Args)]
 struct AgentStartArgs {
@@ -8249,7 +8235,6 @@ fn notice_ignored_read_actor(actor: Option<&str>) {
         stderr_message("st", format_args!("--as is ignored for this read; no actor is required"));
     }
 }
-
 
 async fn publish_mission_intent(
     client: &Client,
