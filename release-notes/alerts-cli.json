@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "st alerts replaces st attention in the CLI (the old name stays as an alias); st now leads with N alerts, says nothing when none wait, and lists unread updates apart without counting them",
+  "summary": "fractal alerts is the CLI alert surface; the attention alias and retired alerts request command are removed",
   "replay": {
     "status": "none",
     "detail": "No replay, backfill or stored data change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "st attention and all its subcommands keep working as an alias of st alerts. Human output changes: st now prints 'N alerts' (nothing when there are none) and an UPDATES section instead of NEEDS YOU; st alerts ls prints ALERTS FOR PERSON then UPDATES. JSON output is unchanged. Gate cards now suggest st alerts approve|reject; an older st binary given that argv fails to parse it, so install the same build everywhere."
+    "detail": "Use fractal alerts instead of attention, and work ask or work update instead of alerts request. POST /v1/attention is removed; attention READ endpoints, durable IDs and historical claims remain readable. Alert resolve and withdraw retain their informational-update and delegated source actions."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "none",
-    "detail": "No manual action is required. Scripts that grep st now for NEEDS YOU should read --json instead."
+    "detail": "Update CLI callers to alerts before upgrading. The delivery soak records failures in its journal and report state instead of posting retired attention mutations."
   },
   "recovery": {
     "status": "none",

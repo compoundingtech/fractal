@@ -226,44 +226,6 @@ pub(super) async fn run_attention(
             }
             print_message_receipt(&receipt, json_output)
         }
-        AttentionCommand::Request(args) => {
-            let actor = args
-                .actor
-                .context("an attention request needs explicit --as")?;
-            let idempotency_key = args
-                .idempotency_key
-                .unwrap_or_else(|| format!("attention-request:{}", uuid::Uuid::now_v7().simple()));
-            let response: AttentionRequestView = client
-                .post(
-                    "/v1/attention",
-                    &fractal_daemon::model::AttentionRequestPost {
-                        request: AttentionRequest {
-                            reviewer: args.reviewer,
-                            title: args.title,
-                            reason: args.reason,
-                            severity: args.severity,
-                            targets: args.targets,
-                            actor,
-                            idempotency_key,
-                        },
-                        closing: fractal_daemon::model::AttentionClosing {
-                            until: args.until,
-                            step: args.step,
-                            closed_by: args.person_closes.then(|| "person".into()),
-                        },
-                    },
-                )
-                .await?;
-            if json_output {
-                print_value(&response, true)
-            } else {
-                println!("{}\t{}", response.status, response.subject);
-                if let Some(step) = &response.step {
-                    eprintln!("It closes on its own when `{step}` ends.");
-                }
-                Ok(())
-            }
-        }
         AttentionCommand::Resolve(args) => {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
             let response: AttentionRequestView = client
