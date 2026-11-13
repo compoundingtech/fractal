@@ -176,6 +176,8 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `operational.recovered` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `episode:string`, `failure:string`, `reason:string` |  |
 | `ordered-membership.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)` |  |
 | `owned-set.revised` | `owned-set` | `system-only` | `append` | `durable` | `body!:object`, `revision!:string` |  |
+| `person.attention-seen` | `person` | `capability-holder` | `append` | `durable` | `attention_id!:string`, `source!:string` |  |
+| `person.attention-snoozed` | `person` | `capability-holder` | `append` | `durable` | `attention_id!:string`, `source!:string`, `until_unix_ms!:integer or null` |  |
 | `person.delegation-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `actions!:array` |  |
 | `person.directive-note-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `expires_at:string`, `text!:string or null` |  |
 | `person.rename.completed` | `person` | `authorized-requester` | `append` | `durable` | `new_person:subject-reference`, `old_person:subject-reference`, `report:object` |  |
@@ -339,6 +341,10 @@ All members must upgrade before publishing accountable roots. Older members reta
 Notes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.
 
 Publication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.
+
+## Person attention controls
+
+`person.attention-seen` and `person.attention-snoozed` on `person/NAME` record that person's own controls over their attention rows: required `attention_id` (`attention/HASH`) and `source`, the daemon-assigned client the person acted from (its pairing grant, or `host/MEMBER` for a local caller). `person.attention-snoozed` also takes required `until_unix_ms`, positive Unix milliseconds or null to end the snooze. Only that exact person may write them, through the `attention.seen` and `attention.snooze` actions only, including replicated admission. Per row, the earliest accepted seen claim is when the person saw it; the latest snooze by accepted time, then canonical claim key, is current. A control changes only its person's view of a row: no lifecycle, deadline or asker reads it.
 
 ## Arrangement operation vocabulary
 

@@ -344,3 +344,12 @@ one more cut trims seed 2 on every modern node. So the kind changes which writer
 waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
 the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
 authority (#6210).
+
+`claims-v27.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
+kinds (docs/st3/schema.md, "Person attention controls") on top of everything the previous
+snapshot covers, plus any optional fields main added since. Earlier versions stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v27.json`;
+do not hand-edit it. The simulation and audit reports select v27. Control draws use the person's
+native admission path over a few rows, with a snooze that sometimes ends; the focused regression
+admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
+converge. PENDING: hosted never-trim characterization of v27.
