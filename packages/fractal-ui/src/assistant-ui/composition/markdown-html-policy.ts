@@ -247,37 +247,42 @@ export function markdownTreeText(tree: Node): string {
 
 /**
  * Fail-closed HTML-only fallback, deliberately NOT a second Markdown parser. Delimiter/image floods cannot use
- * CommonMark safely (nested images remain quadratic with attention disabled). Even HTML-looking literal code may
- * disappear here. Render errors apply this same scrub to text flattened from the already-filtered mdast.
+ * CommonMark safely (nested images remain quadratic with attention disabled). Render errors scrub approved mdast
+ * text through this same function. These rare views may hide literal code and the rest of the message.
  *
- * One forward scan consumes each character once. Open-count lookups skip unmatched closes; matched closes only
- * pop entries, so total stack work is linear. Malformed tags/comments hide through their end or EOF, never expose
- * their attributes. A nested '<' outside quotes begins another candidate rather than swallowing its opener.
+ * Dropped-element closer: none is accepted, an empty subset of normal closers; even an exact closer may be code.
+ * Comment end: none is accepted; a malformed inline opener may not be a normal comment and can contain a dropped
+ * opener before `-->`. Hiding to EOF avoids releasing its suffix earlier than the normal policy.
+ * CDATA/declaration/processing-instruction end: none is accepted; their embedded tags cannot release hidden text.
+ * Tag-name end: ASCII names are read once; recognizing extra malformed dropped openers only hides more.
+ * Attribute quote/end: only matching ASCII quotes release quoted spans; unterminated attributes hide to EOF.
+ * Nested `<` outside quotes: reprocess it, so an earlier malformed ordinary tag cannot swallow a dropped opener.
+ * Every cursor move is forward; each character belongs to one ordinary-text, name, or attribute scan: O(n).
  */
 export function filteredMarkdownText(source: string): string {
   const values: string[] = []
-  const hidden: string[] = []
-  const opened = new Map<string, number>()
   let plain = 0
   let at = 0
   while (at < source.length) {
-    const start = source.indexOf('<', at)
-    if (start === -1) break
-    at = start + 1
-    if (source.startsWith('!--', at)) {
-      if (hidden.length === 0) values.push(source.slice(plain, start))
-      const end = source.indexOf('-->', at + 3)
-      at = plain = end === -1 ? source.length : end + 3
-      continue
+    if (source.charCodeAt(at) !== 60) { at++; continue }
+    const start = at++
+    if (source[at] === '!' || source[at] === '?') {
+      values.push(source.slice(plain, start))
+      return values.join('')
     }
     const closing = source[at] === '/'
     if (closing) at++
     const nameStart = at
-    if (!/[A-Za-z!?]/.test(source[at] ?? '')) continue
-    while (at < source.length && /[A-Za-z0-9:!?-]/.test(source[at]!)) at++
+    const first = source.charCodeAt(at)
+    if (!((first >= 65 && first <= 90) || (first >= 97 && first <= 122))) continue
+    while (at < source.length) {
+      const code = source.charCodeAt(at)
+      if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 58 || code === 45)) break
+      at++
+    }
     const name = source.slice(nameStart, at).toLowerCase()
-    const closingBoundary = at === source.length || /[\t\n\f\r />]/.test(source[at]!)
-    if (hidden.length === 0) values.push(source.slice(plain, start))
+    values.push(source.slice(plain, start))
+    if (!closing && HTML_POLICY.dropWithContent.includes(name)) return values.join('')
     let quote: string | undefined
     while (at < source.length) {
       const character = source[at]!
@@ -287,21 +292,9 @@ export function filteredMarkdownText(source: string): string {
       else if (character === '>') { at++; break }
       at++
     }
-    if (closing && closingBoundary && opened.has(name)) {
-      while (hidden.length > 0) {
-        const closed = hidden.pop()!
-        const remaining = opened.get(closed)! - 1
-        if (remaining === 0) opened.delete(closed)
-        else opened.set(closed, remaining)
-        if (closed === name) break
-      }
-    } else if (!closing && HTML_POLICY.dropWithContent.includes(name)) {
-      hidden.push(name)
-      opened.set(name, (opened.get(name) ?? 0) + 1)
-    }
     plain = at
   }
-  if (hidden.length === 0) values.push(source.slice(plain))
+  values.push(source.slice(plain))
   return values.join('')
 }
 

@@ -29,6 +29,7 @@ if (usePulldown) await pulldown.installPulldown(await readFile(new URL('./markdo
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
 const htmlPolicy = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
 const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-security.json', import.meta.url), 'utf8')).payloads
+const fallbackBoundaries = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-close-boundaries.json', import.meta.url), 'utf8')).cases
 function policyTree(source) {
   const capture = {}
   ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
@@ -43,6 +44,16 @@ test('fail-closed fallback never discloses more than the normal parser across th
     const fallback = htmlPolicy.filteredMarkdownText(source)
     if (!full.includes('SECRET') || priorLeak) assert.doesNotMatch(fallback, /SECRET/, id)
     assert.doesNotMatch(fallback, /<[/!A-Za-z]/, id)
+  }
+})
+
+test('fallback hidden regions never reopen at whitespace closers, code closers or declaration boundaries', () => {
+  for (const { id, source } of fallbackBoundaries) {
+    assert.doesNotMatch(htmlPolicy.filteredMarkdownText(source), /SECRET|<[/!A-Za-z]/, id)
+    assert.match(htmlPolicy.filteredMarkdownText(source), /^Visible /, id)
+  }
+  for (const name of htmlPolicy.HTML_POLICY.dropWithContent) {
+    assert.equal(htmlPolicy.filteredMarkdownText(`Visible <${name}>SECRET</${name}>SECRET`), 'Visible ', name)
   }
 })
 
@@ -294,13 +305,12 @@ test('fallbacks intentionally fail closed even for HTML-looking literal code', a
   const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
   const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
-  assert.match(block(hostile), /Visible/)
   for (const source of [...FALLBACK_LITERAL_CODE, ...FALLBACK_CONTAINER_CODE]) {
     assert.doesNotMatch(filteredMarkdownText(source), /<[/!A-Za-z]|literal/, source)
   }
-  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
-  assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
-  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
+  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before ')
+  assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before ')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`')
   for (const source of FALLBACK_HTML_PAYLOADS) {
     assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
     assert.doesNotMatch(block(source), /HIDDEN|SECRET/, `normal parser must hide the same payload: ${source}`)
@@ -322,7 +332,7 @@ test('delimiter guard and caught renderer failure keep attribute markers and con
   const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
   try {
     for (const mode of ['delimiter guard', 'renderer failure']) {
-      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE, ...fallbackCorpus.filter(entry => entry.priorLeak).map(entry => entry.source)].entries()) {
+      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE, ...fallbackCorpus.filter(entry => entry.priorLeak).map(entry => entry.source), ...fallbackBoundaries.map(entry => entry.source)].entries()) {
         const before = caught.length
         const source = (mode === 'delimiter guard' ? '*a '.repeat(3000) : 'src/x.ts ') + 'Visible\n' + payload
         await act(async () => root.render(h(Markdown, {
@@ -332,7 +342,10 @@ test('delimiter guard and caught renderer failure keep attribute markers and con
         })))
         assert.deepEqual(caught.slice(before), mode === 'renderer failure' ? ['expected renderer failure'] : [], `${mode}: ${payload}`)
         assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
-        assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        assert.doesNotMatch(container.textContent, /HIDDEN|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        if (mode === 'delimiter guard' || !htmlPolicy.markdownTreeText(policyTree(source)).includes('SECRET')) {
+          assert.doesNotMatch(container.textContent, /SECRET/, `${mode} cannot disclose more than its policy-filtered tree: ${payload}`)
+        }
         assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
         assert.doesNotMatch(container.textContent, /<[/!A-Za-z]/, `${mode}: literal HTML may be hidden in a fallback`)
         if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
