@@ -321,3 +321,14 @@ focused lineage regression validates, admits, and replicates both retry and supe
 inputs through the existing generic paths. No old-build admission or checkpoint comparison
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
+
+`claims-v25.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a completed
+Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md), and carries the
+optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fields the registry has
+gained since v24. Versions 1 through 24 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
+do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`. With v25 every fixed seed converges; seeds
+2 and 233 are the exact never-trim set, observed locally and by hosted burst cargo-test run
+43411988505. Drawing the kind without writing it trims both, so the set follows the shifted schedule,
+not the kind's semantics. Hosted linux-tests remains the authority (#6210).
