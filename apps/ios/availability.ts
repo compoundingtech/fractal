@@ -38,31 +38,43 @@ function agoText(iso: string, now: Date): string {
 const until = (iso: string | null, now: Date) => iso ? `until ${whenText(iso, now)}` : '';
 const joined = (...parts: string[]) => parts.filter(Boolean).join(' · ');
 
-const INTERRUPTIONS = {
+// Every word Fractal answers is open: a later daemon may add one. A word this build does not know
+// reads as itself, so the row still says what Fractal said instead of vanishing or guessing.
+const UNKNOWN_DETAIL = 'A setting this version of the app does not describe';
+function lookup<T>(table: Readonly<Record<string, T>>, word: string): T | undefined {
+  return Object.hasOwn(table, word) ? table[word] : undefined;
+}
+
+const STATUS: Readonly<Record<string, string>> = { available: 'Available', away: 'Away' };
+const INTERRUPTIONS: Readonly<Record<string, readonly [string, string]>> = {
   all: ['Interruptions: all', 'Agents may ask you anything'],
   urgent: ['Interruptions: urgent only', 'Only asks due within an hour reach you'],
   none: ['Interruptions: none', 'No asks reach you'],
-} as const;
-const CLOCK = {
+};
+const CLOCK: Readonly<Record<string, readonly [string, string]>> = {
   run: ['Deadline clock: running', 'Ask deadlines run as set'],
   'hold-routine': ['Deadline clock: routine asks held', 'Urgent asks keep running; held time is added to the rest'],
   'hold-all': ['Deadline clock: every ask held', 'Held time is added to every deadline'],
-} as const;
+};
+
+/** The status row. Unreported means no device has reported for a day: the person reads as available and agents ask as usual. */
+function statusRow(availability: PersonAvailability, now: Date): AvailabilityRow {
+  const { status, status_source: source, presence, presence_observed_at: observed } = availability;
+  if (source === 'unreported') return { key: 'status', title: 'Available', context: 'No device reporting · agents ask as usual' };
+  const title = lookup(STATUS, status) ?? `Status: ${status}`;
+  if (source === 'override') return { key: 'status', title, context: joined('Set by you', until(availability.status_until, now)) };
+  if (source !== 'presence') return { key: 'status', title, context: joined(`Source: ${source}`, until(availability.status_until, now)) };
+  const reported = presence && presence !== 'unreported' && observed ? `${presence}, reported ${agoText(observed, now)}` : 'no recent report';
+  return { key: 'status', title, context: `From your devices: ${reported}` };
+}
 
 /** The four rows: status, interruptions, deadline clock and note. */
 export function availabilityRows(availability: PersonAvailability, note: DirectiveNote | null, now: Date): AvailabilityRow[] {
-  const presence = availability.presence && availability.presence !== 'unknown' && availability.presence_observed_at
-    ? `${availability.presence}, reported ${agoText(availability.presence_observed_at, now)}`
-    : 'no recent report';
-  const [interruptions, interruptionsDetail] = INTERRUPTIONS[availability.interruptions];
-  const [clock, clockDetail] = CLOCK[availability.deadline_clock];
+  const [interruptions, interruptionsDetail] = lookup(INTERRUPTIONS, availability.interruptions) ?? [`Interruptions: ${availability.interruptions}`, UNKNOWN_DETAIL];
+  const [clock, clockDetail] = lookup(CLOCK, availability.deadline_clock) ?? [`Deadline clock: ${availability.deadline_clock}`, UNKNOWN_DETAIL];
   const held = availability.deadline_clock !== 'run';
   return [
-    {
-      key: 'status',
-      title: availability.status === 'available' ? 'Available' : 'Away',
-      context: availability.status_source === 'override' ? joined('Set by you', until(availability.status_until, now)) : `From your devices: ${presence}`,
-    },
+    statusRow(availability, now),
     { key: 'interruptions', title: interruptions, context: joined(interruptionsDetail, until(availability.interruptions_until, now)) },
     {
       key: 'deadline_clock',
