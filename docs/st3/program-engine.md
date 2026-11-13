@@ -195,8 +195,9 @@ failure, explicit cancellation, and same-step replacement. The host sends `endin
 `done` or `unresponsive`, then `cancelled` only after actual exit. The daemon retains
 every exact host-incarnation/step/attempt termination independently of its outcome:
 removing an attempt from the running map or failing its step cannot erase that fence.
-Workers may forward only `journal`, `run`, and `ask`; they cannot forge host lifecycle
-notifications.
+Daemon-initiated failure registers its cancellation proof under the same mutex that
+removes the running entry, before persisting failure. The worker-message forwarding
+path accepts only `journal`, `run`, and `ask`, not host lifecycle notifications.
 
 A replacement fences only its own supersession lineage: itself, every superseded
 predecessor, and their descendants across all generations. Both pending worker

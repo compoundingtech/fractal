@@ -385,14 +385,19 @@ impl ProgramEngine {
     /// The program asked for something the daemon refuses (a defect of the bundle): its step fails
     /// and the program stops, with what it already waits on.
     pub fn fail(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
-        let generation = {
-            let inner = self.lock();
-            inner.running.get(step).filter(|running| running.dispatch.attempt == attempt).map(|running| running.generation)
-        };
         // Held as ended until its failure is written: a pass with a view read before then must
-        // not start the attempt again.
-        if let Some(generation) = generation.filter(|&generation| self.end(step, attempt, generation, None)) {
-            send_cancel(&mut self.lock(), generation, step, attempt, reason);
+        // not start the attempt again. Register its termination under the same mutex so a
+        // concurrent replacement cannot observe a forgotten attempt without its fence.
+        {
+            let mut inner = self.lock();
+            let generation = inner.running.get(step).filter(|running| running.dispatch.attempt == attempt)
+                .map(|running| running.generation);
+            if let Some(generation) = generation
+                && forget(&mut inner, step, attempt, generation)
+            {
+                inner.ended.insert(step.to_owned(), attempt);
+                send_cancel(&mut inner, generation, step, attempt, reason);
+            }
         }
         eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
         // The step's state first: a child started concurrently then sees it left (`waiting`).

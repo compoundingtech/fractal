@@ -306,6 +306,33 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
 }
 
 #[test]
+fn daemon_failure_retains_its_worker_fence_until_exact_exit_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "daemon-failure");
+    let step = &run.steps[0].subject;
+    running_attempt(&engine, &run, 1, 1);
+    let child = Command::new("sleep").arg("1000").spawn().unwrap();
+    let (lines, receiver) = mpsc::channel();
+    engine.lock().host = Some(Host { child, lines, generation: 1, ping: None });
+    engine.fail(step, 1, "the daemon refused a program request").unwrap();
+    assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+    assert!(!engine.lock().running.contains_key(step));
+    let cancel: Value = serde_json::from_slice(&receiver.try_recv().unwrap()).unwrap();
+    assert_eq!(cancel["t"], "cancel");
+    assert_eq!(cancel["step"], step.as_str());
+    assert_eq!(cancel["attempt"], 1);
+    assert!(!engine.fence_left_effects(&run).unwrap());
+    // A late host lifecycle notification cannot lose the daemon's pending proof.
+    engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
+    engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 2).unwrap();
+    assert!(!engine.fence_left_effects(&run).unwrap());
+    engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
+    assert!(engine.fence_left_effects(&run).unwrap());
+    engine.clone().host_exited(1);
+}
+
+#[test]
 fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     use std::os::unix::process::CommandExt as _;
     let dir = tempfile::tempdir().unwrap();
