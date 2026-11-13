@@ -28,6 +28,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
 | `github-event` | `github-event/RESOURCE/ITEM/NUMBER/KEY` | no | One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller. |
 | `github-post` | `github-post/OWNER/REPO/KIND/ID` | no | A GitHub comment or review an agent seat posted, by its GitHub ID. |
+| `github-workflow-run` | `github-workflow-run/OWNER/REPO/RUN_ID` | no | One completed CI run of a GitHub repository, written once by its repository's poller. |
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
 | `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
 | `host` | `host/NAME` | no | A graph host. |
@@ -128,6 +129,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `gate.reviewer-reassigned` | `gate-operation` | `authorized-requester` | `append` | `durable` | `owner:subject-reference`, `previous_reviewer:subject-reference`, `request:string`, `reviewer:subject-reference` | `gate` |
 | `github.event` | `github-event` | `system-only` | `once` | `durable` | `at!:string`, `detail:object`, `event!:string`, `head_sha:string`, `item!:subject-reference(resource)`, `observer!:subject-reference(observer)`, `version!:integer` |  |
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
+| `github.workflow-run` | `github-workflow-run` | `system-only` | `once` | `durable` | `attempt!:integer`, `completed_at!:string`, `conclusion!:string`, `created_at!:string`, `duration_ms!:integer`, `event!:string`, `flakes!:integer`, `flaky_tests!:integer`, `head_sha!:string`, `observer!:subject-reference(observer)`, `repository!:string`, `run_id!:integer`, `started_at!:string`, `version!:integer`, `workflow!:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
 | `glass.upserted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `body:object`, `replaced_revision:string` |  |
 | `harness-question.observed` | `harness-question` | `system-only` | `append` | `durable` | `agent!:subject-reference(agent)`, `native_id!:string`, `questions!:array`, `runtime_incarnation!:string`, `session!:string` |  |
