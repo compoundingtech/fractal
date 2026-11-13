@@ -185,7 +185,7 @@ export const ChangesPanel: Story = {
   render: ({ scheme, width }) => <Canvas scheme={scheme} width={width}><div style={{ height: 640, display: 'flex' }}><DiffPanel open title="Changes" showSurfaceTabs={false} branchFiles={[
     { path: 'src/rows.ts', diff: samplePatch.split('\n').slice(4), added: 3, removed: 2 },
     { path: 'src/space.ts', diff: ['@@ -1,5 +1,5 @@', '-const  a = 1', '+const a = 1', ' const b = 2', '+', ' const c = 3', '-  ', ' const d = 4'], added: 2, removed: 2 },
-    { path: 'src/blank.ts', diff: ['@@ -1,1 +1,2 @@', ' const e = 5', '+'], added: 1, removed: 0 },
+    { path: 'src/blank.ts', diff: ['@@ -0,0 +1,1 @@', '+'], added: 1, removed: 0 },
   ]} /></div></Canvas>,
   play: async ({ canvasElement }) => {
     const views = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="diff-code"]')]
