@@ -30,6 +30,7 @@ fn open_installs_each_domain_in_order() {
             "agent-messages",
             "arrangements",
             "read-positions",
+            "attention-controls",
             "limits",
             "usage-credits",
             "run-eta",
@@ -114,7 +115,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -128,6 +129,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/custom",
             "full-replay/arrangements",
             "full-replay/read-positions",
+            "full-replay/attention-controls",
             "full-replay/usage-credits",
             "full-replay/run-eta",
             "full-replay/wake-lookup",
