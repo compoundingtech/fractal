@@ -157,6 +157,7 @@ struct SectionHeader: View {
 }
 
 /// A grouped section: a subheadline header with its summary, and a quieter metadata footer.
+/// Header and footer sit on the group's edge, as an ask page's labels sit on its platters' edge.
 struct PanelSection<Content: View, Footer: View>: View {
   let title: String
   var aside: String?
@@ -167,7 +168,9 @@ struct PanelSection<Content: View, Footer: View>: View {
     Section {
       content()
     } header: {
+      // The Form indents headers to its rows' content; out by that much, to the group's edge.
       SectionHeader(title: title, aside: aside)
+        .padding(.horizontal, -PanelMetrics.formHeaderIndent)
     } footer: {
       // Metadata (when it was measured, presence): quieter than the header's own summary.
       footer()
@@ -184,7 +187,9 @@ extension PanelSection where Footer == EmptyView {
   }
 }
 
-/// A grouped, scrolling form on the panel's own material: no background of its own.
+/// A grouped, scrolling form on the panel's own material: no background of its own. Its groups
+/// start at the panel's inset (K3: the edge of the top level's rows, an ask page's labels and
+/// platters, and the header's hairline) rather than the grouped Form's own 20 pt.
 struct PanelForm<Content: View>: View {
   @Environment(\.panelScrollHeight) private var maxHeight
   @ViewBuilder let content: () -> Content
@@ -193,6 +198,7 @@ struct PanelForm<Content: View>: View {
     Form(content: content)
       .formStyle(.grouped)
       .scrollContentBackground(.hidden)
+      .contentMargins(.horizontal, PanelMetrics.inset - PanelMetrics.formMargin, for: .scrollContent)
       .frame(maxHeight: maxHeight)
       .fixedSize(horizontal: false, vertical: true)
   }

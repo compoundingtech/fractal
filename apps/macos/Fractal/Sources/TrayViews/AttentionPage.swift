@@ -324,7 +324,7 @@ private struct SubjectRow: View {
 }
 
 /// A PR's or issue's state in words with a shape: merged and closed differ from open by symbol,
-/// not only color; a head that moved since the ask says so.
+/// not only color; a head that moved since the ask says so in words, since it bears on the answer.
 private struct StatusText: View {
   let status: SubjectStatus
 
@@ -332,11 +332,15 @@ private struct StatusText: View {
     Group {
       switch status {
       case .state(let word, let headChanged):
-        HStack(spacing: 4) {
+        HStack(spacing: 8) {
           if headChanged {
-            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
-              .help("New commits since the asker looked")
-              .accessibilityLabel("Changed since asked")
+            Label {
+              Text("New commits")
+            } icon: {
+              Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
+            }
+            .help("New commits since the asker looked")
+            .accessibilityLabel("New commits since asked")
           }
           Label(word.capitalized, systemImage: Self.symbol(word)).foregroundStyle(Self.tint(word))
         }

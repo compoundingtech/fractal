@@ -9,6 +9,7 @@ import SwiftUI
 public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   public init(model: AttentionModel, build: BuildIdentity) {
     self.model = model
@@ -19,15 +20,19 @@ public struct TrayPanel: View {
     ZStack(alignment: .top) {
       page
         .id(model.route)
-        // The top level leaves and returns on the leading side, pages on the trailing side: a
-        // page goes back the way it came.
-        .transition(
-          (model.route == .home ? AnyTransition.move(edge: .leading) : .move(edge: .trailing)).combined(with: .opacity))
+        .transition(transition)
     }
     .frame(width: PanelMetrics.width, alignment: .top)
     .clipped()
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)
+  }
+
+  /// The top level leaves and returns on the leading side, pages on the trailing side: a page
+  /// goes back the way it came. With Reduce Motion, pages cross-fade in place.
+  private var transition: AnyTransition {
+    if reduceMotion { return .opacity }
+    return (model.route == .home ? AnyTransition.move(edge: .leading) : .move(edge: .trailing)).combined(with: .opacity)
   }
 
   @ViewBuilder private var page: some View {

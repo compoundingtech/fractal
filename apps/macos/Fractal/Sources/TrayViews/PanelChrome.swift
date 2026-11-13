@@ -21,6 +21,10 @@ enum PanelMetrics {
   /// Leading symbol column of a row.
   static let symbolWidth: CGFloat = 18
   static let symbolSpacing: CGFloat = 8
+  /// The grouped Form's own horizontal margin, and how far it indents a section header past
+  /// its group's edge. Measured from its renders; the Form publishes neither.
+  static let formMargin: CGFloat = 20
+  static let formHeaderIndent: CGFloat = 10
 }
 
 /// The height limit of a page's scrolling content; snapshots lift it to render whole pages. An
@@ -71,6 +75,8 @@ struct PageHeader<Trailing: View>: View {
         .help("Back (Esc)")
         .accessibilityLabel("Back")
         Text(title).font(.headline).lineLimit(1).accessibilityAddTraits(.isHeader)
+          // A push lands VoiceOver on the page it opened.
+          .focusOnArrival(true)
         Spacer(minLength: 8)
         trailing()
       }
@@ -89,9 +95,12 @@ extension PageHeader where Trailing == EmptyView {
   }
 }
 
+/// Pushes and backs. The transition is the panel's (`TrayPanel`): a slide, or with Reduce Motion
+/// a cross-fade.
 @MainActor enum PanelMotion {
+  static let duration = 0.32
   /// Critically damped: a push follows a click, not a flick, so it never overshoots.
-  static let push = Animation.smooth(duration: 0.32)
+  static let push = Animation.smooth(duration: duration)
 
   /// Pushes a page, then reads what it shows.
   static func open(_ route: PanelRoute, in model: AttentionModel) {
@@ -101,6 +110,31 @@ extension PageHeader where Trailing == EmptyView {
 
   static func back(in model: AttentionModel) {
     withAnimation(push) { model.back() }
+  }
+}
+
+/// Moves VoiceOver focus to this element when it arrives with a page change, once the push has
+/// settled: the route swap replaces the element VoiceOver was on, and focus set mid-transition
+/// is lost. Nothing happens unless an assistive technology is running.
+private struct FocusOnArrival: ViewModifier {
+  let arrives: Bool
+  @AccessibilityFocusState private var focused: Bool
+
+  func body(content: Content) -> some View {
+    content
+      .accessibilityFocused($focused)
+      .task {
+        guard arrives else { return }
+        do { try await Task.sleep(for: .seconds(PanelMotion.duration)) } catch { return }
+        focused = true
+      }
+  }
+}
+
+extension View {
+  /// VoiceOver focus lands here when the view appears with a page change and `arrives` holds.
+  func focusOnArrival(_ arrives: Bool) -> some View {
+    modifier(FocusOnArrival(arrives: arrives))
   }
 }
 
