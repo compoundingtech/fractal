@@ -1548,11 +1548,112 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `public-repo-history.yml` | Ordinary content check on pull requests and merge groups; ready for separately activated trusted required-workflow identity, but not currently a forgery-proof admission boundary. |
 | `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
-The content guard still rejects real machine/home identities and private fleet configuration
-references. Release workflows remain separate from the required gate; neither package
-verification nor the Nix package/check graph is made redundant by workspace nextest.
+### Required public history guard
+
+`public-repo-history` checks every introduced commit for public-clean content, not just the
+candidate's final tree. It currently runs as an ordinary check to catch honest mistakes.
+The forgery-proof trust anchor (organization required workflows or a dedicated producer
+App) is a separate decision; no such enforcement is claimed here. Hosted scanning loads
+`scripts/check-public-repo` and its policy from `github.workflow_sha`. That revision is
+trusted only when a required-workflow rule pins it to an approved source; ordinary candidate
+workflows can change their own scanner. The local hook uses accepted remote main's scanner.
+`BASE` and `HEAD` select the immutable history range, not the hosted scanner revision:
+
+```sh
+python3 <trusted-copy>/check-public-repo --repo "$PWD" --base BASE --head HEAD
+```
+
+It traverses `merge-base(BASE, HEAD)..HEAD`, recursively including merged side histories
+and merge commits. Every commit message is checked. Against every parent, additions,
+modifications and type changes contribute the complete introduced blobs, checked at
+their real repository paths; removed lines and synthetic diff headers are not authored
+content to scan. Gitlinks receive path checks only because they reference commits, not
+local blobs. This keeps path-specific policy intact and detects forbidden content anywhere
+in an introduced blob, not just on its added lines. Candidate scripts, configuration and
+dependencies are not executed to decide whether their content is public-clean.
+The content policy rejects real machine/home identities and private fleet configuration
+references. A dirty intermediate commit followed by a cleanup commit still fails, even when
+the head tree and the aggregate base-to-head diff are clean: merging retains that history.
+
+Create a replacement branch from a clean base, apply only public-clean changes and commit
+messages, and open a replacement PR. Do not force-push or rebase the existing PR to remove
+the offending history. A clean head cannot repair an already dirty introduced commit.
+
+The protection must require the **workflow identity**, not a `public-repo-history` status
+context attributed to the GitHub Actions app. Any candidate workflow with `statuses: write`
+can forge that context using the same app identity; a job name or integration ID does not
+identify trusted workflow code. Candidate `merge_group` YAML is likewise not a trust root.
+
+Use GitHub's organization-level **Require workflows to pass before merging** rule, selecting
+the public source repository `compoundingtech/fractal` (repository ID `1310762902`), path
+`.github/workflows/public-repo-history.yml`, and `sha` set to the full approved commit
+ID containing both the repaired workflow and scanner. Do not select a candidate PR or
+queue ref, or use a floating `ref` in place of the approved SHA. Scanner and policy
+are loaded from that same workflow SHA, not from a future main or candidate revision.
+Updates require a reviewed SHA repin. Keep main's pull-request, deletion and force-push
+protections and an empty bypass list. This rule belongs to an organization ruleset,
+not repository main ruleset `20563764`.
+
+**Activation prerequisite:** the observed organization plan is GitHub Free. GitHub documents
+[organization rulesets](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization)
+for Team and Enterprise plans; the required-workflow rule is not a repository-level rule,
+even for this public repository. Upgrade the organization to a supported plan before
+activation. If that is unavailable, a separately controlled, dedicated non-Actions GitHub
+App would be needed instead; no such app is provisioned by this change. The Actions status
+context is not an acceptable substitute. This change does not mutate live settings or
+claim that trusted enforcement is already active.
+
+After landing the workflow and history-capable scanner on trusted main, an administrator
+sets `TRUSTED_WORKFLOW_SHA` to that full approved landing commit ID. The following prints
+the exact organization ruleset payload for `POST /orgs/compoundingtech/rulesets`; it does
+not send a request. No activation SHA can be supplied before that trusted landing exists.
+
+```sh
+jq -n --arg sha "$TRUSTED_WORKFLOW_SHA" '{
+  "name": "public-repo-history",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "repository_id": { "repository_ids": [1310762902] },
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
+  },
+  "rules": [{
+    "type": "workflows",
+    "parameters": {
+      "do_not_enforce_on_create": false,
+      "workflows": [{
+        "repository_id": 1310762902,
+        "path": ".github/workflows/public-repo-history.yml",
+        "sha": $sha
+      }]
+    }
+  }]
+}'
+```
+
+The selected trusted workflow handles `pull_request` and `merge_group`, checks out
+`github.workflow_sha` for scanner and policy, and fetches immutable event base/head
+objects without checking out or executing the candidate. The event base remains the
+scanner's `--base`; it does not select scanner code. A trusted source without the scanner
+contract fails rather than falling back to candidate code. The token has only
+`contents: read`, is not persisted in the checkout, and publishes no commit status.
+After activation or a reviewed SHA repin, retrigger the PR and merge-queue runs so the
+required workflow runs under the new policy.
+
+Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-only pre-push
+guard, using the trusted base's scanner before the existing evidence-signing path. The guard
+does not run candidate code, builds, tests or signing. `ST_SKIP_EVIDENCE=1` and
+`ST_EVIDENCE_LOCAL=off` do not skip it; bypassing the local hook does not bypass the hosted
+required check. Existing evidence-signing waits, background execution and non-blocking
+signing failures are unchanged. A landing-signing transition is a separate change, not part
+of this guard.
+
+Release workflows remain separate from the required gate; neither package verification nor
+the Nix package/check graph is made redundant by workspace nextest.
 
 ## Merge queue
 
@@ -1564,16 +1665,19 @@ gh pr merge NUMBER --auto --match-head-commit REVIEWED_HEAD
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
-`merge_group` event; see the
-trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
+`linux-gate`, `genie-freshness`, `typescript-client`, `fractal-web` and `public-repo-history`
+(these run on the `merge_group` event; see `fleet.yml.genie.ts` and
+`public-repo-history.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
-The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
-bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
+The repository ruleset (`.github/repo-settings.json`, generated from
+`repo-settings.json.genie.ts`, applied by an administrator and never by CI) requires the
+four workspace checks from GitHub Actions with an empty bypass list. The separate
+organization required-workflow rule described above supplies the public-history trust
+boundary; requiring a fifth Actions status context would not do so. The repository
+ruleset keeps the pull-request, deletion and force-push protections and configures the queue:
 merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.
