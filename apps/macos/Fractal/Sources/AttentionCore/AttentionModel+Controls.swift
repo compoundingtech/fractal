@@ -66,6 +66,7 @@ extension AttentionModel {
     do {
       try await adapter.control(AttentionControlSubmission(record: record, control: control))
       controls[record.id] = .committed(label)
+      receipt = Receipt(title: record.title, outcome: label)
       await refresh()
       return .committed(label)
     } catch {

@@ -321,6 +321,65 @@ final class AttentionModelTests: XCTestCase {
       AttentionControlSubmission(record: ask, control: .seen).actionID,
       AttentionControlSubmission(record: Fixture.record(revision: "claim/2"), control: .seen).actionID)
   }
+
+  func testAPageReadsItsDetailConversationAndImagesAndKeepsThemWhenARereadFails() async {
+    let ask = Fixture.record(request: Fixture.decision(), conversationID: "agent/builder")
+    let image = AttachmentRef(sha256: "abc", mediaType: "image/png", name: "shot.png", size: 3, message: "work/step-1")
+    let file = AttachmentRef(sha256: "def", mediaType: "application/pdf", name: "spec.pdf", size: 3, message: "work/step-1")
+    let context = AttentionContext(
+      detail: "Goals",
+      request: RequestContext(
+        question: "Ship?", whyPerson: nil, summary: nil, reasons: ["green"], recommendation: nil, subjects: [],
+        attachments: [image, file]))
+    let excerpt = ConversationExcerpt(
+      conversationID: "agent/builder", turns: [ConversationTurn(id: "t", speaker: .asker, author: nil, text: "Asking", at: nil)],
+      hasEarlier: false)
+    let page = AttentionPage(records: [ask], canAnswer: true)
+    let adapter = FakeAdapter(attention: [.success(page), .success(page)], slo: [.success(slo), .success(slo)])
+    await adapter.setContext(context)
+    await adapter.setExcerpt(excerpt)
+    await adapter.setAttachment("abc", Data([1, 2, 3]))
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    let readsAtTop = await adapter.contextReads
+    XCTAssertEqual(model.route, .home)
+    XCTAssertTrue(readsAtTop.isEmpty, "the top level reads no page")
+
+    model.open(.attention(ask.id))
+    await model.readOpenPage(now: now)
+    XCTAssertEqual(model.contexts[ask.id]?.value, context)
+    XCTAssertEqual(model.excerpts[ask.id]?.value, .some(excerpt))
+    XCTAssertEqual(model.attachments["abc"]?.value, Data([1, 2, 3]))
+    XCTAssertNil(model.attachments["def"], "only images are read")
+
+    await adapter.failContext("member gone")
+    await model.refresh(now: now + 30)
+    XCTAssertEqual(model.contexts[ask.id]?.value, context, "a failed reread keeps the last detail")
+    XCTAssertEqual(model.contexts[ask.id]?.state, .stale(lastSuccess: now, reason: "member gone"))
+    XCTAssertEqual(model.excerpts[ask.id]?.state, .fresh(now + 30), "the conversation is read on its own")
+    let imageReads = await adapter.attachmentReads
+    XCTAssertEqual(imageReads, ["abc"], "an image is content-addressed: read once")
+  }
+
+  func testAnsweringOnAPageReturnsToTheTopLevelWithAReceipt() async {
+    let ask = Fixture.record(request: Fixture.decision())
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [ask], canAnswer: true)), .success(.init(records: [], canAnswer: true))],
+      slo: [.success(slo), .success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(ask.id))
+    await model.readOpenPage(now: now)
+    XCTAssertNotNil(model.contexts[ask.id])
+
+    await model.answer(ask, with: WorkDoneAnswer(summary: "Ship", answerID: "ship"), label: "Ship")
+
+    XCTAssertEqual(model.route, .home, "the card left Fractal, so its page closes")
+    XCTAssertEqual(model.receipt, Receipt(title: "Ship it?", outcome: "Answered Ship"))
+    XCTAssertNil(model.contexts[ask.id], "a closed card's page content is dropped")
+    model.open(.objectives)
+    XCTAssertNil(model.receipt, "moving on clears the receipt")
+  }
 }
 
 private struct FakeError: Error, CustomStringConvertible {
@@ -408,6 +467,32 @@ private actor FakeAdapter: AttentionAdapter {
   func control(_ submission: AttentionControlSubmission) async throws {
     controlled.append(submission)
     if let refusal { throw AnswerRefused(refusal) }
+  }
+
+  private(set) var contextReads: [String] = []
+  private var contextFailure: String?
+  var context = AttentionContext(detail: "Goals", request: nil)
+  var excerpt: ConversationExcerpt?
+  var attachmentBytes: [String: Data] = [:]
+  private(set) var attachmentReads: [String] = []
+
+  func failContext(_ reason: String?) { contextFailure = reason }
+  func setContext(_ context: AttentionContext) { self.context = context }
+  func setExcerpt(_ excerpt: ConversationExcerpt?) { self.excerpt = excerpt }
+  func setAttachment(_ sha: String, _ data: Data) { attachmentBytes[sha] = data }
+
+  func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
+    contextReads.append(record.id)
+    if let contextFailure { throw FakeError(description: contextFailure) }
+    return context
+  }
+
+  func readExcerpt(_ record: AttentionRecord) async throws -> ConversationExcerpt? { excerpt }
+
+  func readAttachment(_ attachment: AttachmentRef) async throws -> Data {
+    attachmentReads.append(attachment.sha256)
+    guard let data = attachmentBytes[attachment.sha256] else { throw FakeError(description: "blob-expired") }
+    return data
   }
 
   func refuseSubmissions(_ reason: String) { refusal = reason }

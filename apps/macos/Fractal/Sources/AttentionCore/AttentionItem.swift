@@ -33,13 +33,16 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   /// The person's own controls on this row (`seen_at`, `snoozed_until`), on every client.
   public let seenAt: Date?
   public let snoozedUntil: Date?
+  /// The asking agent (`agent/…`) whose conversation the card belongs to; the member resolves
+  /// it to that agent's current session.
+  public let conversationID: String?
 
   public init(
     id: String, revision: String, kind: String, state: String, sourceID: String,
     episode: String?, title: String, detail: String, from: String, requestedAt: Date?,
     deadlineAt: Date?, defaultAnswerLabel: String?, actions: [String], promptAnswers: [String],
     request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL,
-    isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil
+    isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil, conversationID: String? = nil
   ) {
     self.id = id
     self.revision = revision
@@ -62,6 +65,7 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     self.isUrgent = isUrgent
     self.seenAt = seenAt
     self.snoozedUntil = snoozedUntil
+    self.conversationID = conversationID
   }
 
   /// Fractal still lists a snoozed row; the tray hides it until its snooze ends.

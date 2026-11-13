@@ -38,6 +38,13 @@ public protocol AttentionAdapter: Sendable {
   func submit(_ submission: WorkDoneSubmission) async throws
   /// Returns only once Fractal committed the control; throws `AnswerRefused` otherwise.
   func control(_ submission: AttentionControlSubmission) async throws
+  /// One card's detail as Fractal holds it now: the full request and the work it belongs to.
+  func readContext(_ record: AttentionRecord) async throws -> AttentionContext
+  /// The requesting agent's recent conversation (at most `ConversationExcerpt.turnLimit` turns),
+  /// or nil when the card names no agent conversation.
+  func readExcerpt(_ record: AttentionRecord) async throws -> ConversationExcerpt?
+  /// An attachment's bytes.
+  func readAttachment(_ attachment: AttachmentRef) async throws -> Data
 }
 
 /// One independently refreshed section: a failure keeps its last value and never blanks another.
@@ -97,6 +104,16 @@ public enum AnswerState: Sendable, Equatable {
   public let configurationError: String?
   let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
+  /// The page the panel shows; a page whose card left Fractal returns to the top level.
+  public internal(set) var route: PanelRoute = .home
+  /// Each open card's detail and its asker's conversation, read when its page opens and again
+  /// on every refresh while it is open; a failed read keeps the last one, marked stale.
+  public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
+  public internal(set) var excerpts: [String: LiveSection<ConversationExcerpt?>] = [:]
+  /// Image attachments by SHA-256; content-addressed, so read once.
+  public internal(set) var attachments: [String: LiveSection<Data>] = [:]
+  /// What the last answer or control committed, shown on the top level after its card left.
+  public internal(set) var receipt: Receipt?
   private var refreshAgain = false
 
   public init(
@@ -174,6 +191,7 @@ public enum AnswerState: Sendable, Equatable {
         }
       }
     } while refreshAgain
+    await readOpenPage(now: now)
     considerSpeech(now: now ?? .now)
   }
 
@@ -270,12 +288,16 @@ public enum AnswerState: Sendable, Equatable {
       return open.contains(id)
     }
     answerDrafts = answerDrafts.filter { open.contains($0.key) }
+    contexts = contexts.filter { open.contains($0.key) }
+    excerpts = excerpts.filter { open.contains($0.key) }
     if let focused = focusedInput, focused != Self.noteInput, !open.contains(focused) { focusedInput = nil }
     let shown = Set(page.records.filter { !$0.isSnoozed(at: snoozeClock) }.map(\.id))
     controls = controls.filter { id, state in
       if case .sending = state { return true }
       return shown.contains(id)
     }
+    // A page whose card was answered, closed or snoozed elsewhere goes back to the top level.
+    if case .attention(let id) = route, !shown.contains(id) { route = .home }
   }
 
   /// Whether the person has typed or picked anything not yet sent, or is typing now: the
@@ -295,6 +317,7 @@ public enum AnswerState: Sendable, Equatable {
       try await adapter.submit(WorkDoneSubmission(record: record, answer: answer))
       answers[record.id] = .committed(label)
       answerDrafts[record.id] = nil
+      receipt = Receipt(title: record.title, outcome: "Answered \(label)")
       await refresh()
       return .committed(label)
     } catch {
