@@ -1,17 +1,17 @@
 {
   "version": 1,
-  "summary": "The iOS app reports the person's presence: present in the foreground, refreshed every 10 minutes, and idle when it leaves",
+  "summary": "The iOS app reports its raw state for the person's presence: active in the foreground, inactive when it leaves, with the last touch",
   "replay": {
     "status": "none",
     "detail": "No graph replay."
   },
   "schema": {
     "status": "none",
-    "detail": "No database, claim or client API change; the app uses the existing client-v0 availability operations."
+    "detail": "No database, claim or client API change; the app uses the existing client-v0 presence operation."
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rule change. Reports go to POST /v1/client/presence; the 10-minute repeat sits between the daemon's 5-minute dedup window and its 15-minute staleness."
+    "detail": "No checkpoint rule change. Reports go to POST /v1/client/presence on every change of state and again at the answer's report_again_at; the phone applies no idle threshold and sends no heartbeat."
   },
   "compatibility": {
     "status": "changed",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "A stale report ages out after 15 minutes; set a status override to ignore presence."
+    "detail": "Fractal stops counting a device's report after 24 hours; set a status override to ignore presence."
   }
 }

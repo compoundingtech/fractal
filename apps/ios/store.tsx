@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { AppState, unstable_batchedUpdates } from 'react-native';
+import { AppState, unstable_batchedUpdates, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
@@ -150,6 +150,12 @@ function useAppStore(proof?: FabricProfile) {
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
+  // The person's last input, for presence: a touch anywhere in the app (the root view's capture only
+  // records its time) or the app coming forward. `presence` is the live connection's reporter.
+  const lastInput = useRef<number | null>(foreground.current.active ? Date.now() : null);
+  const presence = useRef<PresenceReporter | null>(null);
+  useEffect(() => foreground.current.subscribe(active => { if (active) lastInput.current = Date.now(); }), []);
+  const noteInput = useCallback(() => { lastInput.current = Date.now(); presence.current?.input(); }, []);
   const [status, setStatus] = useState<Status>('setup');
   const [hasSynced, setHasSynced] = useState(false);
   // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
@@ -552,17 +558,24 @@ function useAppStore(proof?: FabricProfile) {
     } catch (e) { if (capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
-  // While a connection is live and its pairing may report presence, this phone says whether the person is here.
+  // While a connection is live and its pairing may report presence, this phone reports its raw state
+  // (see presence.ts); each answer's availability replaces what Now shows.
   useEffect(() => {
     if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/') || !caps.capabilities.some(capability => capability.id === 'write.presence' && capability.state === 'granted')) return;
     const reporter = new PresenceReporter({
-      report: async (presence, observed_at) => { const person = (await client.presenceReport({ presence, observed_at })).value; if (capsRef.current === caps) setAvailability(previous => ({ ...previous, person })); },
+      report: async report => {
+        const result = (await client.presenceReport(report)).value;
+        if (capsRef.current === caps) setAvailability(previous => ({ ...previous, person: result.availability }));
+        return result;
+      },
+      lastInput: () => lastInput.current,
       after: (run, ms) => { const timer = setTimeout(run, ms); return () => clearTimeout(timer); }, now: Date.now,
     });
+    presence.current = reporter;
     const gate = foreground.current;
     if (gate.active) reporter.foreground(true);
     const leave = gate.subscribe(active => reporter.foreground(active));
-    return () => { leave(); reporter.stop(); };
+    return () => { leave(); reporter.stop(); if (presence.current === reporter) presence.current = null; };
   }, [proof, client, status, caps]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
@@ -1338,7 +1351,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, noteInput,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
@@ -1354,7 +1367,8 @@ export function StoreProvider({ children, proof }: { children: ReactNode; proof?
   const store = useAppStore(proof);
   return <StoreContext.Provider value={store}>
     <DiagnosticsConnection client={store.client} url={store.url} credential={store.credential} enabled={!proof} />
-    {children}
+    {/* Every touch start asks the root first whether it wants the touch; it records the time, for presence, and declines. */}
+    <View style={{ flex: 1 }} onStartShouldSetResponderCapture={() => { store.noteInput(); return false; }}>{children}</View>
   </StoreContext.Provider>;
 }
 export function useStore(): Store {
