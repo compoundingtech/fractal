@@ -9,7 +9,8 @@ use super::doc::{Doc, DocExt, Hit};
 use super::{text, theme};
 use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, TimeDelta, TimeZone, Utc};
 use fractal_client::{
-    AvailabilityDeadlineClockChange, AvailabilityInterruptionsChange, AvailabilitySet, AvailabilityStatusChange, Client,
+    AvailabilityDeadlineClock, AvailabilityDeadlineClockChange, AvailabilityInterruptions, AvailabilityInterruptionsChange,
+    AvailabilityPresence, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange, AvailabilityStatusSource, Client,
     ClientError, DirectiveNote, ErrorCode, PersonAvailability,
 };
 use ratatui::text::{Line, Span};
@@ -28,6 +29,9 @@ const PRESETS: [(char, &str, Preset); 4] = [
     ('3', "2 hours", Preset::TwoHours),
     ('4', "tomorrow 09:00", Preset::TomorrowNine),
 ];
+
+/// Under a word a newer Fractal sent, which this version does not know and shows as `unknown`.
+const UNKNOWN: &str = "A word this version does not know; updating shows it.";
 
 /// What Fractal last said: the person's effective availability and their current note.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,33 +306,46 @@ impl Availability {
         };
         let at = |label: &str, time: &Option<String>| time.as_deref().map(|time| format!(" · {label} {}", when(time, now)));
         let found = &reading.availability;
-        let (status, color) = match found.status.as_str() {
-            "available" => ("available", theme::GREEN),
-            _ => ("away", theme::YELLOW),
+        let (status, color) = match found.status {
+            AvailabilityStatus::Available => ("available", theme::GREEN),
+            AvailabilityStatus::Away => ("away", theme::YELLOW),
+            AvailabilityStatus::Unknown => ("unknown", theme::TEXT),
         };
-        let source = if found.status_source == "override" { " · set by you" } else { " · from presence" };
+        let (source, explanation) = match found.status_source {
+            AvailabilityStatusSource::Override => (" · set by you", None),
+            AvailabilityStatusSource::Presence => (" · from presence", None),
+            AvailabilityStatusSource::Unreported => {
+                (" · no device reporting", Some("No device has reported for 24 hours; agents ask as usual."))
+            }
+            AvailabilityStatusSource::Unknown => (" · from an unknown source", None),
+        };
         let mut details = source.to_owned();
         details.extend(at("until", &found.status_until));
         row(&mut doc, "Status", status, theme::strong(color), &details, width);
-        if let Some(presence) = &found.presence {
+        let unknown = found.status == AvailabilityStatus::Unknown || found.status_source == AvailabilityStatusSource::Unknown;
+        explain(&mut doc, if unknown { Some(UNKNOWN) } else { explanation }, width);
+        if let Some(presence) = found.presence {
             let details = at("reported", &found.presence_observed_at).unwrap_or_default();
-            row(&mut doc, "Presence", presence, theme::text(), &details, width);
+            row(&mut doc, "Presence", presence.as_str(), theme::text(), &details, width);
+            explain(&mut doc, (presence == AvailabilityPresence::Unknown).then_some(UNKNOWN), width);
         }
-        let (interruptions, explanation) = match found.interruptions.as_str() {
-            "urgent" => ("urgent asks only", Some("Only an ask due within an hour interrupts you.")),
-            "none" => ("none", Some("No ask interrupts you.")),
-            _ => ("all asks", None),
+        let (interruptions, explanation) = match found.interruptions {
+            AvailabilityInterruptions::All => ("all asks", None),
+            AvailabilityInterruptions::Urgent => ("urgent asks only", Some("Only an ask due within an hour interrupts you.")),
+            AvailabilityInterruptions::None => ("none", Some("No ask interrupts you.")),
+            AvailabilityInterruptions::Unknown => ("unknown", Some(UNKNOWN)),
         };
         let details = at("until", &found.interruptions_until).unwrap_or_default();
         row(&mut doc, "Interruptions", interruptions, theme::text(), &details, width);
         explain(&mut doc, explanation, width);
-        let (clock, explanation) = match found.deadline_clock.as_str() {
-            "hold-routine" => (
+        let (clock, explanation) = match found.deadline_clock {
+            AvailabilityDeadlineClock::Run => ("running", None),
+            AvailabilityDeadlineClock::HoldRoutine => (
                 "holding routine asks",
                 Some("Routine asks' deadlines wait and urgent asks keep running; the time held is added to each deadline."),
             ),
-            "hold-all" => ("holding every ask", Some("Every ask's deadline waits; the time held is added to it.")),
-            _ => ("running", None),
+            AvailabilityDeadlineClock::HoldAll => ("holding every ask", Some("Every ask's deadline waits; the time held is added to it.")),
+            AvailabilityDeadlineClock::Unknown => ("unknown", Some(UNKNOWN)),
         };
         let mut details = at("since", &found.deadline_clock_since).unwrap_or_default();
         details.extend(at("until", &found.deadline_clock_until));
@@ -595,7 +612,7 @@ mod tests {
         pane.connected();
         assert_eq!(pane.wanted(true), vec![Want::Read(1)], "a reconnect reads again");
         let mut moved = reading();
-        moved.availability.status = "available".into();
+        moved.availability.status = AvailabilityStatus::Available;
         pane.done(Done::Read(0, Ok(moved)));
         assert_eq!(pane.last, Some(reading()), "an answer from before the reconnect is not shown");
         pane.done(Done::Read(1, Err("the connection to Fractal broke".into())));
@@ -664,6 +681,54 @@ mod tests {
                 "Deadline clock  running",
                 "Note            none",
                 "",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unreported_source_reads_available_and_unknown_words_stay_readable() {
+        let mut pane = Availability::default();
+        pane.wanted(true);
+        let mut unreported = reading();
+        unreported.availability = serde_json::from_value(serde_json::json!({
+            "person": "person/robin", "status": "available", "status_source": "unreported", "status_until": null,
+            "presence": "unreported", "presence_observed_at": null, "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        unreported.note = None;
+        pane.done(Done::Read(0, Ok(unreported)));
+        assert_eq!(
+            lines(&pane.page(true, 80, &now()))[2..7],
+            [
+                "Status          available · no device reporting",
+                "                No device has reported for 24 hours; agents ask as usual.",
+                "Presence        unreported",
+                "Interruptions   all asks",
+                "Deadline clock  running",
+            ]
+        );
+        let mut newer = reading();
+        newer.availability = serde_json::from_value(serde_json::json!({
+            "person": "person/robin", "status": "busy", "status_source": "calendar", "status_until": "2026-11-12T13:30:00Z",
+            "presence": "in-call", "presence_observed_at": "2026-11-12T12:15:00Z", "interruptions": "vip", "interruptions_until": null,
+            "deadline_clock": "hold-weekend", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        newer.note = None;
+        pane.done(Done::Read(0, Ok(newer)));
+        assert_eq!(
+            lines(&pane.page(true, 80, &now()))[2..11],
+            [
+                "Status          unknown · from an unknown source · until 14:30",
+                "                A word this version does not know; updating shows it.",
+                "Presence        unknown · reported 13:15",
+                "                A word this version does not know; updating shows it.",
+                "Interruptions   unknown",
+                "                A word this version does not know; updating shows it.",
+                "Deadline clock  unknown",
+                "                A word this version does not know; updating shows it.",
+                "Note            none",
             ]
         );
     }
