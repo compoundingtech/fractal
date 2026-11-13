@@ -188,6 +188,56 @@ async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
 }
 
 #[tokio::test]
+async fn assistant_slo_reads_need_their_scope_and_return_allowlisted_rows() {
+    let granted = fixture(SCOPES, true).await;
+    // Named through ROUTES: the bare route name as a string literal reads as the top-level
+    // slo/ tree to scripts/rust-test-inputs-scan, because this file also builds paths.
+    let list = ROUTES.iter().find(|(route, scope)| *scope == "read.assistant.slo" && !route.contains('-'))
+        .map(|(route, _)| *route).unwrap();
+    let query = "?max_response_bytes=16384";
+    let payload = granted.payload(list, query);
+    let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["kind"], "page");
+    assert_eq!(value["value"]["collection"], "assistant.slo");
+    for item in value["value"]["items"].as_array().unwrap() {
+        assert!(item["id"].is_string(), "{item}");
+        assert!(item.as_object().unwrap().keys().all(|key| [
+            "id", "kind", "account", "about", "target", "current", "window", "remaining_percent",
+            "status", "tone", "resets_at_unix_ms", "measured_at_unix_ms", "forecast_used_percent",
+            "forecast_basis_minutes", "runs_out_at_unix_ms",
+        ].contains(&key.as_str())), "{item}");
+    }
+
+    let query = "?id=cpu&steps=4";
+    let payload = granted.payload("slo-history", query);
+    let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo-history{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["kind"], "slo-history");
+    assert_eq!(value["value"]["id"], "cpu");
+    assert_eq!(value["value"]["steps"].as_array().unwrap().len(), 4);
+
+    for query in ["?id=cpu&steps=often", "?id=no%20spaces", "?steps=4", "?id=cpu&extra=1"] {
+        let payload = granted.payload("slo-history", query);
+        let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo-history{query}"),
+            Some(&granted.header(&payload, &granted.attestor))).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{query}: {status} {value}");
+        assert!(value.get("value").is_none());
+    }
+
+    let without = fixture(&SCOPES[..4], true).await;
+    for (path, query) in [(list, ""), ("slo-history", "?id=cpu")] {
+        let payload = without.payload(path, query);
+        let (status, value, _) = without.request(&format!("/v1/client/assistant/{path}{query}"),
+            Some(&without.header(&payload, &without.attestor))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+        assert!(value.get("value").is_none());
+    }
+}
+
+#[tokio::test]
 async fn assistant_all_six_reads_require_proof_even_on_native_router() {
     let fixture=fixture(SCOPES,true).await;
     for (route,_) in ROUTES {

@@ -337,6 +337,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/slo", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded objective/budget projection"),
+    ("GET /v1/client/assistant/slo-history", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded history projection"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
