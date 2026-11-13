@@ -176,10 +176,9 @@ impl Store {
             {
                 if matches!(kind.as_str(), "work.submitted" | "work.failed" | "work.released") {
                     finish(execution, at, kind.strip_prefix("work.").unwrap_or(&kind));
-                } else if kind == "step-run.state" {
-                    if let Some(status @ ("completed" | "failed" | "cancelled" | "ready")) = fields["status"].as_str() {
-                        finish(execution, at, status);
-                    }
+                } else if kind == "step-run.state"
+                    && let Some(status @ ("completed" | "failed" | "cancelled" | "ready")) = fields["status"].as_str() {
+                    finish(execution, at, status);
                 }
             }
         }
