@@ -29,6 +29,7 @@
     { "file": "availability-set.json", "definition": "AvailabilitySet" },
     { "file": "availability-set-result.json", "definition": "Envelope" },
     { "file": "presence-report.json", "definition": "PresenceReport" },
+    { "file": "presence-report-result.json", "definition": "Envelope" },
     { "file": "directive-note-set.json", "definition": "DirectiveNoteSet" },
     { "file": "directive-note-set-result.json", "definition": "Envelope" },
     { "file": "capabilities.json", "definition": "Envelope" },

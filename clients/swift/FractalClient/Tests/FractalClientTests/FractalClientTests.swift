@@ -6,6 +6,31 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testMissionRunSupersessionLineageAndLegacyOmission() throws {
+        let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)
+        XCTAssertNil(decoded.supersedes)
+        XCTAssertNil(decoded.supersededBy)
+        XCTAssertNil(decoded.supersessionFault)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        for field in ["supersedes", "superseded_by", "supersession_fault"] {
+            XCTAssertNil(encoded[field])
+        }
+        var linked = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        linked["retry_of"] = "mission-run/example/failed"
+        linked["retried_by"] = ["mission-run/example/retry"]
+        linked["supersedes"] = "mission-run/example/previous"
+        linked["superseded_by"] = "mission-run/example/replacement"
+        linked["supersession_fault"] = "revision old -> new: missing [replacement]; extra [value]"
+        let run = try JSONDecoder().decode(MissionRunSummary.self, from: JSONSerialization.data(withJSONObject: linked))
+        XCTAssertEqual(run.retryOf, "mission-run/example/failed")
+        XCTAssertEqual(run.retriedBy, ["mission-run/example/retry"])
+        XCTAssertEqual(run.supersedes, "mission-run/example/previous")
+        XCTAssertEqual(run.supersededBy, "mission-run/example/replacement")
+        XCTAssertEqual(run.supersessionFault, "revision old -> new: missing [replacement]; extra [value]")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(run)) as? NSDictionary, linked as NSDictionary)
+    }
+
     func testPersonOptionNotesRoundTripAndEmptyOmission() throws {
         let legacy = Data(#"{"id":"land","text":"Ship it."}"#.utf8)
         let decoded = try JSONDecoder().decode(PersonAnswerInput.self, from: legacy)
@@ -289,18 +314,39 @@ final class FractalClientTests: XCTestCase {
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
         let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
-        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery"])
-        XCTAssertEqual(read.value.people[0].statusSource, "override")
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/ben"])
+        XCTAssertEqual(read.value.people[0].statusSource, .override)
         XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
         XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        XCTAssertEqual(read.value.people[2].status, .available)
+        XCTAssertEqual(read.value.people[2].statusSource, .unreported)
         let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
-        XCTAssertEqual(own.value.presence, "present")
+        XCTAssertEqual(own.value.presence, .present)
         let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
         XCTAssertEqual(set.deadlineClock?.value, "run")
         let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
         XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
-        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(presence: "idle", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
-        XCTAssertEqual(report, ["presence": "idle", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "active", lastInputAt: "2026-11-12T09:57:30Z", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, try JSONSerialization.jsonObject(with: Data(contentsOf: fixtures.appendingPathComponent("presence-report.json"))) as? NSDictionary)
+        let locked = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "locked", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(locked, ["state": "locked", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let reported = try JSONDecoder().decode(Envelope<PresenceReportResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("presence-report-result.json")))
+        XCTAssertEqual(reported.value.availability.presence, .present)
+        XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
+    }
+
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
+        let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
+        let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
+        XCTAssertEqual(future.status, .unknown("busy"))
+        XCTAssertEqual(future.statusSource, .unknown("calendar"))
+        XCTAssertEqual(future.presence, .unknown("in-call"))
+        XCTAssertEqual(future.interruptions, .unknown("priority"))
+        XCTAssertEqual(future.deadlineClock, .unknown("hold-weekend"))
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
+        XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
+        XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
     }
 
     func testCreationActionFixtures() throws {
