@@ -1247,7 +1247,7 @@ pub fn start_from_inbox_as(
             ).map_err(internal)?;
             let message = append_admitted_claim_tx(
                 tx, &store.origin, &first_message.subject, "message.sent", Some(person),
-                &message_body, &[], Some(&created.batch_id),
+                &message_body, &[], Some(&created.batch_id), false,
             ).map_err(claim_append_error)?;
             register_operation_tx(tx, &message).map_err(internal)?;
             if encoded_signature.is_some() {
