@@ -192,9 +192,19 @@ impl ProgramEngine {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The same authoritative `run.env` used by spawnEffect, only for this live attempt.
+    pub(super) fn attempt_environment(&self, step: &str, attempt: u32) -> Result<BTreeMap<String, String>> {
+        let inner = self.lock();
+        let running = inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt
+                && inner.host.as_ref().is_some_and(|host| host.generation == running.generation))
+            .context("program attempt has no live execution environment")?;
+        Ok(running.dispatch.env.clone())
+    }
+
     /// Start or resume `dispatch` unless the live host already runs that attempt or its step no
     /// longer runs it.
-    pub fn dispatch(self: &Arc<Self>, dispatch: Dispatch) -> Result<Dispatched> {
+    pub fn dispatch(self: &Arc<Self>, mut dispatch: Dispatch) -> Result<Dispatched> {
         if self.runs(&dispatch) {
             return Ok(Dispatched::Running);
         }
@@ -225,8 +235,8 @@ impl ProgramEngine {
         // minted only here, once the host runs and this attempt is about to start, so a refused,
         // already running or host-down dispatch leaves no row; each start or resume mints one, and
         // it never enters the journal or a log.
-        let mut env = dispatch.env.clone();
         let trace = self.start_trace(&dispatch)?;
+        let mut env = std::mem::take(&mut dispatch.env);
         trace.correlation.environment(&mut env);
         env.insert(
             crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
@@ -253,6 +263,9 @@ impl ProgramEngine {
             "journal": journal,
             "resourceMembership": resource_membership,
         });
+        // Keep exactly the environment sent to spawnEffect's host, including this attempt's
+        // trace and credential, for native lane commands. Never reconstruct a parallel context.
+        dispatch.env = env;
         inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new(), _trace: trace });
         send(&inner, &message);
         Ok(Dispatched::Started)

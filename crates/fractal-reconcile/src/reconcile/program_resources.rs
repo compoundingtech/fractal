@@ -55,6 +55,17 @@ fn execution_id(request: &program::Request) -> String {
     format!("program-resource-{}", hex::encode(sha2::Sha256::digest(request.idempotency_key().as_bytes())))
 }
 
+/// Match spawnEffect: command options are defaults below the attempt's authoritative `run.env`.
+fn command_environment(
+    mut options: BTreeMap<String, String>,
+    attempt: BTreeMap<String, String>,
+    priority: Option<&str>,
+) -> BTreeMap<String, String> {
+    options.insert("ST_SEAT_PRIORITY".into(), priority.unwrap_or("normal").into());
+    options.extend(attempt);
+    options
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     /// A single authority epoch for this daemon's host, never one per program or membership.
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
@@ -259,12 +270,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let runtime_id = execution_id(request);
         let root = record.roots.iter().find(|root| root.runtime_id == runtime_id);
         if root.is_none() {
-            let mut environment = command.options.env;
-            environment.insert("ST_MISSION_RUN".into(), run.subject.clone());
-            environment.insert("ST_STEP_RUN".into(), request.step.clone());
-            environment.insert("ST_SEAT_PRIORITY".into(), command.options.priority.as_deref().unwrap_or("normal").into());
-            environment.insert(crate::store::run_credentials::RUN_CREDENTIAL_ENV.into(),
-                self.store.issue_run_credential(&request.step, request.attempt, program::RUN_CREDENTIAL_LIFETIME_MS)?);
+            let environment = command_environment(
+                command.options.env,
+                engine.attempt_environment(&request.step, request.attempt)?,
+                command.options.priority.as_deref(),
+            );
             let mut argv = command.argv;
             if cfg!(target_os = "macos") && command.options.priority.as_deref() == Some("background") {
                 argv.splice(0..0, ["/usr/sbin/taskpolicy".into(), "-b".into()]);
@@ -339,6 +349,48 @@ impl<R: RuntimeControl> Reconciler<R> {
 mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
+
+    #[test]
+    fn native_command_inherits_authoritative_attempt_environment() {
+        let attempt = BTreeMap::from([
+            ("ST_MISSION".into(), "resource-mission".into()),
+            ("ST_WORKSPACE".into(), "/workspace/resource".into()),
+            ("ST_STEP".into(), "work".into()),
+            ("ST_ATTEMPT".into(), "3".into()),
+            ("ST_MISSION_RUN".into(), "run-id".into()),
+            ("ST_STEP_RUN".into(), "step-run/resource/work".into()),
+            ("ST_LOOP_ROUND".into(), "2".into()),
+            ("ST_LOOP_FEEDBACK".into(), "retry with the recorded feedback".into()),
+            ("ST_LOOP_ITEM_ID".into(), "item-4".into()),
+            ("ST_CANDIDATE_INDEX".into(), "1".into()),
+            ("CUSTOM_ATTEMPT_ENV".into(), "attempt-value".into()),
+            ("TRACEPARENT".into(), "00-11111111111111111111111111111111-2222222222222222-01".into()),
+            ("TRACESTATE".into(), "vendor=attempt".into()),
+            (crate::store::run_credentials::RUN_CREDENTIAL_ENV.into(), "attempt-credential".into()),
+        ]);
+        let environment = command_environment(BTreeMap::new(), attempt.clone(), None);
+        for (key, value) in &attempt {
+            assert_eq!(environment.get(key), Some(value), "{key} must come from the attempt");
+        }
+        assert_eq!(environment["ST_SEAT_PRIORITY"], "normal");
+
+        // A custom command value survives only when run.env does not define that key.
+        // Identity, credential, loop and tracing values all obey the same spawn precedence.
+        let mut options: BTreeMap<_, _> = attempt.keys()
+            .map(|key| (key.clone(), "command-override".to_owned())).collect();
+        options.insert("CUSTOM_COMMAND_ENV".into(), "custom-value".into());
+        let environment = command_environment(options, attempt.clone(), Some("background"));
+        for (key, value) in &attempt {
+            assert_eq!(environment.get(key), Some(value), "{key} must not be overridden by command options");
+        }
+        assert_eq!(environment["CUSTOM_COMMAND_ENV"], "custom-value");
+        assert_eq!(environment["ST_SEAT_PRIORITY"], "background");
+
+        let mut attempt_priority = attempt;
+        attempt_priority.insert("ST_SEAT_PRIORITY".into(), "normal".into());
+        let environment = command_environment(BTreeMap::new(), attempt_priority, Some("background"));
+        assert_eq!(environment["ST_SEAT_PRIORITY"], "normal", "run.env has the final word, as in spawnEffect");
+    }
 
     #[test]
     fn scope_release_awaits_child_cancellation_and_reacts_to_terminal_run() {
