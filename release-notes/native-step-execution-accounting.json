@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The kernel exports Serialize/Deserialize StepExecution and StepExecutionUsage, and Store exposes step_executions. New claims capture the declared model and only an actual valid propagated OpenTelemetry trace. Model drift does not imply fallback, absent usage is null, and unpriced tokens remain explicit. Older fleets still retain the optional-field claims; readers that do not include execution_id in rollup keys must be upgraded before relying on exact per-attempt totals."
+    "detail": "The kernel exports Serialize/Deserialize StepExecution and StepExecutionUsage, and Store exposes step_executions. New claims capture the declared model and only an actual valid propagated OpenTelemetry trace. Model drift does not imply fallback, absent usage is null, and unpriced tokens remain explicit. The earliest applicable native exit bounds duration even when later cleanup closes the step. Older fleets still retain the optional-field claims; readers that do not include execution_id in rollup keys must be upgraded before relying on exact per-attempt totals."
   },
   "downtime": {
     "status": "none",
