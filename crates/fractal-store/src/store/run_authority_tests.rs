@@ -26,7 +26,7 @@ fn retired_agent_authority_is_readable_but_refused_on_every_new_write_shape() {
             let error = store.apply(&intent, &BTreeMap::new(), &format!("retired:{}", intent.source_hash)).unwrap_err();
             assert_eq!(error.code, "retired-agent-authority");
         }
-        let desired = json!({"desired": {"children": [{"name": field.split_whitespace().next().unwrap()}]}});
+        let desired = json!({"kind": "agent", "desired": {"children": [{"name": field.split_whitespace().next().unwrap()}]}});
         let mission = json!({"steps": {"work": {"loop_spec": {"on_keep": {"declarations_kdl": declaration}}}}});
         for (kind, payload) in [
             ("intent.desired", desired),
@@ -50,10 +50,15 @@ fn retired_agent_authority_is_readable_but_refused_on_every_new_write_shape() {
 #[test]
 fn retired_authority_names_in_user_data_are_not_declarations() {
     run_authority::validate_new_claim("intent.desired", "agent/example/worker", &json!({
+        "kind": "agent",
         "member": {"env": {"declarations_kdl": "not kdl", "desired": {
             "children": [{"name": "mission-authority"}]
         }}},
         "desired": {"children": [{"name": "env", "children": [{"name": "mission-authority"}]}]}
+    })).unwrap();
+    run_authority::validate_new_claim("intent.desired", "resource/example/data", &json!({
+        "kind": "resource",
+        "desired": {"children": [{"name": "mission-authority"}]}
     })).unwrap();
 }
 

@@ -112,7 +112,8 @@ pub fn validate_new_claim(kind: &str, subject: &str, body: &Value) -> Result<(),
     fn walk(value: &Value, subject: &str) -> Result<(), FractalError> {
         match value {
             Value::Object(object) => {
-                if let Some(desired) = object.get("desired") {
+                if object.get("kind").and_then(Value::as_str) == Some("agent")
+                    && let Some(desired) = object.get("desired") {
                     validate_agent_declaration(subject, desired)?;
                 }
                 if let Some(source) = object.get("declarations_kdl").and_then(Value::as_str) {
