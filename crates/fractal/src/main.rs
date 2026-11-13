@@ -4602,6 +4602,10 @@ struct WorkUpdateArgs {
     /// The information itself.
     #[arg(long)]
     body: String,
+    /// Words to speak aloud to the person, at most 300 characters. Set it only when the person
+    /// asked to be told this outcome.
+    #[arg(long, value_name = "TEXT")]
+    speech: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,

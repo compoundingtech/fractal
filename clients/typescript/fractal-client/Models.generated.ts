@@ -3519,6 +3519,7 @@ export type PersonStepParameters = {
 
 export type PersonUpdate = {
   about: Id;
+  speech?: string;
   subjects?: Array<RequestSubject>;
   summary?: string;
   type: "update";

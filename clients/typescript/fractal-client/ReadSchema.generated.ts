@@ -1490,6 +1490,8 @@ export type LaunchPreviewEncoded = typeof LaunchPreview.Encoded
 export const PersonUpdate = /*#__PURE__*/ (() => Schema.Struct({
   /** Where the person asked: their mission run or step run, or their message to the agent. */
   "about": Id,
+  /** Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it. */
+  "speech": optionalKey(Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(300))).annotate({ description: "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it." }),
   "subjects": optionalKey(Schema.Array(RequestSubject).check(Schema.isMaxLength(12))),
   "summary": optionalKey(Schema.String),
   "type": Schema.Literal("update"),
