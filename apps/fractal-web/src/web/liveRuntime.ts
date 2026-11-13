@@ -52,8 +52,13 @@ export const createPageRuntime = (replay?: Replay, answerPorts?: Pick<DataSource
     // Pairing belongs to the host that served this page; a replay has no host to pair with.
     live: replay === undefined ? { ...live, source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) } } : {
       ...live,
-      // Example data's stubbed answers need no grant: nothing leaves the page.
-      source: answerPorts === undefined ? live.source : { ...live.source, ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) },
+      // A replay has no person, so it drops the availability port and shows no Availability section. Example data's
+      // stubbed answers need no grant: nothing leaves the page.
+      source: {
+        ...live.source,
+        availability: undefined,
+        ...(answerPorts === undefined ? {} : { ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) }),
+      },
       dispose: () => live.dispose().finally(() => replay.close()),
     },
     telemetry,
