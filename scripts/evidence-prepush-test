@@ -78,7 +78,7 @@ class Hook(unittest.TestCase):
         (self.work / 'scripts').mkdir(parents=True)
         (self.work / '.st').mkdir()
         (self.work / '.st/evidence-keys').write_text('host/box namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n')
-        for name in ('evidence-prepush', 'install-git-hooks'):
+        for name in ('evidence-prepush', 'install-git-hooks', 'check-public-repo'):
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
         (self.work / 'scripts/st-test').write_text(STUB)
         for path in (self.work / 'scripts').rglob('*'):
@@ -488,15 +488,15 @@ class Hook(unittest.TestCase):
         self.assertNotEqual(stopped.returncode, 0)
         self.assertNotIn('reached', stopped.stdout)
 
-    def test_a_hook_whose_scrub_failed_skips_itself_with_a_line_and_the_push_goes(self):
+    def test_a_hook_whose_scrub_failed_refuses_publication(self):
         bash_env = Path(self.tmp.name) / 'bash-env'
         bash_env.write_text('unset() { return 1; }\n')
         linked = self.linked_worktree()
         done = self.push_from(linked, STUB_STATUS='3', BASH_ENV=str(bash_env))
-        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotEqual(done.returncode, 0, done.stderr)
         self.assertIn('could not drop the git environment of the hook', done.stderr)
         self.assertEqual(self.calls(), [])  # nothing ran with GIT_DIR set
-        self.assertTrue(self.remote_has('refs/heads/linked'))
+        self.assertFalse(self.remote_has('refs/heads/linked'))
 
     def test_the_stub_works_in_a_bash_without_compgen_too(self):
         bash_env = Path(self.tmp.name) / 'bash-env'
@@ -777,7 +777,7 @@ class Hook(unittest.TestCase):
         hook = self.work / '.git/hooks/pre-push'
         hook.unlink()
         first = self.install()
-        self.assertEqual(first.stdout.strip(), 'evidence pre-push hook installed (ST_SKIP_EVIDENCE=1: sign in the background, do not wait)')
+        self.assertEqual(first.stdout.strip(), 'public-content and evidence pre-push hook installed (ST_SKIP_EVIDENCE affects signing only)')
         self.assertEqual(self.install().stdout.strip(), '')  # already installed: quiet
         hook.unlink()
         for name in ('GITHUB_ACTIONS', 'CI'):
