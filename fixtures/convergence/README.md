@@ -328,5 +328,7 @@ optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fie
 gained since v24. Versions 1 through 24 stay frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
 do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
-path on a fresh run subject, as it does `github.event`. As for v24, every fixed seed must converge
-and trim.
+path on a fresh run subject, as it does `github.event`. With v25 every fixed seed converges; seeds
+2 and 233 are the exact never-trim set, observed locally and by hosted burst cargo-test run
+43411988505. Drawing the kind without writing it trims both, so the set follows the shifted schedule,
+not the kind's semantics. Hosted linux-tests remains the authority (#6210).

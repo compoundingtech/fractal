@@ -3402,8 +3402,8 @@
     "additional_fields": false,
     "write_policy": "system-only",
     "cardinality": "once",
-    "projection": "resources",
-    "wakes_reconciler": true
+    "projection": null,
+    "wakes_reconciler": false
   },
   "glass.deleted": {
     "kind": "glass.deleted",

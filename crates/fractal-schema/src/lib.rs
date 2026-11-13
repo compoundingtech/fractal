@@ -2145,8 +2145,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[github_plugin::WORKFLOW_RUN_FAMILY],
             WritePolicy::SystemOnly,
             Cardinality::Once,
-            Some("resources"),
-            true,
+            None,
+            false,
             &[],
         ),
         (
