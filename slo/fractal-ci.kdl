@@ -50,3 +50,4 @@ objective "fractal/flakes" {
   window "1h"
   target "per-hour" max=0
   on-breach "fault" owner="agent/dotfiles/build-capacity" backup="agent/compoundingtech/mergemaster" condition="flakes-slo-missed"
+}
