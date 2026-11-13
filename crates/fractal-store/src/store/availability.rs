@@ -277,6 +277,9 @@ pub trait AvailabilityStore {
     fn person_availability(&self, person: &str, now: u128) -> Result<PersonAvailability, FractalError>;
     /// Each change becomes one claim naming `source`, the daemon-assigned writer.
     fn set_person_availability(&self, person: &str, source: &str, changes: &[AvailabilityChange], now: u128) -> Result<PersonAvailability, FractalError>;
+    /// Records `report` only when it is a transition for `source`'s device. A report observed
+    /// before the device's newest recorded report is never recorded: it answers as that newer
+    /// report, so a delayed or retried older state cannot replace it.
     fn report_person_presence(&self, person: &str, source: &str, report: DeviceReport, now: u128) -> Result<PresenceReported, FractalError>;
     fn deadline_clock_holds(&self, person: &str, since: u128) -> Result<Vec<ClockHold>>;
 }
@@ -378,16 +381,18 @@ impl AvailabilityStore for Store {
             return Err(FractalError::new("invalid-presence", "last_input_at must be positive and no later than observed_at"));
         }
         // Record transitions only: a new state, a different derived presence, or an active
-        // device's input moving forward far enough to matter. Anything else repeats the record.
+        // device's input moving forward far enough to matter. Anything else repeats the record,
+        // as does a report observed before the recorded one, which must not become the newest.
         let recorded = self.counting_presence(person, now).map_err(internal)?
             .iter()
             .find(|claim| claim.body["fields"]["source"] == source)
             .and_then(DeviceReport::from_claim);
         let changes = recorded.is_none_or(|recorded| {
-            recorded.state != report.state
-                || recorded.presence_at(now) != report.presence_at(now)
-                || (report.state == DeviceState::Active
-                    && report.last_input().saturating_sub(recorded.last_input()) >= PRESENCE_REFRESH_MS)
+            report.observed_at >= recorded.observed_at
+                && (recorded.state != report.state
+                    || recorded.presence_at(now) != report.presence_at(now)
+                    || (report.state == DeviceState::Active
+                        && report.last_input().saturating_sub(recorded.last_input()) >= PRESENCE_REFRESH_MS))
         });
         if changes {
             let mut fields = BTreeMap::from([
