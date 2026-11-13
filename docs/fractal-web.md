@@ -811,8 +811,11 @@ The Settings dialog's **Availability** section shows the paired person's own eff
 availability and directive note, as `GET /v1/client/availability` (without a person, so the
 session person's own row with its presence) and `GET /v1/client/notes` return them. Status
 names its source: set by the person, with its end, or following presence, with the folded
-presence and its age. Interruptions and the deadline clock show their bounds; a
-`hold-routine` clock says that urgent asks (an explicit deadline within an hour) keep running.
+presence and its age. When no device has reported for a day (`status_source: unreported`) the
+status reads Available and says that no device is reporting, so agents ask as usual; it never
+reads as away. Interruptions and the deadline clock show their bounds; `urgent` interruptions
+let through only asks with priority `critical`, and a `hold-routine` clock says that those
+urgent asks keep running. A response word this build does not know shows as itself.
 The note shows its text and expiry, or that there is none.
 
 Availability is not a followed collection, so the section reads it when Settings opens, when
