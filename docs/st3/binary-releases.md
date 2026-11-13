@@ -355,6 +355,15 @@ Its docs do not explicitly guarantee that `--failed` includes cancelled jobs, so
 uses the cancelled job IDs instead. A fresh `workflow_dispatch` is not equivalent: it
 builds but deliberately skips the push-only publishers.
 
+For an authorized publication diagnosis, set `RELEASE_GH_DIAGNOSTICS=1` on the
+publisher process. `release_gh.py` captures the CLI's HTTP trace without printing it
+and adds only failed request methods, route templates, HTTP statuses and GitHub
+request IDs to errors. This distinguishes a GraphQL preflight from the release
+creation POST or an asset upload. Repository/tag/asset names, query strings,
+credentials and request/response bodies are excluded. Do not enable or publish
+raw `GH_DEBUG=api` logs; they contain release notes and response bodies. Diagnostic
+capture does not change the existing retry or publication policy.
+
 Only after a newer candidate has been successfully created with its complete assets and
 notes does daily cleanup delete older semantic-version unpublished drafts marked as owned
 by this daily workflow. Immediately before deletion, cleanup reads that release by its
