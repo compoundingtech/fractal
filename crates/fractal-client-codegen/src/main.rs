@@ -895,6 +895,7 @@ fn validate_surfaces(
         "AvailabilityDeadlineClockChange",
         "AvailabilitySet",
         "PresenceReport",
+        "PresenceReportResult",
         "DirectiveNoteSet",
         "DirectiveNoteSetResult",
         "ResourceObservation",

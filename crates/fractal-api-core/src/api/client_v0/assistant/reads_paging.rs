@@ -122,6 +122,25 @@ fn read_page(
         let has_more = matching.next().is_some();
         let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
         (snapshot, items, has_more, marker)
+    } else if projection == "slo" {
+        // Rows are measured live on every page. Continuations bind the ordered row IDs, so
+        // offsets stay exact while values refresh; a changed list restarts pagination.
+        let rows = crate::api::operations::current_slo_rows(&state.store, &state.state_dir)
+            .map_err(ApiError::internal)?;
+        use sha2::Digest as _;
+        let mut ids = sha2::Sha256::new();
+        for row in &rows {
+            ids.update(row["id"].as_str().unwrap_or_default().as_bytes());
+            ids.update([0]);
+        }
+        let marker = format!("assistant-slo:{}", hex::encode(ids.finalize()));
+        check_source(&cursor, &marker)?;
+        if cursor.is_some() && offset >= rows.len() {
+            return Err(client_page_expired("the SLO cursor is outside the current objective list"));
+        }
+        let items = rows.iter().skip(offset).take(limit).map(slo_item).collect::<Vec<_>>();
+        let has_more = offset.saturating_add(items.len()) < rows.len();
+        (snapshot, items, has_more, marker)
     } else if state.store.agent_roster_refresher_running() {
         let publication = if cursor.is_some() {
             state.store.published_agent_roster_at(snapshot.store_index, false)

@@ -470,6 +470,18 @@ pub async fn get_mission_run(
     Ok(Json(found))
 }
 
+pub async fn retry_mission_run(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+    Json(request): Json<crate::model::MissionRunRetryRequest>,
+) -> Result<Json<MissionRunView>, ApiError> {
+    let store = state.store.clone();
+    let mut retried = blocking_action(move || store.retry_mission_run(&run, &request)).await?;
+    present_mission_run(&state.store, &mut retried).map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(retried))
+}
+
 pub async fn revise_mission_run(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
@@ -570,6 +582,36 @@ pub async fn revise_mission_run(
             "mission-revision-blocked",
             planned.blockers.join("; "),
         )));
+    }
+    if matches!(current.status.as_str(), "running" | "standing" | "blocked")
+        && current.phase == "normal"
+    {
+        state.store.apply_run_revision(
+            publication,
+            &planned.subject_tokens,
+            &format!("{}:publish", request.idempotency_key),
+            fractal_store::store::RunRevisionApply {
+                actor: &actor,
+                run: &current.subject,
+                operation: &crate::model::MissionRevisionOperation {
+                    id: request.idempotency_key.clone(),
+                    mission: replacement.id.clone(),
+                    revision: replacement.revision.clone(),
+                    from_generation: current.generation.clone(),
+                    reason: request.reason.clone(),
+                    cancellation: None,
+                },
+                direct_key: &format!("{}:adopt", request.idempotency_key),
+                proposal_key: &format!("{}:propose", request.idempotency_key),
+            },
+        ).map_err(ApiError::bad)?;
+        let result = cached_revision_submission(
+            &state,
+            &format!("{}:adopt", request.idempotency_key),
+            &format!("{}:propose", request.idempotency_key),
+        )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
+        signal_changed(&state);
+        return Ok(Json(result));
     }
     // The revision records its publisher: a broken gate in it raises attention for them.
     state
