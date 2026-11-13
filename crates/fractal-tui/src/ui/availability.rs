@@ -149,7 +149,7 @@ impl Availability {
         }
         let (interruptions, explanation) = match found.interruptions {
             AvailabilityInterruptions::All => ("all asks", None),
-            AvailabilityInterruptions::Urgent => ("urgent asks only", Some("Only an ask due within an hour interrupts you.")),
+            AvailabilityInterruptions::Urgent => ("urgent asks only", Some("Only an ask with priority critical interrupts you.")),
             AvailabilityInterruptions::None => ("none", Some("No ask interrupts you.")),
             AvailabilityInterruptions::Unknown => ("unknown", Some(UNKNOWN)),
         };
@@ -371,7 +371,7 @@ mod tests {
                 "Status          away · set by you · until 14:30",
                 "Presence        idle · reported 13:15",
                 "Interruptions   urgent asks only · until tomorrow 09:00",
-                "                Only an ask due within an hour interrupts you.",
+                "                Only an ask with priority critical interrupts you.",
                 "Deadline clock  holding routine asks · since 13:05",
                 "                Routine asks' deadlines wait and urgent asks keep running; the",
                 "                time held is added to each deadline.",
