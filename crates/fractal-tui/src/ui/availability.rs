@@ -57,12 +57,24 @@ impl Axis {
         }
     }
 
-    /// Each value's key, label and wire value; `None` returns the axis to its default.
-    fn choices(self) -> &'static [(char, &'static str, Option<&'static str>)] {
+    /// Each value's key, label and wire word; `None` returns the axis to its default.
+    fn choices(self) -> [(char, &'static str, Option<&'static str>); 3] {
         match self {
-            Axis::Status => &[('1', "away", Some("away")), ('2', "available", Some("available")), ('0', "from presence", None)],
-            Axis::Interruptions => &[('1', "urgent asks only", Some("urgent")), ('2', "none", Some("none")), ('0', "all asks", None)],
-            Axis::DeadlineClock => &[('1', "hold routine asks", Some("hold-routine")), ('2', "hold every ask", Some("hold-all")), ('0', "run", None)],
+            Axis::Status => [
+                ('1', "away", Some(AvailabilityStatus::Away.as_str())),
+                ('2', "available", Some(AvailabilityStatus::Available.as_str())),
+                ('0', "from presence", None),
+            ],
+            Axis::Interruptions => [
+                ('1', "urgent asks only", Some(AvailabilityInterruptions::Urgent.as_str())),
+                ('2', "none", Some(AvailabilityInterruptions::None.as_str())),
+                ('0', "all asks", None),
+            ],
+            Axis::DeadlineClock => [
+                ('1', "hold routine asks", Some(AvailabilityDeadlineClock::HoldRoutine.as_str())),
+                ('2', "hold every ask", Some(AvailabilityDeadlineClock::HoldAll.as_str())),
+                ('0', "run", None),
+            ],
         }
     }
 }
@@ -266,11 +278,17 @@ impl Availability {
                 ..AvailabilitySet::default()
             }),
             Axis::Interruptions => Write::Availability(AvailabilitySet {
-                interruptions: Some(AvailabilityInterruptionsChange { value: value.unwrap_or_else(|| "all".into()), until }),
+                interruptions: Some(AvailabilityInterruptionsChange {
+                    value: value.unwrap_or_else(|| AvailabilityInterruptions::All.as_str().into()),
+                    until,
+                }),
                 ..AvailabilitySet::default()
             }),
             Axis::DeadlineClock => Write::Availability(AvailabilitySet {
-                deadline_clock: Some(AvailabilityDeadlineClockChange { value: value.unwrap_or_else(|| "run".into()), until }),
+                deadline_clock: Some(AvailabilityDeadlineClockChange {
+                    value: value.unwrap_or_else(|| AvailabilityDeadlineClock::Run.as_str().into()),
+                    until,
+                }),
                 ..AvailabilitySet::default()
             }),
         };
@@ -810,7 +828,10 @@ mod tests {
         keys(&mut pane, "s12");
         keys(&mut pane, "i0");
         keys(&mut pane, "d2\n");
-        let away = AvailabilityStatusChange { value: Some("away".into()), until: Some("2026-11-12T13:20:00.000Z".into()) };
+        let away = AvailabilityStatusChange {
+            value: Some(AvailabilityStatus::Away.as_str().into()),
+            until: Some("2026-11-12T13:20:00.000Z".into()),
+        };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { status: Some(away), ..AvailabilitySet::default() })], "away for an hour");
         assert!(sent(&mut pane).is_empty(), "the next change waits for the answer");
         assert!(lines(&pane.page(true, 80, &now())).contains(&"Saving…".to_owned()));
@@ -818,12 +839,12 @@ mod tests {
         answer.status_until = Some("2026-11-12T13:20:00.000Z".into());
         pane.done(Done::Wrote(Ok(Wrote::Availability(answer.clone()))));
         assert_eq!(pane.last.as_ref().map(|last| &last.availability), Some(&answer), "the answer is shown");
-        let all = AvailabilityInterruptionsChange { value: "all".into(), until: None };
+        let all = AvailabilityInterruptionsChange { value: AvailabilityInterruptions::All.as_str().into(), until: None };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { interruptions: Some(all), ..AvailabilitySet::default() })], "0 clears");
         pane.done(Done::Wrote(Err("this device's pairing does not grant write.availability: pair the device again to allow it".into())));
         let shown = lines(&pane.page(true, 80, &now()));
         assert!(shown.iter().any(|line| line.starts_with("Not changed: this device's pairing does not grant write.availability")), "{shown:?}");
-        let held = AvailabilityDeadlineClockChange { value: "hold-all".into(), until: None };
+        let held = AvailabilityDeadlineClockChange { value: AvailabilityDeadlineClock::HoldAll.as_str().into(), until: None };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { deadline_clock: Some(held), ..AvailabilitySet::default() })], "Enter: until changed");
         pane.done(Done::Wrote(Ok(Wrote::Availability(answer))));
         assert_eq!(pane.wanted(true), [Want::Read(3)], "after a refusal Fractal's word is read again, newer than every write");
@@ -870,7 +891,7 @@ mod tests {
         ui.key(KeyEvent::from(KeyCode::Char('4')));
         let [Write::Availability(change)] = &sent(&mut ui.availability)[..] else { panic!("one change") };
         let clock = change.deadline_clock.as_ref().expect("the deadline clock");
-        assert_eq!(clock.value, "hold-routine");
+        assert_eq!(clock.value, AvailabilityDeadlineClock::HoldRoutine.as_str());
         let until = DateTime::parse_from_rfc3339(clock.until.as_deref().expect("an end")).unwrap();
         assert_eq!(until.with_timezone(&chrono::Local).format("%H:%M").to_string(), "09:00", "tomorrow 09:00 local");
         ui.key(KeyEvent::from(KeyCode::Char('s')));
