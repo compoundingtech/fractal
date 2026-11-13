@@ -1,16 +1,19 @@
 /**
- * Typed access to the TrayGallery output in `../renders/`. Three sets, each with its own manifest,
+ * Typed access to the TrayGallery output in `../renders/`. Four sets, each with its own manifest,
  * all globbed rather than imported so a checkout without them still builds (consumers get
  * `undefined` and show a placeholder):
  *
- * - `manifest.json` + `<scenario>-<appearance>.png`: the panel rendered with `cacheDisplay` (no
- *   window-server materials), plus the status item in every state as the tinted template image
- *   on a flat bar (`menubar-<state>-<appearance>.png`). Committed.
+ * - `manifest.json` + `<scenario>-<appearance>.png`: the V4 panel rendered with `cacheDisplay`
+ *   (no window-server materials), plus the status item in every state as the tinted template
+ *   image on a flat bar (`menubar-<state>-<appearance>.png`), and each scenario's height.
+ *   Committed.
  * - `capture.json` + `capture/*.png`: real window-server captures (Liquid Glass, the status item)
  *   of every scenario and every status-item state. Committed when a capture run produces them;
  *   absent, every image falls back to the flat render.
- * - `v2/v2.json` + `v2/*.png`: the V2 design exploration Johannes picked from, frozen. The
- *   variant code that drew it is gone, so it is never regenerated.
+ * - `v3/v3.json` + `v3/*.png`: V3 as shipped in #9344 (the inbox-first Form panel), frozen.
+ * - `v2/v2.json` + `v2/*.png`: the V2 design exploration Johannes picked from, frozen.
+ *
+ * The variant code that drew V2 and V3 is gone, so they are never regenerated.
  */
 
 /** macOS appearance a render was produced in. */
@@ -28,9 +31,19 @@ export const scenarioIds = [
   'read-only',
   'degraded',
   'unconfigured',
+  'ask-decision',
+  'ask-choice',
+  'ask-feedback',
+  'ask-in-fractal',
+  'update-page',
+  'ask-sending',
+  'page-availability',
+  'page-objectives',
   'speech-speaking',
   'speech-in-call',
   'speech-muted',
+  'variant-d1',
+  'variant-d2',
   'notice-speaking',
   'notice-in-call',
   'notice-answered',
@@ -66,6 +79,15 @@ export interface MenuBarImage {
   readonly height: number
 }
 
+/** One scenario's panel height in points (light appearance). */
+export interface PanelHeight {
+  readonly scenario: string
+  /** As the person sees it: scrolling content capped at the live panel's limit. */
+  readonly live: number
+  /** Every row and page section in view. */
+  readonly full: number
+}
+
 /** Shape of `renders/manifest.json` as written by TrayGallery. */
 export interface RenderManifest {
   readonly generator: string
@@ -79,6 +101,16 @@ export interface RenderManifest {
   readonly menuBarStates: readonly RenderScenario[]
   /** Flat status-item renders: the tinted template image on a plain bar. */
   readonly menuBar: readonly MenuBarImage[]
+  /** Each panel scenario's height; absent in manifests that predate V4. */
+  readonly heights?: readonly PanelHeight[]
+}
+
+/** Shape of `renders/v3/v3.json`: the V3 manifest as it shipped, with a note. File names are relative to `v3/`. */
+export interface V3History extends RenderManifest {
+  readonly note: string
+  readonly source: string
+  /** How the V3 heights were measured. */
+  readonly heightsSource?: string
 }
 
 /** Shape of `renders/capture.json`. */
@@ -145,6 +177,10 @@ const captureModules = import.meta.glob<CaptureManifest>('../renders/capture.jso
   eager: true,
   import: 'default',
 })
+const v3Modules = import.meta.glob<V3History>('../renders/v3/v3.json', {
+  eager: true,
+  import: 'default',
+})
 const v2Modules = import.meta.glob<V2History>('../renders/v2/v2.json', {
   eager: true,
   import: 'default',
@@ -157,6 +193,11 @@ const pngUrls: Record<string, string> = {
     import: 'default',
   }),
   ...import.meta.glob<string>('../renders/capture/*.png', {
+    eager: true,
+    query: '?url',
+    import: 'default',
+  }),
+  ...import.meta.glob<string>('../renders/v3/*.png', {
     eager: true,
     query: '?url',
     import: 'default',
@@ -175,6 +216,9 @@ export const manifest: RenderManifest | undefined = manifestModules['../renders/
 export const captureManifest: CaptureManifest | undefined =
   captureModules['../renders/capture.json']
 
+/** V3 as shipped, frozen. */
+export const v3History: V3History | undefined = v3Modules['../renders/v3/v3.json']
+
 /** The frozen V2 exploration. */
 export const v2History: V2History | undefined = v2Modules['../renders/v2/v2.json']
 
@@ -191,9 +235,13 @@ export const scenarioById = (id: string): RenderScenario | undefined =>
 
 /**
  * Where an image came from: the window server (glass, status item), `cacheDisplay` (flat), or
- * the frozen V2 exploration (flat, from code that no longer exists).
+ * frozen history (V3 as shipped, the V2 exploration; flat, from code that no longer exists).
  */
-export type ImageSource = 'capture' | 'fallback' | 'history'
+export type ImageSource = 'capture' | 'fallback' | 'history-v3' | 'history'
+
+/** V4's height for a scenario, from the manifest. */
+export const heightOf = (scenario: string): PanelHeight | undefined =>
+  manifest?.heights?.find((height) => height.scenario === scenario)
 
 /** A render or capture resolved to a bundled URL and point size. */
 export interface ResolvedImage {
@@ -281,6 +329,24 @@ export const resolveV2 = ({
     scale: v2History?.scale ?? 2,
   })
 
+/** A frozen V3 panel scenario in one appearance (file names are relative to `v3/`). */
+export const resolveV3 = ({
+  scenario,
+  appearance,
+}: {
+  scenario: string
+  appearance: Appearance
+}): ResolvedImage | undefined => {
+  const entry = v3History?.renders.find(
+    (render) => render.scenario === scenario && render.appearance === appearance,
+  )
+  return resolve({
+    source: 'history-v3',
+    entry: entry === undefined ? undefined : { ...entry, file: `v3/${entry.file}` },
+    scale: v3History?.scale ?? 2,
+  })
+}
+
 /** Menu-bar states, in gallery order. */
 export const menuBarStates: readonly RenderScenario[] =
   manifest?.menuBarStates ?? captureManifest?.states ?? []
@@ -296,6 +362,8 @@ export const regenerateCommand = (source: ImageSource): string => {
       return captureManifest?.command ?? 'devenv tasks run attention-tray:gallery-capture-vm'
     case 'fallback':
       return manifest?.command ?? 'devenv tasks run attention-tray:gallery'
+    case 'history-v3':
+      return 'not regenerated: V3’s views are gone (git history has them)'
     case 'history':
       return 'not regenerated: the V2 variant code is gone (git history has it)'
   }

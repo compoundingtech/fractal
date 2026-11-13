@@ -221,3 +221,23 @@ html[data-appearance='dark'] body {
 .at-sources a {
   color: #0a84ff;
 }
+
+.at-table {
+  max-width: 980px;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.at-table th,
+.at-table td {
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--at-separator);
+  text-align: left;
+  vertical-align: top;
+}
+
+.at-table th {
+  color: var(--at-secondary);
+  font-weight: 600;
+}

@@ -2,20 +2,13 @@ import AppKit
 import AttentionCore
 import SwiftUI
 
-extension EnvironmentValues {
-  /// The scrolling body's height limit; snapshots lift it to render every section.
-  @Entry public var panelMaxHeight: CGFloat = 620
-}
-
-/// The menu-bar panel, inbox first: asks, updates and speech fill it; availability and
-/// objectives are chips below the inbox that expand their section in place, one at a time. It
-/// draws no background of its own: the menu-bar window's material is the surface, and grouped
-/// form sections sit on it as the content layer.
+/// The menu-bar panel as a Control Center module: the top level (tiles, the inbox as one-line
+/// rows, the footer), and one page drilled into at a time, pushed within the same panel with a
+/// back chevron. It draws no background of its own: the menu-bar window's glass is the surface,
+/// and content sits on it in the content layer.
 public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
-  @State private var chosenDetail: StatusDetail?
-  @State private var detailTouched = false
 
   public init(model: AttentionModel, build: BuildIdentity) {
     self.model = model
@@ -23,259 +16,107 @@ public struct TrayPanel: View {
   }
 
   public var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      PanelHeader(model: model)
-      if let message = model.configurationError {
-        PanelForm { ConfigurationSection(message: message) }
-      } else {
-        PanelBody(model: model, detail: detail)
-      }
-      PanelFooter(build: build)
+    ZStack(alignment: .top) {
+      page
+        .id(model.route)
+        // The top level leaves and returns on the leading side, pages on the trailing side: a
+        // page goes back the way it came.
+        .transition(
+          (model.route == .home ? AnyTransition.move(edge: .leading) : .move(edge: .trailing)).combined(with: .opacity))
     }
-    .frame(width: PanelMetrics.width)
+    .frame(width: PanelMetrics.width, alignment: .top)
+    .clipped()
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)
   }
 
-  /// The status chip expanded in place. Until the person picks one, objectives that need
-  /// attention open below the inbox.
-  private var detail: Binding<StatusDetail?> {
-    Binding(
-      get: {
-        if detailTouched { return chosenDetail }
-        return (model.sloBoard?.needsAttention ?? 0) > 0 ? .objectives : nil
-      },
-      set: {
-        chosenDetail = $0
-        detailTouched = true
-      })
-  }
-}
-
-enum PanelMetrics {
-  static let width: CGFloat = 400
-  /// The grouped Form's content inset (card margin plus row padding): header, status strip and
-  /// footer share the leading edge of section headers and row symbols.
-  static let inset: CGFloat = 30
-}
-
-/// What a status chip expands in place, below the chips, inside the same Form.
-enum StatusDetail: Hashable {
-  case availability, objectives
-}
-
-// MARK: - Body
-
-private struct PanelBody: View {
-  let model: AttentionModel
-  let detail: Binding<StatusDetail?>
-
-  var body: some View {
-    PanelForm {
-      AsksSection(model: model)
-      if !model.updates.isEmpty { UpdatesSection(model: model) }
-      if let speech = model.speech { SpeechControlsSection(speech: speech) }
-      Section {
-      } header: {
-        StatusStrip(model: model, detail: detail)
-      }
-      switch detail.wrappedValue {
-      case .availability: AvailabilitySection(model: model)
-      case .objectives: ObjectivesSection(model: model)
-      case nil: EmptyView()
-      }
-    }
-  }
-}
-
-/// A grouped section: a subheadline header with its summary, and a quieter metadata footer.
-struct PanelSection<Content: View, Footer: View>: View {
-  let title: String
-  var aside: String?
-  @ViewBuilder let content: () -> Content
-  @ViewBuilder let footer: () -> Footer
-
-  var body: some View {
-    Section {
-      content()
-    } header: {
-      SectionHeader(title: title, aside: aside)
-    } footer: {
-      // Metadata (when it was measured, presence): quieter than the header's own summary.
-      footer()
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-  }
-}
-
-extension PanelSection where Footer == EmptyView {
-  init(title: String, aside: String? = nil, @ViewBuilder content: @escaping () -> Content) {
-    self.init(title: title, aside: aside, content: content, footer: { EmptyView() })
-  }
-}
-
-// MARK: - Header
-
-/// Title, freshness and refresh; the version, Settings and Quit live in the footer.
-private struct PanelHeader: View {
-  let model: AttentionModel
-
-  var body: some View {
-    HStack(alignment: .center) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Attention").font(.headline)
-        ConnectionStatusView(connection: model.connection)
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
-      RefreshButton(model: model)
-    }
-    .padding(.horizontal, PanelMetrics.inset)
-    .padding(.top, 14)
-    .padding(.bottom, 6)
-  }
-}
-
-private struct RefreshButton: View {
-  let model: AttentionModel
-
-  var body: some View {
-    Button {
-      Task { await model.refresh() }
-    } label: {
-      if model.isRefreshing {
-        ProgressView().controlSize(.small).accessibilityLabel("Refreshing")
+  @ViewBuilder private var page: some View {
+    switch model.route {
+    case .home:
+      HomePage(model: model, build: build)
+    case .attention(let id):
+      if let record = model.record(id: id) {
+        AttentionPage(record: record, model: model)
       } else {
-        Label("Refresh", systemImage: "arrow.clockwise")
+        HomePage(model: model, build: build)
       }
-    }
-    .labelStyle(.iconOnly)
-    .buttonStyle(.borderless)
-    .keyboardShortcut("r", modifiers: .command)
-    .disabled(model.isRefreshing || model.configurationError != nil)
-    .help(model.configurationError != nil ? "Configure AttentionTray to enable refresh" : "Refresh now (⌘R)")
-  }
-}
-
-// MARK: - Status strip
-
-/// Availability and objectives as toggle chips. A chip shows its summary and expands its full
-/// section in place, one at a time, like a Control Center module; never a popover from the panel.
-private struct StatusStrip: View {
-  let model: AttentionModel
-  let detail: Binding<StatusDetail?>
-
-  var body: some View {
-    // Chips keep their full summary: when one row is too narrow, each takes its own.
-    ViewThatFits(in: .horizontal) {
-      HStack(spacing: 6) {
-        summaries
-        Spacer(minLength: 0)
+    case .availability:
+      ModulePage(title: "Availability", model: model) {
+        AvailabilitySwitch(model: model)
+      } content: {
+        AvailabilitySection(model: model)
       }
-      VStack(alignment: .leading, spacing: 6) { summaries }
-    }
-    .lineLimit(1)
-    .textCase(nil)
-    .padding(.bottom, 6)
-  }
-
-  @ViewBuilder private var summaries: some View {
-    if let availability = model.availability.value?.availability {
-      StatusChip(id: .availability, help: "Availability", detail: detail) {
-        Label(AvailabilitySection.summary(availability), systemImage: AxisRows.symbol(availability.status))
-          .accessibilityLabel("Availability: \(AvailabilitySection.summary(availability))")
-      }
-    }
-    if let board = model.sloBoard {
-      StatusChip(id: .objectives, help: "Objectives", detail: detail) {
-        let summary = board.needsAttention > 0 ? "\(board.needsAttention) need attention" : "Objectives met"
-        Label(summary, systemImage: board.needsAttention > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle")
-          .accessibilityLabel("Objectives and budgets: \(summary)")
-      }
-    }
-  }
-}
-
-private struct StatusChip<Title: View>: View {
-  let id: StatusDetail
-  let help: String
-  let detail: Binding<StatusDetail?>
-  @ViewBuilder let title: () -> Title
-
-  var body: some View {
-    Toggle(isOn: Binding(get: { detail.wrappedValue == id }, set: { detail.wrappedValue = $0 ? id : nil })) {
-      title()
-    }
-    .toggleStyle(.button)
-    .buttonBorderShape(.capsule)
-    .controlSize(.small)
-    .fixedSize()
-    .help("\(help): show or hide its section")
-  }
-}
-
-// MARK: - Configuration and footer
-
-private struct ConfigurationSection: View {
-  let message: String
-
-  var body: some View {
-    Section {
-      Label {
-        VStack(alignment: .leading, spacing: 6) {
-          Text("Configuration needed").fontWeight(.semibold)
-          Text(message).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-          Text(
-            "Set ATTENTION_FRACTAL_SOCKET, ATTENTION_FRACTAL_PERSON and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
+    case .speech:
+      if let speech = model.speech {
+        ModulePage(title: "Speech", model: model) {
+          Toggle(
+            "Speech", isOn: Binding(get: { speech.mutes.all(now: .now) == nil }, set: { on in
+              if on { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
+            })
           )
-          .font(.callout)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-          .textSelection(.enabled)
+          .toggleStyle(.switch)
+          .controlSize(.small)
+          .labelsHidden()
+          .help("Speech on or muted; banners still show")
+        } content: {
+          SpeechControlsSection(speech: speech)
         }
-      } icon: {
-        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+      } else {
+        HomePage(model: model, build: build)
+      }
+    case .objectives:
+      ModulePage(title: "Objectives", model: model) {
+        EmptyView()
+      } content: {
+        ObjectivesSection(model: model)
       }
     }
   }
 }
 
-private struct PanelFooter: View {
-  let build: BuildIdentity
+/// A module's page: the header with back and the module's switch, then its grouped sections.
+private struct ModulePage<Trailing: View, Content: View>: View {
+  let title: String
+  let model: AttentionModel
+  @ViewBuilder let trailing: () -> Trailing
+  @ViewBuilder let content: () -> Content
 
   var body: some View {
-    HStack(spacing: 12) {
-      Text(build.machineVersion)
-        .font(.footnote.monospaced())
-        .foregroundStyle(.tertiary)
-        .textSelection(.enabled)
-        .help(build.details)
-      Spacer()
-      SettingsButton()
-      Button("Quit AttentionTray") { NSApp.terminate(nil) }
-        .keyboardShortcut("q", modifiers: .command)
+    VStack(alignment: .leading, spacing: 0) {
+      PageHeader(title: title, model: model, trailing: trailing)
+      PanelForm(content: content)
+        .contentMargins(.top, 2, for: .scrollContent)
+        .environment(\.pageTitle, title)
     }
-    .buttonStyle(.borderless)
-    .font(.callout)
-    .padding(.horizontal, PanelMetrics.inset)
-    .padding(.top, 4)
-    .padding(.bottom, 12)
   }
 }
 
-/// Opens the Settings window (whether the status item shows in the menu bar). The tray is an
-/// accessory app, so it comes forward first.
-private struct SettingsButton: View {
-  @Environment(\.openSettings) private var openSettings
+/// Availability's switch: on is Available. Off sets Away until the person changes it; turning
+/// a hand-set Away back on follows presence again.
+struct AvailabilitySwitch: View {
+  let model: AttentionModel
 
   var body: some View {
-    Button("Settings…") {
-      NSApp.activate()
-      openSettings()
+    if let availability = model.availability.value?.availability {
+      Toggle(
+        "Available", isOn: Binding(get: { availability.status == .available }, set: { _ in Self.flip(availability, model) })
+      )
+      .toggleStyle(.switch)
+      .controlSize(.small)
+      .labelsHidden()
+      .disabled(model.isWritingAvailability)
+      .help(availability.status == .available ? "Set Away until you change it" : "Set Available")
     }
-    .keyboardShortcut(",", modifiers: .command)
+  }
+
+  static func flip(_ availability: Availability, _ model: AttentionModel) {
+    let edit: AvailabilityEdit
+    let label: String
+    switch (availability.status, availability.statusOverridden) {
+    case (.available, _): (edit, label) = (.status(.away, .indefinitely), "away")
+    case (_, true): (edit, label) = (.status(nil, .indefinitely), "status from presence")
+    default: (edit, label) = (.status(.available, .indefinitely), "available")
+    }
+    Task { await model.setAvailability(edit, label: label) }
   }
 }

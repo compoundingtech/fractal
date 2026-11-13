@@ -30,7 +30,8 @@ enum TraySettings {
 }
 
 /// People choose whether the extra takes menu-bar space. With it hidden the tray keeps
-/// running (counts, speech, presence); opening AttentionTray again brings it back.
+/// running (counts, speech, presence); opening AttentionTray again brings it back. Quit lives
+/// here: the panel's footer holds only the version, refresh and Settings….
 private struct TraySettingsView: View {
   @AppStorage(TraySettings.showInMenuBar) private var showInMenuBar = true
 
@@ -42,6 +43,12 @@ private struct TraySettingsView: View {
         Text("When hidden, open AttentionTray again (Spotlight or Finder) to bring it back.")
           .font(.subheadline)
           .foregroundStyle(.secondary)
+      }
+      Section {
+        LabeledContent("Stops the tray, its speech and its presence reports.") {
+          Button("Quit AttentionTray") { NSApp.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
+        }
       }
     }
     .formStyle(.grouped)
