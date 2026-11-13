@@ -3099,8 +3099,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             if !runner.retired && runner.host == self.host {
-                let _ = self.isolate("gate", &runner.subject, || {
+                let _ = self.isolate("gate", &runner.owner_run, || {
                     self.execute_remote_mechanical_gate(runner)
+                        .with_context(|| format!("remote gate {}", runner.subject))
                 });
             }
             if runner.retired && runner.host == self.host {
@@ -19268,7 +19269,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         anyhow::ensure!(request.origin == origin && request.actor.is_none()
             && request.kind == "gate.requested",
             "the remote gate was not requested by its run origin");
-        let (run, mission) = self.store.mission_run_for_evaluation(&dispatch.stage.run)?;
+        let (run, mission) = self.store.mission_run_for_evaluation(dispatch.stage.run
+            .strip_prefix("mission-run/").unwrap_or(&dispatch.stage.run))?;
         anyhow::ensure!(run.generation == dispatch.stage.generation
             && dispatch.stage.eval == (run.mode == "eval")
             && matches!(run.status.as_str(), "running" | "standing" | "blocked")
@@ -31140,7 +31142,7 @@ mission "proof" state="ready" {{
                 "environment" => { dispatch.environment.insert("UNPUBLISHED".into(), "value".into()); }
                 "host" => dispatch.host = "other".into(),
                 "time_limit" => dispatch.time_limit_ms += 1,
-                "origin" => {}
+                "origin" => { dispatch.check = 2; }
                 _ => unreachable!(),
             }
             dispatch.result_subject = gate_result_subject(&dispatch.stage, &dispatch.name,

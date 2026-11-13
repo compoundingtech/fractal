@@ -432,7 +432,7 @@ impl EvidenceStore for Store {
         } else {
             format!("({})", crate::store::gate_runners::FROM_CLAIMS)
         };
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h16daeb7e7a0e owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha3d84de9cc54 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
             "SELECT DISTINCT runner.subject,
                     COALESCE(json_extract(request.body, '$.fields.host'), runner.origin),
                     runner.owner,

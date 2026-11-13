@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Mechanical mission gates execute on their declared member even when another member owns the run, with durable dispatch requests and replicated results.",
   "replay": {
-    "status": "unchanged",
+    "status": "none",
     "detail": "No replay or historical claim rewrite. Active remote gates create their missing dispatch request when their origin next evaluates them. Existing local gate results retain their operation identity."
   },
   "schema": {
