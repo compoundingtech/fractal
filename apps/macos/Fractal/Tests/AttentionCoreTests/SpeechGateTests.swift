@@ -42,16 +42,15 @@ final class SpeechGateTests: XCTestCase {
   }
 
   func context(
-    _ availability: Availability?, mac: PresenceState? = .present, call: CallState = CallState(),
-    mutes: SpeechMutes = SpeechMutes(), at seconds: TimeInterval = 0
+    _ availability: Availability?, mac: PresenceState? = .present, mutes: SpeechMutes = SpeechMutes(),
+    at seconds: TimeInterval = 0
   ) -> SpeechContext {
-    SpeechContext(
-      availability: availability, macPresence: mac, call: call, mutes: mutes, now: now.addingTimeInterval(seconds))
+    SpeechContext(availability: availability, macPresence: mac, mutes: mutes, now: now.addingTimeInterval(seconds))
   }
 
-  /// Every combination of the gate's inputs, the call and both mutes included, against the
-  /// rule written out once: availability decides whether anything is delivered; all-speech
-  /// mute, then the requester's mute, then an unallowed call turn speech into a banner.
+  /// Every combination of the gate's inputs, the agent mute included, against the rule written
+  /// out once: availability decides whether anything is delivered; the requester's mute turns
+  /// speech into a banner. The person's mute and calls are the speech service's.
   func testTruthTable() {
     let gate = SpeechGate()
     let endOfToday = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now))
@@ -60,53 +59,36 @@ final class SpeechGateTests: XCTestCase {
       for readAloud in [true, false] {
         for interruptions in Availability.Interruptions.known + [.unknown("quiet")] {
           for status in Availability.Status.known + [.unknown("dnd")] {
-            do {
-              for mac in [PresenceState.present, .idle, .locked, nil] {
-                for inCall in [true, false] {
-                  for allowCall in [true, false] {
-                    for mutedAll in [true, false] {
-                      for mutedAgent in [true, false] {
-                        var call = CallState()
-                        call.devices(inCall ? ["microphone: us.zoom.xos"] : [])
-                        call.allow(allowCall)
-                        var mutes = SpeechMutes()
-                        if mutedAll { mutes.muteAll(.hours(1), now: now) }
-                        if mutedAgent { mutes.mute("release-captain", .endOfToday, now: now) }
-                        mutes.mute("someone-else", .indefinitely, now: now)
-                        let verdict = gate.verdict(
-                          item == "update" ? update(speech: "Release landed") : ask(urgent: item == "urgent"),
-                          readAloud: readAloud,
-                          context(
-                            availability(interruptions, status: status), mac: mac,
-                            call: call, mutes: mutes))
-                        let unasked = item != "plain"
-                        let delivered =
-                          (unasked || readAloud) && (interruptions == .all || (interruptions == .urgent && unasked))
-                          && status == .available && mac == .present
-                        let held: SpeechHeld? =
-                          mutedAll
-                          ? .muted(until: now + 3600)
-                          : mutedAgent ? .agentMuted(until: endOfToday) : inCall && !allowCall ? .inCall : nil
-                        let label =
-                          "\(item) readAloud \(readAloud) \(interruptions) \(status) mac \(String(describing: mac)) call \(inCall)/\(allowCall) muted \(mutedAll)/\(mutedAgent)"
-                        if delivered {
-                          XCTAssertEqual(verdict, held.map { .banner($0) } ?? .speak, label)
-                        } else if case .quiet = verdict {
-                        } else {
-                          XCTFail("\(label): expected quiet, got \(verdict)")
-                        }
-                        cases += 1
-                      }
-                    }
-                  }
+            for mac in [PresenceState.present, .idle, .locked, nil] {
+              for mutedAgent in [true, false] {
+                var mutes = SpeechMutes()
+                if mutedAgent { mutes.mute("release-captain", .endOfToday, now: now) }
+                mutes.mute("someone-else", .indefinitely, now: now)
+                let verdict = gate.verdict(
+                  item == "update" ? update(speech: "Release landed") : ask(urgent: item == "urgent"),
+                  readAloud: readAloud,
+                  context(availability(interruptions, status: status), mac: mac, mutes: mutes))
+                let unasked = item != "plain"
+                let delivered =
+                  (unasked || readAloud) && (interruptions == .all || (interruptions == .urgent && unasked))
+                  && status == .available && mac == .present
+                let held: SpeechHeld? = mutedAgent ? .agentMuted(until: endOfToday) : nil
+                let label =
+                  "\(item) readAloud \(readAloud) \(interruptions) \(status) mac \(String(describing: mac)) muted \(mutedAgent)"
+                if delivered {
+                  XCTAssertEqual(verdict, held.map { .banner($0) } ?? .speak, label)
+                } else if case .quiet = verdict {
+                } else {
+                  XCTFail("\(label): expected quiet, got \(verdict)")
                 }
+                cases += 1
               }
             }
           }
         }
       }
     }
-    XCTAssertEqual(cases, 3 * 2 * 4 * 3 * 4 * 2 * 2 * 2 * 2)
+    XCTAssertEqual(cases, 3 * 2 * 4 * 3 * 4 * 2)
   }
 
   func testQuietReasonsNameTheFirstFailingRule() {
@@ -128,32 +110,24 @@ final class SpeechGateTests: XCTestCase {
 
   func testAMuteEndsOnTimeAndOneWithoutAnEndLastsUntilLifted() {
     var mutes = SpeechMutes()
-    mutes.muteAll(.hours(1), now: now)
-    mutes.mute("release-captain", .indefinitely, now: now)
-    XCTAssertEqual(SpeechGate.held(ask(), context(availability(), mutes: mutes)), .muted(until: now + 3600))
+    mutes.mute("release-captain", .hours(1), now: now)
+    mutes.mute("observability", .indefinitely, now: now)
+    XCTAssertEqual(SpeechGate.held(ask(), context(availability(), mutes: mutes)), .agentMuted(until: now + 3600))
+    XCTAssertNil(SpeechGate.held(ask(), context(availability(), mutes: mutes, at: 3600)), "the hour is over")
     XCTAssertEqual(
-      SpeechGate.held(ask(), context(availability(), mutes: mutes, at: 3600)), .agentMuted(until: nil),
-      "the hour is over; the requester stays muted")
+      SpeechGate.held(ask(from: "observability"), context(availability(), mutes: mutes, at: 3600)),
+      .agentMuted(until: nil), "a mute without an end lasts")
     mutes.prune(now: now + 3600)
-    XCTAssertNil(mutes.all)
-    mutes.unmute("release-captain")
+    XCTAssertEqual(mutes.mutedAgents(now: now + 3600).map(\.requester), ["observability"])
+    mutes.unmute("observability")
     XCTAssertEqual(mutes, SpeechMutes())
   }
 
-  func testTheCallOverrideBelongsToOneCall() {
-    var call = CallState()
-    call.allow(true)
-    XCTAssertFalse(call.allowSpeech, "no call to allow speech for")
-    XCTAssertTrue(call.devices(["camera: FaceTime HD Camera"]), "a call started")
-    XCTAssertTrue(call.holdsSpeech)
-    call.allow(true)
-    XCTAssertFalse(call.holdsSpeech)
-    XCTAssertFalse(call.devices(["camera: FaceTime HD Camera", "microphone: us.zoom.xos"]), "same call")
-    XCTAssertTrue(call.allowSpeech, "another device joining keeps the override")
-    call.devices([])
-    XCTAssertFalse(call.allowSpeech, "the call ended")
-    call.devices(["microphone: com.apple.FaceTime"])
-    XCTAssertTrue(call.holdsSpeech, "the next call holds speech again")
+  /// Mutes saved before the person's mute moved to the speech service keep their agent mutes.
+  func testSavedMutesWithTheOldMuteAllKeepTheirAgentMutes() throws {
+    let saved = Data(#"{"all":{},"agents":{"janitor":{}}}"#.utf8)
+    XCTAssertEqual(
+      try JSONDecoder().decode(SpeechMutes.self, from: saved), SpeechMutes(agents: ["janitor": .init(until: nil)]))
   }
 
   func testOncePerRevisionAndOncePerRequesterEveryTenMinutes() {
@@ -203,10 +177,13 @@ final class SpeechServiceClientTests: XCTestCase {
         ]))
       answered.fulfill()
     }
+    let admitted = Lines()
     let outcome = SpeechServiceClient.exchange(
-      .init(id: "attention/one#claim/1", text: "Release train is blocked", source: "release-captain"), path: path)
+      .speak(id: "attention/one#claim/1", text: "Release train is blocked", source: "release-captain"), path: path,
+      admitted: { admitted.append("queued") })
     wait(for: [answered], timeout: 5)
     XCTAssertEqual(outcome, .spoken)
+    XCTAssertEqual(admitted.all, ["queued"], "admitted once the service queued it")
     XCTAssertEqual(
       try JSONSerialization.jsonObject(with: Data(received.all.joined().utf8)) as? [String: String],
       ["op": "speak", "id": "attention/one#claim/1", "text": "Release train is blocked", "language": "en", "source": "release-captain"])
@@ -219,6 +196,91 @@ final class SpeechServiceClientTests: XCTestCase {
     XCTAssertEqual(
       answer(#"{"event":"result","result":{"id":"x","outcome":"failed","reason":"queue_full"}}"#),
       .outcome(.failed("queue_full")))
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"rendered"}}"#),
+      .outcome(.failed("unknown outcome rendered from the speech service")), "a newer outcome stays readable")
+  }
+
+  /// `held` (wire v2): the person's mute or a call kept the request from being spoken.
+  func testHeldResultsMapToTheTraysHolds() {
+    func answer(_ line: String) -> SpeechServiceClient.Answer { SpeechServiceClient.answer(of: Data(line.utf8)) }
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"held","reason":"muted","until":"2026-11-13T15:00:00Z"}}"#),
+      .outcome(.held(.muted(until: Date(timeIntervalSince1970: 1_794_582_000)))))
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"held","reason":"muted"}}"#),
+      .outcome(.held(.muted(until: nil))), "a mute without an end")
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"held","reason":"muted","until":null}}"#),
+      .outcome(.held(.muted(until: nil))), "null is absent")
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"held","reason":"in_call"}}"#), .outcome(.held(.inCall)))
+    XCTAssertEqual(
+      answer(#"{"event":"result","result":{"id":"x","outcome":"held","reason":"focus"}}"#),
+      .outcome(.failed("held: focus")), "a newer hold reason stays readable")
+  }
+
+  func testStateEventsDecodeControlsAndQueue() throws {
+    let line = #"""
+      {"event":"state","controls":{"muted":{"until":"2026-11-13T15:00:00Z"},"call":{"devices":["microphone: us.zoom.xos","camera: FaceTime HD"],"allowed":false},"stop_hotkey":"⌃⌥⌘."},"queue":[{"id":"a","language":"en","source":"release-captain","caller":"tray","characters":24,"speaking":true,"now":false},{"id":"b","language":"en","source":"speak","caller":"robot","characters":5,"speaking":false}]}
+      """#
+    let state = try XCTUnwrap(SpeechServiceClient.Event.decode(Data(line.utf8))?.state)
+    XCTAssertEqual(
+      state,
+      SpeechServiceState(
+        controls: SpeechServiceControls(
+          muted: .init(until: Date(timeIntervalSince1970: 1_794_582_000)),
+          call: .init(devices: ["microphone: us.zoom.xos", "camera: FaceTime HD"], allowed: false),
+          stopHotkey: "⌃⌥⌘."),
+        queue: [
+          .init(id: "a", source: "release-captain", caller: .tray, speaking: true),
+          .init(id: "b", source: "speak", caller: .unknown("robot")),
+        ]))
+    XCTAssertEqual(state.controls.held, .muted(until: Date(timeIntervalSince1970: 1_794_582_000)), "muted wins")
+  }
+
+  func testAbsentAndNullControlsMeanTheSame() throws {
+    func state(_ line: String) throws -> SpeechServiceState {
+      try XCTUnwrap(SpeechServiceClient.Event.decode(Data(line.utf8))?.state, line)
+    }
+    let quiet = SpeechServiceState(controls: SpeechServiceControls(stopHotkey: "⌃⌥⌘."))
+    XCTAssertEqual(try state(#"{"event":"state","controls":{"stop_hotkey":"⌃⌥⌘."},"queue":[]}"#), quiet)
+    XCTAssertEqual(
+      try state(#"{"event":"state","controls":{"muted":null,"call":null,"stop_hotkey":"⌃⌥⌘."},"queue":null}"#), quiet)
+    XCTAssertEqual(
+      try state(#"{"event":"state","controls":{"muted":{"until":null},"call":{"devices":["camera: FaceTime HD"],"allowed":true}}}"#)
+        .controls,
+      SpeechServiceControls(muted: .init(until: nil), call: .init(devices: ["camera: FaceTime HD"], allowed: true)))
+    XCTAssertNil(SpeechServiceClient.Event.decode(Data(#"{"event":"ok","affected":[]}"#.utf8))?.state)
+  }
+
+  func testControlsAreOneRequestLineEach() throws {
+    func json(_ control: SpeechControl) throws -> NSDictionary {
+      try XCTUnwrap(
+        JSONSerialization.jsonObject(with: XCTUnwrap(SpeechServiceClient.Request(control).line)) as? NSDictionary)
+    }
+    XCTAssertEqual(try json(.stop), ["op": "stop"])
+    XCTAssertEqual(
+      try json(.mute(until: Date(timeIntervalSince1970: 1_794_582_000))), ["op": "mute", "until": "2026-11-13T15:00:00Z"])
+    XCTAssertEqual(try json(.mute(until: nil)), ["op": "mute"], "until unmuted")
+    XCTAssertEqual(try json(.unmute), ["op": "unmute"])
+    XCTAssertEqual(try json(.allowCall(true)), ["op": "allow_call", "allowed": true])
+    XCTAssertEqual(
+      try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(SpeechServiceClient.Request.watch.line)) as? NSDictionary),
+      ["op": "watch"])
+  }
+
+  func testControlAnswersMapStateOkAndErrors() throws {
+    func answer(_ line: String) throws -> SpeechControlAnswer {
+      SpeechServiceClient.controlAnswer(try XCTUnwrap(SpeechServiceClient.Event.decode(Data(line.utf8))))
+    }
+    XCTAssertEqual(
+      try answer(#"{"event":"state","controls":{"muted":{}},"queue":[]}"#),
+      .state(SpeechServiceState(controls: SpeechServiceControls(muted: .init()))))
+    XCTAssertEqual(try answer(#"{"event":"ok","affected":["x"]}"#), .done)
+    XCTAssertEqual(
+      try answer(#"{"event":"error","error":"no call in progress","reason":"no_call"}"#),
+      .failed("no call in progress: no_call"))
   }
 
   /// The result is due within one speaking budget per request ahead plus its own.
@@ -244,7 +306,7 @@ final class SpeechServiceClientTests: XCTestCase {
         ], pauseBeforeLast: 1.5)
       answered.fulfill()
     }
-    let outcome = SpeechServiceClient.exchange(.init(id: "x", text: "y", source: "z"), path: path, deadlines: short)
+    let outcome = SpeechServiceClient.exchange(.speak(id: "x", text: "y", source: "z"), path: path, deadlines: short)
     wait(for: [answered], timeout: 5)
     XCTAssertEqual(outcome, .spoken, "1.5 s is past the queued deadline but within two speaking budgets")
   }
@@ -262,7 +324,7 @@ final class SpeechServiceClientTests: XCTestCase {
         ], pauseBeforeLast: 2.5)
       answered.fulfill()
     }
-    let outcome = SpeechServiceClient.exchange(.init(id: "x", text: "y", source: "z"), path: path, deadlines: short)
+    let outcome = SpeechServiceClient.exchange(.speak(id: "x", text: "y", source: "z"), path: path, deadlines: short)
     XCTAssertEqual(outcome, .failed("no outcome at queue position 0 within 1.5 s"))
     wait(for: [answered], timeout: 5)
   }
@@ -272,12 +334,12 @@ final class SpeechServiceClientTests: XCTestCase {
     defer { unlink(path) }
     let server = try StandInSocket(path: path)
     Thread.detachNewThread { _ = server.answer(lines: []) }
-    let outcome = SpeechServiceClient.exchange(.init(id: "x", text: "y", source: "z"), path: path)
+    let outcome = SpeechServiceClient.exchange(.speak(id: "x", text: "y", source: "z"), path: path)
     guard case .unreachable(let reason) = outcome else { return XCTFail("\(outcome)") }
     XCTAssertTrue(reason.contains("authorized caller"), reason)
   }
 
-  /// Stop and Skip send one `skip` naming the request; the service answers `ok`.
+  /// Skip sends one `skip` naming the request; the service answers `ok`.
   func testSkipSendsOneSkipLineNamingTheRequest() async throws {
     let path = socketPath()
     defer { unlink(path) }
@@ -291,6 +353,100 @@ final class SpeechServiceClientTests: XCTestCase {
       try JSONSerialization.jsonObject(with: Data(received.all.joined().utf8)) as? [String: String],
       ["op": "skip", "id": "attention/one#claim/1"])
   }
+
+  func testAControlSendsItsLineAndReturnsTheServicesState() async throws {
+    let path = socketPath()
+    defer { unlink(path) }
+    let server = try StandInSocket(path: path)
+    let received = Lines()
+    let answered = expectation(description: "answered")
+    Thread.detachNewThread {
+      received.append(
+        server.answer(lines: [#"{"event":"state","controls":{"call":{"devices":["camera: FaceTime HD"],"allowed":true}}}"#]))
+      answered.fulfill()
+    }
+    let answer = await SpeechServiceClient(socketPath: path).control(.allowCall(true))
+    await fulfillment(of: [answered], timeout: 5)
+    XCTAssertEqual(
+      answer, .state(SpeechServiceState(controls: SpeechServiceControls(call: .init(devices: ["camera: FaceTime HD"], allowed: true)))))
+    XCTAssertEqual(
+      try JSONSerialization.jsonObject(with: Data(received.all.joined().utf8)) as? NSDictionary,
+      ["op": "allow_call", "allowed": true])
+  }
+
+  /// A restarted service is watched again: each connection's states, nil in between.
+  func testWatchReportsEachStateAndReconnectsAfterTheServiceRestarts() throws {
+    let path = socketPath()
+    defer { unlink(path) }
+    let server = try StandInSocket(path: path)
+    let requests = Lines()
+    Thread.detachNewThread {
+      requests.append(server.answer(lines: [#"{"event":"state","controls":{"muted":{}},"queue":[]}"#]))
+      requests.append(server.answer(lines: [#"{"event":"state","controls":{},"queue":[]}"#]))
+    }
+    let watch = Watch(path: path, backoff: .init(first: 0.05, longest: 0.1))
+    let reported = Reported()
+    let done = expectation(description: "watch ended")
+    Thread.detachNewThread {
+      watch.run { state in
+        reported.append(state)
+        if state == SpeechServiceState(controls: SpeechServiceControls()) { watch.cancel() }
+      }
+      done.fulfill()
+    }
+    wait(for: [done], timeout: 5)
+    XCTAssertEqual(
+      reported.all,
+      [
+        SpeechServiceState(controls: SpeechServiceControls(muted: .init())), nil,
+        SpeechServiceState(controls: SpeechServiceControls()),
+      ])
+    XCTAssertEqual(requests.all, [#"{"op":"watch"}"#, #"{"op":"watch"}"#])
+  }
+
+  /// A service from before wire v2 answers `watch` with an error: no controls, retried later.
+  func testAServiceTooOldToWatchReportsNoState() throws {
+    let path = socketPath()
+    defer { unlink(path) }
+    let server = try StandInSocket(path: path)
+    Thread.detachNewThread { _ = server.answer(lines: [#"{"error":"invalid request","event":"error"}"#]) }
+    let watch = Watch(path: path, backoff: .init(first: 0.05, longest: 0.1))
+    let reported = Reported()
+    let done = expectation(description: "watch ended")
+    Thread.detachNewThread {
+      watch.run { state in
+        reported.append(state)
+        watch.cancel()
+      }
+      done.fulfill()
+    }
+    wait(for: [done], timeout: 5)
+    XCTAssertEqual(reported.all, [nil])
+  }
+
+  /// The stream starts the watch and dropping it ends the connection.
+  func testTheStateStreamYieldsTheFirstState() async throws {
+    let path = socketPath()
+    defer { unlink(path) }
+    let server = try StandInSocket(path: path)
+    Thread.detachNewThread {
+      _ = server.answer(
+        lines: [#"{"event":"state","controls":{"muted":{}}}"#, #"{"event":"state","controls":{}}"#], pauseBeforeLast: 2)
+    }
+    var first: SpeechServiceState??
+    for await state in SpeechServiceClient(socketPath: path).states() {
+      first = state
+      break
+    }
+    XCTAssertEqual(first, .some(SpeechServiceState(controls: SpeechServiceControls(muted: .init()))))
+  }
+}
+
+final class Reported: @unchecked Sendable {
+  private let lock = NSLock()
+  private var states: [SpeechServiceState?] = []
+  func append(_ state: SpeechServiceState?) { lock.withLock { states.append(state) } }
+  var all: [SpeechServiceState?] { lock.withLock { states } }
 }
 
 

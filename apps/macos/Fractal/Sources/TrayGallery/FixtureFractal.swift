@@ -106,12 +106,33 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   }
 }
 
-/// Speech that is still being spoken when the gallery renders.
+/// Speech that is still being spoken when the gallery renders, unless the fixture's service
+/// controls hold it: then it answers `held` at once, as the speech service does.
 struct FixtureSpeech: SpeechOutput {
-  func speak(id: String, text: String, source: String) async -> SpeechOutcome {
+  static let hotkey = "⌃⌥⌘."
+  var state = SpeechServiceState(controls: SpeechServiceControls(stopHotkey: hotkey))
+
+  func speak(id: String, text: String, source: String, admitted: @escaping @Sendable () -> Void) async
+    -> SpeechOutcome
+  {
+    if let held = state.controls.held { return .held(held) }
+    admitted()
     try? await Task.sleep(for: .seconds(3600))
     return .spoken
   }
 
   func skip(id: String) async {}
+
+  func control(_ control: SpeechControl) async -> SpeechControlAnswer { .state(state) }
+
+  func states() -> AsyncStream<SpeechServiceState?> {
+    AsyncStream { $0.yield(state) }
+  }
+
+  /// A coordinator whose service reported this fixture's state, as `watch` would.
+  @MainActor func coordinator(clock: @escaping @Sendable () -> Date = { .now }) -> SpeechCoordinator {
+    let speech = SpeechCoordinator(output: self, clock: clock, log: { _ in })
+    speech.apply(state)
+    return speech
+  }
 }

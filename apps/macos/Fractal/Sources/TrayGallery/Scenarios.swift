@@ -183,7 +183,7 @@ let scenarios: [Scenario] = [
       page: AttentionPage(records: content.asks + [content.update], canAnswer: true, canControl: true),
       slo: content.strainedSlo,
       histories: content.strainedHistories, availability: content.present)
-    let model = model(fractal, speech: SpeechCoordinator(output: FixtureSpeech(), log: { _ in }))
+    let model = model(fractal, speech: FixtureSpeech().coordinator())
     model.macPresence = .present
     await model.refresh()
     return model

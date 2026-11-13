@@ -56,15 +56,17 @@ public struct TrayPanel: View {
     case .speech:
       if let speech = model.speech {
         ModulePage(title: "Speech", model: model) {
-          Toggle(
-            "Speech", isOn: Binding(get: { speech.mutes.all(now: .now) == nil }, set: { on in
-              if on { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
-            })
-          )
-          .toggleStyle(.switch)
-          .controlSize(.small)
-          .labelsHidden()
-          .help("Speech on or muted; banners still show")
+          if let controls = speech.controls {
+            Toggle(
+              "Speech", isOn: Binding(get: { controls.muted == nil }, set: { on in
+                if on { speech.unmuteAll() } else { speech.muteAll(.indefinitely, now: .now) }
+              })
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .labelsHidden()
+            .help("Speech on or muted; banners still show")
+          }
         } content: {
           SpeechControlsSection(speech: speech)
         }

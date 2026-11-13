@@ -3,18 +3,19 @@ import SwiftUI
 
 /// Speech on this Mac: what is being spoken and what waits (Stop, Skip, Mute this agent),
 /// the call that holds speech with its per-call override, and the person's mutes. Shown only
-/// with a speech service, as one grouped section of label + trailing control rows. Mutes are
+/// with a speech service, as one grouped section of label + trailing control rows. The call
+/// and mute rows are the speech service's controls, shown once it reports them. Mutes are
 /// speech only: banners still show.
 struct SpeechControlsSection: View {
   let speech: SpeechCoordinator
 
   var body: some View {
     let now = Date.now
-    PanelSection(title: "Speech", aside: SpeechText.summary(speech, now: now)) {
+    PanelSection(title: "Speech", aside: SpeechText.summary(speech)) {
       if let current = speech.current { NowSpeaking(record: current, speech: speech) }
       ForEach(speech.queue) { record in QueuedRow(record: record, speech: speech) }
-      if speech.call.inCall { CallRow(speech: speech) }
-      MuteRow(speech: speech, now: now)
+      if let call = speech.controls?.call { CallRow(call: call, speech: speech) }
+      if let controls = speech.controls { MuteRow(muted: controls.muted, speech: speech) }
       ForEach(speech.mutes.mutedAgents(now: now), id: \.requester) { muted in
         LabeledContent {
           Button("Unmute") { speech.unmute(agent: muted.requester) }.controlSize(.small)
@@ -50,7 +51,7 @@ private struct NowSpeaking: View {
         } label: {
           Label("Stop", systemImage: "stop.fill")
         }
-        .help("Stop speaking this; the queue goes on (\(SpeechHotkey.stop) from any app)")
+        .help(SpeechText.stopHelp("Stop speaking this; the queue goes on", speech))
         MuteAgentMenu(requester: record.from, speech: speech)
       }
       .controlSize(.small)
@@ -82,28 +83,26 @@ private struct QueuedRow: View {
   }
 }
 
-/// A microphone or camera is in use: speech waits unless the person allows it for this call.
+/// A microphone or camera is in use: the service holds speech unless the person allows it
+/// for this call.
 private struct CallRow: View {
+  let call: SpeechServiceControls.Call
   let speech: SpeechCoordinator
 
   var body: some View {
-    Toggle(isOn: Binding(get: { speech.call.allowSpeech }, set: { speech.allowDuringCall($0) })) {
+    Toggle(isOn: Binding(get: { call.allowed }, set: { speech.allowDuringCall($0) })) {
       Label {
         VStack(alignment: .leading, spacing: 2) {
           Text("Allow Speech During This Call")
-          Text(
-            speech.call.allowSpeech
-              ? "In a call: speech allowed until it ends"
-              : "In a call: speech held, banners only"
-          )
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          if !speech.call.inUse.isEmpty {
-            Text(speech.call.inUse.joined(separator: ", ")).font(.subheadline).foregroundStyle(.tertiary).lineLimit(2)
+          Text(call.allowed ? "In a call: speech allowed until it ends" : "In a call: speech held, banners only")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+          if !call.devices.isEmpty {
+            Text(call.devices.joined(separator: ", ")).font(.subheadline).foregroundStyle(.tertiary).lineLimit(2)
           }
         }
       } icon: {
-        Image(systemName: speech.call.allowSpeech ? "phone.fill" : "phone.badge.waveform.fill")
+        Image(systemName: call.allowed ? "phone.fill" : "phone.badge.waveform.fill")
       }
     }
     .toggleStyle(.switch)
@@ -113,15 +112,15 @@ private struct CallRow: View {
 }
 
 private struct MuteRow: View {
+  let muted: SpeechServiceControls.Muted?
   let speech: SpeechCoordinator
-  let now: Date
 
   var body: some View {
-    if let mute = speech.mutes.all(now: now) {
+    if let muted {
       LabeledContent {
         Button("Unmute") { speech.unmuteAll() }.controlSize(.small)
       } label: {
-        Label("Speech muted \(SpeechText.until(mute.until))", systemImage: "speaker.slash.fill")
+        Label("Speech muted \(SpeechText.until(muted.until))", systemImage: "speaker.slash.fill")
       }
     } else {
       LabeledContent {
@@ -155,11 +154,19 @@ struct MuteAgentMenu: View {
 
 /// Speech wording the panel and the notification preview share.
 enum SpeechText {
-  @MainActor static func summary(_ speech: SpeechCoordinator, now: Date) -> String {
-    if speech.mutes.all(now: now) != nil { return "muted" }
-    if speech.call.holdsSpeech { return "held for a call" }
+  @MainActor static func summary(_ speech: SpeechCoordinator) -> String {
+    switch speech.controls?.held {
+    case .muted: return "muted"
+    case .inCall: return "held for a call"
+    default: break
+    }
     if speech.current != nil { return speech.queue.isEmpty ? "speaking" : "speaking, \(speech.queue.count) waiting" }
     return "on"
+  }
+
+  /// `help`, naming the service's Stop hotkey when it has one.
+  @MainActor static func stopHelp(_ help: String, _ speech: SpeechCoordinator) -> String {
+    speech.controls?.stopHotkey.map { "\(help) (\($0) from any app)" } ?? help
   }
 
   /// `until 16:40`, `until Fri 09:00`, or `until you unmute`.
