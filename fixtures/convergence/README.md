@@ -377,8 +377,8 @@ native admission path over a few rows, with a snooze that sometimes ends; the fo
 admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
 converge.
 
-Hosted [burst run 43505757629](https://github.com/compoundingtech/fractal/actions/runs/43505757629)
-observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
-This includes v27's non-trimming seed 21 and the earlier provisional controls seeds 610 and 1597.
-The exact v28 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
-no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+The earlier controls candidate `851ab51` passed all 32 fixed seeds in hosted
+[burst run 43505757629](https://github.com/compoundingtech/fractal/actions/runs/43505757629)
+(33 tests including real-disk seed 1). Main's subsequent step-execution fields changed the
+generated snapshot and random schedule, so that observation is not the current characterization.
+PENDING: characterize the regenerated v28 snapshot; no older corpus exception carries forward.
