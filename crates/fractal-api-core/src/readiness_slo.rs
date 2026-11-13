@@ -514,11 +514,11 @@ impl Policy {
             store,
             std::slice::from_ref(&row),
             &objectives,
-            Some(crate::objective_faults::ObjectiveResponse {
+            crate::objective_faults::ObjectiveResponse {
                 reviewer: &self.config.reviewer,
                 condition: crate::store::API_READINESS_SLO_MISSED,
                 title: "API readiness",
-            }),
+            },
         )
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(row)
