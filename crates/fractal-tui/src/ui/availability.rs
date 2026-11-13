@@ -57,24 +57,43 @@ impl Axis {
         }
     }
 
-    /// Each value's key, label and wire word; `None` returns the axis to its default.
-    fn choices(self) -> [(char, &'static str, Option<&'static str>); 3] {
+    /// Each value's key, label and word; `None` returns the axis to its default.
+    fn choices(self) -> &'static [(char, &'static str, Option<Word>)] {
         match self {
-            Axis::Status => [
-                ('1', "away", Some(AvailabilityStatus::Away.as_str())),
-                ('2', "available", Some(AvailabilityStatus::Available.as_str())),
+            Axis::Status => &[
+                ('1', "away", Some(Word::Status(AvailabilityStatus::Away))),
+                ('2', "available", Some(Word::Status(AvailabilityStatus::Available))),
                 ('0', "from presence", None),
             ],
-            Axis::Interruptions => [
-                ('1', "urgent asks only", Some(AvailabilityInterruptions::Urgent.as_str())),
-                ('2', "none", Some(AvailabilityInterruptions::None.as_str())),
+            Axis::Interruptions => &[
+                ('1', "urgent asks only", Some(Word::Interruptions(AvailabilityInterruptions::Urgent))),
+                ('2', "none", Some(Word::Interruptions(AvailabilityInterruptions::None))),
                 ('0', "all asks", None),
             ],
-            Axis::DeadlineClock => [
-                ('1', "hold routine asks", Some(AvailabilityDeadlineClock::HoldRoutine.as_str())),
-                ('2', "hold every ask", Some(AvailabilityDeadlineClock::HoldAll.as_str())),
+            Axis::DeadlineClock => &[
+                ('1', "hold routine asks", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldRoutine))),
+                ('2', "hold every ask", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldAll))),
                 ('0', "run", None),
             ],
+        }
+    }
+}
+
+/// A value the person can choose, as the client names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Word {
+    Status(AvailabilityStatus),
+    Interruptions(AvailabilityInterruptions),
+    DeadlineClock(AvailabilityDeadlineClock),
+}
+
+impl Word {
+    /// The word on the wire.
+    fn as_str(self) -> &'static str {
+        match self {
+            Word::Status(word) => word.as_str(),
+            Word::Interruptions(word) => word.as_str(),
+            Word::DeadlineClock(word) => word.as_str(),
         }
     }
 }
@@ -250,7 +269,7 @@ impl Availability {
         match editor {
             Editor::Value(axis) => match axis.choices().iter().find(|(choice, ..)| *choice == key) {
                 Some((_, label, Some(value))) => {
-                    self.editor = Some(Editor::Until { axis, value: (*value).into(), label: (*label).into() });
+                    self.editor = Some(Editor::Until { axis, value: value.as_str().into(), label: (*label).into() });
                 }
                 Some((_, _, None)) => self.queue(axis, None, None),
                 None => return Pressed::Ignored,
