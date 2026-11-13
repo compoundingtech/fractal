@@ -38,9 +38,32 @@ describe('availabilityFacts', () => {
     }
     expect(availabilityFacts({ availability: away, note: { ...note, expires_at: iso(120) } }, now, zone)).toEqual([
       { label: 'Status', value: 'Away · until 11:30', detail: 'Set by you; presence is idle 2m ago.' },
-      { label: 'Interruptions', value: 'Urgent asks only · until 11:00', detail: 'Only asks with a deadline within an hour reach you.' },
+      { label: 'Interruptions', value: 'Urgent asks only · until 11:00', detail: 'Only asks with priority critical reach you.' },
       { label: 'Deadline clock', value: 'Held for routine asks · since 9:45 · until tomorrow 9:00', detail: 'Routine deadlines pause; urgent asks keep running.' },
       { label: 'Note', value: 'Focus on the release.', detail: 'Expires 12:00.' },
+    ])
+  })
+
+  it('shows an unreported person as available with no device reporting, never as away', () => {
+    const unreported: PersonAvailability = { ...base, status_source: 'unreported', presence: 'unreported', presence_observed_at: null }
+    expect(availabilityFacts({ availability: unreported, note: undefined }, now, zone)[0])
+      .toEqual({ label: 'Status', value: 'Available', detail: 'No device is reporting your presence, so agents ask as usual.' })
+    // An override still names presence; an unreported one reads as not reported, without a stale time.
+    const override: PersonAvailability = { ...base, status: 'away', status_source: 'override', presence: 'unreported', presence_observed_at: iso(-3000) }
+    expect(availabilityFacts({ availability: override, note: undefined }, now, zone)[0])
+      .toEqual({ label: 'Status', value: 'Away', detail: 'Set by you; presence is not reported.' })
+  })
+
+  it('shows words this build does not know as themselves', () => {
+    const future: PersonAvailability = {
+      ...base, status: 'heads-down', status_source: 'calendar', presence: 'driving',
+      interruptions: 'family-only', deadline_clock: 'hold-weekend', deadline_clock_since: iso(-15),
+    }
+    expect(availabilityFacts({ availability: future, note: undefined }, now, zone)).toEqual([
+      { label: 'Status', value: 'heads-down', detail: 'Comes from calendar; presence is driving 2m ago.' },
+      { label: 'Interruptions', value: 'family-only' },
+      { label: 'Deadline clock', value: 'hold-weekend · since 9:45' },
+      { label: 'Note', value: 'No note' },
     ])
   })
 })
