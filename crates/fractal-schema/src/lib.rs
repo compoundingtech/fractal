@@ -3603,6 +3603,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claimant", reference()),
             ("claim_incarnation", string()),
             ("invocation_id", string()),
+            ("declared_model", string()),
+            ("trace_id", string()),
+            ("fallback", boolean()),
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
@@ -4227,6 +4230,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
+            ("execution_id", string()),
             (
                 "semantics",
                 required_enum(&[

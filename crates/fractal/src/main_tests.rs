@@ -2856,15 +2856,13 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
             Some(("Tests pass\nnext: docs", 60_000)),
         ),
         step("step-run/two/review", "Review the parser", None),
-        StepRunView {
-            status: "verifying".into(),
-            completion_summary: Some("Published the guide".into()),
-            ..step(
-                "step-run/two/docs",
-                "Write the guide",
-                Some(("Drafting", 0)),
-            )
-        },
+        StepRunView { executions: None, status: "verifying".into(),
+        completion_summary: Some("Published the guide".into()),
+        ..step(
+            "step-run/two/docs",
+            "Write the guide",
+            Some(("Drafting", 0)),
+        ) },
     ];
 
     let card = render_client_agent(&agent, &current, 360_000);
