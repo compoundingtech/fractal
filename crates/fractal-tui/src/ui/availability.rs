@@ -9,7 +9,8 @@ use super::doc::{Doc, DocExt, Hit};
 use super::{text, theme};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeDelta, TimeZone, Utc};
 use fractal_client::{
-    AvailabilityDeadlineClockChange, AvailabilityInterruptionsChange, AvailabilitySet, AvailabilityStatusChange, Client,
+    AvailabilityDeadlineClock, AvailabilityDeadlineClockChange, AvailabilityInterruptions, AvailabilityInterruptionsChange,
+    AvailabilityPresence, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange, AvailabilityStatusSource, Client,
     ClientError, DirectiveNote, DirectiveNoteSet, ErrorCode, PersonAvailability,
 };
 use ratatui::text::{Line, Span};
@@ -29,6 +30,9 @@ const PRESETS: [(char, &str, Preset); 4] = [
     ('4', "tomorrow 09:00", Preset::TomorrowNine),
 ];
 const TYPED_HELP: &str = "type a duration such as 45m or 1h30m, or a time such as 17:30, tomorrow 09:00 or 2026-11-14 09:00";
+
+/// Under a word a newer Fractal sent, which this version does not know and shows as `unknown`.
+const UNKNOWN: &str = "A word this version does not know; updating shows it.";
 
 /// What Fractal last said: the person's effective availability and their current note.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,13 +60,44 @@ impl Axis {
         }
     }
 
-    /// Each value's key, label and wire value; `None` returns the axis to its default.
-    fn choices(self) -> &'static [(char, &'static str, Option<&'static str>)] {
+    /// Each value's key, label and word; `None` returns the axis to its default.
+    fn choices(self) -> &'static [(char, &'static str, Option<Word>)] {
         match self {
-            Axis::Status => &[('1', "away", Some("away")), ('2', "available", Some("available")), ('0', "from presence", None)],
-            Axis::Interruptions => &[('1', "urgent asks only", Some("urgent")), ('2', "none", Some("none")), ('0', "all asks", None)],
-            Axis::DeadlineClock => &[('1', "hold routine asks", Some("hold-routine")), ('2', "hold every ask", Some("hold-all")), ('0', "run", None)],
+            Axis::Status => &[
+                ('1', "away", Some(Word::Status(AvailabilityStatus::Away))),
+                ('2', "available", Some(Word::Status(AvailabilityStatus::Available))),
+                ('0', "from presence", None),
+            ],
+            Axis::Interruptions => &[
+                ('1', "urgent asks only", Some(Word::Interruptions(AvailabilityInterruptions::Urgent))),
+                ('2', "none", Some(Word::Interruptions(AvailabilityInterruptions::None))),
+                ('0', "all asks", None),
+            ],
+            Axis::DeadlineClock => &[
+                ('1', "hold routine asks", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldRoutine))),
+                ('2', "hold every ask", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldAll))),
+                ('0', "run", None),
+            ],
             Axis::Note => &[],
+        }
+    }
+}
+
+/// A value the person can choose, as the client names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Word {
+    Status(AvailabilityStatus),
+    Interruptions(AvailabilityInterruptions),
+    DeadlineClock(AvailabilityDeadlineClock),
+}
+
+impl Word {
+    /// The word on the wire.
+    fn as_str(self) -> &'static str {
+        match self {
+            Word::Status(word) => word.as_str(),
+            Word::Interruptions(word) => word.as_str(),
+            Word::DeadlineClock(word) => word.as_str(),
         }
     }
 }
@@ -256,7 +291,7 @@ impl Availability {
         match editor {
             Editor::Value(axis) => match axis.choices().iter().find(|(choice, ..)| *choice == key) {
                 Some((_, label, Some(value))) => {
-                    self.editor = Some(Editor::Until { axis, value: (*value).into(), label: (*label).into(), typed: None, problem: None });
+                    self.editor = Some(Editor::Until { axis, value: value.as_str().into(), label: (*label).into(), typed: None, problem: None });
                 }
                 Some((_, _, None)) => self.queue(axis, None, None),
                 None => return Pressed::Ignored,
@@ -302,11 +337,17 @@ impl Availability {
                 ..AvailabilitySet::default()
             }),
             Axis::Interruptions => Write::Availability(AvailabilitySet {
-                interruptions: Some(AvailabilityInterruptionsChange { value: value.unwrap_or_else(|| "all".into()), until }),
+                interruptions: Some(AvailabilityInterruptionsChange {
+                    value: value.unwrap_or_else(|| AvailabilityInterruptions::All.as_str().into()),
+                    until,
+                }),
                 ..AvailabilitySet::default()
             }),
             Axis::DeadlineClock => Write::Availability(AvailabilitySet {
-                deadline_clock: Some(AvailabilityDeadlineClockChange { value: value.unwrap_or_else(|| "run".into()), until }),
+                deadline_clock: Some(AvailabilityDeadlineClockChange {
+                    value: value.unwrap_or_else(|| AvailabilityDeadlineClock::Run.as_str().into()),
+                    until,
+                }),
                 ..AvailabilitySet::default()
             }),
             Axis::Note => Write::Note(DirectiveNoteSet { text: value, expires_at: until }),
@@ -343,33 +384,46 @@ impl Availability {
         };
         let at = |label: &str, time: &Option<String>| time.as_deref().map(|time| format!(" · {label} {}", when(time, now)));
         let found = &reading.availability;
-        let (status, color) = match found.status.as_str() {
-            "available" => ("available", theme::GREEN),
-            _ => ("away", theme::YELLOW),
+        let (status, color) = match found.status {
+            AvailabilityStatus::Available => ("available", theme::GREEN),
+            AvailabilityStatus::Away => ("away", theme::YELLOW),
+            AvailabilityStatus::Unknown => ("unknown", theme::TEXT),
         };
-        let source = if found.status_source == "override" { " · set by you" } else { " · from presence" };
+        let (source, explanation) = match found.status_source {
+            AvailabilityStatusSource::Override => (" · set by you", None),
+            AvailabilityStatusSource::Presence => (" · from presence", None),
+            AvailabilityStatusSource::Unreported => {
+                (" · no device reporting", Some("No device has reported for 24 hours; agents ask as usual."))
+            }
+            AvailabilityStatusSource::Unknown => (" · from an unknown source", None),
+        };
         let mut details = source.to_owned();
         details.extend(at("until", &found.status_until));
         row(&mut doc, "Status", status, theme::strong(color), &details, width);
-        if let Some(presence) = &found.presence {
+        let unknown = found.status == AvailabilityStatus::Unknown || found.status_source == AvailabilityStatusSource::Unknown;
+        explain(&mut doc, if unknown { Some(UNKNOWN) } else { explanation }, width);
+        if let Some(presence) = found.presence {
             let details = at("reported", &found.presence_observed_at).unwrap_or_default();
-            row(&mut doc, "Presence", presence, theme::text(), &details, width);
+            row(&mut doc, "Presence", presence.as_str(), theme::text(), &details, width);
+            explain(&mut doc, (presence == AvailabilityPresence::Unknown).then_some(UNKNOWN), width);
         }
-        let (interruptions, explanation) = match found.interruptions.as_str() {
-            "urgent" => ("urgent asks only", Some("Only an ask due within an hour interrupts you.")),
-            "none" => ("none", Some("No ask interrupts you.")),
-            _ => ("all asks", None),
+        let (interruptions, explanation) = match found.interruptions {
+            AvailabilityInterruptions::All => ("all asks", None),
+            AvailabilityInterruptions::Urgent => ("urgent asks only", Some("Only an ask due within an hour interrupts you.")),
+            AvailabilityInterruptions::None => ("none", Some("No ask interrupts you.")),
+            AvailabilityInterruptions::Unknown => ("unknown", Some(UNKNOWN)),
         };
         let details = at("until", &found.interruptions_until).unwrap_or_default();
         row(&mut doc, "Interruptions", interruptions, theme::text(), &details, width);
         explain(&mut doc, explanation, width);
-        let (clock, explanation) = match found.deadline_clock.as_str() {
-            "hold-routine" => (
+        let (clock, explanation) = match found.deadline_clock {
+            AvailabilityDeadlineClock::Run => ("running", None),
+            AvailabilityDeadlineClock::HoldRoutine => (
                 "holding routine asks",
                 Some("Routine asks' deadlines wait and urgent asks keep running; the time held is added to each deadline."),
             ),
-            "hold-all" => ("holding every ask", Some("Every ask's deadline waits; the time held is added to it.")),
-            _ => ("running", None),
+            AvailabilityDeadlineClock::HoldAll => ("holding every ask", Some("Every ask's deadline waits; the time held is added to it.")),
+            AvailabilityDeadlineClock::Unknown => ("unknown", Some(UNKNOWN)),
         };
         let mut details = at("since", &found.deadline_clock_since).unwrap_or_default();
         details.extend(at("until", &found.deadline_clock_until));
@@ -725,7 +779,7 @@ mod tests {
         pane.connected();
         assert_eq!(pane.wanted(true), vec![Want::Read(1)], "a reconnect reads again");
         let mut moved = reading();
-        moved.availability.status = "available".into();
+        moved.availability.status = AvailabilityStatus::Available;
         pane.done(Done::Read(0, Ok(moved)));
         assert_eq!(pane.last, Some(reading()), "an answer from before the reconnect is not shown");
         pane.done(Done::Read(1, Err("the connection to Fractal broke".into())));
@@ -794,6 +848,54 @@ mod tests {
                 "Deadline clock  running",
                 "Note            none",
                 "",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unreported_source_reads_available_and_unknown_words_stay_readable() {
+        let mut pane = Availability::default();
+        pane.wanted(true);
+        let mut unreported = reading();
+        unreported.availability = serde_json::from_value(serde_json::json!({
+            "person": "person/robin", "status": "available", "status_source": "unreported", "status_until": null,
+            "presence": "unreported", "presence_observed_at": null, "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        unreported.note = None;
+        pane.done(Done::Read(0, Ok(unreported)));
+        assert_eq!(
+            lines(&pane.page(true, 80, &now()))[2..7],
+            [
+                "Status          available · no device reporting",
+                "                No device has reported for 24 hours; agents ask as usual.",
+                "Presence        unreported",
+                "Interruptions   all asks",
+                "Deadline clock  running",
+            ]
+        );
+        let mut newer = reading();
+        newer.availability = serde_json::from_value(serde_json::json!({
+            "person": "person/robin", "status": "busy", "status_source": "calendar", "status_until": "2026-11-12T13:30:00Z",
+            "presence": "in-call", "presence_observed_at": "2026-11-12T12:15:00Z", "interruptions": "vip", "interruptions_until": null,
+            "deadline_clock": "hold-weekend", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        newer.note = None;
+        pane.done(Done::Read(0, Ok(newer)));
+        assert_eq!(
+            lines(&pane.page(true, 80, &now()))[2..11],
+            [
+                "Status          unknown · from an unknown source · until 14:30",
+                "                A word this version does not know; updating shows it.",
+                "Presence        unknown · reported 13:15",
+                "                A word this version does not know; updating shows it.",
+                "Interruptions   unknown",
+                "                A word this version does not know; updating shows it.",
+                "Deadline clock  unknown",
+                "                A word this version does not know; updating shows it.",
+                "Note            none",
             ]
         );
     }
@@ -892,7 +994,10 @@ mod tests {
         keys(&mut pane, "s12");
         keys(&mut pane, "i0");
         keys(&mut pane, "d2\n");
-        let away = AvailabilityStatusChange { value: Some("away".into()), until: Some("2026-11-12T13:20:00.000Z".into()) };
+        let away = AvailabilityStatusChange {
+            value: Some(AvailabilityStatus::Away.as_str().into()),
+            until: Some("2026-11-12T13:20:00.000Z".into()),
+        };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { status: Some(away), ..AvailabilitySet::default() })], "away for an hour");
         assert!(sent(&mut pane).is_empty(), "the next change waits for the answer");
         assert!(lines(&pane.page(true, 80, &now())).contains(&"Saving…".to_owned()));
@@ -900,12 +1005,12 @@ mod tests {
         answer.status_until = Some("2026-11-12T13:20:00.000Z".into());
         pane.done(Done::Wrote(Ok(Wrote::Availability(answer.clone()))));
         assert_eq!(pane.last.as_ref().map(|last| &last.availability), Some(&answer), "the answer is shown");
-        let all = AvailabilityInterruptionsChange { value: "all".into(), until: None };
+        let all = AvailabilityInterruptionsChange { value: AvailabilityInterruptions::All.as_str().into(), until: None };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { interruptions: Some(all), ..AvailabilitySet::default() })], "0 clears");
         pane.done(Done::Wrote(Err("this device's pairing does not grant write.availability: pair the device again to allow it".into())));
         let shown = lines(&pane.page(true, 80, &now()));
         assert!(shown.iter().any(|line| line.starts_with("Not changed: this device's pairing does not grant write.availability")), "{shown:?}");
-        let held = AvailabilityDeadlineClockChange { value: "hold-all".into(), until: None };
+        let held = AvailabilityDeadlineClockChange { value: AvailabilityDeadlineClock::HoldAll.as_str().into(), until: None };
         assert_eq!(sent(&mut pane), [set(AvailabilitySet { deadline_clock: Some(held), ..AvailabilitySet::default() })], "Enter: until changed");
         pane.done(Done::Wrote(Ok(Wrote::Availability(answer))));
         assert_eq!(pane.wanted(true), [Want::Read(3)], "after a refusal Fractal's word is read again, newer than every write");
@@ -1015,7 +1120,7 @@ mod tests {
         ui.key(KeyEvent::from(KeyCode::Char('4')));
         let [Write::Availability(change)] = &sent(&mut ui.availability)[..] else { panic!("one change") };
         let clock = change.deadline_clock.as_ref().expect("the deadline clock");
-        assert_eq!(clock.value, "hold-routine");
+        assert_eq!(clock.value, AvailabilityDeadlineClock::HoldRoutine.as_str());
         let until = DateTime::parse_from_rfc3339(clock.until.as_deref().expect("an end")).unwrap();
         assert_eq!(until.with_timezone(&chrono::Local).format("%H:%M").to_string(), "09:00", "tomorrow 09:00 local");
         ui.key(KeyEvent::from(KeyCode::Char('s')));

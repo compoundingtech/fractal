@@ -72,10 +72,13 @@ text). Reads go through `document.get`, `documents.list` and `document-reference
 page is `fractal_ui_model::documents`, the model the phone and web read.
 
 **Availability**, in `Ctrl+K`, opens a tab with the person's own availability: the status
-(available or away), whether they set it or it follows their devices' presence, and until when;
-their presence; which asks may interrupt them (all, urgent only, none) and until when; whether
-the deadline clock holds routine asks' or every ask's deadline, since and until when; and their
-directive note with its expiry. Times are in local time. No stream carries availability, so the
+(available or away), whether they set it, it follows their devices' presence, or no device has
+reported for 24 hours (then it reads available and agents ask as usual), and until when; their
+presence (present, idle, locked or unreported); which asks may interrupt them (all, urgent only,
+none) and until when; whether the deadline clock holds routine asks' or every ask's deadline,
+since and until when; and their directive note with its expiry. Times are in local time. A word
+a newer daemon sends that the terminal UI does not know shows as `unknown`, with a line saying an
+update shows it. No stream carries availability, so the
 tab reads `availability.list` and `notes.list` when it opens, when the terminal regains focus,
 after a reconnect and on `r`, and never on a timer.
 
