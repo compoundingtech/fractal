@@ -1070,7 +1070,7 @@ snapshot's retained sends directly instead of writing or observing a later commi
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
 `until_ms`, `messages`, `calibrated_messages`, `low_microusd`, `high_microusd`,
-`usage_cost_microusd`, `unpriced_tokens` and nullable `low_percent`/`high_percent`.
+`usage_cost_microusd`, `unpriced_tokens`, optional `unpriced_responses` and nullable `low_percent`/`high_percent`.
 Usage costs use the same cumulative snapshots and baseline/reset rules as period rows, in the
 same pass. A zero priced denominator makes the percentages unknown; unpriced coverage remains
 visible. The range can exceed 100% and is never capped. This is a planning allowance that
@@ -1108,8 +1108,10 @@ value is `UsagePeriod { since_ms, until_ms, rows }`, with one `UsageRow` per age
 step, model, paying account and host, largest first. A row carries the token counts (`total`,
 `input`, `output`, `cache_write`, `cache_write_1h`, `cached`), `cost_microusd` (API-equivalent
 cost: the harness's own figure when it reports one, else Fractal's pricing table, named by `pricing`),
-`reported_cost_microusd` (the part the harness reported) and `unpriced_tokens` (tokens neither
-could price, which a client shows as unknown cost, never as free). An identity Fractal does not know,
+`reported_cost_microusd` (the part the harness reported), `unpriced_tokens` (observed total tokens
+neither could price) and optional `unpriced_responses` (responses without any price, even when
+their total tokens are absent). Either nonzero unpriced counter means the known cost is only a
+lower bound, never a known free bill. Reported zero cost remains a known price. An identity Fractal does not know,
 such as the mission run of a standing seat, is absent from the row. A period whose start is after
 its end is `validation-failed`. `limits` lists each account's selected limits reading: `account`
 (a label such as `claude/<digest>`, or `DRIVER/unknown`), `driver`, optional `account_ref`,
@@ -1137,7 +1139,10 @@ See [account limits](../accounts.md#at-the-limit) for the policy and external ba
 Rows also carry optional `native_session_id` (the provider's session UUID, fenced by incarnation)
 and `pricing_provenance`. The legacy `pricing` label remains readable. Each provenance entry
 names `cost_source` (`provider_reported`, `computed`, or `unpriced`), disjoint token buckets,
-`cost_microusd`, `reported_cost_microusd` and `unpriced_tokens`. Computed entries name
+`cost_microusd`, `reported_cost_microusd`, `unpriced_tokens` and optional `unpriced_responses`. The
+response counter shares the existing cumulative provenance store and rollup, not another ledger.
+Older rows without the counter retain their original token-based coverage; no historical response
+counts or token totals are inferred. Computed entries name
 `price_table_id` (`st.api-list`), `price_table_version` (date plus SHA-256 of the complete table),
 and `rates_usd_per_million_tokens` (`input`, `output`, `cache_read`, `cache_write_5m`,
 `cache_write_1h`), with long-context multipliers already applied. Provider-reported entries

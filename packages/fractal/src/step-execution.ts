@@ -11,6 +11,7 @@ export const StepExecutionUsage = Schema.Struct({
   cost_microusd: Schema.Number,
   reported_cost_microusd: Schema.Number,
   unpriced_tokens: Schema.Number,
+  unpriced_responses: Schema.optional(Schema.Number),
 })
 
 /** Generic execution evidence, joined by the durable work claim rather than by a seat's live model. */
