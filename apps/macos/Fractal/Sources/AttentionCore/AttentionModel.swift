@@ -78,7 +78,7 @@ public enum AnswerState: Sendable, Equatable {
     self.configurationError =
       adapter == nil
       ? configurationError
-        ?? "Configure ATTENTION_FRACTAL_ENDPOINT, ATTENTION_FRACTAL_CREDENTIAL and ATTENTION_FRACTAL_URL."
+        ?? "Configure ATTENTION_FRACTAL_SOCKET, ATTENTION_FRACTAL_PERSON and ATTENTION_FRACTAL_URL."
       : nil
   }
 

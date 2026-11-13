@@ -138,7 +138,7 @@ private struct ConfigurationErrorView: View {
         .fixedSize(horizontal: false, vertical: true)
         .textSelection(.enabled)
       Text(
-        "Set ATTENTION_FRACTAL_ENDPOINT, ATTENTION_FRACTAL_CREDENTIAL and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
+        "Set ATTENTION_FRACTAL_SOCKET, ATTENTION_FRACTAL_PERSON and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
       )
       .font(.system(size: 11))
       .foregroundStyle(.secondary)
