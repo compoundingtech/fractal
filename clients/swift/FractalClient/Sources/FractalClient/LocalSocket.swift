@@ -252,7 +252,7 @@ enum LocalHTTP {
             var body = Data()
             while true {
                 let sizeLine = try socket.readLine()
-                guard let size = Int(sizeLine.split(separator: ";", maxSplits: 1)[0].trimmingCharacters(in: .whitespaces), radix: 16), size >= 0 else {
+                guard let size = Int(sizeLine.prefix(while: { $0 != ";" }).trimmingCharacters(in: .whitespaces), radix: 16), size >= 0 else {
                     throw transportError(.cannotParseResponse, "read (chunk size)")
                 }
                 if size == 0 {

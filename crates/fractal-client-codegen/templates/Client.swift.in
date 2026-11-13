@@ -44,8 +44,8 @@ public actor FractalClient {
 
     /// A desktop app of the person on the member's own host: every request and stream goes over the
     /// member's trusted local Unix socket (`fractal.sock` in its state directory's `run/`) as
-    /// `person`, with no bearer credential or pairing. The daemon grants that person's local trust
-    /// only when no process above the app carries an agent or run identity (docs/clients/client-v0/README.md,
+    /// `person`, with no bearer credential or pairing. Writes act as the person only when no process
+    /// above the app carries an agent or run identity (docs/st3/client-v0/README.md,
     /// "A person's desktop app on the local socket").
     public init(localSocketPath: String, person: String, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil, messagesPaging: Bool = false) {
         self.baseURL = URL(string: "http://localhost")!

@@ -639,10 +639,12 @@ Trust comes from the host, not from a credential:
 - The socket is mode 0600, owned by the daemon's Unix user, so only that user (or root) can connect.
 - For each connection the daemon asks the kernel for the peer process (`LOCAL_PEERPID` on macOS,
   `SO_PEERCRED` on Linux) and reads the exec-time environment of it and each same-user ancestor. An
-  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent, and a person header
-  naming anyone else is refused with 403; a run credential binds its mission run; an ancestry the
-  daemon cannot read refuses the person header. An app launched by launchd (a login item, Finder,
-  `open`) has launchd as its parent and is taken for the person.
+  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent: it keeps the
+  agent's free-mode reads, so ordinary GETs and stream upgrades are still served, but a write or an
+  owner-administration read whose person header names anyone but that agent is refused with code
+  `forbidden`. A run credential binds its mission run the same way. An ancestry the daemon cannot
+  read refuses every request that carries a person header. An app launched by launchd (a login
+  item, Finder, `open`) has launchd as its parent, binds to no agent, and is taken for the person.
 - This is cooperative attribution between processes of one Unix user
   ([replication.md](../replication.md)), not a boundary against code already running as that user.
   Never forward this socket to TCP. A device on another host pairs and uses `fractal-client.sock`.

@@ -39,9 +39,9 @@ let attention = try await client.attentionList(limit: 50)
 ```
 
 Every request and stream then uses HTTP/1.1 and RFC 6455 WebSockets over that socket and sends
-`x-st3-person` instead of a bearer credential. The daemon refuses the person when an ancestor of
-the app runs as an agent, so launch the app from launchd (a login item or `open`), not from an agent
-seat. See "A person's desktop app on the local socket" in `docs/st3/client-v0/README.md`. A failed
+`x-st3-person` instead of a bearer credential. Below an agent seat the daemon binds the connection to
+that agent and refuses the person's writes, so launch the app from launchd (a login item or `open`).
+See "A person's desktop app on the local socket" in `docs/st3/client-v0/README.md`. A failed
 connection throws `URLError(.cannotConnectToHost)`; cancelling the calling task closes the socket.
 
 ## Trace context
