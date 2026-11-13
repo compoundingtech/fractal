@@ -762,7 +762,7 @@ mod tests {
         let mut holder = request("child-holder");
         holder.capacity = Some(Capacity { cores: 1, memory: 1024 });
         let fit = Fit { room: holder.capacity, ..Fit::default() };
-        let Admission::Admitted(current) = store.request_resource_membership(&holder, fit, 1).unwrap() else {
+        let Admission::Admitted(current) = store.request_resource_membership(&holder, fit.clone(), 1).unwrap() else {
             panic!("holder must acquire physical custody");
         };
         let child = "mission-run/linked-child";
@@ -787,15 +787,16 @@ mod tests {
         assert_eq!(pending.retired_at, None);
         assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 1024);
         assert!(store.prepare_resource_membership(&current, "late-root").is_err());
-        let waiter = request("child-waiter");
-        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 3).unwrap(), Admission::Queued { .. }));
+        let mut waiter = request("child-waiter");
+        waiter.capacity = holder.capacity;
+        assert!(matches!(store.request_resource_membership(&waiter, fit.clone(), 3).unwrap(), Admission::Queued { .. }));
         store.connection.write().execute("UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id='linked-child'", []).unwrap();
         assert!(store.retire_resource_membership(&current, &holder.owner, &runtime, 4).unwrap());
         let retired = store.resource_membership_for_grant(&current).unwrap();
         assert_eq!(retired.state, "retired");
         assert_eq!(retired.retired_at, Some(4));
         assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
-        grant(&store, &waiter, 5);
+        assert!(matches!(store.request_resource_membership(&waiter, fit, 5).unwrap(), Admission::Admitted(_)));
     }
 
     #[test]
