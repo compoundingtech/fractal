@@ -22,22 +22,67 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// A person's effective status. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatus: Codable, Sendable, Equatable {
+    case available, away
+    case unknown(String)
+    public init(word: String) { self = switch word { case "available": .available; case "away": .away; default: .unknown(word) } }
+    public var word: String { switch self { case .available: "available"; case .away: "away"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Where a status comes from; `unreported` when no device's state has counted for 24 hours (status then reads available). Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatusSource: Codable, Sendable, Equatable {
+    case override, presence, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "override": .override; case "presence": .presence; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .override: "override"; case .presence: "presence"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Presence the daemon derives from the person's device states. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityPresence: Codable, Sendable, Equatable {
+    case present, idle, locked, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "present": .present; case "idle": .idle; case "locked": .locked; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .present: "present"; case .idle: "idle"; case .locked: "locked"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Which attention may interrupt: all, only rows with `urgent` true, or none. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityInterruptions: Codable, Sendable, Equatable {
+    case all, urgent, none
+    case unknown(String)
+    public init(word: String) { self = switch word { case "all": .all; case "urgent": .urgent; case "none": .none; default: .unknown(word) } }
+    public var word: String { switch self { case .all: "all"; case .urgent: "urgent"; case .none: "none"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A hold pauses the deadline clock of asks that are not urgent, or of every ask. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityDeadlineClock: Codable, Sendable, Equatable {
+    case run, holdRoutine, holdAll
+    case unknown(String)
+    public init(word: String) { self = switch word { case "run": .run; case "hold-routine": .holdRoutine; case "hold-all": .holdAll; default: .unknown(word) } }
+    public var word: String { switch self { case .run: "run"; case .holdRoutine: "hold-routine"; case .holdAll: "hold-all"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
 /// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
 public struct PersonAvailability: Codable, Sendable, Equatable {
     public let person: String
-    /// `available` or `away`.
-    public let status: String
-    /// `override` or `presence`.
-    public let statusSource: String
+    public let status: AvailabilityStatus
+    public let statusSource: AvailabilityStatusSource
     public let statusUntil: String?
-    /// `present`, `idle`, `locked` or `unknown`.
-    public let presence: String?
+    public let presence: AvailabilityPresence?
     public let presenceObservedAt: String?
-    /// `all`, `urgent` or `none`.
-    public let interruptions: String
+    public let interruptions: AvailabilityInterruptions
     public let interruptionsUntil: String?
-    /// `run`, `hold-routine` or `hold-all`.
-    public let deadlineClock: String
+    public let deadlineClock: AvailabilityDeadlineClock
     public let deadlineClockSince: String?
     public let deadlineClockUntil: String?
     enum CodingKeys: String, CodingKey {
@@ -88,12 +133,25 @@ public struct AvailabilitySet: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey { case status, interruptions, deadlineClock = "deadline_clock" }
 }
 
-/// One device's `present`, `idle` or `locked` report; the daemon assigns its source.
+/// One device's raw state: `active`, `inactive`, `locked` or `sleeping`, sent on every change,
+/// with its last input. The daemon derives presence and assigns the source.
 public struct PresenceReport: Codable, Sendable, Equatable {
-    public var presence: String
+    public var state: String
+    public var lastInputAt: String?
     public var observedAt: String
-    public init(presence: String, observedAt: String) { self.presence = presence; self.observedAt = observedAt }
-    enum CodingKeys: String, CodingKey { case presence, observedAt = "observed_at" }
+    public init(state: String, lastInputAt: String? = nil, observedAt: String) {
+        self.state = state; self.lastInputAt = lastInputAt; self.observedAt = observedAt
+    }
+    enum CodingKeys: String, CodingKey { case state, lastInputAt = "last_input_at", observedAt = "observed_at" }
+}
+
+/// The person's availability after a report, and when the device reports again although its
+/// state has not changed: while present, the instant it turns idle without newer input. Nil:
+/// report on the next state change or the next input.
+public struct PresenceReportResult: Codable, Sendable, Equatable {
+    public let availability: PersonAvailability
+    public let reportAgainAt: String?
+    enum CodingKeys: String, CodingKey { case availability, reportAgainAt = "report_again_at" }
 }
 
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {

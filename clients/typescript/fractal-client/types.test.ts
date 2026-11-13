@@ -45,9 +45,9 @@ void cancellationClient.conversationContentChunk('session/example', 'reference',
 void cancellationClient.availabilityList(undefined, cancellationOptions);
 void cancellationClient.availabilityList('person/ada', cancellationOptions);
 void cancellationClient.availabilitySet({ status: { value: null } }, cancellationOptions);
-void cancellationClient.presenceReport({ presence: 'idle', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
-// @ts-expect-error a client never reports unknown presence
-void cancellationClient.presenceReport({ presence: 'unknown', observed_at: '2026-11-12T09:58:00Z' });
+void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-11-12T09:57:30Z', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
+// @ts-expect-error a client reports raw device state, never derived presence
+void cancellationClient.presenceReport({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' });
 // @ts-expect-error interruptions are all, urgent or none
 void cancellationClient.availabilitySet({ interruptions: { value: 'focus' } });
 

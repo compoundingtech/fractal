@@ -48,8 +48,12 @@ fn pair(state: &AppState, credential: &str, scopes: &[&str]) {
     }).unwrap();
 }
 
+fn latest_source(state: &AppState, kind: &str) -> Value {
+    state.store.latest_claim("person/ada", Some(kind)).unwrap().unwrap().body["fields"]["source"].clone()
+}
+
 fn presence_source(state: &AppState) -> Value {
-    state.store.latest_claim("person/ada", Some(PRESENCE_KIND)).unwrap().unwrap().body["fields"]["source"].clone()
+    latest_source(state, PRESENCE_KIND)
 }
 
 #[tokio::test]
@@ -68,11 +72,16 @@ async fn availability_writes_act_as_the_session_person_and_refuse_agents() {
     assert_eq!((&value["status"], &value["status_source"], &value["interruptions"]), (&json!("away"), &json!("override"), &json!("urgent")));
     assert!(value["status_until"].is_string() && value["interruptions_until"].is_null());
     assert_eq!(value["presence"], "unknown", "the person sees their own presence");
+    // Every person-state claim records the daemon-assigned writer: this member, for a local caller.
+    let host = json!(client_host_id(state.store.origin()));
+    for kind in [fractal_schema::availability::STATUS_KIND, fractal_schema::availability::INTERRUPTIONS_KIND] {
+        assert_eq!(latest_source(&state, kind), host, "{kind}");
+    }
     let (status, cleared) = send(&app, "PUT", "/v1/client/availability", local("person/ada"), Some(json!({
         "status": {"value": null},
     }))).await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
-    assert_eq!((&cleared["value"]["status"], &cleared["value"]["status_source"]), (&json!("away"), &json!("presence")));
+    assert_eq!((&cleared["value"]["status"], &cleared["value"]["status_source"]), (&json!("available"), &json!("unreported")), "no device has reported");
     assert_eq!(cleared["value"]["interruptions"], "urgent", "an absent axis is unchanged");
 
     for body in [
@@ -99,11 +108,11 @@ async fn availability_writes_act_as_the_session_person_and_refuse_agents() {
         let identity = || if actor.starts_with("agent/") { local(actor) } else { ("x-st3-features", String::new()) };
         let (status, _) = send(&app, "PUT", "/v1/client/availability", identity(), Some(json!({"status": {"value": "available"}}))).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{actor}");
-        let (status, _) = send(&app, "POST", "/v1/client/presence", identity(), Some(json!({"presence": "present", "observed_at": at(now)}))).await;
+        let (status, _) = send(&app, "POST", "/v1/client/presence", identity(), Some(json!({"state": "active", "observed_at": at(now)}))).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{actor}");
     }
     let unchanged = state.store.person_availability("person/ada", client_now_ms()).unwrap();
-    assert_eq!(serde_json::to_value(unchanged).unwrap()["status_source"], "presence");
+    assert_eq!(serde_json::to_value(unchanged).unwrap()["status_source"], "unreported");
     assert!(state.store.latest_claim("person/ada", Some(PRESENCE_KIND)).unwrap().is_none());
 }
 
@@ -117,45 +126,56 @@ async fn paired_writes_need_their_scope_and_presence_names_the_pairing_grant() {
     let now = client_now_ms();
     for (method, path, body) in [
         ("PUT", "/v1/client/availability", json!({"status": {"value": "away"}})),
-        ("POST", "/v1/client/presence", json!({"presence": "present", "observed_at": at(now)})),
+        ("POST", "/v1/client/presence", json!({"state": "active", "observed_at": at(now)})),
     ] {
         assert_eq!(send(&app, method, path, bearer("reader"), Some(body)).await.0, StatusCode::FORBIDDEN, "{path}");
     }
     let (status, before) = send(&app, "GET", "/v1/client/availability", bearer("writer"), None).await;
     assert_eq!(status, StatusCode::OK, "{before}");
-    assert_eq!((&before["value"]["people"][0]["status"], &before["value"]["people"][0]["presence"]), (&json!("away"), &json!("unknown")));
+    let before = &before["value"]["people"][0];
+    assert_eq!((&before["status"], &before["status_source"], &before["presence"]), (&json!("available"), &json!("unreported"), &json!("unknown")));
 
+    // The device reports its raw state and last input; the daemon derives presence and says
+    // when to report again: the instant the device turns idle without newer input.
     let (status, reported) = send(&app, "POST", "/v1/client/presence", bearer("writer"), Some(json!({
-        "presence": "present", "observed_at": at(now - 1_000),
+        "state": "active", "last_input_at": at(now - 2_000), "observed_at": at(now - 1_000),
     }))).await;
     assert_eq!(status, StatusCode::OK, "{reported}");
-    assert_eq!((&reported["value"]["status"], &reported["value"]["status_source"]), (&json!("available"), &json!("presence")));
-    assert_eq!((&reported["value"]["presence"], &reported["value"]["presence_observed_at"]), (&json!("present"), &json!(at(now - 1_000))));
+    let availability = &reported["value"]["availability"];
+    assert_eq!((&availability["status"], &availability["status_source"]), (&json!("available"), &json!("presence")));
+    assert_eq!((&availability["presence"], &availability["presence_observed_at"]), (&json!("present"), &json!(at(now - 1_000))));
+    assert_eq!(reported["value"]["report_again_at"], json!(at(now - 2_000 + crate::store::availability::PRESENCE_IDLE_MS)));
     assert_eq!(presence_source(&state), "custom/client/writer");
     let (status, set) = send(&app, "PUT", "/v1/client/availability", bearer("writer"), Some(json!({
         "deadline_clock": {"value": "hold-routine", "until": at(now + 60 * MINUTE)},
     }))).await;
     assert_eq!(status, StatusCode::OK, "{set}");
     assert_eq!((&set["value"]["deadline_clock"], &set["value"]["status"]), (&json!("hold-routine"), &json!("available")));
+    assert_eq!(latest_source(&state, fractal_schema::availability::DEADLINE_CLOCK_KIND), "custom/client/writer");
 
-    for observed in [now - 20 * MINUTE, now + 10 * MINUTE] {
-        let (status, error) = send(&app, "POST", "/v1/client/presence", bearer("writer"), Some(json!({
-            "presence": "idle", "observed_at": at(observed),
-        }))).await;
-        assert_eq!((status, &error["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("validation-failed")), "{error}");
+    for body in [
+        json!({"state": "inactive", "observed_at": at(now - 20 * MINUTE)}),
+        json!({"state": "inactive", "observed_at": at(now + 10 * MINUTE)}),
+        json!({"state": "active", "last_input_at": at(now + 1_000), "observed_at": at(now)}),
+        json!({"state": "idle", "observed_at": at(now)}),
+        json!({"presence": "present", "observed_at": at(now)}),
+    ] {
+        let (status, error) = send(&app, "POST", "/v1/client/presence", bearer("writer"), Some(body.clone())).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{body}: {status} {error}");
     }
     let (status, _) = send(&app, "POST", "/v1/client/presence", bearer("writer"), Some(json!({
-        "presence": "present", "observed_at": at(now), "source": "custom/client/forged",
+        "state": "active", "observed_at": at(now), "source": "custom/client/forged",
     }))).await;
     assert!(status.is_client_error(), "a client never names its presence source");
 
     // A local caller's reports come from this member.
     let (status, local_report) = send(&router(state.clone()), "POST", "/v1/client/presence", local("person/ada"), Some(json!({
-        "presence": "locked", "observed_at": at(now),
+        "state": "locked", "observed_at": at(now),
     }))).await;
     assert_eq!(status, StatusCode::OK, "{local_report}");
     assert_eq!(presence_source(&state), json!(client_host_id(state.store.origin())));
-    assert_eq!(local_report["value"]["presence"], "present", "a fresh present report from another source still wins");
+    assert_eq!(local_report["value"]["availability"]["presence"], "present", "a present device elsewhere still wins");
+    assert!(local_report["value"]["report_again_at"].is_null(), "a locked device reports again only when its state changes");
 }
 
 #[tokio::test]
@@ -165,7 +185,7 @@ async fn availability_reads_show_raw_presence_only_to_the_person() {
     let app = router(state.clone());
     let now = client_now_ms();
     let (status, _) = send(&app, "POST", "/v1/client/presence", local("person/ada"), Some(json!({
-        "presence": "present", "observed_at": at(now),
+        "state": "active", "observed_at": at(now),
     }))).await;
     assert_eq!(status, StatusCode::OK);
 

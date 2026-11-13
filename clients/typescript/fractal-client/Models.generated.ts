@@ -1203,15 +1203,21 @@ export type AttentionWaiting = {
   step: StepRunId;
 };
 
+export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
+
 export type AvailabilityDeadlineClockChange = {
   until?: (Timestamp | null);
   value: "run" | "hold-routine" | "hold-all";
 };
 
+export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
+
 export type AvailabilityInterruptionsChange = {
   until?: (Timestamp | null);
   value: "all" | "urgent" | "none";
 };
+
+export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
 
 export type AvailabilitySet = {
   deadline_clock?: AvailabilityDeadlineClockChange;
@@ -1219,10 +1225,14 @@ export type AvailabilitySet = {
   status?: AvailabilityStatusChange;
 };
 
+export type AvailabilityStatus = ("available" | "away" | string);
+
 export type AvailabilityStatusChange = {
   until?: (Timestamp | null);
   value: ("available" | "away" | null);
 };
+
+export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
 
 export type BlobChunk = {
   data: string;
@@ -1873,7 +1883,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | PersonAvailability | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | PersonAvailabilities | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -3471,16 +3481,16 @@ export type PersonAvailabilities = {
 };
 
 export type PersonAvailability = {
-  deadline_clock: "run" | "hold-routine" | "hold-all";
+  deadline_clock: AvailabilityDeadlineClock;
   deadline_clock_since: (Timestamp | null);
   deadline_clock_until: (Timestamp | null);
-  interruptions: "all" | "urgent" | "none";
+  interruptions: AvailabilityInterruptions;
   interruptions_until: (Timestamp | null);
   person: string;
-  presence: ("present" | "idle" | "locked" | "unknown" | null);
+  presence: (AvailabilityPresence | null);
   presence_observed_at: (Timestamp | null);
-  status: "available" | "away";
-  status_source: "override" | "presence";
+  status: AvailabilityStatus;
+  status_source: AvailabilityStatusSource;
   status_until: (Timestamp | null);
 };
 
@@ -3590,8 +3600,14 @@ export type PlannerConfig = {
 };
 
 export type PresenceReport = {
+  last_input_at?: Timestamp;
   observed_at: Timestamp;
-  presence: "present" | "idle" | "locked";
+  state: "active" | "inactive" | "locked" | "sleeping";
+};
+
+export type PresenceReportResult = {
+  availability: PersonAvailability;
+  report_again_at: (Timestamp | null);
 };
 
 export type PresentationActor = {
@@ -4016,7 +4032,7 @@ export type SloRow = {
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
   runs_out_at_unix_ms?: number;
-  status: "met" | "missed" | "no-data" | "stale";
+  status: ("met" | "missed" | "no-data" | "stale" | string);
   target: string;
   tone?: string;
   window: string;

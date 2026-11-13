@@ -1031,11 +1031,20 @@ fn availability_fixtures_conform_and_refuse_identity_and_unknown_values() {
     let report = contract_validator("PresenceReport");
     assert!(report.is_valid(&json(asset_root().join("fixtures/presence-report.json"))));
     for invalid in [
-        serde_json::json!({"presence": "unknown", "observed_at": "2026-11-12T09:58:00Z"}),
-        serde_json::json!({"presence": "present", "observed_at": "2026-11-12T09:58:00Z", "source": "custom/client/forged"}),
+        serde_json::json!({"state": "idle", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"presence": "present", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"state": "active", "observed_at": "2026-11-12T09:58:00Z", "source": "custom/client/forged"}),
     ] {
         assert!(!report.is_valid(&invalid), "{invalid}");
     }
+    let reported = json(asset_root().join("fixtures/presence-report-result.json"));
+    assert_conforms(&contract_validator("Envelope"), "presence result", &reported);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence result", &reported["value"]);
+    // Response words are open: a word a later daemon adds still conforms.
+    let mut future = written["value"].clone();
+    future["status_source"] = serde_json::json!("calendar");
+    future["presence"] = serde_json::json!("in-call");
+    assert!(person.is_valid(&future));
 }
 
 #[tokio::test]
@@ -1057,11 +1066,12 @@ async fn daemon_availability_routes_conform_to_client_v0() {
     };
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let (status, reported) = send("POST", "/v1/client/presence", "person/ada", Some(serde_json::json!({
-        "presence": "present", "observed_at": observed_at,
+        "state": "active", "last_input_at": observed_at, "observed_at": observed_at,
     }))).await;
     assert_eq!(status, StatusCode::OK, "{reported}");
     assert_conforms(&contract_validator("Envelope"), "presence report", &reported);
-    assert_conforms(&contract_validator("PersonAvailability"), "presence report", &reported["value"]);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence report", &reported["value"]);
+    assert!(reported["value"]["report_again_at"].is_string(), "{reported}");
     // The fixture's change, with an expiry still in the future whenever the test runs.
     let mut body = json(asset_root().join("fixtures/availability-set.json"));
     body["status"]["until"] = serde_json::json!("2999-01-01T00:00:00Z");
@@ -1069,7 +1079,7 @@ async fn daemon_availability_routes_conform_to_client_v0() {
     assert_eq!(status, StatusCode::OK, "{set}");
     assert_conforms(&contract_validator("PersonAvailability"), "availability set", &set["value"]);
     let typed: fractal_client::Envelope<fractal_client::PersonAvailability> = serde_json::from_value(set.clone()).unwrap();
-    assert_eq!((typed.value.status.as_str(), typed.value.presence.as_deref()), ("away", Some("present")));
+    assert_eq!((typed.value.status, typed.value.presence), (fractal_client::AvailabilityStatus::Away, Some(fractal_client::AvailabilityPresence::Present)));
     for (reader, presence) in [("person/ada", serde_json::json!("present")), ("person/avery", Value::Null)] {
         let uri = if reader == "person/ada" { "/v1/client/availability" } else { "/v1/client/availability?person=person/ada" };
         let (status, read) = send("GET", uri, reader, None).await;

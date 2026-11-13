@@ -223,14 +223,23 @@ A person's availability informs agents; it never grants authority. It has three 
 derived status, all folded when read from claims on `person/NAME`, so expiry needs no writes:
 
 - `status`: an `available` or `away` override with optional `until`. With no override in
-  force, status is `available` only while presence is `present`, otherwise `away`.
+  force, status is `available` while some device is `present`, `away` while devices report but
+  none is present, and `available` with `status_source: "unreported"` when no device's state
+  counts (nobody runs a reporter, or every report is over 24 hours old). An unreported person
+  is not treated as away: agents ask as usual.
 - `interruptions`: `all`, `urgent` or `none`, with optional `until`; `all` when unset.
 - `deadline_clock`: `run`, `hold-routine` or `hold-all`, with optional `until`; `run` when
-  unset. A hold pauses the deadline clock of routine asks (`hold-routine`) or of every ask
-  (`hold-all`); an ask is urgent when its asker named an explicit deadline of at most one hour.
-- `presence`: each source's newest report counts until it is 15 minutes old, measured from
-  the earlier of its `observed_at` and acceptance. A fresh `present` anywhere wins, then
-  `idle`, then `locked`; with no fresh report presence is `unknown`.
+  unset. A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of
+  every ask (`hold-all`). An ask is urgent exactly when its priority is `critical`.
+- `presence`: derived by the daemon, the same way for every device, from each device's newest
+  raw state. An `active` device is `present` until 10 minutes after its last input, then
+  `idle`; `inactive` is `idle`; `locked` and `sleeping` are `locked`. A device's state counts
+  for 24 hours after it was observed (the earlier of `observed_at` and acceptance). `present`
+  anywhere wins, then `idle`, then `locked`; with no counting device presence is `unreported`.
+
+The response words (`status`, `status_source`, `presence`, `interruptions`, `deadline_clock`)
+are open: readers keep a word they do not know as Unknown (`AvailabilityStatus` and siblings
+in Rust and Swift; open string unions in TypeScript), so a later daemon can add one.
 
 `GET /v1/client/availability` (`availability.list`) requires `read.projections` and a person
 or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` it reads that
@@ -240,21 +249,31 @@ gets them as `null` and sees only the effective status with `status_until`, the 
 and the deadline clock.
 
 Writes act as the session's own person, which the body never names; agent sessions are refused
-with `403` even though a local agent session holds every scope. `PUT /v1/client/availability`
-(`availability.set`, scope `write.availability`) takes an `AvailabilitySet`: each present axis
-names its `value` and optional future `until`, and an absent axis is unchanged. A status
-`value` of `null` clears the override and takes no `until`. `POST /v1/client/presence`
-(`presence.report`, scope `write.presence`) takes a `PresenceReport` of `present`, `idle` or
-`locked` and its `observed_at`, which must be within the last 15 minutes and at most 2 minutes
-ahead of this member's clock. The client decides idleness with its own threshold. The daemon assigns
-the source: the exact pairing grant for a paired device, otherwise `host/<member>`. An
-unchanged report from one source is recorded at most once every 5 minutes; a change is
-recorded at once. Both writes answer the person's full `PersonAvailability`; invalid input is
-`validation-failed`. The generated Rust `availability_list`, `availability_set` and
-`presence_report`, and Swift and TypeScript `availabilityList`, `availabilitySet` and
-`presenceReport` methods use these routes. See the
-[read fixture](fixtures/person-availability.json) and
-[write fixture](fixtures/availability-set.json).
+with `403` even though a local agent session holds every scope. The daemon records the source
+of every write on its claim: the exact pairing grant for a paired device, otherwise
+`host/<member>`; a body never names it. `PUT /v1/client/availability` (`availability.set`,
+scope `write.availability`) takes an `AvailabilitySet`: each present axis names its `value`
+and optional future `until`, and an absent axis is unchanged. A status `value` of `null`
+clears the override and takes no `until`; it answers the person's full `PersonAvailability`.
+
+`POST /v1/client/presence` (`presence.report`, scope `write.presence`) takes a
+`PresenceReport`: the device's raw `state` (`active`, `inactive`, `locked` or `sleeping`), its
+optional `last_input_at` and its `observed_at`, which must be within the last 15 minutes and at
+most 2 minutes ahead of this member's clock; `last_input_at` may not be later than
+`observed_at`. Devices apply no idle threshold and send no heartbeat. A device reports on every
+state change, and again at the `report_again_at` of its last `PresenceReportResult` with its
+current `last_input_at`: while it is present, that is the instant it would turn idle without
+newer input. A null `report_again_at` means: report on the next state change, or on the next
+input after an idle stretch. Reporting more often is harmless: the daemon records a device's
+report only when it changes the device's state or derived presence, or moves an active
+device's last input forward by at least 5 minutes. The answer is a `PresenceReportResult`:
+the person's full `availability` and `report_again_at`. Invalid input is `validation-failed`.
+The generated Rust `availability_list`, `availability_set` and `presence_report`, and Swift
+and TypeScript `availabilityList`, `availabilitySet` and `presenceReport` methods use these
+routes. See the [read fixture](fixtures/person-availability.json), the
+[write fixture](fixtures/availability-set.json) and the
+[presence fixture](fixtures/presence-report.json) with its
+[result](fixtures/presence-report-result.json).
 
 ### Phone observations
 

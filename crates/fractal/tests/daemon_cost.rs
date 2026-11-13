@@ -716,7 +716,7 @@ const PROBES: &[Probe] = &[
         "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
     })),
     post("POST /v1/client/presence", "/v1/client/presence", |_, _| json!({
-        "presence": "present",
+        "state": "active",
         "observed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     })),
     get(
