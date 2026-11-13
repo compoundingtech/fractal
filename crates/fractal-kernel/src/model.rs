@@ -2989,6 +2989,17 @@ pub struct MissionRunRequest {
     pub idempotency_key: String,
 }
 
+/// Start an independent run from a failed run without changing the failed run's history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunRetryRequest {
+    pub actor: String,
+    #[serde(default)]
+    pub same_revision: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
     #[serde(
@@ -3076,6 +3087,21 @@ pub struct MissionRunView {
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<MissionRunOutcomeView>,
+    /// The failed run this fresh run retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Independent retry runs linked to this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// The cancelled predecessor whose cleanup this replacement must await.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// The fresh replacement selected by a later mission publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Why a publication could not safely replace this still-active run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     #[serde(default)]

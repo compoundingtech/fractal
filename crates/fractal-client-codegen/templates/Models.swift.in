@@ -40,22 +40,67 @@ public struct DirectiveNoteSetResult: Codable, Sendable, Equatable {
     public let note: DirectiveNote?
 }
 
+/// A person's effective status. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatus: Codable, Sendable, Equatable {
+    case available, away
+    case unknown(String)
+    public init(word: String) { self = switch word { case "available": .available; case "away": .away; default: .unknown(word) } }
+    public var word: String { switch self { case .available: "available"; case .away: "away"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Where a status comes from; `unreported` when no device's state has counted for 24 hours (status then reads available). Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatusSource: Codable, Sendable, Equatable {
+    case override, presence, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "override": .override; case "presence": .presence; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .override: "override"; case .presence: "presence"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Presence the daemon derives from the person's device states. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityPresence: Codable, Sendable, Equatable {
+    case present, idle, locked, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "present": .present; case "idle": .idle; case "locked": .locked; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .present: "present"; case .idle: "idle"; case .locked: "locked"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Which attention may interrupt: all, only rows with `urgent` true, or none. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityInterruptions: Codable, Sendable, Equatable {
+    case all, urgent, none
+    case unknown(String)
+    public init(word: String) { self = switch word { case "all": .all; case "urgent": .urgent; case "none": .none; default: .unknown(word) } }
+    public var word: String { switch self { case .all: "all"; case .urgent: "urgent"; case .none: "none"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A hold pauses the deadline clock of asks that are not urgent, or of every ask. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityDeadlineClock: Codable, Sendable, Equatable {
+    case run, holdRoutine, holdAll
+    case unknown(String)
+    public init(word: String) { self = switch word { case "run": .run; case "hold-routine": .holdRoutine; case "hold-all": .holdAll; default: .unknown(word) } }
+    public var word: String { switch self { case .run: "run"; case .holdRoutine: "hold-routine"; case .holdAll: "hold-all"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
 /// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
 public struct PersonAvailability: Codable, Sendable, Equatable {
     public let person: String
-    /// `available` or `away`.
-    public let status: String
-    /// `override` or `presence`.
-    public let statusSource: String
+    public let status: AvailabilityStatus
+    public let statusSource: AvailabilityStatusSource
     public let statusUntil: String?
-    /// `present`, `idle`, `locked` or `unknown`.
-    public let presence: String?
+    public let presence: AvailabilityPresence?
     public let presenceObservedAt: String?
-    /// `all`, `urgent` or `none`.
-    public let interruptions: String
+    public let interruptions: AvailabilityInterruptions
     public let interruptionsUntil: String?
-    /// `run`, `hold-routine` or `hold-all`.
-    public let deadlineClock: String
+    public let deadlineClock: AvailabilityDeadlineClock
     public let deadlineClockSince: String?
     public let deadlineClockUntil: String?
     enum CodingKeys: String, CodingKey {
@@ -106,12 +151,25 @@ public struct AvailabilitySet: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey { case status, interruptions, deadlineClock = "deadline_clock" }
 }
 
-/// One device's `present`, `idle` or `locked` report; the daemon assigns its source.
+/// One device's raw state: `active`, `inactive`, `locked` or `sleeping`, sent on every change,
+/// with its last input. The daemon derives presence and assigns the source.
 public struct PresenceReport: Codable, Sendable, Equatable {
-    public var presence: String
+    public var state: String
+    public var lastInputAt: String?
     public var observedAt: String
-    public init(presence: String, observedAt: String) { self.presence = presence; self.observedAt = observedAt }
-    enum CodingKeys: String, CodingKey { case presence, observedAt = "observed_at" }
+    public init(state: String, lastInputAt: String? = nil, observedAt: String) {
+        self.state = state; self.lastInputAt = lastInputAt; self.observedAt = observedAt
+    }
+    enum CodingKeys: String, CodingKey { case state, lastInputAt = "last_input_at", observedAt = "observed_at" }
+}
+
+/// The person's availability after a report, and when the device reports again although its
+/// state has not changed: while present, the instant it turns idle without newer input. Nil:
+/// report on the next state change or the next input.
+public struct PresenceReportResult: Codable, Sendable, Equatable {
+    public let availability: PersonAvailability
+    public let reportAgainAt: String?
+    enum CodingKeys: String, CodingKey { case availability, reportAgainAt = "report_again_at" }
 }
 
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
@@ -707,7 +765,7 @@ public struct LaunchDecisionResource: Codable, Sendable { public let id, kind, r
 public struct LaunchApprovalResource: Codable, Sendable { public let id, kind, revision, updatedAt, launchID, variantID, reviewer, state, previewToken, decidedAt: String; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", launchID = "launch_id", variantID = "variant_id", reviewer, state, previewToken = "preview_token", decidedAt = "decided_at", operational } }
 public struct MissionResource: Codable, Sendable { public let id, kind, revision, updatedAt, title, state, missionRevision: String; public let declaredAdmission: DeclaredAdmission?; public let runs: [String]; public let runDetails: [MissionRunSummary]?; public let mustAct: String?; public let activeRuns, totalRuns: UInt64?; public let runCounts: [String: UInt64]?; public let runsTruncated, system: Bool?; public let presentation: JSONValue?; public let runGenerations: [String: String]; public let visualization: Visualization?; public let usage: UsageSummary?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", title, state, missionRevision = "mission_revision", declaredAdmission = "declared_admission", runs, runDetails = "run_details", mustAct = "must_act", activeRuns = "active_runs", totalRuns = "total_runs", runCounts = "run_counts", runsTruncated = "runs_truncated", system, presentation, runGenerations = "run_generations", visualization, usage, resources, operational } }
 /// Current-step assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
-public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let startedAt, completedAt: UInt64?; public let generationID, revision, lastProgress, after, deadline: String?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker, eta: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", generationID = "generation_id", revision, requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, eta, after, deadline, steps } }
+public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let startedAt, completedAt: UInt64?; public let generationID, retryOf, supersedes, supersededBy, supersessionFault, revision, lastProgress, after, deadline: String?; public let retriedBy: [String]?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker, eta: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", generationID = "generation_id", retryOf = "retry_of", retriedBy = "retried_by", supersedes, supersededBy = "superseded_by", supersessionFault = "supersession_fault", revision, requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, eta, after, deadline, steps } }
 public struct MissionRunOutcome: Codable, Sendable { public let status, reason, actor, at: String; public let previousStatus: String?; enum CodingKeys: String, CodingKey { case status, previousStatus = "previous_status", reason, actor, at } }
 /// Assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
 public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
@@ -1609,7 +1667,7 @@ public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assi
 public enum AssistantSenderClass: String, Codable, Sendable { case externalAssistant = "external-assistant" }
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
-    case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
+    case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal", slo = "read.assistant.slo"
     case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
     case availability = "read.assistant.availability"
 }

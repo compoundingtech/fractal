@@ -21,24 +21,34 @@ fn store() -> Store {
     Store::open_memory("alder").unwrap()
 }
 
-fn report(store: &Store, source: &str, presence: Presence, at: u128) -> PersonAvailability {
+const MAC: &str = "host/mac";
+
+fn device(state: DeviceState, last_input_at: Option<u128>, observed_at: u128) -> DeviceReport {
+    DeviceReport { state, last_input_at, observed_at }
+}
+
+fn report(store: &Store, source: &str, state: DeviceState, at: u128) -> PresenceReported {
     let _clock = Clock::at(at);
-    store.report_person_presence(ADA, source, presence, at, at).unwrap()
+    store.report_person_presence(ADA, source, device(state, Some(at), at), at).unwrap()
 }
 
 fn set(store: &Store, change: AvailabilityChange, at: u128) -> PersonAvailability {
     let _clock = Clock::at(at);
-    store.set_person_availability(ADA, &[change], at).unwrap()
+    store.set_person_availability(ADA, MAC, &[change], at).unwrap()
+}
+
+fn presence_claims(store: &Store) -> usize {
+    store.claims_for(ADA, Some(fractal_schema::availability::PRESENCE_KIND)).unwrap().len()
 }
 
 #[test]
 fn an_override_beats_presence_until_it_expires() {
     let store = store();
-    report(&store, "mac", Presence::Present, T0);
+    report(&store, "mac", DeviceState::Active, T0);
     let away = set(&store, AvailabilityChange::Status(Some(Status::Away), Some(T0 + 10 * MINUTE)), T0 + MINUTE);
     assert_eq!((away.status, away.status_source, away.presence), (Status::Away, StatusSource::Override, Some(Presence::Present)));
     assert_eq!(away.status_until, rfc3339(T0 + 10 * MINUTE));
-    report(&store, "mac", Presence::Present, T0 + 9 * MINUTE);
+    report(&store, "mac", DeviceState::Active, T0 + 9 * MINUTE);
     let expired = store.person_availability(ADA, T0 + 10 * MINUTE).unwrap();
     assert_eq!((expired.status, expired.status_source, expired.status_until), (Status::Available, StatusSource::Presence, None));
     set(&store, AvailabilityChange::Status(Some(Status::Away), None), T0 + 11 * MINUTE);
@@ -47,70 +57,114 @@ fn an_override_beats_presence_until_it_expires() {
 }
 
 #[test]
-fn missing_or_stale_presence_never_counts_as_present() {
+fn every_person_state_claim_names_its_source() {
+    let store = store();
+    set(&store, AvailabilityChange::DeadlineClock(DeadlineClock::HoldRoutine, None), T0);
+    set(&store, AvailabilityChange::Interruptions(Interruptions::Urgent, None), T0 + 1);
+    set(&store, AvailabilityChange::Status(None, None), T0 + 2);
+    report(&store, "custom/client/pairing-1", DeviceState::Locked, T0 + 3);
+    for kind in fractal_schema::availability::KINDS {
+        let claims = store.claims_for(ADA, Some(kind)).unwrap();
+        assert!(!claims.is_empty(), "{kind}");
+        for claim in claims {
+            let source = claim.body["fields"]["source"].as_str().unwrap();
+            assert_eq!(source, if kind == fractal_schema::availability::PRESENCE_KIND { "custom/client/pairing-1" } else { MAC });
+        }
+    }
+}
+
+#[test]
+fn nobody_reporting_reads_available_and_unreported() {
     let store = store();
     let nobody = store.person_availability(ADA, T0).unwrap();
-    assert_eq!((nobody.status, nobody.presence, nobody.presence_observed_at), (Status::Away, Some(Presence::Unknown), None));
-    let present = report(&store, "mac", Presence::Present, T0);
+    assert_eq!(
+        (nobody.status, nobody.status_source, nobody.presence, nobody.presence_observed_at),
+        (Status::Available, StatusSource::Unreported, Some(Presence::Unreported), None)
+    );
+    report(&store, "mac", DeviceState::Active, T0);
+    let present = store.person_availability(ADA, T0 + PRESENCE_IDLE_MS - 1).unwrap();
     assert_eq!((present.status, present.status_source, present.presence), (Status::Available, StatusSource::Presence, Some(Presence::Present)));
-    let fresh = store.person_availability(ADA, T0 + PRESENCE_STALE_MS - 1).unwrap();
-    assert_eq!(fresh.presence, Some(Presence::Present));
-    let coarse = fresh.clone().without_presence();
+    let coarse = present.clone().without_presence();
     assert_eq!((coarse.status, coarse.presence, coarse.presence_observed_at), (Status::Available, None, None));
-    let stale = store.person_availability(ADA, T0 + PRESENCE_STALE_MS).unwrap();
-    assert_eq!((stale.status, stale.presence), (Status::Away, Some(Presence::Unknown)));
-    // A report observed long ago, or ahead of this member's clock, is refused.
-    let _clock = Clock::at(T0);
-    assert!(store.report_person_presence(ADA, "mac", Presence::Present, T0 - PRESENCE_STALE_MS, T0).is_err());
-    assert!(store.report_person_presence(ADA, "mac", Presence::Present, T0 + PRESENCE_FUTURE_SKEW_MS + 1, T0).is_err());
-    assert!(store.report_person_presence(ADA, "mac", Presence::Unknown, T0, T0).is_err());
+    // An active device with no input for the threshold is idle, and the person away.
+    let idle = store.person_availability(ADA, T0 + PRESENCE_IDLE_MS).unwrap();
+    assert_eq!((idle.status, idle.status_source, idle.presence), (Status::Away, StatusSource::Presence, Some(Presence::Idle)));
+    // A device's state counts for a day after it was observed; then the person is unreported again.
+    let late = store.person_availability(ADA, T0 + PRESENCE_COUNTS_MS - 1).unwrap();
+    assert_eq!((late.status, late.status_source), (Status::Away, StatusSource::Presence));
+    let gone = store.person_availability(ADA, T0 + PRESENCE_COUNTS_MS).unwrap();
+    assert_eq!((gone.status, gone.status_source, gone.presence), (Status::Available, StatusSource::Unreported, Some(Presence::Unreported)));
+    // An override still wins over an unreported person.
+    let away = set(&store, AvailabilityChange::Status(Some(Status::Away), None), T0 + PRESENCE_COUNTS_MS);
+    assert_eq!((away.status, away.status_source), (Status::Away, StatusSource::Override));
 }
 
 #[test]
-fn every_fresh_source_folds_and_present_anywhere_wins() {
+fn the_daemon_derives_presence_from_raw_device_states() {
+    let at = |state, last_input_at| device(state, last_input_at, T0).presence_at(T0 + 5 * MINUTE);
+    assert_eq!(at(DeviceState::Active, Some(T0)), Some(Presence::Present));
+    assert_eq!(at(DeviceState::Active, None), Some(Presence::Present), "an active report without input counts from when it was observed");
+    assert_eq!(at(DeviceState::Active, Some(T0 - 6 * MINUTE)), Some(Presence::Idle));
+    assert_eq!(at(DeviceState::Inactive, Some(T0)), Some(Presence::Idle));
+    assert_eq!(at(DeviceState::Locked, Some(T0)), Some(Presence::Locked));
+    assert_eq!(at(DeviceState::Sleeping, None), Some(Presence::Locked));
+    assert_eq!(device(DeviceState::Active, Some(T0), T0).idle_at(T0), Some(T0 + PRESENCE_IDLE_MS));
+    assert_eq!(device(DeviceState::Inactive, Some(T0), T0).idle_at(T0), None);
+    // A report observed long ago, ahead of this member's clock, or with input after it was observed is refused.
     let store = store();
-    report(&store, "phone", Presence::Locked, T0);
-    let both = report(&store, "mac", Presence::Present, T0 + MINUTE);
+    let _clock = Clock::at(T0);
+    for refused in [
+        device(DeviceState::Active, None, T0 - PRESENCE_REPORT_MAX_AGE_MS),
+        device(DeviceState::Active, None, T0 + PRESENCE_FUTURE_SKEW_MS + 1),
+        device(DeviceState::Active, Some(T0 + 1), T0),
+        device(DeviceState::Active, Some(0), T0),
+    ] {
+        assert!(store.report_person_presence(ADA, "mac", refused, T0).is_err(), "{refused:?}");
+    }
+    assert_eq!(presence_claims(&store), 0);
+}
+
+#[test]
+fn every_counting_device_folds_and_present_anywhere_wins() {
+    let store = store();
+    report(&store, "phone", DeviceState::Locked, T0);
+    let both = report(&store, "mac", DeviceState::Active, T0 + MINUTE).availability;
     assert_eq!((both.status, both.presence), (Status::Available, Some(Presence::Present)));
     assert_eq!(both.presence_observed_at, rfc3339(T0 + MINUTE));
-    let idle = report(&store, "mac", Presence::Idle, T0 + 2 * MINUTE);
-    assert_eq!((idle.status, idle.presence), (Status::Away, Some(Presence::Idle)));
-    // Each source counts only through its newest report: once both are stale nothing speaks;
-    // a fresh locked report from the phone then folds alone.
-    let phone_only = store.person_availability(ADA, T0 + 2 * MINUTE + PRESENCE_STALE_MS).unwrap();
-    assert_eq!(phone_only.presence, Some(Presence::Unknown), "the phone's report is older and stale too");
-    report(&store, "phone", Presence::Locked, T0 + 10 * MINUTE);
-    let phone = store.person_availability(ADA, T0 + 2 * MINUTE + PRESENCE_STALE_MS).unwrap();
-    assert_eq!(phone.presence, Some(Presence::Locked));
+    let inactive = report(&store, "mac", DeviceState::Inactive, T0 + 2 * MINUTE).availability;
+    assert_eq!((inactive.status, inactive.presence), (Status::Away, Some(Presence::Idle)));
+    // Each device counts only through its newest report: the mac's sleep replaces its activity.
+    report(&store, "mac", DeviceState::Active, T0 + 3 * MINUTE);
+    let asleep = report(&store, "mac", DeviceState::Sleeping, T0 + 4 * MINUTE).availability;
+    assert_eq!((asleep.status, asleep.presence), (Status::Away, Some(Presence::Locked)));
 }
 
 #[test]
-fn unchanged_reports_are_recorded_once_per_refresh_interval() {
+fn only_transitions_are_recorded_and_the_daemon_says_when_to_report_again() {
     let store = store();
-    let count = |store: &Store| store.claims_for(ADA, Some(fractal_schema::availability::PRESENCE_KIND)).unwrap().len();
-    report(&store, "mac", Presence::Present, T0);
-    report(&store, "mac", Presence::Present, T0 + MINUTE);
-    assert_eq!(count(&store), 1);
-    report(&store, "phone", Presence::Present, T0 + MINUTE);
-    assert_eq!(count(&store), 2, "another source records its own report");
-    report(&store, "mac", Presence::Idle, T0 + 2 * MINUTE);
-    assert_eq!(count(&store), 3, "a change records at once");
-    report(&store, "mac", Presence::Idle, T0 + 2 * MINUTE + PRESENCE_REFRESH_MS);
-    assert_eq!(count(&store), 4, "an unchanged report refreshes after the interval");
-}
-
-#[test]
-fn a_late_flushed_report_does_not_swallow_a_fresh_one() {
-    let store = store();
-    let count = |store: &Store| store.claims_for(ADA, Some(fractal_schema::availability::PRESENCE_KIND)).unwrap().len();
-    {
-        let _clock = Clock::at(T0);
-        store.report_person_presence(ADA, "mac", Presence::Present, T0 - 12 * MINUTE, T0).unwrap();
-    }
-    report(&store, "mac", Presence::Present, T0 + MINUTE);
-    assert_eq!(count(&store), 2, "the recorded report was observed too long ago to count as unchanged");
-    let later = store.person_availability(ADA, T0 + 4 * MINUTE).unwrap();
-    assert_eq!((later.status, later.presence), (Status::Available, Some(Presence::Present)));
+    let first = report(&store, "mac", DeviceState::Active, T0);
+    assert_eq!(presence_claims(&store), 1);
+    assert_eq!(first.report_again_at, rfc3339(T0 + PRESENCE_IDLE_MS), "report when the device would turn idle");
+    // Input a minute later changes nothing the daemon derives: not recorded, same deadline.
+    let soon = report(&store, "mac", DeviceState::Active, T0 + MINUTE);
+    assert_eq!((presence_claims(&store), soon.report_again_at), (1, rfc3339(T0 + PRESENCE_IDLE_MS)));
+    // Reporting at that instant with newer input keeps the device present and moves the deadline.
+    let again = report(&store, "mac", DeviceState::Active, T0 + PRESENCE_IDLE_MS);
+    assert_eq!((presence_claims(&store), again.availability.presence), (2, Some(Presence::Present)));
+    assert_eq!(again.report_again_at, rfc3339(T0 + 2 * PRESENCE_IDLE_MS));
+    // Active without new input past the threshold is idle: nothing to record, nothing to schedule.
+    let idle_at = T0 + 3 * PRESENCE_IDLE_MS;
+    let idle = {
+        let _clock = Clock::at(idle_at);
+        store.report_person_presence(ADA, "mac", device(DeviceState::Active, Some(T0 + PRESENCE_IDLE_MS), idle_at), idle_at).unwrap()
+    };
+    assert_eq!((presence_claims(&store), idle.availability.presence, idle.report_again_at), (2, Some(Presence::Idle), None));
+    // Repeated locked reports record once; another device records its own.
+    report(&store, "mac", DeviceState::Locked, idle_at + MINUTE);
+    report(&store, "mac", DeviceState::Locked, idle_at + 2 * MINUTE);
+    assert_eq!(presence_claims(&store), 3);
+    report(&store, "phone", DeviceState::Locked, idle_at + 2 * MINUTE);
+    assert_eq!(presence_claims(&store), 4);
 }
 
 #[test]
@@ -125,25 +179,25 @@ fn interruptions_and_the_deadline_clock_expire_to_their_defaults() {
     let later = store.person_availability(ADA, T0 + 8 * MINUTE).unwrap();
     assert_eq!((later.interruptions, later.deadline_clock, later.deadline_clock_since), (Interruptions::All, DeadlineClock::Run, None));
     let _clock = Clock::at(T0);
-    assert!(store.set_person_availability(ADA, &[AvailabilityChange::Interruptions(Interruptions::None, Some(T0))], T0).is_err());
-    assert!(store.set_person_availability(ADA, &[], T0).is_err());
+    assert!(store.set_person_availability(ADA, MAC, &[AvailabilityChange::Interruptions(Interruptions::None, Some(T0))], T0).is_err());
+    assert!(store.set_person_availability(ADA, MAC, &[], T0).is_err());
 }
 
 #[test]
 fn only_the_person_writes_their_availability() {
     let store = store();
     let _clock = Clock::at(T0);
-    assert!(store.set_person_availability("agent/worker", &[AvailabilityChange::Status(Some(Status::Away), None)], T0).is_err());
+    assert!(store.set_person_availability("agent/worker", MAC, &[AvailabilityChange::Status(Some(Status::Away), None)], T0).is_err());
     let forged = |actor: &str| ClaimInput {
         subject: ADA.into(), kind: STATUS_KIND.into(), actor: Some(actor.into()),
-        fields: BTreeMap::from([("status".into(), json!("away"))]),
+        fields: BTreeMap::from([("status".into(), json!("away")), ("source".into(), json!(MAC))]),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     };
     for actor in ["agent/worker", "person/robin"] {
         assert_eq!(store.append_claim(&forged(actor)).unwrap_err().code, "availability-forbidden");
     }
     assert!(store.append_client_claim(&forged(ADA)).is_err(), "the ordinary claim surface cannot write availability");
-    assert_eq!(store.person_availability(ADA, T0).unwrap().status_source, StatusSource::Presence);
+    assert_eq!(store.person_availability(ADA, T0).unwrap().status_source, StatusSource::Unreported);
 }
 
 fn hold(start: u128, end: Option<u128>, all: bool) -> ClockHold {
@@ -151,7 +205,7 @@ fn hold(start: u128, end: Option<u128>, all: bool) -> ClockHold {
 }
 
 #[test]
-fn held_time_extends_deadlines_hold_routine_spares_urgent_asks() {
+fn held_time_extends_deadlines_hold_routine_spares_critical_asks() {
     let asked = T0;
     let deadline = T0 + 60 * MINUTE;
     assert_eq!(effective_deadline(asked, deadline, false, &[]), Some(deadline));
@@ -170,9 +224,10 @@ fn held_time_extends_deadlines_hold_routine_spares_urgent_asks() {
     assert_eq!(effective_deadline(asked, deadline, false, &spanning), Some(deadline + 40 * MINUTE));
     let two = [hold(T0 + 5 * MINUTE, Some(T0 + 15 * MINUTE), true), hold(T0 + 20 * MINUTE, Some(T0 + 25 * MINUTE), false)];
     assert_eq!(effective_deadline(asked, deadline, false, &two), Some(deadline + 15 * MINUTE));
-    assert!(urgent_ask(&json!({"deadline_ms": 3_600_000})));
-    assert!(!urgent_ask(&json!({"deadline_ms": 3_600_001})));
-    assert!(!urgent_ask(&json!({"deadline_unix_ms": 1})), "a fleet-default deadline is routine");
+    // Only priority decides urgency; a short deadline does not make an ask urgent.
+    assert!(urgent_ask(&json!({"priority": "critical"})));
+    assert!(!urgent_ask(&json!({"priority": "high", "deadline_ms": 60_000})));
+    assert!(!urgent_ask(&json!({"deadline_ms": 1})), "an ask without a priority is normal");
 }
 
 #[test]

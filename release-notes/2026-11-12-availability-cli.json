@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add `fractal availability` to show, set and clear a person's status, interruptions and deadline clock, and to report presence",
+  "summary": "Add `fractal availability` to show, set and clear a person's status, interruptions and deadline clock, and to report a device's raw state",
   "replay": {
     "status": "none",
     "detail": "The CLI writes the existing availability claims through the client operations; nothing new is stored or replayed."
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Only a person writes their own availability; an agent, including one in a seat, is refused before any request and may only read. `--for` or `--until` applies to every axis named in one set. `clear` returns status to presence, interruptions to all and the deadline clock to run."
+    "detail": "Only a person writes their own availability; an agent, including one in a seat, is refused before any request and may only read. `--for` or `--until` applies to every axis named in one set. `clear` returns status to presence, interruptions to all and the deadline clock to run. `presence` takes only a raw device state (active, inactive, locked or sleeping) with an optional `--last-input-at`; derived words (present, idle, unreported) are refused. It prints the daemon's `report_again_at`. A person with no device reporting reads as available (no device reporting)."
   },
   "compatibility": {
     "status": "changed",

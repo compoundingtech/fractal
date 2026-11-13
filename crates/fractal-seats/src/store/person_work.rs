@@ -318,6 +318,10 @@ pub mod tests {
     }
 
     fn fixture_with_store(store: Store) -> (Store, StepRunView, PersonAskRequest) {
+        fixture_with_revision(store, None)
+    }
+
+    fn fixture_with_revision(store: Store, prepare_changes: Option<bool>) -> (Store, StepRunView, PersonAskRequest) {
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
@@ -331,10 +335,15 @@ mission "person-work" state="ready" {
         )
         .unwrap();
         store.apply_internal(&intent, "person-fixture").unwrap();
+        if let Some(prepare_changes) = prepare_changes {
+            // Exercise direct generation adoption, not publication-driven supersession.
+            let next = crate::graph::parse_internal_intent(&revision_source(prepare_changes), "alder").unwrap();
+            store.apply_internal(&next, "person-revision").unwrap();
+        }
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "person-work".into(),
-                revision: None,
+                revision: prepare_changes.map(|_| intent.missions["person-work"].revision.clone()),
                 workspace: "/tmp".into(),
                 requester: Some("person/avery".into()),
                 mode: Some("run".into()),
@@ -639,15 +648,13 @@ schedule "intake" {
         );
     }
 
-    /// Revise the fixture's run so `prepare` moves into a new generation: carried with its
-    /// claim when only `review` changes, or issued again and claimed anew when `prepare` changes.
-    fn revise_fixture(store: &Store, origin: &StepRunView, prepare_changes: bool) -> StepRunView {
+    fn revision_source(prepare_changes: bool) -> String {
         let (prepare, review) = if prepare_changes {
             ("Prepare the release notes too.", "Review the release.")
         } else {
             ("Prepare the release.", "Review the release notes.")
         };
-        let source = format!(
+        format!(
             r#"version 2
 mission "person-work" state="ready" {{
   goal "Review the release.";
@@ -655,9 +662,13 @@ mission "person-work" state="ready" {{
   step "review" {{ assigned-to "person/avery"; goal "{review}"; }}
 }}
 "#
-        );
+        )
+    }
+
+    /// Move `prepare` by explicit generation adoption, preserving its claim when unchanged.
+    fn revise_fixture(store: &Store, origin: &StepRunView, prepare_changes: bool) -> StepRunView {
+        let source = revision_source(prepare_changes);
         let intent = crate::graph::parse_internal_intent(&source, "alder").unwrap();
-        store.apply_internal(&intent, "person-revision").unwrap();
         let revised = store
             .adopt_mission_revision(
                 &origin.run,
@@ -700,7 +711,10 @@ mission "person-work" state="ready" {{
     #[test]
     fn a_worker_asks_from_the_step_a_revision_moved_by_its_old_name() {
         for prepare_changes in [false, true] {
-            let (store, origin, input) = fixture();
+            let (store, origin, input) = fixture_with_revision(
+                Store::open_memory("alder").unwrap(),
+                Some(prepare_changes),
+            );
             let eta = fractal_store::work_eta::summary(
                 Some("Release preparation checkpoint"),
                 "2h",
