@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use opentelemetry::{KeyValue, metrics::{Histogram, Meter}, trace::{Span as _, TraceContextExt as _, Tracer as _}};
 
-use super::AttemptTraceContext;
 
 /// Execution identity belongs on traces/logs, never metric dimensions.
 #[derive(Clone, Debug)]
@@ -134,12 +133,11 @@ impl LaneTelemetry {
 
     /// Admission begins at queue entry; execution begins only at confirmed payload release.
     /// Release ends only at confirmed retirement; an uncertain end never frees capacity.
-    pub fn phase(&self, phase: LanePhaseKind, identity: &LaneIdentity, links: &[AttemptTraceContext]) -> LanePhase {
+    pub fn phase(&self, phase: LanePhaseKind, identity: &LaneIdentity, links: &[opentelemetry::Context]) -> LanePhase {
         let span = if super::export_enabled() {
             let mut attributes = identity.attributes();
             attributes.push(KeyValue::new("span.label", phase.label()));
-            let links = links.iter().filter_map(|link| {
-                let context = link.context();
+            let links = links.iter().filter_map(|context| {
                 let span = context.span().span_context().clone();
                 span.is_valid().then(|| opentelemetry::trace::Link::new(span, Vec::new(), 0))
             }).collect::<Vec<_>>();

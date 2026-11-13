@@ -1,17 +1,17 @@
 //! In-memory span ownership mirrors committed host custody; SQLite remains authoritative.
 use super::{Membership, Store};
-use crate::otel::{AttemptTraceContext, LaneIdentity, LaneOutcome, LanePhase, LanePhaseKind, LaneTelemetry};
+use crate::otel::{LaneIdentity, LaneOutcome, LanePhase, LanePhaseKind, LaneTelemetry};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-use opentelemetry::{propagation::TextMapPropagator as _, trace::TraceContextExt as _};
+use opentelemetry::trace::TraceContextExt as _;
 
 #[derive(Default)]
 struct Active {
     admission: Option<LanePhase>,
     executions: BTreeMap<String, LanePhase>,
     release: Option<LanePhase>,
-    links: Vec<AttemptTraceContext>,
+    links: Option<opentelemetry::Context>,
 }
 
 #[derive(Default)]
@@ -20,14 +20,9 @@ pub(in crate::store) struct Observations {
     active: BTreeMap<String, Active>,
 }
 
-fn links() -> Vec<AttemptTraceContext> {
+fn links() -> Option<opentelemetry::Context> {
     let context = tracing::Span::current().context();
-    if !context.span().span_context().is_valid() { return Vec::new(); }
-    let mut carrier = std::collections::HashMap::new();
-    opentelemetry_sdk::propagation::TraceContextPropagator::new().inject_context(&context, &mut carrier);
-    carrier.remove("traceparent").map(|traceparent| AttemptTraceContext {
-        traceparent, tracestate: carrier.remove("tracestate").filter(|state| !state.is_empty()),
-    }).into_iter().collect()
+    context.span().span_context().is_valid().then_some(context)
 }
 
 impl Observations {
@@ -47,7 +42,7 @@ impl Observations {
             self.active.insert(member.request.id.clone(), Active { links: links(), ..Default::default() });
         }
         let active = self.active.get_mut(&member.request.id).expect("observation was just installed");
-        let correlation = &active.links;
+        let correlation = active.links.as_slice();
         let make_phase = |phase, at: u64| self.telemetry.phase(phase, &identity, correlation)
             .rebase(Duration::from_millis(now_ms.saturating_sub(at)), recovered || member.clock_uncertain || now_ms < at);
         if active.admission.is_none() && (member.state == "queued" || previous.is_none() || previous == Some("queued")) {
