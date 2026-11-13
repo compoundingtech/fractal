@@ -99,7 +99,7 @@ mod tests {
         let without_state = AttemptTraceContext { tracestate: None, ..attempt.correlation.clone() };
         without_state.environment(&mut env);
         assert_eq!(env["TRACESTATE"], "");
-        let retry = AttemptTrace::start("st.program.attempt", Vec::new(), &[attempt.correlation.clone()]);
+        let retry = AttemptTrace::start("st.program.attempt", Vec::new(), std::slice::from_ref(&attempt.correlation));
         assert_ne!(attempt.correlation.trace_id(), retry.correlation.trace_id());
     }
 
@@ -118,7 +118,7 @@ mod tests {
             .with_simple_exporter(exporter.clone()).build();
         opentelemetry::global::set_tracer_provider(provider.clone());
         let run = AttemptTrace::start("st.mission.run", Vec::new(), &[]);
-        let first = AttemptTrace::start("st.program.attempt", Vec::new(), &[run.correlation.clone()]);
+        let first = AttemptTrace::start("st.program.attempt", Vec::new(), std::slice::from_ref(&run.correlation));
         let retry = AttemptTrace::start("st.program.attempt", Vec::new(), &[
             run.correlation.clone(), first.correlation.clone(),
         ]);

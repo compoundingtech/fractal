@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v24.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
