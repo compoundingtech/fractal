@@ -221,83 +221,80 @@ export function remarkHtmlPolicy() {
   return (tree: Node) => { capDepth(tree, 0); rebuild(tree); capDepth(tree, 0) }
 }
 
-/**
- * The parser's plain-text rendering path still applies the HTML policy. Code islands remain literal, while prose
- * passes through the same tree policy as parsed Markdown (including hidden comments and dropped element content).
- */
-export function filteredMarkdownText(source: string): string {
-  const children: Node[] = []
-  const runs = [...source.matchAll(/`+/g)]
-  const next = new Map<number, number>()
-  const closing = new Map<number, number>()
-  for (let index = runs.length - 1; index >= 0; index--) {
-    const run = runs[index]!
-    const end = next.get(run[0].length)
-    if (end !== undefined) closing.set(run.index, end + run[0].length)
-    next.set(run[0].length, run.index)
-  }
-  let at = 0
-  let plainStart = 0
-  let fence: { marker: string; start: number } | undefined
-  while (at < source.length) {
-    if (at === 0 || source[at - 1] === '\n') {
-      const newline = source.indexOf('\n', at)
-      const end = newline === -1 ? source.length : newline + 1
-      const line = source.slice(at, end)
-      const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line)
-      if (fence !== undefined) {
-        if (marker !== null && marker[1]![0] === fence.marker[0] && marker[1]!.length >= fence.marker.length && marker[2]!.trim() === '') {
-          children.push({ type: 'code', value: source.slice(fence.start, end) })
-          fence = undefined
-          plainStart = end
-        }
-        at = end
-        continue
-      }
-      if (marker !== null && !(marker[1]![0] === '`' && marker[2]!.includes('`'))) {
-        children.push({ type: 'html', value: source.slice(plainStart, at) })
-        fence = { marker: marker[1]!, start: at }
-        at = end
-        continue
-      }
-      if (/^(?: {4}|\t)/.test(line)) {
-        children.push({ type: 'html', value: source.slice(plainStart, at) }, { type: 'code', value: line })
-        at = plainStart = end
-        continue
-      }
-    }
-    // Comment contents cannot open a code island; otherwise a fake fence would hide the visible suffix as well.
-    if (source.startsWith('<!--', at)) {
-      const end = source.indexOf('-->', at + 4)
-      at = end === -1 ? source.length : end + 3
-      continue
-    }
-    // A tag's attributes are HTML, not Markdown: their backticks (even unquoted ones, as browsers accept) and
-    // multiline fence markers must never split an opener away from the content the policy needs to drop.
-    if (source[at] === '<') {
-      const end = tagEnd(source, at)
-      if (end !== -1 && TAG.test(source.slice(at, end + 1))) { at = end + 1; continue }
-    }
-    if (source[at] === '\\' && (source[at + 1] === '`' || source[at + 1] === '\\')) { at += 2; continue }
-    if (source[at] === '`') {
-      const end = closing.get(at)
-      if (end !== undefined) {
-        children.push({ type: 'html', value: source.slice(plainStart, at) }, { type: 'inlineCode', value: source.slice(at, end) })
-        at = plainStart = end
-      } else while (source[at] === '`') at++
-    } else at++
-  }
-  if (fence !== undefined) children.push({ type: 'code', value: source.slice(fence.start) })
-  else children.push({ type: 'html', value: source.slice(plainStart) })
-  const tree: Node = { type: 'paragraph', children }
-  remarkHtmlPolicy()(tree)
+export interface MarkdownParsedTree { tree?: Node }
+
+/** Retain the policy-filtered mdast, not another parse or a source-based approximation, for render failures. */
+export function remarkCaptureTree(capture: MarkdownParsedTree) {
+  return (tree: Node) => { capture.tree = tree }
+}
+
+/** Escaped React text is derived only from policy-approved text/code nodes; HTML can never be a fallback value. */
+export function markdownTreeText(tree: Node): string {
   const values: string[] = []
-  const pending = [...(tree.children ?? [])].reverse()
+  const pending: (Node | string)[] = [tree]
   while (pending.length > 0) {
     const node = pending.pop()!
+    if (typeof node === 'string') { values.push(node); continue }
+    if (node.type === 'html') continue
     if (node.value !== undefined) values.push(node.value)
-    else for (let index = (node.children?.length ?? 0) - 1; index >= 0; index--) pending.push(node.children![index]!)
+    if (node.children !== undefined) {
+      if (/^(?:paragraph|heading|blockquote|listItem|code|tableRow)$/.test(node.type)) pending.push('\n')
+      for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]!)
+    }
   }
+  return values.join('').trimEnd()
+}
+
+/**
+ * Fail-closed HTML-only fallback, deliberately NOT a second Markdown parser. Delimiter/image floods cannot use
+ * CommonMark safely (nested images remain quadratic with attention disabled). Render errors scrub approved mdast
+ * text through this same function. These rare views may hide literal code and the rest of the message.
+ *
+ * Dropped-element closer: none is accepted, an empty subset of normal closers; even an exact closer may be code.
+ * Comment end: none is accepted; a malformed inline opener may not be a normal comment and can contain a dropped
+ * opener before `-->`. Hiding to EOF avoids releasing its suffix earlier than the normal policy.
+ * CDATA/declaration/processing-instruction end: none is accepted; their embedded tags cannot release hidden text.
+ * Tag-name end: ASCII names are read once; recognizing extra malformed dropped openers only hides more.
+ * Attribute quote/end: only matching ASCII quotes release quoted spans; unterminated attributes hide to EOF.
+ * Nested `<` outside quotes: reprocess it, so an earlier malformed ordinary tag cannot swallow a dropped opener.
+ * Every cursor move is forward; each character belongs to one ordinary-text, name, or attribute scan: O(n).
+ */
+export function filteredMarkdownText(source: string): string {
+  const values: string[] = []
+  let plain = 0
+  let at = 0
+  while (at < source.length) {
+    if (source.charCodeAt(at) !== 60) { at++; continue }
+    const start = at++
+    if (source[at] === '!' || source[at] === '?') {
+      values.push(source.slice(plain, start))
+      return values.join('')
+    }
+    const closing = source[at] === '/'
+    if (closing) at++
+    const nameStart = at
+    const first = source.charCodeAt(at)
+    if (!((first >= 65 && first <= 90) || (first >= 97 && first <= 122))) continue
+    while (at < source.length) {
+      const code = source.charCodeAt(at)
+      if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 58 || code === 45)) break
+      at++
+    }
+    const name = source.slice(nameStart, at).toLowerCase()
+    values.push(source.slice(plain, start))
+    if (!closing && HTML_POLICY.dropWithContent.includes(name)) return values.join('')
+    let quote: string | undefined
+    while (at < source.length) {
+      const character = source[at]!
+      if (quote !== undefined) { if (character === quote) quote = undefined }
+      else if (character === '"' || character === "'") quote = character
+      else if (character === '<') break
+      else if (character === '>') { at++; break }
+      at++
+    }
+    plain = at
+  }
+  values.push(source.slice(plain))
   return values.join('')
 }
 

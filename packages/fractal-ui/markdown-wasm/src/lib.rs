@@ -66,9 +66,10 @@ fn start(tag: &Tag) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text, byte_start, byte_end]`,
-/// `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break, `["r"]` rule, `["fr", label]`,
-/// `["tk", "x" | ""]`. Text offsets are decimal strings, with an exclusive end, in the original UTF-8 source.
+/// Markdown as a JSON array of events: `["s", kind, …fields]`, `["e"]`, `["t", text, byte_start, byte_end,
+/// inline_start?, inline_end?]`, `["c", code]`, `["h", html]`, `["sb"]` soft break, `["hb"]` hard break,
+/// `["r"]` rule, `["fr", label]`, `["tk", "x" | ""]`. Offsets are decimal strings with exclusive ends in the
+/// original UTF-8 source. Text's enclosing inline run bounds exclude structural table delimiters.
 pub fn events(source: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
     let mut json = Json(String::with_capacity(source.len() * 2 + 16));
@@ -76,11 +77,15 @@ pub fn events(source: &str) -> String {
     // Whether each open container was emitted, so a dropped start drops its end too.
     let mut open: Vec<bool> = Vec::new();
     let mut depth = 0usize;
+    let mut inline_runs = Vec::new();
     for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 let emit = depth < MAX_DEPTH;
                 if emit {
+                    if matches!(tag, Tag::Paragraph | Tag::Heading { .. } | Tag::TableCell | Tag::Item) {
+                        inline_runs.push(range.clone());
+                    }
                     let (kind, fields) = start(&tag);
                     let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
                     let mut all = vec![kind];
@@ -94,13 +99,23 @@ pub fn events(source: &str) -> String {
                 if open.pop().unwrap_or(false) {
                     depth -= 1;
                     json.event("e", &[]);
+                    if matches!(tag, TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell | TagEnd::Item) {
+                        inline_runs.pop();
+                    }
                 } else if matches!(tag, TagEnd::Paragraph | TagEnd::Item | TagEnd::BlockQuote(_)) {
                     json.event("t", &[" "]);
                 }
             }
-            // Byte offsets let the host recognize literal URLs in the original source, before inline delimiters
-            // have been consumed. Only text events are eligible; code, HTML, links and images remain opaque.
-            Event::Text(text) => json.event("t", &[&text, &range.start.to_string(), &range.end.to_string()]),
+            // Keep the original enclosing run as well as each text span: formatting may split a URL's text, but its
+            // source extent must never cross a cell boundary. Tight list items have no paragraph event.
+            Event::Text(text) => {
+                if let Some(inline) = inline_runs.last() {
+                    json.event("t", &[&text, &range.start.to_string(), &range.end.to_string(),
+                        &inline.start.to_string(), &inline.end.to_string()]);
+                } else {
+                    json.event("t", &[&text, &range.start.to_string(), &range.end.to_string()]);
+                }
+            }
             Event::Code(code) => json.event("c", &[&code]),
             Event::Html(html) | Event::InlineHtml(html) => json.event("h", &[&html]),
             Event::SoftBreak => json.event("sb", &[]),
@@ -158,5 +173,19 @@ mod tests {
     fn deep_nesting_emits_bounded_events() {
         let json = super::events(&">".repeat(5000));
         assert!(json.matches("\"blockquote\"").count() <= super::MAX_DEPTH);
+    }
+
+    #[test]
+    fn text_events_keep_enclosing_inline_run_offsets() {
+        for cell in ["https://example.test/a", "https://example.test/a*b*c", "https://example.test/a\\|b"] {
+            let source = format!("|link|other|\n|---|---|\n|{cell}|next|");
+            let start = source.find(cell).unwrap();
+            let end = start + cell.len();
+            let json = super::events(&source);
+            // Every text fragment in the first data cell carries that cell's original bounds, even when emphasis
+            // or an escaped pipe split its text. The delimiter before `next` must not be inside those bounds.
+            let metadata = format!(",\"{start}\",\"{end}\"]");
+            assert!(json.contains(&metadata), "{cell}: {json}");
+        }
     }
 }

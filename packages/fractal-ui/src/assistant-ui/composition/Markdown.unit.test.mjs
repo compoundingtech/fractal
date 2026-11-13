@@ -3,7 +3,7 @@ import { after, test } from 'node:test'
 import { createServer } from 'vite'
 import stylex from '@stylexjs/unplugin'
 
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { createElement as h } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
@@ -19,14 +19,100 @@ const server = await createServer({
   logLevel: 'error',
 })
 after(() => server.close())
-const { completeStreamingTail, Markdown, InlineMarkdown } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
-const { splitMarkdownBlocks } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+const { completeStreamingTail, Markdown, InlineMarkdown, markdownNeedsFallback } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+const { splitMarkdownBlocks, limitNesting } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
 // MARKDOWN_PARSER=pulldown runs the whole suite on the WebAssembly parser: the policy, the block cuts and every
 // regression must hold for both parsers.
 const pulldown = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
 const usePulldown = process.env.MARKDOWN_PARSER === 'pulldown'
 if (usePulldown) await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
+const htmlPolicy = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-security.json', import.meta.url), 'utf8')).payloads
+const fallbackBoundaries = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-close-boundaries.json', import.meta.url), 'utf8')).cases
+function policyTree(source) {
+  const capture = {}
+  // Disclosure is relative to this suite's normal view, not another parser's HTML-block boundaries.
+  ReactMarkdown({ children: source, remarkPlugins: [usePulldown ? pulldown.remarkPulldown : remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
+  return capture.tree
+}
+
+test('fail-closed fallback never discloses more than the normal parser across the 1453-source FPL corpus', () => {
+  assert.equal(fallbackCorpus.length, 1453)
+  assert.equal(fallbackCorpus.filter(entry => entry.priorLeak).length, 258)
+  for (const { id, source, priorLeak } of fallbackCorpus) {
+    const full = htmlPolicy.markdownTreeText(policyTree(source))
+    const fallback = htmlPolicy.filteredMarkdownText(source)
+    if (!full.includes('SECRET') || priorLeak) assert.doesNotMatch(fallback, /SECRET/, id)
+    assert.doesNotMatch(fallback, /<[/!A-Za-z]/, id)
+  }
+})
+
+test('fallback hidden regions never reopen at whitespace closers, code closers or declaration boundaries', () => {
+  for (const { id, source } of fallbackBoundaries) {
+    assert.doesNotMatch(htmlPolicy.filteredMarkdownText(source), /SECRET|<[/!A-Za-z]/, id)
+    assert.match(htmlPolicy.filteredMarkdownText(source), /^Visible /, id)
+  }
+  for (const name of htmlPolicy.HTML_POLICY.dropWithContent) {
+    assert.equal(htmlPolicy.filteredMarkdownText(`Visible <${name}>SECRET</${name}>SECRET`), 'Visible ', name)
+  }
+})
+
+test('HTML-only fallback scrub keeps image, bracket and corpus CPU work linear', t => {
+  for (const [name, sources] of [
+    ['emphasis', ['*a '.repeat(3000) + '<script>SECRET</script> `<!-- literal -->`']],
+    ['strike', ['~a '.repeat(3000) + '<!-- SECRET -->']],
+    ['brackets', ['['.repeat(6000) + '<script>SECRET</script>']],
+    ['images', ['!['.repeat(2000) + 'x' + '](https://example.test)'.repeat(2000)]],
+    ['whole corpus', fallbackCorpus.map(entry => entry.source)],
+  ]) {
+    let worst = 0
+    for (let run = 0; run < 5; run++) {
+      const { result, milliseconds } = cpuMilliseconds(() => sources.map(htmlPolicy.filteredMarkdownText))
+      worst = Math.max(worst, milliseconds)
+      assert.ok(milliseconds < 300, `${name}: ${milliseconds}ms CPU`)
+      if (name !== 'whole corpus') for (const value of result) assert.doesNotMatch(value, /SECRET/)
+    }
+    t.diagnostic(`${name}: worst of five ${worst}ms CPU; unchanged budget 300ms`)
+  }
+})
+
+test('the eight malformed original openers are escaped inline code in the NORMAL view', t => {
+  for (const tag of ['object', 'svg', 'math', 'template']) for (const ticks of ['`', '```']) {
+    const source = `<${tag} data-x=${ticks}>SECRET</${tag}>${ticks}`
+    const html = block(source)
+    t.diagnostic(JSON.stringify({ source, normalHTML: html }))
+    assert.match(html, /SECRET/)
+    assert.match(html, /<code/)
+    assert.doesNotMatch(html, /<(?:object|svg|math|template)[\s>]/)
+    assert.doesNotMatch(htmlPolicy.filteredMarkdownText(source), /SECRET/)
+  }
+})
+
+test('fallback guard incidence on existing Markdown and scenario transcript messages', async t => {
+  const samples = FRAGMENTS.map((source, index) => ({ origin: `Markdown fixture ${index}`, source }))
+  const root = new URL('../../../../../fixtures/scenarios/', import.meta.url)
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (!(await readdir(new URL(`${entry.name}/`, root))).includes('conversation.json')) continue
+    const conversation = JSON.parse(await readFile(new URL(`${entry.name}/conversation.json`, root), 'utf8'))
+    const pending = [{ value: conversation, path: entry.name }]
+    while (pending.length > 0) {
+      const { value, path } = pending.pop()
+      if (value === null || typeof value !== 'object') continue
+      for (const [key, child] of Object.entries(value)) {
+        if (key === 'text' && typeof child === 'string') samples.push({ origin: `${path}.text`, source: child })
+        else if (child !== null && typeof child === 'object') pending.push({ value: child, path: `${path}.${key}` })
+      }
+    }
+  }
+  assert.ok(samples.length >= 200, `only ${samples.length} messages found`)
+  const guarded = samples.filter(({ source }) => splitMarkdownBlocks(limitNesting(source)).some(markdownNeedsFallback))
+  const codeGuarded = guarded.filter(({ source }) => /```|~~~|^(?: {4}|\t)/m.test(source))
+  t.diagnostic(JSON.stringify({ messages: samples.length, uniqueSources: new Set(samples.map(({ source }) => source)).size, codeBlockMessages: samples.filter(({ source }) => /```|~~~|^(?: {4}|\t)/m.test(source)).length, guarded: guarded.length, share: guarded.length / samples.length, codeBlockMessagesGuarded: codeGuarded }))
+  assert.deepEqual(codeGuarded, [], 'ordinary code-block messages must not take the fallback')
+})
+
 test('generated Pierre IDs and aliases match the installed package', async () => {
   assert.equal(await readFile(output, 'utf8'), await generatedLanguages())
 })
@@ -168,6 +254,10 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
 })
 
 const FALLBACK_HTML_PAYLOADS = [
+  '<script>hidden</scripture>SECRET</script>Visible',
+  '<style>hidden</stylesheet>SECRET</style>Visible',
+  '<script>hidden</script\u0000>SECRET</script>Visible',
+  '<span <script>SECRET</script>Visible',
   '<script data-x="`">SECRET</script>`',
   "<script data-x='`'>SECRET</script>`",
   '<script data-x=`>SECRET</script>`',
@@ -180,6 +270,16 @@ const FALLBACK_HTML_PAYLOADS = [
   '<span data-x="`unfinished',
   '<!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <details>Visible</details>',
   ...['&#106;avascript:', '&#x6A;avascript:', 'java&Tab;script:'].map(scheme => `<a data-x="\`" href="${scheme}alert(1)">safe</a>\``),
+  ...[
+    '- item\n\t',
+    '1. item\n\t',
+    '- outer\n  - inner\n\t',
+    '> item\n> \t',
+    '>\t',
+    '- item\n \t',
+    '- item\nlazy continuation\n\t',
+    '- item\n\n\t',
+  ].flatMap(prefix => [`${prefix}<script>SECRET</script>`, `${prefix}<!-- HIDDEN -->`]),
 ]
 const FALLBACK_LITERAL_CODE = [
   '`<!-- literal -->`',
@@ -189,24 +289,38 @@ const FALLBACK_LITERAL_CODE = [
   '    <script data-x="`">literal</script>',
   '\t<!-- literal -->',
 ]
+// Blank-line-separated containers can settle into multiple independently rendered blocks. Exercise their source
+// preservation directly; the DOM fallback matrix below covers every hostile payload and single-block code island.
+const FALLBACK_CONTAINER_CODE = [
+  '- item\n\n      <script>literal</script>',
+  '- item\n\n \t  <!-- literal -->',
+  '1. item\n\n       <script>literal</script>',
+  '> item\n>\n>     <!-- literal -->',
+  '- item\n  ~~~html\n  <script>literal</script>\n  ~~~',
+  '>\t~~~html\n> <!-- literal -->\n> ~~~',
+  '- item\n\nOutside the list\n\n    <script>literal</script>',
+  '> quote\n\nOutside the quote\n\n\t<!-- literal -->',
+]
 
-test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
+test('fallbacks intentionally fail closed even for HTML-looking literal code', async () => {
   const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
   const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
-  assert.match(block(hostile), /Visible/)
-  for (const source of FALLBACK_LITERAL_CODE) {
-    assert.equal(filteredMarkdownText(source), source)
+  for (const source of [...FALLBACK_LITERAL_CODE, ...FALLBACK_CONTAINER_CODE]) {
+    assert.doesNotMatch(filteredMarkdownText(source), /<[/!A-Za-z]|literal/, source)
   }
-  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
-  assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
-  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
-  for (const source of FALLBACK_HTML_PAYLOADS) assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
-  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible <span data-x="unfinished')
-  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible <span data-x="`')
+  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before ')
+  assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before ')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`')
+  for (const source of FALLBACK_HTML_PAYLOADS) {
+    assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
+    assert.doesNotMatch(block(source), /HIDDEN|SECRET/, `normal parser must hide the same payload: ${source}`)
+  }
+  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible ')
+  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible ')
 })
 
-test('delimiter guard and caught renderer failure keep attribute code markers out of the real fallback DOM', async () => {
+test('delimiter guard and caught renderer failure keep attribute markers and container HTML out of the real fallback DOM', async () => {
   const { JSDOM } = await import('jsdom')
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
@@ -219,7 +333,7 @@ test('delimiter guard and caught renderer failure keep attribute code markers ou
   const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
   try {
     for (const mode of ['delimiter guard', 'renderer failure']) {
-      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE].entries()) {
+      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE, ...fallbackCorpus.filter(entry => entry.priorLeak).map(entry => entry.source), ...fallbackBoundaries.map(entry => entry.source)].entries()) {
         const before = caught.length
         const source = (mode === 'delimiter guard' ? '*a '.repeat(3000) : 'src/x.ts ') + 'Visible\n' + payload
         await act(async () => root.render(h(Markdown, {
@@ -229,9 +343,12 @@ test('delimiter guard and caught renderer failure keep attribute code markers ou
         })))
         assert.deepEqual(caught.slice(before), mode === 'renderer failure' ? ['expected renderer failure'] : [], `${mode}: ${payload}`)
         assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
-        assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        assert.doesNotMatch(container.textContent, /HIDDEN|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        if (mode === 'delimiter guard' || !htmlPolicy.markdownTreeText(policyTree(source)).includes('SECRET')) {
+          assert.doesNotMatch(container.textContent, /SECRET/, `${mode} cannot disclose more than its policy-filtered tree: ${payload}`)
+        }
         assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
-        if (payload.includes('literal')) assert.ok(container.textContent.includes(payload), `${mode} must preserve literal code: ${payload}`)
+        assert.doesNotMatch(container.textContent, /<[/!A-Za-z]/, `${mode}: literal HTML may be hidden in a fallback`)
         if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
       }
     }
@@ -475,6 +592,30 @@ test('the WebAssembly parser builds the tree remark builds without changing the 
   assertParser(block('**x**'))
 })
 
+test('HTML closing-tag whitespace has identical raw and policy-filtered mdast on both parsers', async () => {
+  const parse = (source, plugins) => {
+    let tree
+    const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+    ReactMarkdown({ children: source, remarkPlugins: [...plugins, capture] })
+    return tree
+  }
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    // This covers type-1 block lines as well as inline closers: only the latter are HTML grammar tokens.
+    for (const tag of ['script', 'style', 'iframe']) for (const whitespace of ['', '\t', '\n', '\r', ' ', '\f', '\v', '\u00a0']) {
+      for (const prefix of ['', 'Visible ', 'src/x.ts Visible\nVisible ']) {
+        const source = `${prefix}<${tag}>SECRET</${tag}${whitespace}>SECRET`
+        for (const policy of [[], [htmlPolicy.remarkHtmlPolicy]]) {
+          assert.deepEqual(parse(source, [parity.remarkPulldown, ...policy]), parse(source, [remarkGfm, ...policy]), JSON.stringify({ source, filtered: policy.length !== 0 }))
+        }
+      }
+    }
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+})
+
 test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
   const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
   try {
@@ -515,6 +656,128 @@ test('literal URL precedence matches original remark-gfm, including exact destin
       const expected = parse(source, [remarkGfm])
       for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
         assert.deepEqual(parse(source, plugins), expected, source)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
+test('literal URLs stay inside original inline containers on both parser paths', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      // Compare semantic nodes; list looseness bookkeeping is also covered by exact rendered-HTML equality.
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => ['position', 'implicit', 'spread'].includes(key) ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    const differences = []
+    const compare = (actual, expected, source) => {
+      try { assert.deepEqual(actual, expected, source) }
+      catch (error) { differences.push({ source, message: error.message }) }
+    }
+    const protocols = ['https://example.test/', 'www.example.test/']
+    for (const prefix of protocols) {
+      for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a(b)).']) {
+        for (const source of [
+          `|link|other|\n|---|---|\n|${prefix}${suffix}|b|`,
+          `|${prefix}${suffix}|other|\n|---|---|\n|a|b|`,
+          `|${prefix}${suffix}|${prefix}next|\n|---|---|\n|${prefix}${suffix}|${prefix}last|`,
+          `link|other\n---|---\n${prefix}${suffix}|b`,
+        ]) {
+          const expected = parse(source, [remarkGfm])
+          for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+            const actual = parse(source, plugins)
+            compare(actual, expected, source)
+            if (actual.tree.children[0].type === 'table' && expected.tree.children[0].type === 'table') {
+              compare(actual.tree.children[0].children.map(row => row.children.length), expected.tree.children[0].children.map(row => row.children.length), source)
+            }
+          }
+        }
+      }
+    }
+    const table = '|link|other|\n|---|---|\n|https://example.test/a\\|b|next|'
+    for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+      const cells = parse(table, plugins).tree.children[0].children[1].children
+      assert.equal(cells.length, 2)
+      assert.equal(cells[0].children[0].url, 'https://example.test/a\\|b')
+      assert.deepEqual(cells[0].children[0].children, [{ type: 'text', value: 'https://example.test/a\\|b' }])
+      assert.deepEqual(cells[1].children, [{ type: 'text', value: 'next' }])
+    }
+    for (const source of [
+      '> https://example.test/a*b*c\n> www.example.test/d_e_f',
+      '> https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '- https://example.test/a*b*c\n  www.example.test/d_e_f',
+      '- https://example.test/a*b*c\n\n  www.example.test/d_e_f\n\n- next',
+      '- outer\n  - https://example.test/a*b*c\n    www.example.test/d_e_f\n- next',
+      '# https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '# https://example.test/a*b*c ###\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\n===\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c  \nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\\\nwww.example.test/d_e_f',
+      '> https://example.test/a*b*c  \n> www.example.test/d_e_f',
+      '- https://example.test/a*b*c\\\n  www.example.test/d_e_f',
+      '[https://example.test/a*b*c](https://target.test/) www.example.test/after',
+      '![https://example.test/a*b*c](https://image.test/) www.example.test/after',
+      '|[https://example.test/a*b*c](https://target.test/)|www.example.test/after|\n|---|---|\n|![https://example.test/a*b*c](https://image.test/)|next|',
+      'https://example.test/a|b\n---|---|---',
+      'www.example.test/a|b\n---|---|---',
+      '|www.example.test/a|b\n---|---|---|---',
+      '`a\\\\|b` and `` a\\\\|b ``',
+      '```\na\\\\|b\n```\n\n    a\\\\|b',
+      '<span title="a\\\\|b">body</span>',
+      '<https://example.test/a\\\\|b>',
+      '[label](https://example.test/a\\\\|b) ![alt](https://example.test/a\\\\|b)',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        compare(parse(source, plugins), expected, source)
+      }
+    }
+    assert.deepEqual(differences, [], 'all inline-container cases match the original remark-gfm oracle')
+  } finally { await isolated.close() }
+})
+
+test('known upstream divergence: even backslash runs before table pipes remain explicit beside GFM output', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const render = (source, plugins) => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source))
+    const anchor = (value, text = value) => h('a', { href: encodeURI(value.startsWith('www.') ? `http://${value}` : value) }, text)
+    const table = (head, row) => renderToStaticMarkup(h('table', null,
+      h('thead', null, h('tr', null, ...head.map(cell => h('th', null, cell)))),
+      h('tbody', null, h('tr', null, ...row.map(cell => h('td', null, cell)))),
+    ))
+    for (const prefix of ['https://example.test/', 'www.example.test/']) {
+      const raw = `${prefix}a\\\\|b`
+      const nativeLink = () => anchor(raw, `${prefix}a\\|b`)
+      const gfmLink = () => anchor(`${prefix}a\\\\`)
+      const gfmParagraphValue = suffix => `${prefix}a${prefix.startsWith('www.') ? '\\' : '\\\\'}|b|${suffix}`
+      const knownDivergences = [
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact data row', source: `|link|other|\n|---|---|\n|${raw}|b|`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact header', source: `|${raw}|other|\n|---|---|\n|a|b|`,
+          pulldown: table([nativeLink(), 'other'], ['a', 'b']),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue('other|')), '\n|---|---|\n|a|b|')) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'compact header and row', source: `|${raw}|${prefix}next|\n|---|---|\n|${raw}|${prefix}last|`,
+          pulldown: table([nativeLink(), anchor(`${prefix}next`)], [nativeLink(), anchor(`${prefix}last`)]),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue(`${prefix}next|`)), '\n|---|---|\n|', anchor(gfmParagraphValue(`${prefix}last|`)))) },
+        // upstream pulldown-cmark: backslash-run before | in table cells; see the upstream issue.
+        { name: 'row without outer pipes', source: `link|other\n---|---\n${raw}|b`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+      ]
+      for (const known of knownDivergences) {
+        assert.notEqual(known.pulldown, known.gfm, known.name)
+        assert.equal(render(known.source, [remarkGfm]), known.gfm, `original GFM: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [remarkGfm, parity.remarkLinearAutolinks]), known.gfm, `bounded remark fallback: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [parity.remarkPulldown]), known.pulldown, `pinned upstream divergence: ${prefix} ${known.name}`)
       }
     }
   } finally { await isolated.close() }

@@ -54,9 +54,9 @@ export const setPulldownEnabled = (on: boolean): void => { enabled = on }
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
-function events(source: string): readonly Event[] {
+function events(source: string | Uint8Array): readonly Event[] {
   const module = exports!
-  const bytes = encoder.encode(source)
+  const bytes = typeof source === 'string' ? encoder.encode(source) : source
   const pointer = module.alloc(bytes.length)
   try {
     new Uint8Array(module.memory.buffer, pointer, bytes.length).set(bytes)
@@ -132,7 +132,17 @@ export function pulldownTree(source: string): MdastNode {
         break
       }
       case 'c': if (top().type === 'image') top().alt += fields[0]!; else append({ type: 'inlineCode', value: fields[0]! }); break
-      case 'h': if (top().type === 'html') top().value += fields[0]!; else append({ type: 'html', value: fields[0]! }); break
+      case 'h': {
+        if (top().type === 'html') top().value += fields[0]!
+        else {
+          const value = fields[0]!
+          // pulldown accepts FF in inline closing tags; CommonMark/remark permits only space, TAB and line endings.
+          // Keep invalid closers as text so the policy cannot end a hidden region earlier than remark does.
+          const type = value.startsWith('</') && !/^<\/[A-Za-z][A-Za-z0-9-]*[\t\n\r ]*>$/.test(value) ? 'text' : 'html'
+          append({ type, value })
+        }
+        break
+      }
       case 'sb': if (top().type === 'image') top().alt += ' '; else append({ type: 'text', value: '\n' }); break
       case 'hb': append({ type: 'break' }); break
       case 'r': append({ type: 'thematicBreak' }); break
@@ -225,56 +235,138 @@ function* literalUrls(source: string): Generator<LiteralUrl> {
 }
 
 /**
- * The first event pass supplies source offsets and opaque contexts, not the already-parsed URL text. Turn eligible
- * raw URL extents into escaped explicit links and parse once more: emphasis/code/delete can no longer consume their
- * delimiters, and surrounding emphasis is parsed with the same precedence as GFM. Code, HTML, existing links and
- * image alt text are never rewritten. Documents without literal URLs need only the original pass.
+ * Text events identify both the original text span and its enclosing inline run. Recognize URL extents only within
+ * that run, never across structural cell delimiters, then rewrite eligible raw extents as escaped explicit links.
+ * Reparse so emphasis/code/delete cannot consume URL delimiters. Existing links, images, code and HTML stay opaque.
+ * Preserve the raw literal, including escaped pipes: GFM keeps their backslash inside URL destinations and labels.
  */
 function literalEvents(source: string): readonly Event[] {
-  const candidates = [...literalUrls(source)]
-  const original = events(source)
-  if (candidates.length === 0) return original
-  const ranges: { start: number; end: number }[] = []
+  const bytes = encoder.encode(source)
+  const original = events(bytes)
+  if (!/https?:\/\/|www\./i.test(source)) return original
+  interface Rewrite { readonly start: number; readonly end: number; readonly value: string }
+  interface InlineRun {
+    readonly start: number; readonly end: number
+    readonly candidates: Rewrite[]; next: number
+  }
+  const runs = new Map<string, InlineRun>()
+  const ranges: { start: number; end: number; run: InlineRun }[] = []
   const stack: string[] = []
   let opaque = 0
-  for (const [kind, first, start, end] of original) {
+  for (const [kind, first, start, end, inlineStart, inlineEnd] of original) {
     if (kind === 's') { stack.push(first!); if (['code', 'html', 'link', 'image'].includes(first!)) opaque++ }
     else if (kind === 'e') { if (['code', 'html', 'link', 'image'].includes(stack.pop()!)) opaque-- }
-    else if (kind === 't' && opaque === 0 && start !== undefined) ranges.push({ start: Number(start), end: Number(end) })
+    else if (kind === 't' && opaque === 0 && inlineStart !== undefined && inlineEnd !== undefined) {
+      const key = `${inlineStart}:${inlineEnd}`
+      let run = runs.get(key)
+      if (run === undefined) {
+        run = { start: Number(inlineStart), end: Number(inlineEnd), candidates: [], next: 0 }
+        runs.set(key, run)
+      }
+      ranges.push({ start: Number(start), end: Number(end), run })
+    }
   }
-  const escape = (value: string) => value.replace(/[!-/:-@[-`{-~]/g, '\\$&')
+  for (const run of runs.values()) {
+    const raw = decoder.decode(bytes.subarray(run.start, run.end))
+    let cursor = 0
+    let byte = run.start
+    for (const candidate of literalUrls(raw)) {
+      const start = candidate.index
+      const end = start + candidate.value.length
+      byte += encoder.encode(raw.slice(cursor, start)).length
+      const byteEnd = byte + encoder.encode(raw.slice(start, end)).length
+      run.candidates.push({ start: byte, end: byteEnd, value: candidate.value })
+      cursor = end
+      byte = byteEnd
+    }
+  }
+  const escape = (value: string, destination = false) => value.replace(/[!-/:-@[-`{-~]/g, (character, index: number) => {
+    if (character !== '|') return `\\${character}`
+    // The destination must not duplicate the label's structural pipes. Character references decode to the same URL.
+    if (destination) return '&#124;'
+    // Preserve block parsing too: escaping an originally structural pipe in a paragraph could turn a malformed
+    // table header into a valid one on the second pass. In cells, retain the original odd escaped-pipe parity.
+    let slash = index
+    while (slash > 0 && value[slash - 1] === '\\') slash--
+    return (index - slash) % 2 === 0 ? '|' : '\\|'
+  })
   const parts: string[] = []
-  let byte = 0
-  let cursor = 0
-  let range = 0
   let at = 0
-  for (const candidate of candidates) {
-    byte += encoder.encode(source.slice(cursor, candidate.index)).length
-    cursor = candidate.index
-    while (range < ranges.length && ranges[range]!.end <= byte) range++
-    if (range === ranges.length || ranges[range]!.start > byte) continue
-    let before = source.slice(at, candidate.index)
-    // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
-    const marker = source[candidate.index - 1]
-    let slash = candidate.index - (marker === '!' ? 1 : 0)
-    while (slash > at && source[slash - 1] === '\\') slash--
-    const slashCount = candidate.index - (marker === '!' ? 1 : 0) - slash
-    if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
-    else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
-    parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
-    at = candidate.index + candidate.value.length
+  // Text ranges arrive in source order. Consume each run's candidate cursor here rather than sorting overlapping
+  // item/paragraph runs, so recognition and reconstruction remain bounded scans.
+  for (const range of ranges) {
+    const run = range.run
+    while (run.next < run.candidates.length && run.candidates[run.next]!.start < range.start) run.next++
+    while (run.next < run.candidates.length && run.candidates[run.next]!.start < range.end) {
+      const candidate = run.candidates[run.next++]!
+      if (candidate.start < at) continue
+      let before = decoder.decode(bytes.subarray(at, candidate.start))
+      // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
+      const marker = before.at(-1)
+      let slash = before.length - (marker === '!' ? 1 : 0)
+      while (slash > 0 && before[slash - 1] === '\\') slash--
+      const slashCount = before.length - (marker === '!' ? 1 : 0) - slash
+      if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
+      else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
+      parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value, true)}>)`)
+      at = candidate.end
+    }
   }
   if (parts.length === 0) return original
-  parts.push(source.slice(at))
+  parts.push(decoder.decode(bytes.subarray(at)))
   return events(parts.join(''))
 }
 
-/** Email is the only literal syntax absent from both parsers; protocol/www links are recognized before emphasis. */
+/**
+ * GFM also has a URL-only postparse fallback (for example `|www.…` in a paragraph). Preserve its distinct preceding
+ * character, ASCII-domain and punctuation rules, without its restarting regex or the quadratic email alternatives.
+ */
+function* fallbackUrls(source: string): Generator<LiteralUrl> {
+  const prefix = /https?:\/\/|www(?=\.)/gi
+  const domainPattern = /[\w-]*\.[\w.-]*/y
+  for (let match = prefix.exec(source); match !== null; match = prefix.exec(source)) {
+    const previous = source[match.index - 1]
+    if (previous !== undefined && (/[0-9a-z]/i.test(previous) || !/[\s\p{P}\p{S}]/u.test(previous))) continue
+    domainPattern.lastIndex = match.index + match[0].length
+    const domainMatch = domainPattern.exec(source)
+    if (domainMatch === null) continue
+    let end = domainPattern.lastIndex
+    while (end < source.length && !/[\t\n\r ]/.test(source[end]!)) end++
+    // A rejected replacement still consumes the original regex's whole match; never retry each prefix in its path.
+    prefix.lastIndex = end
+    const www = /^www/i.test(match[0])
+    const domainStart = www ? match.index : match.index + match[0].length
+    const domain = source.slice(domainStart, domainPattern.lastIndex)
+    if (/[\p{P}\p{S}]/u.test(domain[0]!) || domain.split('.').slice(-2).some(label => label !== '' && (label.includes('_') || !/[0-9a-z]/i.test(label)))) continue
+    const pathEnd = end
+    while (end > domainStart && /[!"&'),.:;<>?\]}]/.test(source[end - 1]!)) end--
+    let balance = 0
+    for (let index = domainStart; index < end; index++) {
+      if (source[index] === '(') balance++
+      else if (source[index] === ')') balance--
+    }
+    for (let index = end; index < pathEnd && balance > 0; index++) {
+      if (source[index] === ')') { balance--; end = index + 1 }
+    }
+    yield { index: match.index, value: source.slice(match.index, end) }
+  }
+}
+
+/** Tokenizer links are already nodes. Only the URL fallback and bounded email scan operate on remaining text. */
 function linkLiterals(parent: MdastNode): void {
   if (parent.children === undefined || parent.type === 'link' || parent.type === 'linkReference') return
   parent.children = parent.children.flatMap((child): MdastNode[] => {
     if (child.type !== 'text') { linkLiterals(child); return [child] }
-    return emailLiterals(child)
+    const parts: MdastNode[] = []
+    let at = 0
+    for (const candidate of fallbackUrls(child.value!)) {
+      if (candidate.index > at) parts.push(...emailLiterals({ type: 'text', value: child.value!.slice(at, candidate.index) }))
+      parts.push({ type: 'link', url: /^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value, title: null, children: [{ type: 'text', value: candidate.value }] })
+      at = candidate.index + candidate.value.length
+    }
+    if (at === 0) return emailLiterals(child)
+    if (at < child.value!.length) parts.push(...emailLiterals({ type: 'text', value: child.value!.slice(at) }))
+    return parts
   })
 }
 
@@ -298,8 +390,8 @@ function emailLiterals(node: MdastNode): MdastNode[] {
 }
 
 /**
- * Replace only GFM's restarting email tokenizer and postparse regex with a bounded tree scan. Retain GFM's protocol
- * and www tokenizers: their precedence over inline delimiters is part of the syntax, not a postparse link policy.
+ * Replace GFM's restarting email tokenizer and combined postparse regex with bounded scans. Retain its protocol/www
+ * tokenizers and the URL-only postparse fallback; only email's quadratic path changes implementation.
  */
 export function remarkLinearAutolinks(this: { data(): object }) {
   const data = this.data()
