@@ -625,6 +625,36 @@ different from fleet replication secrets. A remote client is always online: v0 h
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
 
+### A person's desktop app on the local socket
+
+A native app the person runs on the member's own host, such as a menu-bar tray, calls this API over
+the trusted local `fractal.sock`, as `fractal note set` does: no pairing and no bearer credential.
+Each request names the person with `x-st3-person: person/NAME` (`x-fractal-person` is also
+accepted). That session acts as the person and holds every scope; without the header the session is
+the read-only `client/local/read-only`. Every `/v1/client/` route is served, WebSocket streams
+included. The daemon ignores the HTTP `Host`; send `localhost`.
+
+Trust comes from the host, not from a credential:
+
+- The socket is mode 0600, owned by the daemon's Unix user, so only that user (or root) can connect.
+- For each connection the daemon asks the kernel for the peer process (`LOCAL_PEERPID` on macOS,
+  `SO_PEERCRED` on Linux) and reads the exec-time environment of it and each same-user ancestor. An
+  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent: it keeps the
+  agent's free-mode reads, so ordinary GETs and stream upgrades are still served, but a write or an
+  owner-administration read whose person header names anyone but that agent is refused with code
+  `forbidden`. A run credential binds its mission run the same way. An ancestry the daemon cannot
+  read refuses every request that carries a person header. An app launched by launchd (a login
+  item, Finder, `open`) has launchd as its parent, binds to no agent, and is taken for the person.
+- This is cooperative attribution between processes of one Unix user
+  ([replication.md](../replication.md)), not a boundary against code already running as that user.
+  Never forward this socket to TCP. A device on another host pairs and uses `fractal-client.sock`.
+
+The socket is `run/fractal.sock` in the daemon's state directory
+(`~/.local/state/st3/run/fractal.sock` on a default install); the daemon links it there even when
+it binds under `XDG_RUNTIME_DIR`. The Swift client connects with
+`FractalClient(localSocketPath:person:client:)`, which carries every request and stream over that
+socket; the Rust client's `Client::unix_as` does the same.
+
 ### Native Fabric carrier
 
 The CLI and native generated-client transports accept
@@ -1222,7 +1252,9 @@ person-step attention card then includes the same `request`; a card without one 
 ask, and clients should not infer answers from its title. A card with `update` instead brings
 information the person asked for and asks nothing: show it, and send `work.done` with
 `answer: {"id": "read"}` (its `action_parameters` already carry it) when the person opens it
-or presses read. Agents post updates with `fractal work update`.
+or presses read. Agents post updates with `fractal work update`. An update's optional `speech`
+(1 to 300 characters) is set only when the person asked to be told that outcome: a client that
+speaks reads `update.speech` aloud, and speaks no update without it.
 
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
