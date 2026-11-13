@@ -18,11 +18,11 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 #[test]
 fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
     let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
-    let [ada, avery, ben] = &read.value.people[..] else { panic!("three people") };
+    let [ada, avery, blair] = &read.value.people[..] else { panic!("three people") };
     assert_eq!((ada.status.as_str(), ada.status_source.as_str(), ada.interruptions.as_str()), ("away", "override", "urgent"));
     assert!(ada.presence.is_none() && ada.presence_observed_at.is_none());
     assert_eq!((avery.deadline_clock, avery.deadline_clock_until.as_deref()), (AvailabilityDeadlineClock::HoldRoutine, Some("2026-11-12T17:00:00Z")));
-    assert_eq!((ben.status, ben.status_source), (AvailabilityStatus::Available, AvailabilityStatusSource::Unreported));
+    assert_eq!((blair.status, blair.status_source), (AvailabilityStatus::Available, AvailabilityStatusSource::Unreported));
     let own: Envelope<PersonAvailability> = decode("availability-set-result.json");
     assert_eq!(own.value.presence, Some(AvailabilityPresence::Present));
     let set: AvailabilitySet = decode("availability-set.json");
