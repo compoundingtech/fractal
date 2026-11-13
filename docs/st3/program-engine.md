@@ -54,8 +54,12 @@ Taken by the owner on 2026-11-10:
 ### Versioned
 
 - **R04 Pinned code:** a run executes exactly the bytes its mission revision pins.
-- **R05 Old runs finish on old code:** publishing new program code never changes a running
-  generation; a run moves to new code only by a new generation.
+- **R05 Generations pin code; publication replaces active stale runs:** dispatch and resume
+  execute the code pinned by their generation. New-revision publication preflights a fresh
+  replacement before ordinary source cancellation and cleanup; the replacement waits for
+  terminal cleanup, then restarts on the new code without adopting the source journal.
+  Admission refusal leaves the source active with a visible fault. Explicit run revision
+  remains a distinct generation transition; replay never substitutes code in a journal.
 - **R06 No divergent replay:** replay never feeds a journal to different code.
 
 ### Accountable
@@ -311,6 +315,16 @@ unrelated run. A run starts runs only as the children its program starts, never 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
 step's `definition_hash` and the mission revision. A run generation binds one revision, hence one
 bundle.
+
+For a policy-less mission, publishing a new revision automatically supersedes already-active
+stale runs, subject to [replacement admission and cleanup](mission-graph-runtime.md#automatic-publication-supersession).
+Existing human-only review and when-idle cutover policies take precedence: publication does not
+bypass review or cancel work before its declared idle boundary. Approved proposal cutover uses
+a new linked run at the exact approved revision. Neither path rewrites a generation's bundle or
+journal. The fresh replacement restarts all programs and steps, and effects must be idempotent
+against prior workspace and external effects. Republish of the same revision does nothing; a
+same-revision retry begun after publication remains selected until a later new-revision
+publication. No journal is adopted and no new data-DSL syntax is introduced.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
    sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and
