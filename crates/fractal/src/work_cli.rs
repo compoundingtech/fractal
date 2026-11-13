@@ -170,6 +170,10 @@ pub(super) async fn run_work(
         }
         WorkCommand::Update(args) => {
             reject_foreign_agent_actor(&args.actor)?;
+            let mut update = serde_json::json!({"version": 1, "type": "update", "about": args.about});
+            if let Some(speech) = args.speech {
+                update["speech"] = speech.into();
+            }
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
@@ -185,9 +189,7 @@ pub(super) async fn run_work(
                         new_run: None,
                         incarnation: None,
                         idempotency_key: args.idempotency_key,
-                        request: Some(
-                            serde_json::json!({"version": 1, "type": "update", "about": args.about}),
-                        ),
+                        request: Some(update),
                     },
                 )
                 .await?;

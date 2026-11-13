@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Let an agent mark a person update to be spoken with work update --speech",
+  "replay": {"status": "none", "detail": "No replay or projection changes; the update object already reaches attention rows unchanged, now with its optional speech."},
+  "schema": {"status": "changed", "detail": "The update request object (stored in the work.person-asked request field) and the client-v0 PersonUpdate gain optional speech, 1 to 300 characters. No table, claim kind or rules version changes."},
+  "rules": {"status": "none", "detail": "Only an update carries speech; the existing rule that an update is about the person's own run, step or message is unchanged. Updates the daemon posts when an ask ends carry no speech."},
+  "compatibility": {"status": "changed", "detail": "Additive: older clients ignore update.speech. A daemon that predates this field refuses a request carrying it with invalid-person-request, so roll daemons before agents use work update --speech. The Rust, TypeScript and Swift SDKs expose PersonUpdate.speech."},
+  "downtime": {"status": "none", "detail": "No service restart or coordinated upgrade required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Reverting removes the flag and field; stored updates that carry speech stay readable as ordinary updates."}
+}
