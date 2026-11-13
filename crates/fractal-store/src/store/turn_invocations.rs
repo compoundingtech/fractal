@@ -107,12 +107,14 @@ pub fn bind_claim_tx(tx: &Transaction<'_>, origin: &str, subject: &str,
         [subject], |row| row.get(0)).optional()?;
     let Some(run) = run else { return Ok(None); };
     let mut receipt = receipt_tx(tx, &run, subject, attempt, epoch, agent, incarnation)?;
+    let at = now_ms();
     // An unexpired same-owner claim is a repeated read/claim, not a new native turn.
     if let Some(prior) = latest_claim_of_kind_tx(tx, subject, "work.claimed")? {
         let previous = &prior.body["fields"];
         if previous["claimant"] == agent && previous["claim_incarnation"] == incarnation
             && previous["attempt"] == attempt && previous["readiness_epoch"] == epoch
-            && previous["claim_expires_at_unix_ms"].as_u64().is_some_and(|expiry| u128::from(expiry) > now_ms())
+            && super::step_executions::execution_lease_at(tx, &prior.id, at)?
+                .is_some_and(|expiry| expiry > at)
             && let Some(id) = previous["invocation_id"].as_str()
         {
             receipt.invocation_id = id.into();
@@ -185,6 +187,66 @@ pub fn record_terminal_tx(tx: &Transaction<'_>, origin: &str, claim: &ClaimRecor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewed_effective_lease_keeps_the_turn_when_the_original_claim_expired() {
+        for quiet in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            let now = now_ms();
+            let agent = "agent/node.worker";
+            let step = "step-run/r/g/build";
+            store.set_write_clock_at(now - 700_000).unwrap();
+            store.connection.batched(|tx| -> Result<()> {
+                tx.execute("INSERT INTO mission_runs
+                    (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
+                     workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+                    VALUES('r','mission/test','rev','g','rev','r','{}','person/test','{}','once','running','execution',?1,?1)",
+                    [(now - 700_000).to_string()])?;
+                tx.execute("INSERT INTO run_generations
+                    (id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+                    VALUES('g','r','rev','running',?1,'test',?2,?2)",
+                    params![agent, (now - 700_000).to_string()])?;
+                tx.execute("INSERT INTO step_runs
+                    (subject,run_id,generation_id,step_path,definition_hash,status,attempt,goals,
+                     lease_owner,lease_incarnation,lease_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms)
+                    VALUES(?1,'r','g','build','hash','working',1,'[]',?2,'one',?3,?4,?4)",
+                    params![step, agent, (now - 100_000).to_string(), (now - 700_000).to_string()])?;
+                append_claim_tx(tx, "node", step, "work.claimed", Some(agent), &json!({"fields":{
+                    "attempt":1,"readiness_epoch":0,"claimant":agent,"claim_incarnation":"one",
+                    "claim_expires_at_unix_ms":now - 100_000,"invocation_id":"invocation/turn-original"
+                }}), &[], None)?;
+                Ok(())
+            }).unwrap().unwrap();
+            store.set_write_clock_at(now - 400_000).unwrap();
+            store.connection.batched(|tx| -> Result<()> {
+                if quiet {
+                    tx.execute("INSERT INTO local_work_lease_renewals
+                        (subject,attempt,lease_owner,lease_incarnation,lease_expires_at_unix_ms,updated_at_unix_ms)
+                        VALUES(?1,1,?2,'one',?3,?4)",
+                        params![step, agent, (now + 200_000).to_string(), (now - 400_000).to_string()])?;
+                } else {
+                    append_claim_tx(tx, "node", step, "work.renewed", Some(agent), &json!({"fields":{
+                        "attempt":1,"readiness_epoch":0,"claimant":agent,"claim_incarnation":"one",
+                        "claim_expires_at_unix_ms":now + 200_000
+                    }}), &[], None)?;
+                }
+                Ok(())
+            }).unwrap().unwrap();
+            store.set_write_clock_at(now).unwrap();
+            store.connection.batched(|tx| -> Result<()> {
+                // The work writer has already updated the operational projection before binding.
+                tx.execute("UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+                    params![step, (now + 600_000).to_string()])?;
+                let mut body = json!({"fields":{"attempt":1,"readiness_epoch":0,"claimant":agent,
+                    "claim_incarnation":"one","claim_expires_at_unix_ms":now + 600_000}});
+                let receipt = bind_claim_tx(tx, "node", step, Some(agent), &mut body)?.unwrap();
+                assert_eq!(receipt.invocation_id, "invocation/turn-original", "quiet={quiet}");
+                assert_eq!(body["fields"]["invocation_id"], "invocation/turn-original");
+                Ok(())
+            }).unwrap().unwrap();
+        }
+    }
+
     #[test]
     fn terminal_work_receipt_ends_only_its_exact_turn() {
         let store = Store::open_memory("node").unwrap();
