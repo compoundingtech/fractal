@@ -98,6 +98,7 @@ pub struct Total {
     pub cached: u64,
     pub cost_microusd: u64,
     pub unpriced: u64,
+    pub unpriced_responses: u64,
 }
 
 impl Total {
@@ -109,6 +110,7 @@ impl Total {
         self.cached += row.cached_tokens;
         self.cost_microusd += row.cost_microusd;
         self.unpriced += row.unpriced_tokens;
+        self.unpriced_responses += row.unpriced_responses;
     }
 
     /// What the tokens were: re-read from the cache, written to it, fresh input, or output, as
@@ -123,10 +125,9 @@ impl Total {
         )
     }
 
-    /// The cost, with a `+` when some tokens had no price: the true cost is higher, never
-    /// lower.
+    /// The known cost, with a `+` when any usage has no price.
     pub fn money(&self) -> String {
-        let plus = if self.unpriced > 0 { "+" } else { "" };
+        let plus = if self.unpriced > 0 || self.unpriced_responses > 0 { "+" } else { "" };
         format!("{}{plus}", money(self.cost_microusd))
     }
 }
@@ -466,7 +467,7 @@ fn estimate_lines(estimate: &fractal_client::AgentMessageEstimate) -> Vec<Line<'
         let share = match (day.low_percent, day.high_percent) {
             (Some(low), Some(high)) => format!(
                 "{low:.1}–{high:.1}%{}",
-                if day.unpriced_tokens > 0 { "*" } else { "" }
+                if day.unpriced_tokens > 0 || day.unpriced_responses > 0 { "*" } else { "" }
             ),
             _ => "share unknown".into(),
         };
@@ -630,7 +631,7 @@ fn credits_line(credits: &fractal_client::UsageCredits) -> Line<'static> {
         Some(credits.used_microusd as f64 * 100.0 / credits.budget_microusd as f64)
     };
     let (_, color) = limit_share(percent);
-    let plus = if credits.unpriced_tokens > 0 { "+" } else { "" };
+    let plus = if credits.unpriced_tokens > 0 || credits.unpriced_responses > 0 { "+" } else { "" };
     Line::from(vec![
         span("   credits  ", theme::dim()),
         span(
@@ -1018,6 +1019,8 @@ mod tests {
             ..Total::default()
         };
         assert_eq!(unpriced.money(), "$1.00+");
+        assert_eq!(Total { unpriced_responses: 1, ..Total::default() }.money(), "$0+");
+        assert_eq!(Total::default().money(), "$0");
         assert_eq!(next_period(24), 168);
         assert_eq!(next_period(720), 24);
         assert_eq!(period_name(168), "the last 7 days");

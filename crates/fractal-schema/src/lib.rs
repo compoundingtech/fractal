@@ -4201,6 +4201,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cost_microusd", integer()),
             ("reported_cost_microusd", integer()),
             ("unpriced_tokens", integer()),
+            ("unpriced_responses", integer()),
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
