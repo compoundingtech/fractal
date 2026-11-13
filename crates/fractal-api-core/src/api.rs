@@ -7654,9 +7654,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let HarnessAncestry::Run(credential) = &ancestry {
                         request.extensions_mut().insert(credential.clone());
                     }
-                    if matches!(ancestry, HarnessAncestry::Unavailable) {
-                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
-                    }
+                    // Preserve positive person evidence as well as failures. Private reads
+                    // must distinguish a verified operator from a missing ancestry binding.
+                    request.extensions_mut().insert(ancestry);
                     app.oneshot(request).await
                 }
             });
