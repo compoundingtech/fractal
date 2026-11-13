@@ -16,16 +16,19 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
 
   private let page: AttentionPage
   private let slo: SloSnapshot
+  /// Each row's steps, oldest first; a row without any reads as never measured.
+  private let histories: [String: [Double?]]
   private let availability: AvailabilitySnapshot
   private let submits: [String: Submit]
   private var failure: String?
 
   init(
-    page: AttentionPage, slo: SloSnapshot, availability: AvailabilitySnapshot,
+    page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
     submits: [String: Submit] = [:]
   ) {
     self.page = page
     self.slo = slo
+    self.histories = histories
     self.availability = availability
     self.submits = submits
   }
@@ -40,6 +43,15 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
 
   func readAttention() async throws -> AttentionPage { try serve(page) }
   func readSlo() async throws -> SloSnapshot { try serve(slo) }
+
+  func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory {
+    let steps = histories[request.id] ?? Array(repeating: nil, count: request.steps)
+    return try serve(
+      SloHistory(
+        id: request.id, since: request.since, until: request.until, samples: steps.compactMap { $0 }.count * 60,
+        steps: steps))
+  }
+
   func readAvailability() async throws -> AvailabilitySnapshot { try serve(availability) }
 
   func submit(_ submission: WorkDoneSubmission) async throws {

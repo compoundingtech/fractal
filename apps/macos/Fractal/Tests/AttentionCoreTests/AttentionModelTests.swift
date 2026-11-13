@@ -127,6 +127,66 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(reads, 1)
     XCTAssertEqual(model.asks, [ask])
   }
+
+  func testEachRowsHistoryIsReadOncePerRevisionAndBar() async {
+    let read = Fixture.slo("read", status: "met", tone: "green")
+    let cpu = Fixture.slo("cpu", status: "met", tone: "green", remaining: 80)
+    let first = SloSnapshot(asOf: now, rows: [read, cpu])
+    let changed = SloSnapshot(asOf: now, rows: [read, Fixture.slo("cpu", status: "missed", tone: "red", remaining: 0)])
+    let page = AttentionPage(records: [], canAnswer: true)
+    let adapter = FakeAdapter(
+      attention: Array(repeating: .success(page), count: 4),
+      slo: [.success(first), .success(first), .success(changed), .success(changed)])
+    let model = AttentionModel(adapter: adapter)
+
+    await model.refresh(now: now)
+    var requests = await adapter.historyRequests
+    XCTAssertEqual(Set(requests.map(\.id)), ["read", "cpu"])
+    XCTAssertEqual(requests.first?.since, now.addingTimeInterval(-24 * 3600))
+    XCTAssertEqual(requests.first?.until, now)
+    XCTAssertEqual(requests.first?.steps, 24)
+    XCTAssertEqual(model.sloHistory.state, .fresh(now))
+    let history = model.sloHistory.value?["cpu"]
+    XCTAssertEqual(history?.buckets.count, 24)
+    XCTAssertEqual(history?.buckets.first?.start, now.addingTimeInterval(-24 * 3600))
+    XCTAssertEqual(history?.buckets.last?.end, now)
+
+    await model.refresh(now: now.addingTimeInterval(30))
+    requests = await adapter.historyRequests
+    XCTAssertEqual(requests.count, 2, "unchanged rows inside one bar are not read again")
+
+    await model.refresh(now: now.addingTimeInterval(60))
+    requests = await adapter.historyRequests
+    XCTAssertEqual(requests.dropFirst(2).map(\.id), ["cpu"], "a changed row is read again")
+
+    await model.refresh(now: now.addingTimeInterval(3660))
+    requests = await adapter.historyRequests
+    XCTAssertEqual(Set(requests.dropFirst(3).map(\.id)), ["read", "cpu"], "a bar later every row moves on")
+  }
+
+  func testAFailedHistoryKeepsTheLastOneAndOnlyItsSectionGoesStale() async {
+    let rows = SloSnapshot(asOf: now, rows: [Fixture.slo("read", status: "met", tone: "green")])
+    let page = AttentionPage(records: [], canAnswer: true)
+    let adapter = FakeAdapter(
+      attention: [.success(page), .success(page), .success(page)],
+      slo: [.success(rows), .success(rows), .success(SloSnapshot(asOf: now, rows: []))])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    let kept = model.sloHistory.value?["read"]
+    XCTAssertNotNil(kept)
+
+    await adapter.failHistory("history down")
+    let later = now.addingTimeInterval(3600)
+    await model.refresh(now: later)
+    XCTAssertEqual(model.sloHistory.state, .stale(lastSuccess: now, reason: "history down"))
+    XCTAssertEqual(model.sloHistory.value?["read"], kept)
+    XCTAssertEqual(model.slo.state, .fresh(later))
+    XCTAssertEqual(model.connection, .fresh(later), "objectives and asks stay fresh")
+
+    await adapter.failHistory(nil)
+    await model.refresh(now: later.addingTimeInterval(30))
+    XCTAssertEqual(model.sloHistory.value, [:], "a row no longer listed drops its history")
+  }
 }
 
 private struct FakeError: Error, CustomStringConvertible {
@@ -182,6 +242,20 @@ private actor FakeAdapter: AttentionAdapter {
   func readSlo() async throws -> SloSnapshot {
     guard !slo.isEmpty else { throw FakeError(description: "unexpected slo read") }
     return try slo.removeFirst().get()
+  }
+
+  private(set) var historyRequests: [SloHistoryRequest] = []
+  private var historyFailure: String?
+
+  func failHistory(_ reason: String?) { historyFailure = reason }
+
+  /// Every step holds the request's own index, so a history shows which read it came from.
+  func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory {
+    if let historyFailure { throw FakeError(description: historyFailure) }
+    historyRequests.append(request)
+    return SloHistory(
+      id: request.id, since: request.since, until: request.until, samples: 60,
+      steps: Array(repeating: Double(historyRequests.count), count: request.steps))
   }
 
   func submit(_ submission: WorkDoneSubmission) async throws {
