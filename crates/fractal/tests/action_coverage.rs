@@ -1183,6 +1183,7 @@ mission "example/attention-report" state="ready" {
         .ask_person(&fractal_daemon::model::PersonAskRequest {
             deadline_ms: None,
             default_answer: None,
+            priority: None,
             legacy_request: None,
             person: PERSON.into(),
             title: "Fixture update".into(),
