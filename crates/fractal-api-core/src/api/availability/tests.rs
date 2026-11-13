@@ -267,3 +267,55 @@ async fn a_paired_device_writes_the_persons_note_and_a_related_agent_reads_it() 
     assert_eq!((status, &cleared["value"]["note"]), (StatusCode::OK, &Value::Null), "{cleared}");
     assert!(state.store.directive_notes("agent/garden/helper").unwrap().is_empty());
 }
+
+/// A local harness or peer that names a person is no person: it never writes the person's
+/// availability or presence and never reads their raw presence.
+#[tokio::test]
+async fn a_local_peer_naming_the_person_neither_writes_nor_reads_raw_presence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::super::tests::state(root.path());
+    let now = client_now_ms();
+    let person = || client_v0::ClientSession::local(Some("person/ada")).unwrap();
+    let peer = || client_v0::ClientSession { local_peer: true, ..person() };
+    let presence = || Json(serde_json::from_value::<PresenceReport>(json!({"state": "active", "observed_at": at(now)})).unwrap());
+    let change = || Json(serde_json::from_value::<AvailabilitySet>(json!({"status": {"value": "away"}})).unwrap());
+
+    let refused = report(State(state.clone()), Extension(peer()), presence()).await.unwrap_err();
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.message);
+    let refused = set(State(state.clone()), Extension(peer()), change()).await.unwrap_err();
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.message);
+    assert!(state.store.latest_claim("person/ada", Some(PRESENCE_KIND)).unwrap().is_none());
+    assert!(state.store.latest_claim("person/ada", Some(fractal_schema::availability::STATUS_KIND)).unwrap().is_none());
+
+    // The person's own session still writes.
+    let Json(reported) = report(State(state.clone()), Extension(person()), presence()).await.unwrap();
+    assert_eq!(reported["availability"]["presence"], "present", "{reported}");
+    let Json(written) = set(State(state.clone()), Extension(person()), change()).await.unwrap();
+    assert_eq!((&written["status"], &written["presence"]), (&json!("away"), &json!("present")), "{written}");
+
+    let read = |session: client_v0::ClientSession, query: Option<&str>| {
+        let state = state.clone();
+        let query = AvailabilityQuery { person: query.map(str::to_owned) };
+        async move { list(State(state), Extension(session), Query(query)).await.unwrap().1.0 }
+    };
+    for query in [None, Some("person/ada")] {
+        let own = read(person(), query).await;
+        assert_eq!(own["people"][0]["presence"], "present", "{own}");
+        let coarse = read(peer(), query).await;
+        let row = &coarse["people"][0];
+        assert_eq!((&row["person"], &row["status"]), (&json!("person/ada"), &json!("away")), "{coarse}");
+        assert!(row["presence"].is_null() && row["presence_observed_at"].is_null(), "{row}");
+    }
+
+    // Over the socket, an agent harness naming the person reads only coarsely too.
+    let request = Request::builder().method("GET").uri("/v1/client/availability")
+        .header("x-st3-person", "person/ada")
+        .extension(BoundAgent("agent/worker".into()))
+        .body(Body::empty()).unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+    let row = &body["value"]["people"][0];
+    assert_eq!(row["person"], "person/ada", "{body}");
+    assert!(row["presence"].is_null() && row["presence_observed_at"].is_null(), "{row}");
+}
