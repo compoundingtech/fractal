@@ -631,6 +631,7 @@ impl UsageFold {
                                     .and_then(Value::as_u64)
                                     .unwrap_or(0)
                                     == 0
+                                    && fields.get("unpriced_responses").and_then(Value::as_u64).unwrap_or(0) == 0
                             }),
                     },
                 );
@@ -722,7 +723,7 @@ impl UsageFold {
                             unknown_cost = true;
                         }
                         summary.currency.get_or_insert_with(|| "USD".into());
-                    } else if rollup.total > 0 {
+                    } else {
                         unknown_cost = true;
                     }
                 }
@@ -10132,6 +10133,8 @@ pub fn insert_local_observation_tx(
             None
         };
         let cost_microusd = reported_cost.or(estimated_cost).unwrap_or(0);
+        // Count responses separately: missing totals must never masquerade as a known free bill.
+        let unpriced_responses = u64::from(reported_cost.or(estimated_cost).is_none());
         let unpriced_tokens = if reported_cost.or(estimated_cost).is_some() {
             0
         } else {
@@ -10271,6 +10274,7 @@ pub fn insert_local_observation_tx(
                 cost_microusd,
                 reported_cost.unwrap_or(0),
                 unpriced_tokens,
+                unpriced_responses,
             ]) {
                 entry[name] = json!(entry[name].as_u64().unwrap_or(0).saturating_add(value));
             }
@@ -10622,7 +10626,7 @@ pub fn usage_native_session(
     Ok(previous.flatten().filter(|id| !id.trim().is_empty()))
 }
 
-pub const USAGE_BUCKETS: [&str; 9] = [
+pub const USAGE_BUCKETS: [&str; 10] = [
     "total_tokens",
     "input_tokens",
     "output_tokens",
@@ -10632,6 +10636,7 @@ pub const USAGE_BUCKETS: [&str; 9] = [
     "cost_microusd",
     "reported_cost_microusd",
     "unpriced_tokens",
+    "unpriced_responses",
 ];
 
 pub fn pricing_identity(entry: &Value) -> String {

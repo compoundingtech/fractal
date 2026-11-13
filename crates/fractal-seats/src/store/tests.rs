@@ -2501,6 +2501,78 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
 }
 
 #[test]
+fn missing_response_totals_preserve_unknown_price_locally_and_after_replication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let agent = "agent/example.incomplete-spend";
+    let step = "step-run/example/generation/incomplete-spend";
+    let at = now_ms().saturating_sub(1_000);
+    let store = Store::open(&path, "host-one").unwrap();
+    store.set_write_clock_at(at).unwrap();
+    {
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        fractal_store::store::append_claim_tx(&tx, store.origin(), step, "work.claimed",
+            Some(agent), &json!({"fields":{"attempt":1,"claimant":agent,
+                "claim_incarnation":"incomplete","claim_expires_at_unix_ms":at+600_000},
+                "evidence":[]}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    for (index, cost) in [None, Some(0.0)].into_iter().enumerate() {
+        let entry = format!("incomplete-{index}");
+        let mut input = timeline_observation(agent, "incomplete", &entry);
+        input.fields.insert("entry_type".into(), json!("usage"));
+        input.fields.insert("source_id".into(), json!(entry));
+        input.fields.insert("observed_at_unix_ms".into(), json!((at + 100) as u64));
+        // Even a model in the price table cannot price absent disjoint buckets.
+        let mut body = json!({"semantics":"response","model":"claude-opus-5-5","input_tokens":7});
+        if let Some(cost) = cost {
+            body["cost"] = json!(cost);
+            body["model"] = json!("observed-zero");
+        }
+        input.fields.insert("body".into(), body);
+        let (observation, _) = store.append_claim_outcome(&input).unwrap();
+        assert_eq!(observation.body["fields"]["spend"]["basis"],
+            if cost.is_some() { "reported" } else { "unpriced" });
+        let rollup = store.usage_rollup_for_timeline(&observation).unwrap().unwrap();
+        assert_eq!(rollup.fields["total_tokens"], 0, "no total may be invented");
+        assert_eq!(rollup.fields["unpriced_tokens"], 0, "no token sentinel may be invented");
+        assert_eq!(rollup.fields["unpriced_responses"], u64::from(cost.is_none()),
+            "a reported zero remains a known price despite incomplete token buckets");
+        assert_eq!(rollup.fields["cost_microusd"], 0);
+        store.append_claim(&rollup).unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, "host-one").unwrap();
+    let peer = Store::open_memory("host-two").unwrap();
+    let exchange = exchange_from(&store, &ReplicationInventory::default());
+    receive_and_project(&peer, "host-one", &exchange);
+    for reader in [&store, &peer] {
+        let executions = reader.step_executions(step).unwrap();
+        let usage = executions[0].usage.as_ref().unwrap();
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.input_tokens, 14);
+        assert_eq!(usage.unpriced_tokens, 0);
+        assert_eq!(usage.unpriced_responses, 1);
+        assert_eq!(usage.cost_microusd, 0);
+        let (rows, report) = reader.usage_period_report(at as u64 - 1, now_ms() as u64 + 60_000).unwrap();
+        assert_eq!(rows.len(), 2, "zero total must not discard unknown-price evidence");
+        let unknown = rows.iter().find(|row| row["model"] == "claude-opus-5-5").unwrap();
+        let zero = rows.iter().find(|row| row["model"] == "observed-zero").unwrap();
+        assert_eq!(zero["unpriced_responses"], 0);
+        assert_eq!(zero["cost_microusd"], 0);
+        assert_eq!(unknown["unpriced_responses"], 1);
+        let provenance = unknown["pricing_provenance"].as_array().unwrap();
+        assert!(provenance.iter().any(|entry| entry["cost_source"] == "unpriced"
+            && entry["unpriced_responses"] == 1));
+        assert!(report["days"].as_array().unwrap().iter()
+            .any(|day| day["unpriced_responses"] == 1));
+        assert_eq!(reader.usage_summary_at(agent, None, None).unwrap().unwrap().cost, None,
+            "an unpriced response must not project as a free session");
+    }
+}
+
+#[test]
 fn counted_responses_are_remembered_for_a_bounded_horizon() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");

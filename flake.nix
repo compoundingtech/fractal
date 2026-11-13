@@ -2087,6 +2087,8 @@
             chmod -R u+w hooks
             cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
             cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            mkdir -p tests/fixtures/harness-timeline
+            cp ${self}/crates/fractal-drivers/tests/fixtures/harness-timeline/omp-response-evidence.json tests/fixtures/harness-timeline/
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"

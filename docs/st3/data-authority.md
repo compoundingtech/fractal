@@ -171,6 +171,13 @@ and `ttft` become fractional `duration_ms` and `ttft_ms`. These are harness obse
 not step wall duration, and duration need not equal completion minus start. Requested
 launch models are not evidence of the actual response model.
 
+The shipped driver and daemon OMP/pi channel hooks explicitly allowlist this response
+metadata, numeric token/cost/quota observations, and the one-hour cache subset before
+emitting terminal timeline frames. String bounds and tool payload redaction still
+apply; raw request/response objects and unrecognized usage fields are not forwarded.
+The hook smoke check drives the real extensions through a channel recorder using the
+response-evidence fixture, including missing, zero, partial and invalid observations.
+
 OMP/pi input, output, cache-read (`cached_tokens`) and cache-write buckets are disjoint.
 `reasoning_tokens` is a subset of output; `cache_write_1h_tokens` (OMP
 `usage.cttl.ephemeral1h`, Claude `cache_creation.ephemeral_1h_input_tokens`) is a subset

@@ -1716,6 +1716,7 @@
         "budget_microusd": { "type": "integer", "minimum": 0 },
         "used_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "period_start_ms": { "type": "integer", "minimum": 0 }
       }
     },
@@ -1744,6 +1745,7 @@
         "high_microusd": { "type": "integer", "minimum": 0 },
         "usage_cost_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "low_percent": { "type": ["number", "null"], "minimum": 0 },
         "high_percent": { "type": ["number", "null"], "minimum": 0 }
       }
@@ -1816,7 +1818,8 @@
         "cached_tokens": { "type": "integer", "minimum": 0 },
         "cost_microusd": { "type": "integer", "minimum": 0 },
         "reported_cost_microusd": { "type": "integer", "minimum": 0 },
-        "unpriced_tokens": { "type": "integer", "minimum": 0 }
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "UsagePricingRates": {
@@ -1869,6 +1872,7 @@
         "unpriced_tokens"
       ],
       "properties": {
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "price_table_id": {
           "type": "string"
         },
@@ -2209,7 +2213,8 @@
         "total_tokens": { "type": "integer", "minimum": 0 },
         "cost_microusd": { "type": "integer", "minimum": 0 },
         "reported_cost_microusd": { "type": "integer", "minimum": 0 },
-        "unpriced_tokens": { "type": "integer", "minimum": 0 }
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "MissionStepProgram": {

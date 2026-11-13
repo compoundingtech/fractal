@@ -213,7 +213,7 @@ impl Store {
                     if !key[0].is_empty() && key[0] != "unknown" { execution.observed_models.push(key[0].clone()); }
                     macro_rules! add { ($($name:ident),*) => { $(usage.$name = usage.$name.saturating_add(fields[stringify!($name)].as_u64().unwrap_or(0));)* }; }
                     add!(input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cached_tokens,
-                        total_tokens, cost_microusd, reported_cost_microusd, unpriced_tokens);
+                        total_tokens, cost_microusd, reported_cost_microusd, unpriced_tokens, unpriced_responses);
                 }
                 execution.observed_models.sort();
                 execution.observed_models.dedup();
