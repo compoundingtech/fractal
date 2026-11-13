@@ -70,17 +70,20 @@ enum Measure {
     Count(Box<Count>),
 }
 
-/// A subject's event: its earliest event claim's time, and the label, exclude and `only` fields of it.
+/// A subject's event: its earliest event claim's time and id (the id breaks a tie, so every member
+/// keeps the same claim), and the label, exclude and `only` fields of it.
 #[derive(Debug)]
 struct Counted {
     at: u64,
+    id: String,
     fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default)]
 struct Sample {
-    /// The earliest start, and the label, exclude and `only` fields of its claim.
-    start: Option<(u64, BTreeMap<String, String>)>,
+    /// The earliest start by its time, then its claim id, so every member keeps the same claim;
+    /// and the label, exclude and `only` fields of that claim.
+    start: Option<(u64, String, BTreeMap<String, String>)>,
     expect: Option<Expect>,
     /// Each member's stop times; without `member=`, under "".
     stops: BTreeMap<String, BTreeSet<u64>>,
@@ -296,9 +299,9 @@ impl Tracked {
         if at < horizon {
             return;
         }
-        let event = Counted { at, fields: kept };
+        let event = Counted { at, id: claim.id.clone(), fields: kept };
         match self.events.get_mut(&claim.subject) {
-            Some(earliest) if at < earliest.at => *earliest = event,
+            Some(earliest) if (at, claim.id.as_str()) < (earliest.at, earliest.id.as_str()) => *earliest = event,
             Some(_) => {}
             None => {
                 self.events.insert(claim.subject.clone(), event);
@@ -424,9 +427,9 @@ impl Sample {
             // A `stop` naming the `start` kind takes no `member=`.
             let stop = if stops { Some(time(&interval.stop.0.at)?) } else { None };
             if let Some(at) = start
-                && self.start.as_ref().is_none_or(|(start, _)| at < *start)
+                && self.start.as_ref().is_none_or(|(start, id, _)| (at, claim.id.as_str()) < (*start, id.as_str()))
             {
-                self.start = Some((at, kept_fields(&interval.labels, &interval.excludes, &interval.only, fields)));
+                self.start = Some((at, claim.id.clone(), kept_fields(&interval.labels, &interval.excludes, &interval.only, fields)));
             }
             let latest = start.into_iter().chain(expect.as_ref().map(|(at, _)| *at)).chain(stop).max().unwrap_or_default();
             if let Some((at, set)) = expect
@@ -470,7 +473,7 @@ impl Sample {
     }
 
     fn label(&self, field: &str) -> Option<&str> {
-        let start = self.start.as_ref().and_then(|(_, fields)| fields.get(field));
+        let start = self.start.as_ref().and_then(|(_, _, fields)| fields.get(field));
         start.or_else(|| self.expect.as_ref().and_then(|expect| expect.fields.get(field))).map(String::as_str)
     }
 
@@ -478,11 +481,11 @@ impl Sample {
     /// of its start claim.
     fn excluded(&self, interval: &Interval) -> bool {
         let excluded = interval.excludes.iter().any(|exclude| {
-            let start = self.start.as_ref().and_then(|(_, fields)| fields.get(&exclude.field));
+            let start = self.start.as_ref().and_then(|(_, _, fields)| fields.get(&exclude.field));
             let expect = self.expect.as_ref().and_then(|expect| expect.fields.get(&exclude.field));
             [start, expect].into_iter().flatten().any(|value| exclude.values.contains(value))
         });
-        excluded || self.start.as_ref().is_some_and(|(_, fields)| !holds(&interval.only, fields))
+        excluded || self.start.as_ref().is_some_and(|(_, _, fields)| !holds(&interval.only, fields))
     }
 
     /// The earliest stop of `member` at or after `start`.
@@ -492,7 +495,7 @@ impl Sample {
 
     /// The sample at `now`, or with `member`, that member's part of it.
     fn class(&self, interval: &Interval, member: Option<&str>, now: u64) -> Class {
-        let Some((start, _)) = &self.start else {
+        let Some((start, _, _)) = &self.start else {
             return Class::Unstarted;
         };
         let start = *start;

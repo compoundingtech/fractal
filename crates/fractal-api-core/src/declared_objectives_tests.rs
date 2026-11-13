@@ -367,6 +367,26 @@ fn one_claim_that_starts_and_stops_the_sample_is_its_stop_less_its_start() {
 }
 
 #[test]
+fn two_claims_starting_one_sample_at_the_same_time_keep_the_same_one_in_any_order() {
+    let document = crate::objective::parse_document(&run_declaration("    only \"attempt\" \"1\"\n")).unwrap();
+    let Indicator::Interval(interval) = &document[0].indicator else { panic!("an interval") };
+    let created = *NOW - 10 * MINUTE;
+    // Two pollers recorded one run at different attempts: the same `created_at`, other ids.
+    let attempt = |id: &str, attempt: u64, completed: u64| ClaimRecord {
+        id: id.into(),
+        ..record(RUN, *NOW, json!({"created_at": created, "completed_at": completed, "attempt": attempt}))
+    };
+    let (first, second) = (attempt("claim-a", 1, created + 60_000), attempt("claim-b", 2, created + 90_000));
+    for order in [[&first, &second], [&second, &first]] {
+        let mut sample = Sample::default();
+        for claim in order {
+            sample.observe(interval, claim).unwrap();
+        }
+        assert_eq!(sample.class(interval, None, *NOW), Class::Closed { value: 60_000, stop: created + 60_000 });
+    }
+}
+
+#[test]
 fn only_leaves_out_a_sample_whose_start_claim_has_another_value_or_none() {
     let store = store_with(&run_declaration("    only \"event\" \"merge_group\"\n    only \"attempt\" \"1\"\n"));
     run(&store, "kept", 30 * MINUTE, 2 * MINUTE, json!({"event": "merge_group", "attempt": 1}));

@@ -199,7 +199,9 @@ member evaluates them from the replicated claims, so each reads the same rows:
   and reruns only some jobs, so only a first attempt measures the run.
 - `fractal/flakes`: a count of runs whose `flakes` is not 0 (a test nextest passed only on a retry,
   or a merge group ejected from the queue) over the last hour, at most 0 an hour. With `max=0` the
-  row is missed exactly when any flake is seen; it counts runs, not flaky tests.
+  row is missed exactly when any flake is seen; it counts runs, not flaky tests. Pull request runs
+  of every conclusion are recorded, so a flaky test in a failed or cancelled pull request run counts
+  too (the shipped `flakes` row it replaces read only successful pull request runs).
 
 Each names its owner in `on-breach`. Publish the file with `fractal apply slo/fractal-ci.kdl`
 once every member runs a build that knows `only` and the `github.workflow-run` kind.
