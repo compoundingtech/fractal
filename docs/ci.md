@@ -1548,11 +1548,51 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `public-repo-history.yml` | Required `public-repo-history` on `pull_request_target` and merge groups, using immutable event base/head SHAs on GitHub-hosted Ubuntu. |
 | `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
-The content guard still rejects real machine/home identities and private fleet configuration
-references. Release workflows remain separate from the required gate; neither package
-verification nor the Nix package/check graph is made redundant by workspace nextest.
+### Required public history guard
+
+`public-repo-history` requires every introduced commit to be public-clean, not just the
+candidate's final tree. The scanner is `scripts/check-public-repo` copied from the trusted
+`BASE` revision and invoked against the candidate repository:
+
+```sh
+python3 <base-copy>/check-public-repo --repo "$PWD" --base BASE --head HEAD
+```
+
+It traverses `merge-base(BASE, HEAD)..HEAD`, including merged side histories and merge
+commits. Each commit's message, changed paths and added content are checked; merges are
+compared against every parent rather than only the first parent. Candidate scripts,
+configuration and dependencies are not executed to decide whether their content is public-clean.
+The content policy rejects real machine/home identities and private fleet configuration
+references. A dirty intermediate commit followed by a cleanup commit still fails, even when
+the head tree and the aggregate base-to-head diff are clean: merging retains that history.
+
+Create a replacement branch from a clean base, apply only public-clean changes and commit
+messages, and open a replacement PR. Do not force-push or rebase the existing PR to remove
+the offending history. A clean head cannot repair an already dirty introduced commit.
+
+The required context is exactly `public-repo-history`, attributed to the GitHub Actions app
+(integration ID `15368`) in the `main` ruleset (`20563764`). This documents the required
+protection contract; it does not mutate live repository settings or claim a live-settings
+observation.
+The accepted base must contain the history-capable scanner and workflow before an
+administrator enables live enforcement. A PR cannot bootstrap its own trusted scanner:
+the workflow checks out the immutable event base SHA and fetches candidate head objects
+without checking out or executing the candidate. A base without the scanner contract fails
+rather than falling back to candidate code.
+
+Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-only pre-push
+guard, using the trusted base's scanner before the existing evidence-signing path. The guard
+does not run candidate code, builds, tests or signing. `ST_SKIP_EVIDENCE=1` and
+`ST_EVIDENCE_LOCAL=off` do not skip it; bypassing the local hook does not bypass the hosted
+required check. Existing evidence-signing waits, background execution and non-blocking
+signing failures are unchanged. A landing-signing transition is a separate change, not part
+of this guard.
+
+Release workflows remain separate from the required gate; neither package verification nor
+the Nix package/check graph is made redundant by workspace nextest.
 
 ## Merge queue
 
@@ -1564,16 +1604,17 @@ gh pr merge NUMBER --auto --match-head-commit REVIEWED_HEAD
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
-`merge_group` event; see the
-trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
+`linux-gate`, `genie-freshness`, `typescript-client`, `fractal-web` and `public-repo-history`
+(these run on the `merge_group` event; see `fleet.yml.genie.ts` and
+`public-repo-history.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
-bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
+by an administrator and never by CI) requires the five checks from GitHub Actions with an empty
+bypass list, including `public-repo-history` from integration `15368` in main ruleset `20563764`,
+keeps the pull-request, deletion and force-push protections, and configures the queue:
 merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.
