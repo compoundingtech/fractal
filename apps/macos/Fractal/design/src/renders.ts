@@ -19,6 +19,12 @@ export const scenarioIds = [
   'read-only',
   'degraded',
   'unconfigured',
+  'speech-speaking',
+  'speech-in-call',
+  'speech-muted',
+  'notice-speaking',
+  'notice-in-call',
+  'notice-answered',
 ] as const
 
 /** One of the gallery scenarios. */

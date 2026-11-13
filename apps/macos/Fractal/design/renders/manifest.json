@@ -5,28 +5,28 @@
     {
       "appearance" : "light",
       "file" : "busy-light.png",
-      "height" : 2614,
+      "height" : 2798,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "busy-dark.png",
-      "height" : 2614,
+      "height" : 2798,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "answering-light.png",
-      "height" : 2014,
+      "height" : 1982,
       "scenario" : "answering",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "answering-dark.png",
-      "height" : 2014,
+      "height" : 1982,
       "scenario" : "answering",
       "width" : 800
     },
@@ -85,6 +85,90 @@
       "height" : 420,
       "scenario" : "unconfigured",
       "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "speech-speaking-light.png",
+      "height" : 1364,
+      "scenario" : "speech-speaking",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "speech-speaking-dark.png",
+      "height" : 1364,
+      "scenario" : "speech-speaking",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "speech-in-call-light.png",
+      "height" : 1158,
+      "scenario" : "speech-in-call",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "speech-in-call-dark.png",
+      "height" : 1158,
+      "scenario" : "speech-in-call",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "speech-muted-light.png",
+      "height" : 1080,
+      "scenario" : "speech-muted",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "speech-muted-dark.png",
+      "height" : 1080,
+      "scenario" : "speech-muted",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "notice-speaking-light.png",
+      "height" : 1062,
+      "scenario" : "notice-speaking",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "notice-speaking-dark.png",
+      "height" : 1062,
+      "scenario" : "notice-speaking",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "notice-in-call-light.png",
+      "height" : 866,
+      "scenario" : "notice-in-call",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "notice-in-call-dark.png",
+      "height" : 866,
+      "scenario" : "notice-in-call",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "notice-answered-light.png",
+      "height" : 566,
+      "scenario" : "notice-answered",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "notice-answered-dark.png",
+      "height" : 566,
+      "scenario" : "notice-answered",
+      "width" : 800
     }
   ],
   "scale" : 2,
@@ -118,7 +202,36 @@
       "description" : "The tray started without its Fractal configuration and says what to set.",
       "id" : "unconfigured",
       "title" : "Not configured"
+    },
+    {
+      "description" : "A critical ask is being read aloud with Stop and Mute this agent; a second waits in the queue with Skip.",
+      "id" : "speech-speaking",
+      "title" : "Speaking"
+    },
+    {
+      "description" : "The microphone and camera are in use: a critical ask shows as a banner but is not spoken; the person may allow speech for this call.",
+      "id" : "speech-in-call",
+      "title" : "In a call"
+    },
+    {
+      "description" : "Speech muted for an hour and one agent muted for today: critical asks still show as banners.",
+      "id" : "speech-muted",
+      "title" : "Speech muted"
+    },
+    {
+      "description" : "The decision being read aloud: Stop, its answers as buttons, Request changes as a text reply, Mute this agent, Open in Fractal.",
+      "id" : "notice-speaking",
+      "title" : "Notification while speaking"
+    },
+    {
+      "description" : "A feedback ask held for a call: no Stop, a text reply for the feedback.",
+      "id" : "notice-in-call",
+      "title" : "Notification in a call"
+    },
+    {
+      "description" : "After Fractal committed the answer: the notification says so and offers only Open in Fractal.",
+      "id" : "notice-answered",
+      "title" : "Answered from the notification"
     }
-  ],
-  "trayRev" : "src.ec50433"
+  ]
 }

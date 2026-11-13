@@ -46,6 +46,9 @@ export const Quiet: Story = scenarioStory({ scenario: 'quiet' })
 export const ReadOnly: Story = scenarioStory({ scenario: 'read-only' })
 export const Degraded: Story = scenarioStory({ scenario: 'degraded' })
 export const Unconfigured: Story = scenarioStory({ scenario: 'unconfigured' })
+export const SpeechSpeaking: Story = scenarioStory({ scenario: 'speech-speaking' })
+export const SpeechInCall: Story = scenarioStory({ scenario: 'speech-in-call' })
+export const SpeechMuted: Story = scenarioStory({ scenario: 'speech-muted' })
 
 /** Every scenario, light and dark side by side. */
 export const AllStates: Story = {

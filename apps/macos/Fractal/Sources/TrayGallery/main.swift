@@ -37,7 +37,8 @@ guard let outArgument = arguments.first else {
   exit(2)
 }
 let wanted = Set(arguments.dropFirst())
-if let unknown = wanted.subtracting(scenarios.map(\.id)).first {
+let panels = scenarios + speechScenarios
+if let unknown = wanted.subtracting(panels.map(\.id) + noticeScenarios.map(\.id)).first {
   FileHandle.standardError.write(Data("unknown scenario \(unknown)\n".utf8))
   exit(2)
 }
@@ -49,22 +50,31 @@ NSApp.setActivationPolicy(.prohibited)
 let rev = ProcessInfo.processInfo.environment["TRAY_GALLERY_REV"].flatMap { $0.isEmpty ? nil : $0 }
 let build = BuildIdentity(baseVersion: "0.2.0", rev: rev, dirty: false, fractalClientRev: nil)
 var manifest = Manifest(trayRev: rev)
-for scenario in scenarios where wanted.isEmpty || wanted.contains(scenario.id) {
+@MainActor func record(_ id: String, _ name: String, _ png: Data?) throws {
+  guard let png, let bitmap = NSBitmapImageRep(data: png) else {
+    FileHandle.standardError.write(Data("could not render \(id) \(name)\n".utf8))
+    exit(1)
+  }
+  let file = "\(id)-\(name).png"
+  try png.write(to: out.appendingPathComponent(file))
+  manifest.renders.append(
+    .init(scenario: id, appearance: name, file: file, width: bitmap.pixelsWide, height: bitmap.pixelsHigh))
+  print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
+}
+let appearances = [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)]
+for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
   manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))
-  for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+  for (name, appearance) in appearances {
     let model = await scenario.prepare(.now)
-    guard
-      let png = await PanelSnapshot.png(model: model, build: build, reveal: scenario.reveal, appearance: appearance),
-      let bitmap = NSBitmapImageRep(data: png)
-    else {
-      FileHandle.standardError.write(Data("could not render \(scenario.id) \(name)\n".utf8))
-      exit(1)
-    }
-    let file = "\(scenario.id)-\(name).png"
-    try png.write(to: out.appendingPathComponent(file))
-    manifest.renders.append(
-      .init(scenario: scenario.id, appearance: name, file: file, width: bitmap.pixelsWide, height: bitmap.pixelsHigh))
-    print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
+    try record(
+      scenario.id, name,
+      await PanelSnapshot.png(model: model, build: build, reveal: scenario.reveal, appearance: appearance))
+  }
+}
+for scenario in noticeScenarios where wanted.isEmpty || wanted.contains(scenario.id) {
+  manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))
+  for (name, appearance) in appearances {
+    try record(scenario.id, name, await PanelSnapshot.png(notice: scenario.notice(.now), appearance: appearance))
   }
 }
 let encoder = JSONEncoder()
