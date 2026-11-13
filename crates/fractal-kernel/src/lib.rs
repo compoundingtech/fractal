@@ -37,6 +37,8 @@ pub mod program_journal;
 pub mod projection;
 pub mod rules;
 pub mod seat_queue;
+pub mod step_execution;
+pub use step_execution::{StepExecution, StepExecutionUsage};
 /// The st agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod publication;
