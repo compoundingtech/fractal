@@ -9,6 +9,8 @@ pub use fractal_missions::store::person_work::*;
 pub use fractal_missions::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod reconcile_candidates_tests;
+#[cfg(test)]
+mod deadline_clock_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
@@ -363,6 +365,7 @@ mission "person-work" state="ready" {
             Ok(())
         }).unwrap().unwrap();
         let input = PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

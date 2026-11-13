@@ -1573,6 +1573,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   /** Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it. */
   "update": optionalKey(PersonUpdate),
   "updated_at": Timestamp,
+  /** Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent. */
+  "urgent": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." }),
   "variant_id": optionalKey(Id),
   "what": optionalKey(Schema.String)
 }).annotate({ identifier: "Attention" }))()
