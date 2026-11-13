@@ -585,7 +585,10 @@ test('availability decodes the coarse view, the full view and a status clear', a
     assert.deepEqual([result.people[2].status, result.people[2].status_source], ['available', 'unreported']);
     // Words a newer daemon adds stay readable.
     const future = { ...wire.people[0], status: 'busy', status_source: 'calendar', presence: 'in-call', interruptions: 'priority', deadline_clock: 'hold-weekend' };
-    const kept = Schema.encodeSync(Rich.PersonAvailability)(Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict')(future));
+    const decodedFuture = Rich.decodeUnknownSync(Rich.PersonAvailability)(future);
+    assert.equal(Rich.containsUnknownCase(decodedFuture), true);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict')(future));
+    const kept = Schema.encodeSync(Rich.PersonAvailability)(decodedFuture);
     assert.deepEqual([kept.status, kept.status_source, kept.presence, kept.interruptions, kept.deadline_clock], ['busy', 'calendar', 'in-call', 'priority', 'hold-weekend']);
     const own = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json').value;
     const full = Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict');
@@ -599,9 +602,9 @@ test('availability decodes the coarse view, the full view and a status clear', a
     report(require('../../../docs/st3/client-v0/fixtures/presence-report.json'));
     assert.throws(() => report({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' }));
     assert.throws(() => report({ presence: 'present', observed_at: '2026-11-12T09:58:00Z' }));
-    const result = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
+    const reportResult = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
     const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json').value;
-    assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(result(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
+    assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
 });
 
 test('person-ask mission rows retain actor references through the generated decoder', async () => {

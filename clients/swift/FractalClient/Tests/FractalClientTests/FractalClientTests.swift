@@ -322,7 +322,7 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
     }
 
-    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndRoundTrip() throws {
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
         let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
         let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
         XCTAssertEqual(future.status, .unknown("busy"))

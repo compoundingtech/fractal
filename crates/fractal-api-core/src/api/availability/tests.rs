@@ -71,7 +71,7 @@ async fn availability_writes_act_as_the_session_person_and_refuse_agents() {
     assert_eq!(value["person"], "person/ada");
     assert_eq!((&value["status"], &value["status_source"], &value["interruptions"]), (&json!("away"), &json!("override"), &json!("urgent")));
     assert!(value["status_until"].is_string() && value["interruptions_until"].is_null());
-    assert_eq!(value["presence"], "unknown", "the person sees their own presence");
+    assert_eq!(value["presence"], "unreported", "the person sees their own presence");
     // Every person-state claim records the daemon-assigned writer: this member, for a local caller.
     let host = json!(client_host_id(state.store.origin()));
     for kind in [fractal_schema::availability::STATUS_KIND, fractal_schema::availability::INTERRUPTIONS_KIND] {
@@ -133,7 +133,7 @@ async fn paired_writes_need_their_scope_and_presence_names_the_pairing_grant() {
     let (status, before) = send(&app, "GET", "/v1/client/availability", bearer("writer"), None).await;
     assert_eq!(status, StatusCode::OK, "{before}");
     let before = &before["value"]["people"][0];
-    assert_eq!((&before["status"], &before["status_source"], &before["presence"]), (&json!("available"), &json!("unreported"), &json!("unknown")));
+    assert_eq!((&before["status"], &before["status_source"], &before["presence"]), (&json!("available"), &json!("unreported"), &json!("unreported")));
 
     // The device reports its raw state and last input; the daemon derives presence and says
     // when to report again: the instant the device turns idle without newer input.
