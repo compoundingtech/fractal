@@ -75,6 +75,10 @@ if ! git show "$base:scripts/check-public-repo" > "$work/check-public-repo"; the
   echo "public repository guard: accepted base has no content scanner" >&2
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "public repository guard: python3 is not on PATH; refusing unscanned publication" >&2
+  exit 1
+fi
 python3 "$work/check-public-repo" --repo "$top" --pre-push "$remote" < "$work/updates" || exit 1
 # arn:lmig:smalltalk:2026-10-27-st-test-shim — copy the self-contained implementation; fractal-test needs its adjacent st-test.
 runner=scripts/st-test

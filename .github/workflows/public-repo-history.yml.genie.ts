@@ -1,5 +1,6 @@
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
+import { fullHistoryCheckoutSteps } from './workspace-ci.ts'
 
 const publishHistoryStatus = `
 await github.rest.repos.createCommitStatus({
@@ -47,15 +48,10 @@ export default githubWorkflow(auditCaches({
           env: { HISTORY_STATE: 'pending' },
           with: { script: publishHistoryStatus },
         },
-        {
-          name: 'Check out immutable accepted base and policy',
-          uses: 'actions/checkout@v4',
-          with: {
-            ref: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
-            'fetch-depth': 0,
-            'persist-credentials': false,
-          },
-        },
+        ...fullHistoryCheckoutSteps({
+          ref: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
+          'persist-credentials': false,
+        }, { name: 'Check out immutable accepted base and policy' }),
         {
           name: 'Fetch candidate history without checking it out',
           shell: 'bash',
