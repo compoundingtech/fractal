@@ -344,3 +344,9 @@ one more cut trims seed 2 on every modern node. So the kind changes which writer
 waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
 the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
 authority (#6210).
+
+`claims-v26.json` captures the merged registry with the system-only `mission.run.trace` and
+`program.attempt.trace` correlation claims. Versions 1 through 25 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v26.json`;
+do not hand-edit it. The simulation and audit reports select v26. The fixed seeds must earn
+their own checkpoint-trim coverage rather than inheriting v25's never-trim set.

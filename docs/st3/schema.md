@@ -191,7 +191,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `principal.key-granted` | `person`, `agent` | `system-only` | `append` | `durable` | `issuer!:string`, `issuer_key!:string`, `key!:string`, `label:string`, `role!:string` |  |
 | `principal.key-revoked` | `person`, `agent` | `system-only` | `append` | `durable` | `key!:string`, `reason:string` |  |
 | `program.attempt.trace` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `trace:any` | `observability` |
-| `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `child:string`, `error:any`, `key!:string`, `ms:integer`, `program!:string`, `status!:string`, `trace:any`, `value:any` | `step`, `program` |
+| `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `child:string`, `error:any`, `key!:string`, `ms:integer`, `program!:string`, `status!:string`, `value:any` | `step`, `program` |
 | `publication.operation` | `*` | `system-only` | `append` | `durable` | `action:string`, `operation:string`, `status!:string` | `revision`, `reset`, `cancellation`, `refresh`, `feedback` |
 | `read-position.advanced` | `read-position` | `ordinary-client` | `append` | `durable` | `at_ms!:integer`, `conversation!:string`, `owner!:subject-reference(person)` |  |
 | `reconcile.fault` | `daemon`, `mission-run`, `observer`, `schedule`, `step-run`, `subscription` | `system-only` | `append` | `durable` | `publication:string`, `reason:string`, `scope!:string`, `status!:string` |  |

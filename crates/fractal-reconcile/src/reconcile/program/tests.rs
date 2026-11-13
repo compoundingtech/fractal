@@ -348,7 +348,11 @@ fn daemon_refusals_export_failed_attempt_spans() {
         assert!(status.success(), "isolated refusal trace test failed");
         return;
     }
-    let spans = crate::otel::capture_test_spans(|| {
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone()).build();
+    opentelemetry::global::set_tracer_provider(provider.clone());
+    {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path());
         for kind in ["run", "ask"] {
@@ -369,7 +373,9 @@ fn daemon_refusals_export_failed_attempt_spans() {
             "exit": {"_tag": "Success", "value": 2}}), 1).unwrap();
         assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
         assert!(!engine.lock().running.contains_key(step));
-    });
+    }
+    provider.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
     let attempts = spans.iter().filter(|span| span.name == "st.program.attempt").collect::<Vec<_>>();
     assert_eq!(attempts.len(), 3);
     for span in attempts {
