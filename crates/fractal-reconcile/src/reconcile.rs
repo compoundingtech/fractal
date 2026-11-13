@@ -12574,6 +12574,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|mission| mission.state == MissionState::Ready))
     }
 
+    /// Track both sides of a capacity-refused start: a holder ending during the start must
+    /// still wake the parent, and a newly admitted holder must wake it on the next release.
+    fn note_mission_capacity_holders(&self, mission: &str) -> Result<()> {
+        for holder in self.store.active_mission_runs_for_mission(mission)? {
+            smallclaims::touched::note_read(|| holder.subject.clone());
+        }
+        Ok(())
+    }
+
     fn evaluate_used_mission(
         &self,
         run: &MissionRunView,
@@ -12635,6 +12644,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(child) = self.store.mission_run_for_parent_step(&view.subject)? {
                 (child, false)
             } else {
+                self.note_mission_capacity_holders(&mission)?;
                 let selector = step_run_selector(view);
                 let child = match self.store.create_child_mission_run(
                     &MissionRunRequest {
@@ -12653,8 +12663,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &view.subject,
                     Some(&selector),
                 ) {
-                    Ok(child) => child,
+                    Ok(child) => {
+                        // A newly created view did not pass through the annotated child lookup.
+                        // Follow its outcome now, including a child that ends before our next read.
+                        smallclaims::touched::note_read(|| child.subject.clone());
+                        child
+                    }
                     Err(error) if error.code == "mission-run-capacity" => {
+                        self.note_mission_capacity_holders(&mission)?;
                         return Ok((false, UsedMissionOutcome::Pending));
                     }
                     Err(error) => return Err(error.into()),
@@ -14966,22 +14982,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
-            // The runs holding the mission's capacity are read before the start and again after a
-            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
-            let note_holders = || -> Result<()> {
-                for holder in self.store.active_mission_runs_for_mission(mission)? {
-                    smallclaims::touched::note_read(|| holder.subject.clone());
-                }
-                Ok(())
-            };
-            note_holders()?;
+            self.note_mission_capacity_holders(mission)?;
             return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
                 }
                 Err(error) if error.code == "mission-run-capacity" => {
-                    note_holders()?;
+                    self.note_mission_capacity_holders(mission)?;
                     Ok(false)
                 }
                 // A store failure or contention (a run-mutation fence while projections catch up)
