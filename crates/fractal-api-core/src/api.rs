@@ -8381,6 +8381,7 @@ pub async fn guard_bound_request(
         "/v1/agents/resume",
         "/v1/agents/native-session",
         "/v1/agents/lane/burst",
+        "/v1/hosts/holds",
         "/v1/delivery/hold",
         "/v1/hosts/holds",
         "/v1/lane-changes",

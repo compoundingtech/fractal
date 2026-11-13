@@ -196,7 +196,7 @@ mod tests {
     use super::*;
     fn request() -> PlaceHostHold { PlaceHostHold { actor: "person/operator".into(), host: "host-a".into(), reason: "Investigate activation".into(), operations: vec!["activation".into()], originating_run: Some("mission-run/terminal".into()), receipt: Some("receipt/failure".into()) } }
     #[test]
-    fn alternate_store_constructors_initialize_host_resource_schemas() {
+    fn alternate_store_constructors_initialize_host_hold_schema() {
         let root = tempfile::tempdir().unwrap();
         let views = std::sync::Arc::new(smallclaims::ivm::Views::new(vec![]).unwrap());
         let stores = [

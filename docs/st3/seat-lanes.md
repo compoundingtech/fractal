@@ -578,3 +578,24 @@ A default scheduler weight is declared `not-enforced` with reason `default weigh
 inactive units and absent controllers retain their observed reasons. This fixture
 policy distinguishes an explicitly configured share from a default share; it does
 not imply that the kernel ignores default scheduler weights.
+
+## Finite execution custody
+
+The native finite-execution backend generalizes the existing Linux lane hierarchy
+without enabling the jobs scheduler. Host-owned memberships bind a named immutable
+policy, an authority epoch, and exact run/step/attempt identity. Holds close admission
+without occupying capacity; FIFO membership admission accounts independent roots
+once alongside seats, scoped raises and bursts.
+
+Admission, payload release, execution end and retirement have separate persisted
+timestamps. In-boot elapsed clocks are monotonic; uncertain recovered clocks do not
+grant a fresh execution budget. A process-generation record references membership
+identity before the payload gate opens. Cancellation and natural parent exit retain
+custody until the native runtime proves whole-tree retirement; failed cleanup and
+unknown authority survivors do not free capacity.
+
+The telemetry adapter records queue, execution and release phases, correlated
+membership/generation identities, occupancy and hold observations. These observations
+do not grant launch authority. Required Linux enforcement is checked before release;
+Darwin remains explicit about logical-only coverage and uncertain escaped descendants.
+

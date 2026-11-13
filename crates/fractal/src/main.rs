@@ -95,6 +95,7 @@ mod pairing_qr;
 mod agents_cli;
 mod attention_cli;
 mod claims_cli;
+mod hosts_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -6432,6 +6433,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6540,6 +6542,8 @@ fn guard_mutating_cli_actor(
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. } } => actor.as_deref(),
         Command::Apply(args) => args.actor.as_deref(),
+        Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
+            | hosts_cli::HostsCommand::Release { actor, .. } } => actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
