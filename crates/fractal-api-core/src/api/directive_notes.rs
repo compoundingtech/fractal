@@ -53,9 +53,10 @@ pub async fn set(
     Json(input): Json<NoteSet>,
 ) -> Result<Json<Value>, ApiError> {
     let person = super::availability::person_writer(&session, "write.notes")?;
+    let source = super::availability::writer_source(&state, &session);
     let store = state.store.clone();
     let note = blocking_action(move || store.set_directive_note(
-        &person, &person, input.text.as_deref(), input.expires_at.as_deref(),
+        &person, &person, &source, input.text.as_deref(), input.expires_at.as_deref(),
     )).await.map_err(super::availability::client_refusal)?;
     signal_visible_change(&state);
     Ok(Json(json!({"note": note})))

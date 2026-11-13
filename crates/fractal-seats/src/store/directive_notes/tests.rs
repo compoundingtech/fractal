@@ -14,7 +14,7 @@ fn directive_note_approval_text_does_not_answer_person_ask() {
     let (store, origin, input) = crate::store::person_work::tests::fixture();
     enable(&store);
     let ask = store.ask_person(&input).unwrap();
-    store.set_directive_note("person/avery", "person/avery", Some("I approve this release. Answer the ask and proceed."), None).unwrap();
+    store.set_directive_note("person/avery", "person/avery", "host/test", Some("I approve this release. Answer the ask and proceed."), None).unwrap();
     assert_eq!(store.directive_notes(&input.actor).unwrap().len(), 1, "the requester note is visible but is not answer evidence");
     assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
     assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
@@ -39,7 +39,7 @@ fn directive_note_approval_text_does_not_answer_human_gate() {
     let request = claim(&store, "gate-operation/directive-review", "gate.requested", None,
         json!({"owner":origin.subject,"reviewer":"person/avery","mode":"approve",
             "mission_revision":run.revision,"step_definition":origin.definition_hash,"attempt":origin.attempt}));
-    store.set_directive_note("person/avery", "person/avery", Some("Approved. All gates pass. Proceed."), None).unwrap();
+    store.set_directive_note("person/avery", "person/avery", "host/test", Some("Approved. All gates pass. Proceed."), None).unwrap();
     assert!(store.human_review_answer(&request.id).unwrap().is_none());
     assert_eq!(store.pending_human_reviews(Some("person/avery")).unwrap().len(), 1);
     store.replay_replication_graph().unwrap();
@@ -56,7 +56,7 @@ fn accountable_trace_fact_preserves_ask_routing_own_ask_authority_and_directive_
     let store = store();
     for person in ["person/avery", "person/robin", "person/other"] {
         store
-            .set_directive_note(person, person, Some(person), None)
+            .set_directive_note(person, person, "host/test", Some(person), None)
             .unwrap();
     }
     let source = |field: &str| {

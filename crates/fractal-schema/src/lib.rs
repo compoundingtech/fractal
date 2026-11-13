@@ -586,8 +586,8 @@ impl Registry {
         output.push_str(usage_limits::DOCUMENTATION);
         output.push_str("\n## Agent principal grammar\n\nAn agent may declare one optional `principal \"person/operator\"` child. It takes\nexactly one canonical person ID string, with no properties or body; agent IDs,\nmalformed person IDs and duplicate principal children are rejected. `principal`\nis not an agent property. The canonical `intent.desired.desired` tree retains\nthe child without adding a separate claim field. Omitting it remains valid.\nThis grammar declaration is distinct from the accountable-root contract below.\n\nPending harness observations with `ask=\"question\"` route to the declared\nprincipal, otherwise to the daemon's configured `person`. Account ownership,\nhelper bindings, mission requesters and declaration authors are not question\nauthority. If neither principal exists, global attention retains the prompt\nwith an empty person and a configuration diagnostic instead of dropping it.\nOnly a live declaration and its running incarnation can produce the item;\nrepublishing its principal invalidates attention. `under` remains non-owning.\nPermission and review prompts retain their existing ownership and answer\nauthorization. This routing does not enable answering unsupported harnesses.\nSupported native question answers require the effective principal as answerer.\nUpgrade readers before publishing the child: older readers reject it.\n");
         output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
-        output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
-        output.push_str("\n## Person availability\n\nFour kinds on `person/NAME` record a person's availability. Only that exact person may write them, through dedicated operations only, including replicated admission. `person.status-set` takes `status` (`available`, `away`, or null to clear the override); `person.interruptions-set` takes `interruptions` (`all`, `urgent`, `none`); `person.deadline-clock-set` takes `deadline_clock` (`run`, `hold-routine`, `hold-all`). Each takes optional `until_unix_ms`, after which that axis returns to its default: presence-derived status, `all` interruptions and a running clock. The canonical latest claim of each kind is that axis's current value.\n\n`person.presence-observed` is one client's report: `presence` (`present`, `idle`, `locked`), the daemon-assigned `source` and the client's `observed_at_unix_ms`. Without an override, status is `available` only while some source's newest report is fresh and `present`; stale or missing reports never count as present.\n\nA deadline-clock hold pauses ask deadlines: `hold-all` every ask, `hold-routine` asks without an explicit deadline of at most one hour. The durable clock history records held time; an ask's effective deadline is its stored deadline plus the time held since it was asked. Availability never grants authority.\n");
+        output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp; optional `source` is the daemon-assigned writer, a pairing grant or `host/MEMBER`, and is absent on notes written before it. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
+        output.push_str("\n## Person availability\n\nFour kinds on `person/NAME` record a person's availability. Only that exact person may write them, through dedicated operations only, including replicated admission. Each names the daemon-assigned `source` that wrote it: the client's pairing grant, or `host/MEMBER` for a local caller. `person.status-set` takes `status` (`available`, `away`, or null to clear the override); `person.interruptions-set` takes `interruptions` (`all`, `urgent`, `none`); `person.deadline-clock-set` takes `deadline_clock` (`run`, `hold-routine`, `hold-all`). Each takes optional `until_unix_ms`, after which that axis returns to its default: derived status, `all` interruptions and a running clock. The canonical latest claim of each kind is that axis's current value.\n\n`person.presence-observed` is one device's raw state transition: `state` (`active`, `inactive`, `locked`, `sleeping`), optional `last_input_at_unix_ms` and the device's `observed_at_unix_ms`. Devices apply no thresholds; the daemon derives presence for every device alike. An `active` device is `present` until 10 minutes after its last input, then `idle`; `inactive` is `idle`; `locked` and `sleeping` are `locked`. A device's state counts for 24 hours after it was observed. Without an override, status is `available` while some device is `present`, `away` while devices count but none is present, and `available` with source `unreported` when no device counts.\n\nA deadline-clock hold pauses ask deadlines: `hold-all` every ask, `hold-routine` every ask that is not urgent. `work.person-asked` takes optional `priority` (`critical`, `high`, `normal`, `low`; `normal` when absent), and an ask is urgent exactly when its priority is `critical`. The durable clock history records held time; an ask's effective deadline is its stored deadline plus the time held since it was asked. Availability never grants authority.\n");
         output.push_str("\n## Arrangement operation vocabulary\n\nReplication retains unknown operation tags and unknown placement subject families as retryable `unknown-claim-field` records. Local edits still refuse them with `invalid-arrangement-operations` and `invalid-subject-reference`. Supported operation tags, included in this registry's digest:\n\n");
         for tag in &self.arrangement_operations {
             output.push_str(&format!("- `{tag}`\n"));
@@ -1827,6 +1827,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["mission-run"],
             WritePolicy::SystemOnly,
             Cardinality::StateTransition,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.retry-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.supersede-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
             Some("mission-runs"),
             true,
             &[],
@@ -3287,21 +3305,26 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
             ("expires_at", string()),
+            ("source", string()),
         ],
         availability::STATUS_KIND => &[
             ("status", FieldSpec { required: true, nullable: true, ..enumeration(availability::STATUSES) }),
             ("until_unix_ms", integer()),
+            ("source", required_string()),
         ],
         availability::INTERRUPTIONS_KIND => &[
             ("interruptions", required_enum(availability::INTERRUPTIONS)),
             ("until_unix_ms", integer()),
+            ("source", required_string()),
         ],
         availability::DEADLINE_CLOCK_KIND => &[
             ("deadline_clock", required_enum(availability::DEADLINE_CLOCKS)),
             ("until_unix_ms", integer()),
+            ("source", required_string()),
         ],
         availability::PRESENCE_KIND => &[
-            ("presence", required_enum(availability::PRESENCES)),
+            ("state", required_enum(availability::DEVICE_STATES)),
+            ("last_input_at_unix_ms", integer()),
             ("source", required_string()),
             ("observed_at_unix_ms", required_integer()),
         ],
@@ -3435,6 +3458,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
             ("status", string()),
+            ("phase", string()),
+            ("admission_publication", string()),
             ("mission", reference()),
             ("revision", string()),
             ("generation", reference()),
@@ -3461,6 +3486,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("stalled_after_ms", integer()),
             ("report_stalls", boolean()),
             ("report_completed", boolean()),
+        ],
+        "mission-run.retry-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("retry", required_reference_to(&["mission-run"])),
+            ("reason", string()),
+        ],
+        "mission-run.supersede-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("replacement", required_reference_to(&["mission-run"])),
+            ("publication", required_string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3582,6 +3617,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", integer()),
             ("deadline_ms", integer()),
             ("default_answer", string()),
+            ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
             ("attempt", integer()),
@@ -3647,6 +3683,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("step_definition", string()),
             ("attempt", integer()),
             ("runner", string()),
+            ("host", string()),
+            ("dispatch", object()),
             ("model", string()),
             ("token_budget", integer()),
             ("tools", array()),
@@ -4019,6 +4057,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("scope", required_string()),
             ("status", required_enum(&["faulted", "recovered"])),
             ("reason", string()),
+            ("publication", string()),
         ],
         "record.repaired" => &[
             ("record", required_string()),
@@ -4080,6 +4119,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("exit_code", integer()),
             ("exit_signal", integer()),
+            ("exit_evidence", object()),
             ("incarnation_id", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
@@ -5136,7 +5176,7 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
+        // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
@@ -5146,14 +5186,27 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("mission-run.retry-linked").unwrap();
+        current.claims.remove("mission-run.supersede-linked").unwrap();
+        for field in ["phase", "admission_publication"] {
+            current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }
         for kind in availability::KINDS {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.get_mut(directive_notes::KIND).unwrap().fields.remove("source").unwrap();
+        current.claims.get_mut("work.person-asked").unwrap().fields.remove("priority").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.observed").unwrap()
+            .fields.remove("exit_evidence").unwrap();
+        for field in ["host", "dispatch"] {
+            current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
