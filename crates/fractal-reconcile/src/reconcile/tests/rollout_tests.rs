@@ -1054,6 +1054,7 @@ fn ask_with_deadline(seat: &Seat) -> (String, String, u128) {
     let ask = seat
         .store
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: Some(3_600_000),
             default_answer: None,
             legacy_request: None,
@@ -1135,7 +1136,10 @@ async fn the_reconciler_arms_the_ask_deadline_wake_past_the_time_the_clock_was_h
                 subject: "person/operator".into(),
                 kind: "person.deadline-clock-set".into(),
                 actor: Some("person/operator".into()),
-                fields: BTreeMap::from([("deadline_clock".into(), json!(deadline_clock))]),
+                fields: BTreeMap::from([
+                    ("deadline_clock".into(), json!(deadline_clock)),
+                    ("source".into(), json!("host/amber")),
+                ]),
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: None,
@@ -1199,6 +1203,7 @@ mission "garden/cancel-ask" state="ready" {
         idempotency_key: "cancel-ask-claim".into(),
     }).unwrap();
     let ask = seat.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1279,6 +1284,7 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let ask = seat
             .store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

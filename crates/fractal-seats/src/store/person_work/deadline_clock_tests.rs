@@ -26,7 +26,7 @@ impl Drop for SimulatedClock {
 /// person/avery sets their deadline clock at `at`.
 fn set_clock(store: &Store, clock: DeadlineClock, until: Option<u128>, at: u128) {
     smallclaims::store::set_thread_clock(Some(at));
-    store.set_person_availability("person/avery", &[AvailabilityChange::DeadlineClock(clock, until)], at).unwrap();
+    store.set_person_availability("person/avery", "host/test", &[AvailabilityChange::DeadlineClock(clock, until)], at).unwrap();
 }
 
 /// The deadline person/avery's home shows for `subject` at `at`.
@@ -73,23 +73,24 @@ fn hold_all_keeps_an_asks_default_from_applying_until_the_deadline_clock_runs() 
     assert_eq!(resumed.person_answers[0].answer.as_ref().unwrap()["id"], "keep-open");
 }
 
-/// `hold-routine` holds an ask on the fleet default deadline, but one whose asker named a
-/// deadline of at most an hour is urgent and resolves on time.
+/// `hold-routine` holds every ask that is not urgent, however short its deadline; one its asker
+/// gave priority `critical` is urgent and resolves on time.
 #[test]
 fn hold_routine_holds_a_routine_ask_while_an_urgent_one_resolves_at_its_deadline() {
     let _clock = SimulatedClock::at(ASKED);
     let (store, origin, mut input) = fixture();
     store.set_ask_deadlines(true);
-    store.set_default_ask_deadline_ms(2 * HOUR as u64).unwrap();
     store.set_step_state(&origin.subject, "completed", None).unwrap();
     input.step = None;
+    input.deadline_ms = Some(HOUR as u64);
     input.new_run = Some("routine".into());
+    input.priority = Some("high".into());
     let routine = store.ask_person(&input).unwrap();
     input.new_run = Some("urgent".into());
     input.idempotency_key = "urgent-release-date".into();
-    input.deadline_ms = Some(HOUR as u64);
+    input.priority = Some("critical".into());
     let urgent = store.ask_person(&input).unwrap();
-    assert_eq!((stored_deadline(&store, &routine.subject), stored_deadline(&store, &urgent.subject)), (ASKED + 2 * HOUR, ASKED + HOUR));
+    assert_eq!((stored_deadline(&store, &routine.subject), stored_deadline(&store, &urgent.subject)), (ASKED + HOUR, ASKED + HOUR));
     set_clock(&store, DeadlineClock::HoldRoutine, None, ASKED + 10 * MINUTE);
     // The first pass starts counting deadlines; only the urgent one arms a wake.
     assert_eq!(store.reconcile_person_asks_at(ASKED + 20 * MINUTE).unwrap(), PersonAskPass { changed: false, next_deadline: Some(ASKED + HOUR) });
@@ -102,6 +103,49 @@ fn hold_routine_holds_a_routine_ask_while_an_urgent_one_resolves_at_its_deadline
     smallclaims::store::set_thread_clock(Some(later));
     assert_eq!(store.reconcile_person_asks_at(later).unwrap(), PersonAskPass::default());
     assert_eq!(store.step_run(&routine.subject).unwrap().unwrap().status, "ready");
+}
+
+/// An ask records the priority its asker gave it, `normal` by default, and its attention row
+/// is urgent exactly when that priority is `critical`. A retry under the same key must name the
+/// same priority; an unknown priority, or one on an update, is refused.
+#[test]
+fn an_ask_records_its_priority_and_only_critical_makes_its_row_urgent() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (store, origin, mut input) = fixture();
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
+    input.step = None;
+    let mut rows = Vec::new();
+    for (name, priority) in [("unnamed", None), ("normal", Some("normal")), ("low", Some("low")), ("high", Some("high")), ("critical", Some("critical"))] {
+        input.new_run = Some(name.into());
+        input.idempotency_key = format!("priority-{name}");
+        input.priority = priority.map(Into::into);
+        let ask = store.ask_person(&input).unwrap();
+        let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let recorded = claim.body["fields"].get("priority").and_then(|priority| priority.as_str());
+        assert_eq!(recorded, priority.filter(|priority| *priority != "normal"), "{name}");
+        let row = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.subject == ask.subject).unwrap();
+        rows.push((row.priority.clone(), row.is_urgent()));
+    }
+    assert_eq!(rows, [
+        ("normal".to_owned(), false), ("normal".to_owned(), false), ("low".to_owned(), false),
+        ("high".to_owned(), false), ("critical".to_owned(), true),
+    ]);
+    // Naming `normal` is the same ask as naming none; another priority is another question.
+    input.new_run = Some("unnamed".into());
+    input.idempotency_key = "priority-unnamed".into();
+    input.priority = Some("normal".into());
+    store.ask_person(&input).unwrap();
+    input.priority = Some("critical".into());
+    assert_eq!(store.ask_person(&input).unwrap_err().code, "idempotency-conflict");
+    input.idempotency_key = "priority-unknown".into();
+    input.priority = Some("blocker".into());
+    assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-ask-priority");
+    input.new_run = None;
+    input.idempotency_key = "priority-update".into();
+    input.priority = Some("critical".into());
+    input.request = Some(serde_json::json!({"version": 1, "type": "update", "about": origin.run}));
+    assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-ask-priority");
 }
 
 /// A hold with `until` ends by itself, with no claim: the deadline moves by exactly the hold's
