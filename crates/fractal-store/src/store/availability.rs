@@ -31,9 +31,10 @@ pub enum Status { Available, Away }
 pub enum StatusSource { Override, Presence, Unreported }
 
 /// Presence the daemon derives from device states; ordered so the first wins a fold.
+/// `Unreported` when no device's state counts.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Presence { Present, Idle, Locked, Unknown }
+pub enum Presence { Present, Idle, Locked, Unreported }
 
 /// A device's raw state, as the device reports it. It applies no thresholds of its own.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -236,7 +237,7 @@ pub fn clock_holds(newest_first: &[ClaimRecord], since: u128) -> Vec<ClockHold> 
 /// it never speak for it.
 pub fn fold_presence(newest_first: &[ClaimRecord], now: u128) -> FoldedPresence {
     let mut seen = BTreeSet::new();
-    let mut folded = FoldedPresence { presence: Presence::Unknown, observed_at: None, reported: false };
+    let mut folded = FoldedPresence { presence: Presence::Unreported, observed_at: None, reported: false };
     for claim in newest_first {
         let Some(source) = claim.body["fields"]["source"].as_str() else { continue };
         if !seen.insert(source.to_owned()) {
