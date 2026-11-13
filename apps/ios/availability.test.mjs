@@ -19,10 +19,16 @@ test('a member serves availability when it lists the write scope, granted or not
   assert.equal(servesAvailability({ capabilities: [{ id: 'write.availability', state: 'ungranted', version: 0 }] }), true);
 });
 
-test('the session person reads their own entries', () => {
+test('the paired session reads the concrete person resolved by the availability API', () => {
+  const capabilities = { session_actor: 'person/ada/session/phone' };
   const note = { person: 'person/ada', author: 'person/ada', revision: 'r', text: 'ship it', time: at(12, 9) };
-  assert.deepEqual(ownAvailability([{ ...base, person: 'person/avery' }, base], [note], 'person/ada'), { person: base, note });
-  assert.deepEqual(ownAvailability([base], [], 'person/avery'), { person: null, note: null });
+  assert.notEqual(capabilities.session_actor, base.person);
+  const own = ownAvailability([base], [{ ...note, person: 'person/avery' }, note]);
+  assert.deepEqual(own, { person: base, note });
+  assert.equal(availabilityRows(own.person, own.note, now)[3].title, 'ship it');
+  assert.deepEqual(ownAvailability([base], []), { person: base, note: null });
+  assert.deepEqual(ownAvailability([], [note]), { person: null, note: null });
+  assert.deepEqual(ownAvailability([base, { ...base, person: 'person/avery' }], [note]), { person: null, note: null });
 });
 
 test('times read in local time near now', () => {

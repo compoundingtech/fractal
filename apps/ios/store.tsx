@@ -543,12 +543,14 @@ function useAppStore(proof?: FabricProfile) {
 
   // Availability is not on the collections socket: it is read each time a connection goes live (opening,
   // returning to the foreground, reconnecting) and on pull to refresh, and a write's answer replaces it.
+  const availabilityRead = useRef(0);
   const readAvailability = useCallback(async () => {
-    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) return;
+    const read = ++availabilityRead.current;
+    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) { setAvailability(NO_AVAILABILITY); return; }
     try {
       const [people, notes] = await Promise.all([client.availabilityList(), client.notesList()]);
-      if (capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes, caps.session_actor), issue: '' });
-    } catch (e) { if (capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
+      if (availabilityRead.current === read && capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes), issue: '' });
+    } catch (e) { if (availabilityRead.current === read && capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
 

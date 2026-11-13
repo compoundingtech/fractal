@@ -3219,6 +3219,9 @@ pub struct StepRunView {
     pub run: String,
     pub generation: String,
     pub step: String,
+    /// Detail-read execution evidence; absent on lean work reads and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<crate::step_execution::StepExecution>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -21,9 +21,9 @@ function pickEnd(title: string, open: string, done: (until: Date | null) => void
 // The person's availability and directive note, at the top of Now as `fractal now` prints them.
 // Tapping a row changes it: a value from an action sheet, then how long it holds.
 export function AvailabilitySection() {
-  const { availability, actor, caps, status, actions } = useStore();
+  const { availability, caps, status, actions } = useStore();
   const { person, note, issue } = availability;
-  if (!issue && person?.person !== actor) return null;
+  if (!issue && !person) return null;
   const granted = (scope: string) => caps?.capabilities.some(capability => capability.id === scope && capability.state === 'granted') ?? false;
   const choose = (axis: Axis) => {
     const { title, choices } = AXES[axis];
@@ -49,6 +49,6 @@ export function AvailabilitySection() {
     <GroupedHeader title="Availability" />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {caps && !granted('write.availability') ? <Note>{REPAIR_FOR_AVAILABILITY}</Note> : null}
-    {person?.person === actor ? availabilityRows(person, note, new Date()).map(row => <GroupedRow key={row.key} title={row.title} context={row.context} hint={HINTS[row.key]} onPress={() => edit(row)} />) : null}
+    {person ? availabilityRows(person, note, new Date()).map(row => <GroupedRow key={row.key} title={row.title} context={row.context} hint={HINTS[row.key]} onPress={() => edit(row)} />) : null}
   </View>;
 }

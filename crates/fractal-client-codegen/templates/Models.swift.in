@@ -662,10 +662,10 @@ public struct SloRow: Codable, Sendable { public let id, kind, about, target, cu
 public struct SloHistory: Codable, Sendable { public let id: String; public let sinceMS, untilMS, samples: UInt64; public let steps: [Double?]; enum CodingKeys: String, CodingKey { case id, samples, steps, sinceMS = "since_ms", untilMS = "until_ms" } }
 public struct UsagePeriod: Codable, Sendable { public let sinceMS, untilMS: UInt64; public let rows: [UsageRow]; public let limits: [UsageLimit]?; public let accounts: [UsageAccount]?; public let agentMessages: AgentMessageEstimate?; enum CodingKeys: String, CodingKey { case rows, limits, accounts, sinceMS = "since_ms", untilMS = "until_ms", agentMessages = "agent_messages" } }
 public struct AgentMessageEstimate: Codable, Sendable { public let calibration: String?; public let source, method: String; public let fallbackLowMicrousd, fallbackHighMicrousd: UInt64; public let days: [AgentMessageDay]; enum CodingKeys: String, CodingKey { case calibration, source, method, days, fallbackLowMicrousd = "fallback_low_microusd", fallbackHighMicrousd = "fallback_high_microusd" } }
-public struct AgentMessageDay: Codable, Sendable { public let dayStartMS, sinceMS, untilMS, messages, calibratedMessages, lowMicrousd, highMicrousd, usageCostMicrousd, unpricedTokens: UInt64; public let lowPercent, highPercent: Double?; enum CodingKeys: String, CodingKey { case messages, dayStartMS = "day_start_ms", sinceMS = "since_ms", untilMS = "until_ms", calibratedMessages = "calibrated_messages", lowMicrousd = "low_microusd", highMicrousd = "high_microusd", usageCostMicrousd = "usage_cost_microusd", unpricedTokens = "unpriced_tokens", lowPercent = "low_percent", highPercent = "high_percent" } }
+public struct AgentMessageDay: Codable, Sendable { public let dayStartMS, sinceMS, untilMS, messages, calibratedMessages, lowMicrousd, highMicrousd, usageCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; public let lowPercent, highPercent: Double?; enum CodingKeys: String, CodingKey { case messages, dayStartMS = "day_start_ms", sinceMS = "since_ms", untilMS = "until_ms", calibratedMessages = "calibrated_messages", lowMicrousd = "low_microusd", highMicrousd = "high_microusd", usageCostMicrousd = "usage_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses", lowPercent = "low_percent", highPercent = "high_percent" } }
 public struct UsageAccount: Codable, Sendable { public let name, provider: String; public let account, driver, plan: String?; public let kind: UsageAccountKind; public let credits: UsageCredits? }
 public enum UsageAccountKind: String, Codable, Sendable { case subscription; case apiKey = "api-key" }
-public struct UsageCredits: Codable, Sendable { public let budgetMicrousd, usedMicrousd, unpricedTokens, periodStartMS: UInt64; enum CodingKeys: String, CodingKey { case budgetMicrousd = "budget_microusd", usedMicrousd = "used_microusd", unpricedTokens = "unpriced_tokens", periodStartMS = "period_start_ms" } }
+public struct UsageCredits: Codable, Sendable { public let budgetMicrousd, usedMicrousd, unpricedTokens, periodStartMS: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case budgetMicrousd = "budget_microusd", usedMicrousd = "used_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses", periodStartMS = "period_start_ms" } }
 public struct UsageLimit: Codable, Sendable { public let account, driver, measuredBy, host: String; public let identified: Bool?; public let accountRef, plan: String?; public let fiveHourPercent, weeklyPercent: Double?; public let fiveHourResetsAtUnixMS, weeklyResetsAtUnixMS: UInt64?; public let measuredAtUnixMS: UInt64; public let seats: [String]; enum CodingKeys: String, CodingKey { case account, driver, host, plan, seats, identified, accountRef = "account_ref", measuredBy = "measured_by", fiveHourPercent = "five_hour_percent", weeklyPercent = "weekly_percent", fiveHourResetsAtUnixMS = "five_hour_resets_at_unix_ms", weeklyResetsAtUnixMS = "weekly_resets_at_unix_ms", measuredAtUnixMS = "measured_at_unix_ms" } }
 public struct UsagePricingRates: Codable, Sendable {
     public let input, output, cacheRead, cacheWrite5m, cacheWrite1h: Double
@@ -676,9 +676,10 @@ public struct UsagePricing: Codable, Sendable {
     public let costSource: String
     public let ratesUsdPerMillionTokens: UsagePricingRates?
     public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64
-    enum CodingKeys: String, CodingKey { case priceTableID = "price_table_id", priceTableVersion = "price_table_version", costSource = "cost_source", ratesUsdPerMillionTokens = "rates_usd_per_million_tokens", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens" }
+    public let unpricedResponses: UInt64?
+    enum CodingKeys: String, CodingKey { case priceTableID = "price_table_id", priceTableVersion = "price_table_version", costSource = "cost_source", ratesUsdPerMillionTokens = "rates_usd_per_million_tokens", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" }
 }
-public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens" } }
+public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" } }
 /// Declared admission — declared, not enforced.
 public struct DeclaredAttentionBudget: Codable, Sendable { public let person: String; public let asks: UInt64 }
 public struct DeclaredBudgets: Codable, Sendable { public let cpuSeconds, tokenBudget: UInt64?; public let memoryMax, diskMax: String?; public let attention: [DeclaredAttentionBudget]?; enum CodingKeys: String, CodingKey { case attention, cpuSeconds = "cpu_seconds", memoryMax = "memory_max", diskMax = "disk_max", tokenBudget = "token_budget" } }
@@ -768,8 +769,30 @@ public struct MissionResource: Codable, Sendable { public let id, kind, revision
 public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let startedAt, completedAt: UInt64?; public let generationID, retryOf, supersedes, supersededBy, supersessionFault, revision, lastProgress, after, deadline: String?; public let retriedBy: [String]?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker, eta: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", generationID = "generation_id", retryOf = "retry_of", retriedBy = "retried_by", supersedes, supersededBy = "superseded_by", supersessionFault = "supersession_fault", revision, requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, eta, after, deadline, steps } }
 public struct MissionRunOutcome: Codable, Sendable { public let status, reason, actor, at: String; public let previousStatus: String?; enum CodingKeys: String, CodingKey { case status, previousStatus = "previous_status", reason, actor, at } }
 /// Assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
-public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
-    public let program: MissionStepProgram?; public let attempts: [MissionStepAttempt]?; public let waits: [MissionStepWait]?; public let transitions: [MissionStepTransition]?; public let historyComplete: Bool?; public let eta: MissionStepEta? }
+public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, executions, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
+    public let program: MissionStepProgram?; public let attempts: [MissionStepAttempt]?; public let executions: [StepExecution]?; public let waits: [MissionStepWait]?; public let transitions: [MissionStepTransition]?; public let historyComplete: Bool?; public let eta: MissionStepEta? }
+public struct StepExecution: Codable, Sendable {
+    public let id, stepSubject, agent: String
+    public let attempt: UInt
+    public let incarnationID, declaredModel: String?
+    public let observedModels: [String]
+    public let fallback: Bool?
+    public let startedAtUnixMS: UInt64
+    public let endedAtUnixMS, durationMS: UInt64?
+    public let status, traceID, exitEvidence: String?
+    public let usage: StepExecutionUsage?
+    enum CodingKeys: String, CodingKey {
+        case id, stepSubject = "step_subject", attempt, agent, incarnationID = "incarnation_id", declaredModel = "declared_model", observedModels = "observed_models", fallback, startedAtUnixMS = "started_at_unix_ms", endedAtUnixMS = "ended_at_unix_ms", durationMS = "duration_ms", status, traceID = "trace_id", exitEvidence = "exit_evidence", usage
+    }
+}
+public struct StepExecutionUsage: Codable, Sendable {
+    public let inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, totalTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64
+    public let unpricedResponses: UInt64?
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens"
+        case unpricedResponses = "unpriced_responses"
+    }
+}
 /// A program step's current attempt journal: each key's latest entry, its innermost open key and open fault.
 public struct MissionStepProgram: Codable, Sendable { public let openKey, lastEntryAt: String?; public let entries: [MissionStepProgramEntry]; public let truncated: Bool; public let stalledAfterMS: UInt64; public let fault: MissionStepProgramFault?; enum CodingKeys: String, CodingKey { case openKey = "open_key", entries, truncated, lastEntryAt = "last_entry_at", stalledAfterMS = "stalled_after_ms", fault } }
 public struct MissionStepProgramEntry: Codable, Sendable { public let key, status: String; public let startedAt, endedAt, error, child: String?; public let ms: UInt64?; enum CodingKeys: String, CodingKey { case key, status, startedAt = "started_at", endedAt = "ended_at", ms, error, child } }
@@ -1308,7 +1331,42 @@ public struct TimelineToolResultBody: Codable, Sendable { public let blocks: [Ti
 public struct TimelineStatusBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let status: TimelineStatus; public let detail: String? }
 public struct TimelineErrorBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let code: String; public let message: String; public let retryable: Bool; public let details: [String: JSONValue] }
 public struct TimelineAttribution: Codable, Sendable { public let agentID: String; public let missionRunID: String?; public let generationID: String?; public let stepID: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", missionRunID = "mission_run_id", generationID = "generation_id", stepID = "step_id" } }
-public struct TimelineUsageBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let semantics: TimelineUsageSemantics; public let driver: String; public let model: String?; public let inputTokens: UInt64?; public let outputTokens: UInt64?; public let cachedTokens: UInt64?; public let totalTokens: UInt64?; public let contextUsedTokens: UInt64?; public let contextWindowTokens: UInt64?; public let contextUsedPercent: Double?; public let compactions: UInt64?; public let lastCompactionMs: UInt64?; public let lastCompactionTrigger: String?; public let cost: Double?; public let currency: String?; public let attribution: TimelineAttribution; enum CodingKeys: String, CodingKey { case blocks; case semantics, driver, model, inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent", compactions, lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", cost, currency, attribution } }
+public struct TimelineUsageBody: Codable, Sendable {
+    public let blocks: [TimelineBlock]?
+    public let semantics: TimelineUsageSemantics
+    public let driver: String
+    public let model, provider, account, responseID, api, stopReason: String?
+    public let startedAtUnixMs, completedAtUnixMs: UInt64?
+    public let durationMs, ttftMs: Double?
+    public let inputTokens, outputTokens, cachedTokens, cacheWriteTokens, cacheWrite1hTokens, reasoningTokens, totalTokens: UInt64?
+    public let turnID: String?
+    public let contextUsedTokens, contextWindowTokens: UInt64?
+    public let contextUsedPercent: Double?
+    public let compactions, lastCompactionMs: UInt64?
+    public let lastCompactionTrigger: String?
+    public let cost: Double?
+    public let costComponents: TimelineResponseCostComponents?
+    public let currency: String?
+    public let providerQuota: TimelineProviderQuota?
+    public let attribution: TimelineAttribution
+    enum CodingKeys: String, CodingKey {
+        case blocks, semantics, driver, model, provider, account, api, cost, currency, compactions, attribution
+        case responseID = "response_id", stopReason = "stop_reason", startedAtUnixMs = "started_at_unix_ms", completedAtUnixMs = "completed_at_unix_ms"
+        case durationMs = "duration_ms", ttftMs = "ttft_ms", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens"
+        case cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", reasoningTokens = "reasoning_tokens", totalTokens = "total_tokens", turnID = "turn_id"
+        case contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent"
+        case lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", costComponents = "cost_components", providerQuota = "provider_quota"
+    }
+}
+public struct TimelineResponseCostComponents: Codable, Sendable {
+    public let input, output, cacheRead, cacheWrite: Double?
+    enum CodingKeys: String, CodingKey { case input, output, cacheRead = "cache_read", cacheWrite = "cache_write" }
+}
+public enum TimelineProviderQuotaUnit: String, Codable, Sendable { case premiumRequests = "premium_requests" }
+public struct TimelineProviderQuota: Codable, Sendable {
+    public let unit: TimelineProviderQuotaUnit
+    public let quantity: Double
+}
 public struct TimelineRedactionBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let withheldBytes: UInt64; public let withheldItems: UInt64?; enum CodingKeys: String, CodingKey { case blocks; case reason, withheldBytes = "withheld_bytes", withheldItems = "withheld_items" } }
 public struct TimelineTruncationBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let omittedFromSequence: UInt64; public let omittedToSequence: UInt64; public let continuationCursor: String?; enum CodingKeys: String, CodingKey { case blocks; case reason, omittedFromSequence = "omitted_from_sequence", omittedToSequence = "omitted_to_sequence", continuationCursor = "continuation_cursor" } }
 public enum TimelineBody: Sendable { case message(TimelineMessageBody), content(TimelineContentBody), toolCall(TimelineToolCallBody), toolResult(TimelineToolResultBody), status(TimelineStatusBody), error(TimelineErrorBody), usage(TimelineUsageBody), redaction(TimelineRedactionBody), truncation(TimelineTruncationBody) }

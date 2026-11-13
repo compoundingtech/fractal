@@ -213,3 +213,17 @@ test('Now draws its background, text and native chrome from the live system appe
   }
   assert.equal(calls(namedFunction(appSource, 'Main'), 'useScheme').length, 1, 'the navigation theme and tab tint follow the appearance');
 });
+
+test('paired availability renders the server person and clears unsupported reconnects', () => {
+  const section = namedFunction(source('./screens/Availability.tsx'), 'AvailabilitySection');
+  assert.equal(nodes(section, node => ts.isIdentifier(node) && node.text === 'actor').length, 0, 'a device session actor is not a concrete person ID');
+  const store = source('./store.tsx');
+  const read = nodes(store, node => ts.isVariableDeclaration(node) && node.name.getText() === 'readAvailability')[0];
+  assert.ok(read);
+  const guard = nodes(read, ts.isIfStatement).find(node => node.expression.getText().includes('!servesAvailability(caps)'));
+  assert.ok(guard);
+  assert.equal(calls(guard.thenStatement, 'setAvailability')[0].arguments[0].getText(), 'NO_AVAILABILITY', 'a daemon without availability must not retain the previous daemon person');
+  assert.equal(calls(read, 'ownAvailability')[0].arguments.length, 2, 'the server resolves the paired person; do not filter by session actor');
+  const publish = nodes(read, ts.isIfStatement).filter(node => calls(node.thenStatement, 'setAvailability').length);
+  assert.ok(publish.filter(node => node !== guard).every(node => node.expression.getText().includes('availabilityRead.current === read')), 'late reads cannot restore availability after reconnect invalidated it');
+});

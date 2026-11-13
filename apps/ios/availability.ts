@@ -11,9 +11,10 @@ export function servesAvailability(caps: Capabilities | null): boolean {
   return caps?.capabilities.some(capability => capability.id === 'write.availability') ?? false;
 }
 
-/** The session person's own entries: a person's read answers only them, but the lists are lists. */
-export function ownAvailability(people: readonly PersonAvailability[], notes: readonly DirectiveNote[], actor: string): { person: PersonAvailability | null; note: DirectiveNote | null } {
-  return { person: people.find(entry => entry.person === actor) ?? null, note: notes.find(entry => entry.person === actor) ?? null };
+/** With no person query, the availability API resolves the pairing to its one concrete person. */
+export function ownAvailability(people: readonly PersonAvailability[], notes: readonly DirectiveNote[]): { person: PersonAvailability | null; note: DirectiveNote | null } {
+  const person = people.length === 1 ? people[0] : null;
+  return { person, note: person ? notes.find(entry => entry.person === person.person) ?? null : null };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
