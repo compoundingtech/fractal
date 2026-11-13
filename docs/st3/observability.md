@@ -1402,11 +1402,15 @@ attributes, never metric labels; `span.label` is a concise attempt label.
 
 The daemon persists the W3C `{traceparent,tracestate?}` object in durable,
 system-only `mission.run.trace` and append-only `program.attempt.trace` claims.
-Every program journal/result claim carries its launch's `trace` object.
+Every new program journal/result claim references its exact launch's
+`program.attempt.trace` claim ID in the existing `evidence[]` envelope field;
+the `program.step` fields keep their old shape, with no inline trace object.
 These records are independent of collector sampling and backend retention.
 With export disabled, fresh valid IDs still exist, with the sampled flag clear;
 this is correlation evidence, not a claim that an exported span exists.
-Historical journal entries without `trace` remain valid.
+Historical journal entries without trace evidence remain valid. Older readers
+admit the unchanged journal shape and retain the unknown standalone trace claim
+kinds, so this correlation change does not require a reader-first deployment.
 New root carriers use `tracestate=st=c`, retaining the collector-owned sampling
 marker used by Fractal's other propagation surfaces.
 

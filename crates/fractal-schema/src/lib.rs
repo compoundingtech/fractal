@@ -3553,7 +3553,6 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("error", any()),
             ("ms", integer()),
             ("child", string()),
-            ("trace", any()),
         ],
         "work.person-asked" => &[
             ("run", reference()),

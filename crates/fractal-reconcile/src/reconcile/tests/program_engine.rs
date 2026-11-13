@@ -239,7 +239,12 @@ fn trace_context_crosses_host_worker_and_exec_and_is_retained_with_result() {
         let claims = fixture.store.claims_for(step, Some(JOURNAL_KIND)).unwrap();
         let result = claims.iter().find(|claim| claim.body["fields"]["key"] == RESULT_KEY).unwrap();
         let fields = &result.body["fields"];
-        let trace: crate::otel::AttemptTraceContext = serde_json::from_value(fields["trace"].clone()).unwrap();
+        assert!(fields.get("trace").is_none(), "journal fields must stay readable by older peers");
+        let evidence = result.body["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 1);
+        let traces = fixture.store.claims_for(step, Some("program.attempt.trace")).unwrap();
+        let trace = traces.iter().find(|trace| Some(trace.id.as_str()) == evidence[0].as_str()).unwrap();
+        let trace: crate::otel::AttemptTraceContext = serde_json::from_value(trace.body["fields"]["trace"].clone()).unwrap();
         assert_eq!(fields["value"]["worker"], trace.traceparent);
         assert_eq!(fields["value"]["child"], trace.traceparent);
         assert_eq!(trace.traceparent.len(), 55);
