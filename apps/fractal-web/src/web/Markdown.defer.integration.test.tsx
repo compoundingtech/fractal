@@ -60,7 +60,7 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
     expect(grammar.requested).toBe(true)
     const pre = container.querySelector('pre')!
     const code = pre.querySelector('code')!
-    const wrap = container.querySelector<HTMLButtonElement>('[aria-label="Wrap code"]')!
+    const wrap = container.querySelector<HTMLButtonElement>('[aria-label="Code actions"]')!
     expect(pre.getAttribute('role')).toBe('group')
     expect(pre.getAttribute('aria-label')).toBe('Code, typescript')
     expect(code.textContent).toBe('const answer = 42\n')
@@ -68,13 +68,13 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
     const unknown = container.querySelectorAll('code')[1]!
     expect(unknown.textContent).toBe('literal <script>\n')
     expect(unknown.querySelector('[data-syntax-token]')).toBeNull()
-    await act(async () => { wrap.focus(); wrap.click() })
+    await act(async () => { wrap.focus() })
     await act(async () => { grammar.release(); await grammar.finished })
     expect(container.querySelector('pre')).toBe(pre)
     expect(pre.querySelector('code')).toBe(code)
     expect(code.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')
     expect(code.textContent).toBe('const answer = 42\n')
-    expect(wrap.getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector('[aria-label="Code actions"]')).toBe(wrap)
     expect(document.activeElement).toBe(wrap)
     expect(container.querySelectorAll('code')[1]).toBe(unknown)
     expect(unknown.textContent).toBe('literal <script>\n')

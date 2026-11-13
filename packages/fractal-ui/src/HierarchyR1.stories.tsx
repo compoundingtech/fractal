@@ -229,7 +229,8 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(markdown.getBoundingClientRect().bottom).toBeCloseTo(blocks.at(-1)!.getBoundingClientRect().bottom, 1)
   const nested = markdown.querySelector<HTMLElement>('[data-list-depth="1"]')!
   await expect(getComputedStyle(blocks[1]!).paddingInlineStart).toBe('22px')
-  await expect(getComputedStyle(nested).borderInlineStartWidth).toBe('1px')
+  // Nested lists indent without a guide line (R8).
+  await expect(getComputedStyle(nested).borderInlineStartWidth).toBe('0px')
   await expect(getComputedStyle(nested).listStyleType).toBe('circle')
   const quote = markdown.querySelector('blockquote')!
   await expect(getComputedStyle(quote).borderInlineStartWidth).toBe('2px')

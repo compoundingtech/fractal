@@ -353,6 +353,8 @@ KIT_PATTERNS = (
     "docs/st3/client-v0/fixtures/github-plugin-stale.json",
     "docs/st3/client-v0/fixtures/github-plugin-unavailable.json",
     "fixtures/clients/transcripts/wakes.json",
+    # The kit Markdown suite checks every client-shared Markdown case and the HTML policy in it.
+    "fixtures/clients/markdown-cases.json",
     "apps/fractal-web/src/web/index.html",
     "clients/typescript/fractal-scenarios/**",
     "clients/typescript/fractal-client/**",
