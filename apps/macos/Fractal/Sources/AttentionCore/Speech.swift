@@ -72,6 +72,8 @@ public enum SpeechStatus: Sendable, Equatable {
   public private(set) var call = CallState()
   public weak var deliveries: (any SpeechDeliverySink)?
   private var gate: SpeechGate
+  /// Queued items the person asked to hear from the panel: held, they get no banner.
+  private var readAloud: Set<String> = []
   private var logged: [String: String] = [:]
   private let output: any SpeechOutput
   private let store: (any SpeechLedgerStore)?
@@ -104,6 +106,7 @@ public enum SpeechStatus: Sendable, Equatable {
     status = status.filter { ids.contains($0.key) }
     logged = logged.filter { key, _ in open.contains { SpeechGate.key($0) == key } }
     queue.removeAll { !ids.contains($0.id) }
+    readAloud.formIntersection(ids)
     if let current, !ids.contains(current.id) { skip(current) }
     deliveries?.retain(ids)
     var pruned = mutes
@@ -135,6 +138,7 @@ public enum SpeechStatus: Sendable, Equatable {
     if current?.id == id { return stopCurrent() }
     guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
     let record = queue.remove(at: index)
+    readAloud.remove(id)
     status[id] = .finished(.skipped)
     note(record, "skipped by the person")
   }
@@ -198,8 +202,10 @@ public enum SpeechStatus: Sendable, Equatable {
       store?.save(gate)
       deliveries?.delivered(record, .held(held))
     case .speak:
-      gate.delivered(record, spoke: true, at: context.now)
+      // Delivered now; the requester's rate window starts only once it is actually spoken.
+      gate.delivered(record, spoke: false, at: context.now)
       store?.save(gate)
+      if readAloud { self.readAloud.insert(record.id) }
       queue.append(record)
       status[record.id] = .queued
       note(record, readAloud ? "read aloud, queued" : "urgent, queued")
@@ -215,11 +221,12 @@ public enum SpeechStatus: Sendable, Equatable {
       let record = queue.removeFirst()
       let now = clock()
       if let held = SpeechGate.held(record, SpeechContext(availability: nil, macPresence: nil, call: call, mutes: mutes, now: now)) {
-        status[record.id] = .held(held)
-        note(record, "held (\(held))")
-        deliveries?.delivered(record, .held(held))
+        hold(record, held)
         continue
       }
+      readAloud.remove(record.id)
+      gate.delivered(record, spoke: true, at: now)
+      store?.save(gate)
       current = record
       status[record.id] = .speaking
       note(record, "speaking")
@@ -248,16 +255,21 @@ public enum SpeechStatus: Sendable, Equatable {
   /// Drop every queued item the mutes or the call now hold, and stop the current one if held.
   private func holdQueued(now: Date) {
     let context = SpeechContext(availability: nil, macPresence: nil, call: call, mutes: mutes, now: now)
-    queue.removeAll { record in
-      guard let held = SpeechGate.held(record, context) else { return false }
-      status[record.id] = .held(held)
-      note(record, "held (\(held))")
-      return true
-    }
+    let held = queue.compactMap { record in SpeechGate.held(record, context).map { (record, $0) } }
+    queue.removeAll { record in held.contains { $0.0.id == record.id } }
+    for (record, reason) in held { hold(record, reason) }
     if let current, let held = SpeechGate.held(current, context) {
       note(current, "stopped (\(held))")
       skip(current)
     }
+  }
+
+  /// A queued item the mutes or the call hold: a banner instead, unless the person asked for
+  /// it from the panel.
+  private func hold(_ record: AttentionRecord, _ held: SpeechHeld) {
+    status[record.id] = .held(held)
+    note(record, "held (\(held))")
+    if readAloud.remove(record.id) == nil { deliveries?.delivered(record, .held(held)) }
   }
 
   private func updateMutes(_ change: (inout SpeechMutes) -> Void) {
