@@ -318,7 +318,9 @@ fn daemon_failure_retains_its_worker_fence_until_exact_exit_acknowledgement() {
     engine.fail(step, 1, "the daemon refused a program request").unwrap();
     assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
     assert!(!engine.lock().running.contains_key(step));
-    let cancel: Value = serde_json::from_slice(&receiver.try_recv().unwrap()).unwrap();
+    let cancel = receiver.try_iter().map(|line| serde_json::from_slice::<Value>(&line).unwrap())
+        .find(|message| message["t"] == "cancel")
+        .expect("daemon failure sends cancellation even when host pings interleave");
     assert_eq!(cancel["t"], "cancel");
     assert_eq!(cancel["step"], step.as_str());
     assert_eq!(cancel["attempt"], 1);
