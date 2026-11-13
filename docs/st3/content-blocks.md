@@ -21,7 +21,7 @@ sender intent -> strict admission -> immutable canonical blocks in carrier claim
                                                  |
 client renderer <- negotiated ContentBlockView <- derived observations
        |
-native answer + displayed observation -> durable approval record
+native answer + rendered digest + client-reported state -> durable approval record
 ```
 
 `blocks[]` is a flat, ordered array. A block has a carrier-local stable `id`, `kind`, per-kind integer `version`, required plain-text `fallback`, and typed `data`. An ID is not an array or subject index. Preserve IDs within an unchanged request; a changed request receives a new authored-content digest. Subjects remain relational metadata for navigation; a block target is self-contained. Conflicting pins for the same reviewed target in subjects and blocks are refused.
@@ -66,7 +66,7 @@ type ContentBlockStored = Block<"text_change", TextChange> | Block<"image", Stor
 // Its authorized read view additionally includes blob: "blob/<sha256>".
 
 type Check = {
-  observation_id: string; checked_at: string;
+  checked_at: string;
   base_revision: string; observed_revision?: string; observed_file_sha256?: string
 } & (
   { state: "applies"; reason: "exact_base_and_current_match" } |
@@ -120,7 +120,7 @@ resolve authorized pin/current target
 
 1. Resolve the pinned commit and authorized current repository/worktree target using existing document/repository access. Current means the target's active worktree bytes, including uncommitted edits when a worktree exists; otherwise the authorized current ref's blob. Record the observed commit when available and file-byte digest. Never claim current-file verification from the pinned blob alone.
 2. Read bounded text and compare each before span at its exact offset. A demonstrably absent path in an accessible resolved tree is stale; an inaccessible or unresolved tree is unverifiable. If multiple failures occur, inaccessible required evidence wins, then path_missing, base_mismatch, file_changed. Never leak inaccessible target details in a reason.
-3. Require the current target file bytes to equal the pinned file bytes. A different target file is stale even if the individual before spans still match. Commits touching only other files do not stale the block. Record the observation identity, time, base and available current evidence. `applies` means exact textual applicability at that observation, not semantic safety or that anything has been applied.
+3. Require the current target file bytes to equal the pinned file bytes. A different target file is stale even if the individual before spans still match. Commits touching only other files do not stale the block. Record the check time, base and available current evidence. `applies` means exact textual applicability at that check, not semantic safety or that anything has been applied.
 4. Recompute on target-file/current-ref changes using repository observation invalidation and publish an updated attention view. Checks run outside the pure `client_view` transformation and outside per-card render loops. Derived observations are keyed by authored-content digest, target identity and observed file identity; unavailable reads have explicit states, not synthetic success. No polling loop or arbitrary network fetch is introduced by list rendering.
 
 Each v1 text-change view supplies a check; a legacy/temporarily missing check is displayed as “Not checked”, never applies. Stale and unverifiable remain answerable on a capable renderer, with an explicit warning visible both on the collapsed header and at acceptance. An offline attention card remains subject to the existing no-action rule.
@@ -128,19 +128,19 @@ Each v1 text-change view supplies a check; a legacy/temporarily missing check is
 ## Approval record and answer fencing
 
 ```text
-view(request revision + content digest + check observations)
+view(authored-content digest + checks)
   -> render exact hunks and provenance
-  -> native accept echoes displayed binding
-  -> validate binding and append approval to existing person answer
+  -> native accept carries rendered digest + client-reported shown states
+  -> compare digest, check current targets and append approval to existing answer
 ```
 
 An accept is the native decision answer whose declared outcome is `accept`; other answers and update read actions do not approve hunks. Accept approves all `text_change` blocks on that request, not an implicit selected subset. It authorizes the agent to proceed and records the exact proposal. It does not edit a file, commit, verify a later commit, or promise that approved hunks eventually land.
 
-The negotiated answer input adds `content_review: {request_revision, content_digest, observations: [{block_id, observation_id}]}`. Digest the canonical stored `blocks` array with SHA-256 over RFC 8785 canonical JSON; exclude checks and other ephemeral view fields. The request revision is the existing immutable source claim/revision identity, not the top-level request schema version. The daemon validates source episode/person authority, request revision, digest, full coverage of text-change block IDs, and that each observation belongs to that block/digest and was issued to an authorized read. Client-supplied check states are never trusted.
+The negotiated answer input adds `content_review: {content_digest, client_reported_checks: [{block_id, state}]}`. The digest identifies the canonical stored `blocks` array rendered by the client: SHA-256 over RFC 8785 canonical JSON, excluding checks and other ephemeral view fields. Each text-change block has one client-reported state: `applies`, `stale`, `unverifiable`, or `not_checked`. The daemon validates existing source episode/person authority and refuses the answer with stale-fence behavior if the supplied digest does not match the current request. A changed request requires a fresh view. Client-reported states are unverified statements about what the client showed, not daemon evidence of applicability or proof of inspection.
 
-A successful answer atomically appends an approval alongside existing answer history with: request revision, content digest, each block ID, exact canonical target and hunks, and the full check observation displayed for that block. Retain observation records needed to validate outstanding views for the request's lifetime; copy the accepted observations into durable answer history. Do not substitute a newer check at answer time. A later file observation alone does not invalidate unchanged authored intent: record the shown state, including its timestamp, even if a newer state exists. A changed request revision/digest fails with the existing stale-fence behavior and requires a fresh view. Ordinary answer idempotency prevents duplicate records.
+A successful accept atomically appends an approval alongside existing answer history with: content digest, every text-change block ID, exact canonical target and hunks, the daemon's own check result at answer time (state, observed revision when available, and time), and the state the client reports it showed, explicitly labelled `client_reported`. The daemon checks current targets using the same semantics as the read check; stale and unverifiable remain answerable with warning. Preserve both states if the file changes between display and acceptance; do not relabel the client-reported state as verified. There is no observation-reference protocol, validation of which snapshot the client displayed, or retained observation store. Ordinary answer idempotency prevents duplicate records.
 
-An accept without a valid rich-review binding is refused for a request containing text changes. A client without the exact kind/version renderer cannot accept that request through UI, CLI, delegated or alternate action paths; it may read fallback, decline or request changes under existing rules. Renderer support is a client conformance obligation, not a new grant of authority or proof the person read every line. Historical answers without this binding remain ordinary historical answers; never retroactively claim they approved exact hunks.
+An accept without the rendered-content digest is refused for a request containing text changes. A client without the exact kind/version renderer cannot accept that request through UI, CLI, delegated or alternate action paths; it may read fallback, decline or request changes under existing rules. Renderer support is a client conformance obligation, not a new grant of authority or proof the person read every line. Historical answers without this binding remain ordinary historical answers. Never fabricate rich-review bindings for old answers, delegated answers or timeouts; a delegated acceptance must supply the same explicit digest and labelled client report under its existing authorization.
 
 ## Capabilities, images and compatibility
 
@@ -148,7 +148,7 @@ An accept without a valid rich-review binding is refused for a request containin
 | --- | --- |
 | Admission | `content-blocks` v1, carrier `person-ask-blocks` or `person-update-blocks` v1, and each emitted `content-block-text-change` / `content-block-image` v1 |
 | Read shape | `content-blocks` v1 for the shared unknown-envelope decoder; carrier support selects block-aware projection |
-| Rich accept | `person-answer-content-review` v1 plus local `text_change/1` renderer support and a valid displayed observation binding |
+| Rich accept | `person-answer-content-review` v1 plus local `text_change/1` renderer support and the rendered authored-content digest |
 
 These repository-local names follow the serving daemon's existing capability version/state contract: only `granted` support permits a new field. Keep `StructuredRequest.version = 1`; unknown input fields are not safely ignored by old strict decoders. Unknown kinds/versions are refused on writes. Breaking kind semantics require a newly negotiated per-kind version. Do not ship the prototype-only `previews[]` name or `provenance`/`resolved` wire sketch.
 
@@ -171,7 +171,7 @@ All clients preserve block order directly after the question (after the update s
 | TUI | Collapsed one-row summary by default; `d` opens/closes. Compact word diff uses a bar gutter, folded unchanged context, underlined green insertions and struck-through red deletions. `n`/`p` navigate hunks; `+`/`-` adjust context. Hide line numbers for prose. For code at card widths ≥60 columns, use delta-style removed/added rows with word emphasis and line numbers; narrower cards use compact wrapping. Add-only hunks remain single-column. Layout uses card width, not terminal width. Opening a preview on a narrow card gives it the full available terminal content width, hiding the list as needed; restore the prior layout on close. Headers wrap or drop secondary location detail rather than cut off check state. `NO_COLOR`/monochrome uses `[-removed-]{+added+}`, not colour-only marks. |
 | Web | Eager lightweight disclosure header; lazy-loaded `@pierre/diffs` body only on expansion. Unified word diff, wrapping and folded context by default; optional split view. Use Pierre as is: a pure insertion within a paragraph may show the full −/+ paragraph pair; do not create an insertion-only custom renderer. Word/tokenization limits cover the full supported hunk text. Share `@pierre/highlights` 0.4.0, upgraded in its own preceding change. Keep Pierre outside the eager attention/detail graph. The production CSP proof must pass; Storybook's development CSP is not proof. |
 | iOS | Native exact before/after renderer with word emphasis for prose, distinct removed/added code rows, folding/disclosure, check warning and accessible labels. Native image rendering reuses existing blob authorization. No fallback-only acceptance and no embedded web renderer prerequisite. |
-| CLI | Human read-back prints target/pin, check/time and every exact before/after hunk with removal/addition markers; never summary alone. Machine-readable output preserves blocks/checks and approved records. `NO_COLOR` has unambiguous text markers. Native accept passes the displayed binding, not a fresh hidden check or a bare answer ID. |
+| CLI | Human read-back prints target/pin, check/time and every exact before/after hunk with removal/addition markers; never summary alone. Machine-readable output preserves blocks/checks and approved records. `NO_COLOR` has unambiguous text markers. Native accept passes the digest of the content rendered and labels its reported shown check states as client-reported; the daemon separately records its answer-time checks. |
 
 ### Diff colour
 
@@ -189,4 +189,4 @@ Messages, notices and transcript adapters may reuse these definitions through ex
 
 ## Conformance
 
-Contract fixtures and focused tests cover strict input/forged metadata, unknown read pairs versus malformed known data, UTF-8 boundaries, repeated text and empty-before insertions, overlap/size refusal, exact and stale/unverifiable checks, uncommitted file changes, unrelated commits, unavailable/missing paths, image ownership/expiry/carrier access, legacy normalization without duplicates, and N/N-1 retention/replay. Answer tests prove exact hunks and displayed observations are retained, changed-content fences fail, stale stays answerable with warning, fallback-only accept is refused, and no apply/post-commit action occurs. Each client covers prose insertion/replacement/deletion, code, narrow layout, unknown fallback, provenance and no-colour/accessibility. Web additionally requires lazy graph, palette and production CSP proofs.
+Contract fixtures and focused tests cover strict input/forged metadata, unknown read pairs versus malformed known data, UTF-8 boundaries, repeated text and empty-before insertions, overlap/size refusal, exact and stale/unverifiable checks, uncommitted file changes, unrelated commits, unavailable/missing paths, image ownership/expiry/carrier access, legacy normalization without duplicates, and N/N-1 retention/replay. Answer tests prove exact hunks, the daemon's answer-time checks and separately labelled client-reported shown states are retained; changed-content digests fail; stale stays answerable with warning; fallback-only accept is refused; no rich bindings are fabricated for old/delegated answers or timeouts; and no apply/post-commit action occurs. Each client covers prose insertion/replacement/deletion, code, narrow layout, unknown fallback, provenance and no-colour/accessibility. Web additionally requires lazy graph, palette and production CSP proofs.
