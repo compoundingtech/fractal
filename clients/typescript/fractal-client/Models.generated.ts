@@ -740,8 +740,6 @@ export type AssistantAttentionItem = {
   mission_run_id: string | null;
   person_id: PersonId;
   revision: Revision;
-  seen_at?: (Timestamp | null);
-  snoozed_until?: (Timestamp | null);
   waiting_since: Timestamp;
 };
 

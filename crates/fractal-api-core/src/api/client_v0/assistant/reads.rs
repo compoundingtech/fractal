@@ -319,9 +319,6 @@ pub fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
         "revision": episode,
         "episode": episode,
         "waiting_since": timestamp(&item["requested_at"]),
-        // The person's own controls, read-only here: no assistant scope can write them.
-        "seen_at": timestamp(&item["seen_at"]),
-        "snoozed_until": timestamp(&item["snoozed_until"]),
     });
     if rich {
         row["title"] = item["title"].clone();

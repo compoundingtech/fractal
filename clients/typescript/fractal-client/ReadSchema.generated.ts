@@ -1133,10 +1133,6 @@ export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
   "mission_run_id": Schema.OptionFromNullOr(Schema.String),
   "person_id": PersonId,
   "revision": Revision,
-  /** When the person first saw the row, or null. Read-only: assistants cannot mark rows seen. */
-  "seen_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the person first saw the row, or null. Read-only: assistants cannot mark rows seen." }),
-  /** Until when the person put the row off, or null. Read-only: assistants cannot snooze rows. */
-  "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the person put the row off, or null. Read-only: assistants cannot snooze rows." }),
   "waiting_since": Timestamp
 }).annotate({ identifier: "AssistantAttentionItem" }))()
 export type AssistantAttentionItem = typeof AssistantAttentionItem.Type

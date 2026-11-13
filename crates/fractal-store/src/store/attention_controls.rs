@@ -109,6 +109,27 @@ pub fn controls(connection: &Connection, rows: &[(&str, &str)]) -> Result<HashMa
     Ok(found)
 }
 
+/// Sets each client attention row's `seen_at` and `snoozed_until` from its person's own controls
+/// (null when none), read on `connection`. Controls are an overlay on the row, not part of its
+/// own state, so every reader of attention rows applies them the same way when it serves them.
+pub fn overlay(connection: &Connection, rows: &mut [Value]) -> Result<()> {
+    let keys = rows
+        .iter()
+        .filter_map(|row| Some((row["person_id"].as_str()?, row["id"].as_str()?)))
+        .collect::<Vec<_>>();
+    let found = controls(connection, &keys)?;
+    let time = |at: Option<u128>| at.map_or(Value::Null, |at| json!(crate::client_values::client_timestamp(at)));
+    for row in rows {
+        let control = match (row["person_id"].as_str(), row["id"].as_str()) {
+            (Some(person), Some(id)) => found.get(&(person.to_owned(), id.to_owned())).copied().unwrap_or_default(),
+            _ => Controls::default(),
+        };
+        row["seen_at"] = time(control.seen_at_ms);
+        row["snoozed_until"] = time(control.snoozed_until_ms);
+    }
+    Ok(())
+}
+
 /// A control the person asked for: seen, or a snooze until a time or ended (`None`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
@@ -120,6 +141,11 @@ impl Store {
     /// The controls of each `(person, attention id)` asked for that has any.
     pub fn attention_controls(&self, rows: &[(&str, &str)]) -> Result<HashMap<(String, String), Controls>> {
         controls(&self.readers.get(), rows)
+    }
+
+    /// Overlays each row's person's own controls; see [`overlay`].
+    pub fn overlay_attention_controls(&self, rows: &mut [Value]) -> Result<()> {
+        overlay(&self.readers.get(), rows)
     }
 
     /// Record `person`'s control over `attention_id`, from `source` (the pairing grant or

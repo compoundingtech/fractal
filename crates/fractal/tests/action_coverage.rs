@@ -1266,6 +1266,16 @@ mission "example/attention-authored" state="ready" {
     let work = daemon.store().step_run(&authored).unwrap().unwrap();
     assert_eq!(work.status, "ready");
     assert!(work.person_answers.is_empty());
+    // Nor does work.done dismiss it: with no asker there is nobody to read `dismissed`.
+    let fence = daemon.fence(PERSON).await;
+    let error = dispatch(&daemon.client(PERSON), "work.done", "coverage:work-done-dismiss-authored", fence,
+        json!({"target_id": authored, "episode": row["episode"], "summary": "", "answer": {"id": "dismiss"}}))
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(error), ErrorCode::ValidationFailed);
+    let work = daemon.store().step_run(&authored).unwrap().unwrap();
+    assert_eq!(work.status, "ready");
+    assert!(work.person_answers.is_empty());
 
     // An ask that offers its own `dismiss` answer keeps it, so dismiss could only pick the
     // asker's answer: it refuses, writes no answer, and the ask keeps waiting.

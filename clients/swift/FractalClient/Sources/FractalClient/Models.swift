@@ -1683,8 +1683,8 @@ public struct AssistantSummary: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey { case kind, asOf = "as_of", counts }
 }
 public struct AssistantAttentionItem: Codable, Sendable, Equatable {
-    public let id, attentionKind, personID, revision, episode, waitingSince: String; public let agentID, missionID, missionRunID, seenAt, snoozedUntil: String?
-    enum CodingKeys: String, CodingKey { case id, attentionKind = "attention_kind", personID = "person_id", revision, episode, waitingSince = "waiting_since", agentID = "agent_id", missionID = "mission_id", missionRunID = "mission_run_id", seenAt = "seen_at", snoozedUntil = "snoozed_until" }
+    public let id, attentionKind, personID, revision, episode, waitingSince: String; public let agentID, missionID, missionRunID: String?
+    enum CodingKeys: String, CodingKey { case id, attentionKind = "attention_kind", personID = "person_id", revision, episode, waitingSince = "waiting_since", agentID = "agent_id", missionID = "mission_id", missionRunID = "mission_run_id" }
 }
 public struct AssistantStepCounts: Codable, Sendable, Equatable { public let total, completed: UInt64 }
 public struct AssistantMissionItem: Codable, Sendable, Equatable {

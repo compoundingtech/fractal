@@ -743,7 +743,7 @@
     "ReadPosition": {"description": "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim.", "allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "conversation", "at"], "properties": {"kind": {"const": "read-position"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp"}}}]},
     "ReadPositionPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "read-positions"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/ReadPosition"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
     "ReadPositionAdvanceParameters": {"type": "object", "additionalProperties": false, "required": ["owner", "conversation", "at"], "properties": {"owner": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person."}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp", "description": "The newest prose time seen; an `at` not beyond the stored position completes without a claim."}}},
-    "AttentionControlId": {"description": "An open attention row's id: a native row (`attention/` and 32 lowercase hex digits) or, once notices are published, a notice id.", "type": "string", "pattern": "^(?:attention/[0-9a-f]{32}|custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"},
+    "AttentionControlId": {"description": "An open attention row's id: `attention/` and 32 lowercase hex digits.", "type": "string", "pattern": "^attention/[0-9a-f]{32}$"},
     "AttentionSeenParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}}},
     "AttentionSnoozeParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id", "until"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "When the row comes back: a future instant, or null to bring it back now. A snooze never moves a deadline."}}},
     "AttentionDismissParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "text": {"type": "string", "maxLength": 8000, "description": "An ask only: why, sent to the asker with the dismissal."}}},
@@ -4368,9 +4368,7 @@
         "mission_run_id": { "type": ["string", "null"] },
         "revision": { "$ref": "#/$defs/Revision" },
         "episode": { "type": "string" },
-        "waiting_since": { "$ref": "#/$defs/Timestamp" },
-        "seen_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When the person first saw the row, or null. Read-only: assistants cannot mark rows seen." },
-        "snoozed_until": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Until when the person put the row off, or null. Read-only: assistants cannot snooze rows." }
+        "waiting_since": { "$ref": "#/$defs/Timestamp" }
       }
     },
     "AssistantMissionItem": {

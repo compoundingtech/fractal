@@ -17,16 +17,11 @@ pub const KINDS: [&str; 2] = [SEEN_KIND, SNOOZED_KIND];
 /// The client the person acted from: its pairing grant, or the local member.
 pub const MAX_SOURCE_BYTES: usize = 256;
 
-/// An attention row id: a native row, `attention/` and 32 lowercase hex digits, or a notice,
-/// `custom/attention/snapshot/UUID`. Mirrors `AttentionControlId`.
+/// An attention row id: `attention/` and 32 lowercase hex digits. Mirrors `AttentionControlId`.
+/// Notice ids join when notice rows are served as attention rows.
 pub fn valid_attention_id(id: &str) -> bool {
-    let hex = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if let Some(hash) = id.strip_prefix("attention/") {
-        return hash.len() == 32 && hex(hash);
-    }
-    id.strip_prefix(crate::notice::SNAPSHOT_PREFIX).is_some_and(|uuid| {
-        let groups = uuid.split('-').collect::<Vec<_>>();
-        groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12]) && groups.iter().all(|group| hex(group))
+    id.strip_prefix("attention/").is_some_and(|hash| {
+        hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
 }
 
@@ -51,7 +46,7 @@ pub fn validate_fields(kind: &str, fields: &BTreeMap<String, Value>) -> Result<(
     if !fields.get("attention_id").and_then(Value::as_str).is_some_and(valid_attention_id) {
         return Err(error(
             "invalid-attention-control",
-            "attention_id must be an attention row id: attention/HASH or a notice id",
+            "attention_id must be an attention row id: attention/HASH",
         ));
     }
     if !fields
@@ -92,7 +87,7 @@ mod tests {
         let notice = "custom/attention/snapshot/01234567-89ab-cdef-0123-456789abcdef";
         for (kind, body) in [
             (SEEN_KIND, json!({"attention_id": ROW, "source": "host/alder"})),
-            (SEEN_KIND, json!({"attention_id": notice, "source": "custom/client/pairing-1"})),
+            (SEEN_KIND, json!({"attention_id": ROW, "source": "custom/client/pairing-1"})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": 5})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": null})),
         ] {
@@ -105,6 +100,7 @@ mod tests {
             (SEEN_KIND, json!({"attention_id": "attention/closed/abc", "source": "s"})),
             (SEEN_KIND, json!({"attention_id": "attention/0123456789ABCDEF0123456789abcdef", "source": "s"})),
             (SEEN_KIND, json!({"attention_id": "custom/attention/source/01234567-89ab-cdef-0123-456789abcdef", "source": "s"})),
+            (SEEN_KIND, json!({"attention_id": notice, "source": "s"})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s"})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": 0})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": -1})),

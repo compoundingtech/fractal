@@ -163,8 +163,9 @@ fn resolve_answer(
         };
         // The person may set a free-text ask aside too. It records the dismissal a feedback
         // request records, the structured form of a free-text ask, so the asker reads
-        // `dismissed` rather than text that looks like a reply.
-        if !cancel && answer.id.as_deref() == Some(crate::person_request::DISMISS) && answer.option_notes.is_empty() {
+        // `dismissed` rather than text that looks like a reply. A step with no ask has no asker
+        // to tell, so it is the person's own work and is not dismissed.
+        if !cancel && ask.is_some() && answer.id.as_deref() == Some(crate::person_request::DISMISS) && answer.option_notes.is_empty() {
             let mut dismissed = json!({"type": "feedback", "outcome": "dismissed"});
             if let Some(text) = answer.text.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
                 if text.chars().count() > crate::person_request::MAX_TEXT {

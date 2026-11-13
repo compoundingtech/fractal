@@ -188,8 +188,8 @@ export const AttachmentInput = /*#__PURE__*/ (() => Schema.Struct({
 export type AttachmentInput = typeof AttachmentInput.Type
 export type AttachmentInputEncoded = typeof AttachmentInput.Encoded
 
-/** An open attention row's id: a native row (`attention/` and 32 lowercase hex digits) or, once notices are published, a notice id. */
-export const AttentionControlId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^(?:attention/[0-9a-f]{32}|custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", "u"))).annotate({ identifier: "AttentionControlId", description: "An open attention row's id: a native row (`attention/` and 32 lowercase hex digits) or, once notices are published, a notice id." }))()
+/** An open attention row's id: `attention/` and 32 lowercase hex digits. */
+export const AttentionControlId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^attention/[0-9a-f]{32}$", "u"))).annotate({ identifier: "AttentionControlId", description: "An open attention row's id: `attention/` and 32 lowercase hex digits." }))()
 export type AttentionControlId = typeof AttentionControlId.Type
 export type AttentionControlIdEncoded = typeof AttentionControlId.Encoded
 

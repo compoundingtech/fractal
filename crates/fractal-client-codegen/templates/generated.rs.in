@@ -4838,11 +4838,6 @@ pub struct AssistantAttentionItem {
     pub revision: String,
     pub episode: String,
     pub waiting_since: String,
-    /// The person's own controls, read-only for assistants.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seen_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snoozed_until: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
