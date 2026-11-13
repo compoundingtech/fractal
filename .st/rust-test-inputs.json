@@ -239,6 +239,7 @@
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
     "crates/fractal-daemon/hooks/pi-channel.ts",
+    "slo/fractal-ci.kdl",
     "slo/objectives.kdl"
    ]
   },
