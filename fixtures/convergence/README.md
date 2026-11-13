@@ -322,16 +322,34 @@ inputs through the existing generic paths. No old-build admission or checkpoint 
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
 
-`claims-v26.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
+`claims-v25.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a completed
+Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md), and carries the
+optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fields the registry has
+gained since v24. Versions 1 through 24 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
+do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`. With v25 every fixed seed converges; seeds
+2 and 233 are the exact never-trim set, observed by hosted linux-tests (runs 43416435882 and
+43424149648) and hosted burst cargo-test run 43411988505. In both seeds the old build draws the new
+kind, and that one replicated claim makes it a writer every later checkpoint waits for; an old build
+never seals. Seed 233 never excuses it (quiesce's even draw says no). Seed 2 does, but its schedule
+ends with `checkpoint/2100-01-24` sealed under two participant sets and no later cut. Hosted burst
+runs on throwaway tracing commits show this: in
+[43425100378](https://github.com/compoundingtech/fractal/actions/runs/43425100378) excusing seed
+233's old build trims every modern node; in
+[43428226636](https://github.com/compoundingtech/fractal/actions/runs/43428226636) skipping only
+the old build's `github.workflow-run` write, after drawing it so the schedule is unchanged, trims
+both seeds; in [43431112343](https://github.com/compoundingtech/fractal/actions/runs/43431112343)
+one more cut trims seed 2 on every modern node. So the kind changes which writers a checkpoint
+waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
+the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
+authority (#6210).
+
+`claims-v27.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
 kinds (docs/st3/schema.md, "Person attention controls") on top of everything the previous
 snapshot covers, plus any optional fields main added since. Earlier versions stay frozen. Generate it with
-`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v26.json`;
-do not hand-edit it. The simulation and audit reports select v26. Control draws use the person's
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v27.json`;
+do not hand-edit it. The simulation and audit reports select v27. Control draws use the person's
 native admission path over a few rows, with a snooze that sometimes ends; the focused regression
 admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
-converge. Every fixed seed trims except 610 and 1597, the exact never-trim set observed by hosted
-[burst run 43423546514](https://github.com/compoundingtech/fractal/actions/runs/43423546514)
-(nextest, every `convergence::seed_` test at the head). The cause is the schedule, not the new
-kinds: the shifted draws give both seeds an old-build node that is never excused, neither during
-the schedule nor by quiesce's half-the-runs excusal, so it holds every checkpoint. Excusing it
-after quiesce lets every new-build node trim with the control claims in place, with no failure.
+converge. PENDING: hosted never-trim characterization of v27.

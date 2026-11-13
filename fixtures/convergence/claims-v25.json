@@ -3299,6 +3299,112 @@
     "projection": "subscriptions",
     "wakes_reconciler": true
   },
+  "github.workflow-run": {
+    "kind": "github.workflow-run",
+    "subjects": [
+      "github-workflow-run"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "completed_at": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "conclusion": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "created_at": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "duration_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "event": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "flakes": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "flaky_tests": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "head_sha": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "observer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "observer"
+        ]
+      },
+      "repository": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "run_id": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "started_at": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "version": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "workflow": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "glass.deleted": {
     "kind": "glass.deleted",
     "subjects": [
@@ -6111,63 +6217,6 @@
     "cardinality": "append",
     "projection": "owned-sets",
     "wakes_reconciler": true
-  },
-  "person.attention-seen": {
-    "kind": "person.attention-seen",
-    "subjects": [
-      "person"
-    ],
-    "fields": {
-      "attention_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "source": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "capability-holder",
-    "cardinality": "append",
-    "projection": "person-attention-controls",
-    "wakes_reconciler": false
-  },
-  "person.attention-snoozed": {
-    "kind": "person.attention-snoozed",
-    "subjects": [
-      "person"
-    ],
-    "fields": {
-      "attention_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "source": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "until_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "nullable": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "capability-holder",
-    "cardinality": "append",
-    "projection": "person-attention-controls",
-    "wakes_reconciler": false
   },
   "person.delegation-set": {
     "kind": "person.delegation-set",

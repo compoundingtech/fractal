@@ -7904,13 +7904,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
+    // The shipped CI objectives are retired: end any fault one left open, once per start.
+    if let Err(error) = fractal_daemon::objective_faults::end_retired_ci_objectives(&store) {
+        eprintln!("st3: ending the retired CI objectives' open faults failed: {error:?}");
+    }
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
-                fractal_daemon::objective_faults::check_and_report(&store, &rows);
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)

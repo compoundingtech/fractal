@@ -26,14 +26,25 @@ export interface Interval {
   readonly start: ClaimEvent
   /** The members a sample must stop on: a list of strings in field `set` of the newest claim. */
   readonly expect?: ClaimEvent & { readonly set: string }
-  /** One member stopping, named by field `member` (required with `expect`). */
+  /**
+   * One member stopping, named by field `member` (required with `expect`). It may name the `start`
+   * kind when both read their time from different `at` fields: one claim is then the whole sample.
+   */
   readonly stop: ClaimEvent & { readonly member?: string }
   readonly cancel?: string
   readonly pause?: { readonly kind: string; readonly resume: string }
   /** Fields of the start or expect claim, or `member`, that split the rows. */
   readonly labels?: readonly string[]
   /** Leave out a sample whose start or expect claim has one of `values` in `field`. */
-  readonly exclude?: readonly { readonly field: string; readonly values: readonly string[] }[]
+  readonly exclude?: readonly FieldValues[]
+  /** Keep a sample only when its start claim has one of `values` in `field`; every `only` must hold. */
+  readonly only?: readonly FieldValues[]
+}
+
+/** A claim field and the values an `exclude` leaves out or an `only` keeps. */
+export interface FieldValues {
+  readonly field: string
+  readonly values: readonly string[]
 }
 
 /** Events in claims per hour, one per subject under `subjectPrefix` at its earliest `event` claim. */
@@ -44,7 +55,9 @@ export interface Count {
   /** Fields of the event claim that split the rows. */
   readonly labels?: readonly string[]
   /** Leave out an event whose claim has one of `values` in `field`. */
-  readonly exclude?: readonly { readonly field: string; readonly values: readonly string[] }[]
+  readonly exclude?: readonly FieldValues[]
+  /** Keep an event only when its claim has one of `values` in `field`; every `only` must hold. */
+  readonly only?: readonly FieldValues[]
 }
 
 /** How a sample is measured; `kind` is the KDL indicator name. */
@@ -57,8 +70,6 @@ export type Indicator =
   | { readonly kind: 'cpu'; readonly idleMinMinutes: number; readonly loadMaxCores: number }
   | { readonly kind: 'database' }
   | { readonly kind: 'divergence' }
-  | { readonly kind: 'ci-duration'; readonly series: string }
-  | { readonly kind: 'ci-count'; readonly series: string }
   | ({ readonly kind: 'interval' } & Interval)
   | ({ readonly kind: 'count' } & Count)
 
@@ -133,12 +144,6 @@ export const indicator = {
   database: (): IndicatorOf<'database'> => freeze({ kind: 'database' }),
   /** Open projection divergence faults. */
   divergence: (): IndicatorOf<'divergence'> => freeze({ kind: 'divergence' }),
-  /** A percentile of a CI series' durations, `ci/NAME`. */
-  ciDuration: ({ series }: { readonly series: string }): IndicatorOf<'ci-duration'> =>
-    freeze({ kind: 'ci-duration', series }),
-  /** Events in a CI series per hour. */
-  ciCount: ({ series }: { readonly series: string }): IndicatorOf<'ci-count'> =>
-    freeze({ kind: 'ci-count', series }),
 }
 
 /** What a missed row delivers. */
@@ -178,9 +183,6 @@ const isField = (value: unknown): value is string =>
 
 const isAgentRef = (value: unknown): value is AgentRef =>
   isRecord(value) && value._tag === 'SubjectRef' && value.kind === 'agent'
-
-const isCiSeries = (series: string): boolean =>
-  /^ci\/[a-z0-9-]+(\/[a-z0-9-]+)*$/u.test(series)
 
 /** Refuses fields other than `allowed`; an `undefined` field counts as absent. */
 const only = ({
@@ -243,32 +245,43 @@ const checkLabels = ({ value, fail }: { readonly value: Fields; readonly fail: F
       fail(`label ${JSON.stringify(label)} is not a field, or is repeated`)
     }
   })
-  const excludes = value.exclude ?? []
-  if (Array.isArray(excludes) === false) return fail('`exclude` is a list')
-  for (const exclude of excludes as unknown[]) {
-    if (
-      isRecord(exclude) === false ||
-      isField(exclude.field) === false ||
-      Array.isArray(exclude.values) === false ||
-      exclude.values.length === 0 ||
-      exclude.values.some((v: unknown) => typeof v !== 'string' || v === '')
-    ) {
-      fail('`exclude` needs a field and at least one value')
+  const fieldValues = (name: 'exclude' | 'only'): readonly Fields[] => {
+    const list = value[name] ?? []
+    if (Array.isArray(list) === false) return fail(`\`${name}\` is a list`)
+    for (const entry of list as unknown[]) {
+      if (
+        isRecord(entry) === false ||
+        isField(entry.field) === false ||
+        Array.isArray(entry.values) === false ||
+        entry.values.length === 0 ||
+        entry.values.some((v: unknown) => typeof v !== 'string' || v === '')
+      ) {
+        fail(`\`${name}\` needs a field and at least one value`)
+      }
+      only({ value: entry as Fields, allowed: ['field', 'values'], what: `\`${name}\``, fail })
     }
-    only({ value: exclude as Fields, allowed: ['field', 'values'], what: '`exclude`', fail })
+    return list as Fields[]
   }
+  fieldValues('exclude')
+  fieldValues('only').forEach(({ field }, index, kept) => {
+    if (kept.findIndex((other) => other.field === field) !== index) {
+      fail(`\`only ${JSON.stringify(field)}\` is repeated: every \`only\` must hold, so each names its own field`)
+    }
+  })
   return labels
 }
 
-const labelsAndExcludes = (value: Pick<Count, 'labels' | 'exclude'>) => ({
+const freezeFieldValues = (list: readonly FieldValues[]): readonly FieldValues[] =>
+  freeze(list.map(({ field, values }) => freeze({ field, values: freeze([...values]) })))
+
+const labelsAndFilters = (value: Pick<Count, 'labels' | 'exclude' | 'only'>) => ({
   ...(value.labels === undefined ? {} : { labels: freeze([...value.labels]) }),
-  ...(value.exclude === undefined
-    ? {}
-    : { exclude: freeze(value.exclude.map(({ field, values }) => freeze({ field, values: freeze([...values]) }))) }),
+  ...(value.exclude === undefined ? {} : { exclude: freezeFieldValues(value.exclude) }),
+  ...(value.only === undefined ? {} : { only: freezeFieldValues(value.only) }),
 })
 
 const parseCount = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'count'> => {
-  only({ value, allowed: ['kind', 'subjectPrefix', 'event', 'labels', 'exclude'], what: 'indicator `count`', fail })
+  only({ value, allowed: ['kind', 'subjectPrefix', 'event', 'labels', 'exclude', 'only'], what: 'indicator `count`', fail })
   if (value.subjectPrefix === undefined) fail('a count needs `subjectPrefix`')
   checkPrefix({ value, fail })
   if (value.event === undefined) fail('a count needs `event`')
@@ -277,13 +290,13 @@ const parseCount = ({ value, fail }: { readonly value: Fields; readonly fail: Fa
   checkLabels({ value, fail })
   // Every field was checked above.
   const count = value as unknown as IndicatorOf<'count'>
-  return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze({ kind: count.event.kind, at: count.event.at }), ...labelsAndExcludes(count) })
+  return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze({ kind: count.event.kind, at: count.event.at }), ...labelsAndFilters(count) })
 }
 
 const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'interval'> => {
   only({
     value,
-    allowed: ['kind', 'subjectPrefix', 'start', 'expect', 'stop', 'cancel', 'pause', 'labels', 'exclude'],
+    allowed: ['kind', 'subjectPrefix', 'start', 'expect', 'stop', 'cancel', 'pause', 'labels', 'exclude', 'only'],
     what: 'indicator `interval`',
     fail,
   })
@@ -311,13 +324,21 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
   if (labels.includes('member') && stop.member === undefined) {
     fail('`label "member"` needs `stop.member`')
   }
+  if (stop.kind === start.kind) {
+    // One claim is the whole sample: its start and its stop are two of its fields.
+    if (expect !== undefined || stop.member !== undefined) fail('a `stop` naming the `start` kind takes no `expect` or `member`')
+    if (start.at === undefined || stop.at === undefined || start.at === stop.at) {
+      fail('a `stop` naming the `start` kind needs both to name different `at` fields')
+    }
+  }
   // Every field was checked above.
   const interval = value as unknown as IndicatorOf<'interval'>
   const kinds = [
     interval.start.kind,
-    // The expect claim may also start the sample (merge to live); every other kind has one role.
+    // The expect claim may also start the sample (merge to live), and one claim may be the whole
+    // sample (start and stop); every other kind has one role.
     ...(interval.expect === undefined || interval.expect.kind === interval.start.kind ? [] : [interval.expect.kind]),
-    interval.stop.kind,
+    ...(interval.stop.kind === interval.start.kind ? [] : [interval.stop.kind]),
     ...(interval.cancel === undefined ? [] : [interval.cancel]),
     ...(interval.pause === undefined ? [] : [interval.pause.kind, interval.pause.resume]),
   ]
@@ -338,7 +359,7 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
     ...(interval.pause === undefined
       ? {}
       : { pause: freeze({ kind: interval.pause.kind, resume: interval.pause.resume }) }),
-    ...labelsAndExcludes(interval),
+    ...labelsAndFilters(interval),
   })
 }
 
@@ -377,14 +398,6 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
       }
       if (loadMaxCores <= 0) return fail('loadMaxCores is not positive')
       return freeze({ kind, idleMinMinutes, loadMaxCores })
-    }
-    case 'ci-duration':
-    case 'ci-count': {
-      allow(['series'])
-      const series = value.series
-      if (typeof series !== 'string') return fail(`indicator \`${kind}\` needs one \`series\``)
-      if (isCiSeries(series) === false) return fail(`series ${JSON.stringify(series)} is not \`ci/\` and lowercase words`)
-      return freeze({ kind, series })
     }
     case 'interval':
       return parseInterval({ value, fail })
@@ -476,11 +489,8 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
       return (target.stat === 'live-gb' || target.stat === 'growth-mb-per-day') && max({ integer: false, zero: false })
     case 'divergence':
       return target.stat === 'open' && max({ integer: true, zero: true })
-    case 'ci-count':
-      return target.stat === 'per-hour' && max({ integer: true, zero: true })
     case 'count':
       return target.stat === 'per-hour' && ('min' in target ? number !== undefined && number > 0 : max({ integer: false, zero: true }))
-    case 'ci-duration':
     case 'interval':
       return percentile(target.stat) !== undefined && within
   }
@@ -495,8 +505,6 @@ const requiredStats: Readonly<Record<Indicator['kind'], readonly string[]>> = {
   cpu: ['cores', 'idle-cores'],
   database: ['live-gb', 'growth-mb-per-day'],
   divergence: ['open'],
-  'ci-duration': [],
-  'ci-count': ['per-hour'],
   interval: [],
   count: ['per-hour'],
 }
@@ -625,6 +633,7 @@ const intervalChildren = (interval: Interval): Node[] => {
       : [node({ name: 'pause', args: [interval.pause.kind], props: { resume: interval.pause.resume } })]),
     ...(interval.labels ?? []).map((label) => node({ name: 'label', args: [label] })),
     ...(interval.exclude ?? []).map(({ field, values }) => node({ name: 'exclude', args: [field, ...values] })),
+    ...(interval.only ?? []).map(({ field, values }) => node({ name: 'only', args: [field, ...values] })),
   ]
 }
 
@@ -639,9 +648,6 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
         node({ name: 'idle-min-minutes', args: [indicator.idleMinMinutes] }),
         node({ name: 'load-max-cores', args: [indicator.loadMaxCores] }),
       ]
-    case 'ci-duration':
-    case 'ci-count':
-      return [node({ name: 'series', args: [indicator.series] })]
     case 'interval':
       return intervalChildren(indicator)
     case 'count':
@@ -650,6 +656,7 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
         node({ name: 'event', args: [indicator.event.kind], props: { at: indicator.event.at } }),
         ...(indicator.labels ?? []).map((label) => node({ name: 'label', args: [label] })),
         ...(indicator.exclude ?? []).map(({ field, values }) => node({ name: 'exclude', args: [field, ...values] })),
+        ...(indicator.only ?? []).map(({ field, values }) => node({ name: 'only', args: [field, ...values] })),
       ]
     case 'statement':
     case 'transaction':
