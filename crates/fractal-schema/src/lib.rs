@@ -5114,6 +5114,9 @@ mod tests {
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.observed").unwrap()
             .fields.remove("exit_evidence").unwrap();
+        for field in ["host", "dispatch"] {
+            current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

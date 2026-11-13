@@ -19073,7 +19073,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .latest_claim(&operation, Some("gate.requested"))?
             .map(|requested| {
-                anyhow::ensure!(requested.origin == self.host,
+                anyhow::ensure!(!remote || requested.origin == self.host,
                     "the gate admission was written by another executor");
                 Ok::<_, anyhow::Error>(requested)
             }).transpose()?
@@ -31225,6 +31225,11 @@ mission "proof" state="ready" {
                 fields: fields.into_iter().collect(), evidence: vec![],
                 expected_subject: None, idempotency_key: None,
             }).unwrap();
+            if changed == "origin" {
+                // A writer's export does not forward the run it imported. Establish the
+                // legitimate owner before delivering the other member's forged request.
+                executor.import_replication("origin", &origin.export_replication(0).unwrap()).unwrap();
+            }
             executor.import_replication(writer.origin(), &writer.export_replication(0).unwrap()).unwrap();
             let runtime = Arc::new(FakeRuntime::default());
             let executor_reconciler = Reconciler::new(executor.clone(), runtime.clone(),
