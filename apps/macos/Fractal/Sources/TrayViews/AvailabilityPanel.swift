@@ -7,65 +7,71 @@ struct AvailabilitySection: View {
   let model: AttentionModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      SectionTitle(title: "Availability", aside: model.availability.value.map { Self.summary($0.availability) })
+    PanelSection(
+      title: "Availability", aside: model.availability.value.map { Self.summary($0.availability) }, startsOpen: false
+    ) {
       SectionFailure(state: model.availability.state)
       if let snapshot = model.availability.value {
-        AxesCard(availability: snapshot.availability, model: model)
-        NoteCard(note: snapshot.note, model: model)
-        if let write = model.availabilityWrite { WriteStatusView(state: write) }
+        AxisRows(availability: snapshot.availability, model: model)
+        if let write = model.availabilityWrite { WriteStatusView(state: write, write: .availability) }
       } else if case .loading = model.availability.state {
-        Text("Loading…").font(.system(size: 12)).foregroundStyle(.tertiary)
+        Text("Loading…").foregroundStyle(.secondary)
+      }
+    } footer: {
+      if let availability = model.availability.value?.availability { PresenceFooter(availability: availability) }
+    }
+    if let snapshot = model.availability.value {
+      PanelSection(title: "Note for Agents", aside: snapshot.note == nil ? "none" : "set", startsOpen: false) {
+        NoteRow(note: snapshot.note, model: model)
       }
     }
   }
 
   static func summary(_ availability: Availability) -> String {
-    [availability.status.word, "interruptions \(availability.interruptions.word)"]
+    [availability.status.label, AxisRows.short(availability.interruptions)]
       .joined(separator: " · ")
   }
 }
 
-private struct AxesCard: View {
+/// The three hand-set axes as labelled rows, each with its choices in a pop-up menu.
+struct AxisRows: View {
   let availability: Availability
   let model: AttentionModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    Group {
       AxisRow(
         title: "Status", value: availability.status.label,
-        symbol: availability.status == .available ? "person.fill.checkmark" : availability.status == .away ? "moon.fill" : "questionmark.circle",
+        symbol: AxisRows.symbol(availability.status),
         detail: statusDetail
       ) {
         PresetMenu(title: "Available") { set(.status(.available, $0), "available", $0) }
         PresetMenu(title: "Away") { set(.status(.away, $0), "away", $0) }
         if availability.statusOverridden {
           Divider()
-          Button("Follow presence") { set(.status(nil, .indefinitely), "status from presence") }
+          Button("Follow Presence") { set(.status(nil, .indefinitely), "status from presence") }
         }
       }
       AxisRow(
         title: "Interruptions", value: availability.interruptions.label,
-        symbol: availability.interruptions == .all ? "bell.fill" : availability.interruptions == .urgent ? "bell.badge" : "bell.slash.fill",
+        symbol: Self.symbol(availability.interruptions),
         detail: availability.interruptionsUntil.map { .until($0) } ?? .text(nil)
       ) {
         Button("All") { set(.interruptions(.all, .indefinitely), "all interruptions") }
-        PresetMenu(title: "Urgent only") { set(.interruptions(.urgent, $0), "urgent interruptions only", $0) }
+        PresetMenu(title: "Urgent Only") { set(.interruptions(.urgent, $0), "urgent interruptions only", $0) }
         PresetMenu(title: "None") { set(.interruptions(.none, $0), "no interruptions", $0) }
       }
       AxisRow(
-        title: "Deadline clock", value: availability.deadlineClock.label,
-        symbol: availability.deadlineClock == .run ? "clock" : "pause.circle.fill",
+        title: "Deadline Clock", value: availability.deadlineClock.label,
+        symbol: availability.deadlineClock == .run ? "clock" : "pause.circle",
         detail: clockDetail
       ) {
         Button("Run") { set(.deadlineClock(.run, .indefinitely), "deadline clock running") }
-        PresetMenu(title: "Hold routine asks") { set(.deadlineClock(.holdRoutine, $0), "routine deadlines held", $0) }
-        PresetMenu(title: "Hold all asks") { set(.deadlineClock(.holdAll, $0), "all deadlines held", $0) }
+        PresetMenu(title: "Hold Routine Asks") { set(.deadlineClock(.holdRoutine, $0), "routine deadlines held", $0) }
+        PresetMenu(title: "Hold All Asks") { set(.deadlineClock(.holdAll, $0), "all deadlines held", $0) }
       }
-      presence
     }
     .disabled(model.isWritingAvailability)
-    .card()
   }
 
   private var statusDetail: AxisDetail {
@@ -79,21 +85,35 @@ private struct AxesCard: View {
     return .text(nil)
   }
 
-  @ViewBuilder private var presence: some View {
-    HStack(spacing: 4) {
-      Text("Presence: \(availability.presence?.word ?? "unknown")")
-      if let observed = availability.presenceObservedAt {
-        Text("·")
-        RelativeTime(date: observed, prefix: "reported")
-      }
-    }
-    .font(.system(size: 10.5))
-    .foregroundStyle(.tertiary)
-  }
-
   private func set(_ edit: AvailabilityEdit, _ label: String, _ until: Until? = nil) {
     let label = until.map { "\(label), \($0.label.lowercased())" } ?? label
     Task { await model.setAvailability(edit, label: label) }
+  }
+
+  static func short(_ interruptions: Availability.Interruptions) -> String {
+    switch interruptions {
+    case .all: "all interruptions"
+    case .urgent: "urgent only"
+    case .none: "no interruptions"
+    case .unknown(let word): word
+    }
+  }
+
+  static func symbol(_ status: Availability.Status) -> String {
+    switch status {
+    case .available: "person.fill.checkmark"
+    case .away: "moon.fill"
+    case .unknown: "questionmark.circle"
+    }
+  }
+
+  static func symbol(_ interruptions: Availability.Interruptions) -> String {
+    switch interruptions {
+    case .all: "bell"
+    case .urgent: "bell.badge"
+    case .none: "bell.slash"
+    case .unknown: "questionmark.circle"
+    }
   }
 }
 
@@ -111,29 +131,32 @@ private struct AxisRow<Options: View>: View {
   @ViewBuilder let options: () -> Options
 
   var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 6) {
-      Image(systemName: symbol).frame(width: 14).foregroundStyle(.secondary).accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 1) {
-        Text(title).font(.system(size: 11.5))
-        Group {
-          switch detail {
-          case .text(let text?): Text(text)
-          case .text(nil): EmptyView()
-          case .until(let date): Text("until \(Self.clock(date))").help(date.formatted(date: .abbreviated, time: .standard))
-          case .since(let date): RelativeTime(date: date, prefix: "since")
-          }
-        }
-        .font(.system(size: 10.5))
-        .foregroundStyle(.tertiary)
-      }
-      Spacer(minLength: 6)
+    LabeledContent {
       Menu(content: options) { Text(value) }
-        .menuStyle(.borderlessButton)
         .fixedSize()
-        .font(.system(size: 11.5, weight: .medium))
         .help("Change \(title.lowercased())")
+    } label: {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Image(systemName: symbol)
+          .symbolRenderingMode(.hierarchical)
+          .foregroundStyle(.secondary)
+          .frame(width: 18)
+          .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(title)
+          Group {
+            switch detail {
+            case .text(let text?): Text(text)
+            case .text(nil): EmptyView()
+            case .until(let date): Text("until \(Self.clock(date))").help(Absolute.text(date))
+            case .since(let date): RelativeTime(date: date, prefix: "since")
+            }
+          }
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+        }
+      }
     }
-    .accessibilityElement(children: .combine)
   }
 
   /// `16:40` today, else `Fri 09:00`.
@@ -156,106 +179,103 @@ private struct PresetMenu: View {
   }
 }
 
-private struct NoteCard: View {
+private struct PresenceFooter: View {
+  let availability: Availability
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Text("Presence: \(availability.presence?.word ?? "unknown")")
+      if let observed = availability.presenceObservedAt {
+        Text("·")
+        RelativeTime(date: observed, prefix: "reported")
+      }
+    }
+  }
+}
+
+/// The directive note: read, edit with an expiry preset, or clear. The text being edited is a
+/// model draft, so it survives the panel closing.
+private struct NoteRow: View {
   let note: DirectiveNoteState?
   let model: AttentionModel
-  @State private var editing = false
-  @State private var text = ""
-  @State private var until: Until = .indefinitely
   @FocusState private var focused: Bool
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("Note for agents").font(.system(size: 11.5))
-      if editing {
-        TextField("What agents should know", text: $text, axis: .vertical)
+    Group {
+      if let draft = model.noteDraft {
+        VStack(alignment: .leading, spacing: 8) {
+          TextField(
+            "Note",
+            text: Binding(get: { draft.text }, set: { model.noteDraft?.text = $0 }),
+            prompt: Text("What agents should know"), axis: .vertical
+          )
+          .labelsHidden()
           .textFieldStyle(.roundedBorder)
           .lineLimit(1...6)
-          .font(.system(size: 12))
           .focused($focused)
-        HStack(spacing: 10) {
-          Picker("Expires", selection: $until) {
-            ForEach(Until.presets) { Text($0.label).tag($0) }
+          HStack(spacing: 8) {
+            Picker("Expires", selection: Binding(get: { draft.until }, set: { model.noteDraft?.until = $0 })) {
+              ForEach(Until.presets) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            Spacer()
+            Button("Cancel") { model.noteDraft = nil }
+            Button("Save") { save(draft) }
+              .buttonStyle(.borderedProminent)
+              .keyboardShortcut(.defaultAction)
+              .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
           }
-          .pickerStyle(.menu)
-          .fixedSize()
-          Spacer()
-          Button("Cancel") { editing = false }.buttonStyle(.borderless)
-          Button("Save") { save() }
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          .controlSize(.small)
         }
-        .controlSize(.small)
-        .font(.system(size: 11))
       } else if let note {
-        Text(note.text)
-          .font(.system(size: 12))
-          .fixedSize(horizontal: false, vertical: true)
-          .textSelection(.enabled)
-        HStack(spacing: 4) {
-          if let time = note.time { RelativeTime(date: time, prefix: "set") }
-          if let expires = note.expiresAt {
-            Text("·")
-            RelativeTime(date: expires, prefix: "expires")
-          }
-          Spacer()
-          HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(note.text)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+          HStack(spacing: 4) {
+            if let time = note.time { RelativeTime(date: time, prefix: "set") }
+            if let expires = note.expiresAt {
+              Text("·")
+              RelativeTime(date: expires, prefix: "expires")
+            }
+            Spacer()
             Button("Edit") { edit(note.text) }
             Button("Clear") {
               Task { await model.setNote(NoteRequest(text: "", until: .indefinitely, now: .now), label: "note cleared") }
             }
           }
+          .buttonStyle(.borderless)
+          .controlSize(.small)
+          .font(.subheadline)
           .foregroundStyle(.secondary)
         }
-        .buttonStyle(.borderless)
-        .font(.system(size: 10.5))
-        .foregroundStyle(.tertiary)
       } else {
-        HStack {
-          Text("No note").font(.system(size: 12)).foregroundStyle(.tertiary)
-          Spacer()
-          Button("Write note") { edit("") }.buttonStyle(.borderless).font(.system(size: 11))
+        LabeledContent {
+          Button("Write Note…") { edit("") }.controlSize(.small)
+        } label: {
+          Text("No note").foregroundStyle(.secondary)
         }
       }
     }
     .disabled(model.isWritingAvailability)
-    .card()
+    .onChange(of: focused) { _, isFocused in
+      if isFocused {
+        model.focusedInput = AttentionModel.noteInput
+      } else if model.focusedInput == AttentionModel.noteInput {
+        model.focusedInput = nil
+      }
+    }
   }
 
   private func edit(_ current: String) {
-    text = current
-    until = .indefinitely
-    editing = true
+    model.noteDraft = NoteDraft(text: current)
     focused = true
   }
 
-  private func save() {
-    let request = NoteRequest(text: text, until: until, now: .now)
-    editing = false
+  private func save(_ draft: NoteDraft) {
+    let request = NoteRequest(text: draft.text, until: draft.until, now: .now)
+    model.noteDraft = nil
     Task { await model.setNote(request, label: "note") }
-  }
-}
-
-private struct WriteStatusView: View {
-  let state: AnswerState
-
-  var body: some View {
-    Group {
-      switch state {
-      case .sending(let label):
-        HStack(spacing: 6) {
-          ProgressView().controlSize(.mini)
-          Text("Saving \(label)…")
-        }
-      case .committed(let label):
-        Label("Saved \(label) in Fractal", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-      case .refused(let reason):
-        Label {
-          Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-        } icon: {
-          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-        }
-      }
-    }
-    .font(.system(size: 11))
   }
 }

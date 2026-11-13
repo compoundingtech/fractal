@@ -129,6 +129,33 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.asks, [ask])
   }
 
+  func testADraftOutlivesARefusalAndLeavesWithTheCommitOrTheCard() async {
+    let ask = Fixture.record(id: "attention/one")
+    let other = Fixture.record(id: "attention/two")
+    let both = AttentionPage(records: [ask, other], canAnswer: true)
+    let adapter = FakeAdapter(
+      attention: [.success(both), .success(both), .success(.init(records: [ask], canAnswer: true))],
+      slo: [.success(slo), .success(slo), .success(slo)])
+    await adapter.refuseSubmissions("Fractal is restarting.")
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.answerDrafts[ask.id] = AnswerDraft(words: "Only on mbp2025")
+    model.answerDrafts[other.id] = AnswerDraft(selected: "changes")
+    XCTAssertTrue(model.hasUnsentInput, "a draft keeps Return off the default answer")
+
+    await model.answer(ask, with: WorkDoneAnswer(summary: "Only on mbp2025"), label: "“Only on mbp2025”")
+    XCTAssertEqual(model.answerDrafts[ask.id]?.words, "Only on mbp2025", "a refused answer keeps what was typed")
+
+    await adapter.acceptSubmissions()
+    await model.answer(ask, with: WorkDoneAnswer(summary: "Only on mbp2025"), label: "“Only on mbp2025”")
+    XCTAssertNil(model.answerDrafts[ask.id], "a committed answer drops its draft")
+    XCTAssertNotNil(model.answerDrafts[other.id], "other drafts stay")
+
+    await model.refresh(now: now)
+    XCTAssertNil(model.answerDrafts[other.id], "a card that left Fractal drops its draft")
+    XCTAssertFalse(model.hasUnsentInput)
+  }
+
   func testEachRowsHistoryIsReadOncePerRevisionAndBar() async {
     let read = Fixture.slo("read", status: "met", tone: "green")
     let cpu = Fixture.slo("cpu", status: "met", tone: "green", remaining: 80)
@@ -271,6 +298,7 @@ private actor FakeAdapter: AttentionAdapter {
   }
 
   func refuseSubmissions(_ reason: String) { refusal = reason }
+  func acceptSubmissions() { refusal = nil }
   func holdSubmissions() { held = true }
 
   func waitForSubmission() async {

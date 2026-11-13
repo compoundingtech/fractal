@@ -58,6 +58,15 @@ public enum AnswerState: Sendable, Equatable {
   /// The panel's latest availability or note change: sending, committed or Fractal's refusal.
   public internal(set) var availabilityWrite: AnswerState?
   public private(set) var answers: [String: AnswerState] = [:]
+  /// Unsent answers by attention ID, and the note being edited. The window-style panel closes
+  /// on any click outside it, so typed text lives here rather than in its views. A committed
+  /// answer and a card that left Fractal drop their draft.
+  public var answerDrafts: [String: AnswerDraft] = [:]
+  public var noteDraft: NoteDraft?
+  /// The panel text field with keyboard focus (an attention ID, or `noteInput`), so Return
+  /// never answers an ask other than the one being typed into.
+  public var focusedInput: String?
+  public static let noteInput = "note"
   public private(set) var isRefreshing = false
   /// This Mac's own presence, as its presence reporter last derived it.
   public var macPresence: PresenceState?
@@ -217,14 +226,19 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  /// Drop answer states of cards Fractal no longer holds open.
+  /// Drop answer states and drafts of cards Fractal no longer holds open.
   private func prune(_ page: AttentionPage) {
     let open = Set(page.records.map(\.id))
     answers = answers.filter { id, state in
       if case .sending = state { return true }
       return open.contains(id)
     }
+    answerDrafts = answerDrafts.filter { open.contains($0.key) }
   }
+
+  /// Whether the person has typed or picked anything not yet sent, or is typing now: the
+  /// panel's default action (Return) stays off while this holds.
+  public var hasUnsentInput: Bool { focusedInput != nil || !answerDrafts.isEmpty || noteDraft != nil }
 
   // MARK: Actions
 
@@ -238,6 +252,7 @@ public enum AnswerState: Sendable, Equatable {
     do {
       try await adapter.submit(WorkDoneSubmission(record: record, answer: answer))
       answers[record.id] = .committed(label)
+      answerDrafts[record.id] = nil
       await refresh()
       return .committed(label)
     } catch {

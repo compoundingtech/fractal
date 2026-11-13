@@ -3,31 +3,30 @@ import SwiftUI
 
 /// Speech on this Mac: what is being spoken and what waits (Stop, Skip, Mute this agent),
 /// the call that holds speech with its per-call override, and the person's mutes. Shown only
-/// with a speech service. Mutes are speech only: banners still show.
-public struct SpeechControlsSection: View {
+/// with a speech service, as one grouped section of label + trailing control rows. Mutes are
+/// speech only: banners still show.
+struct SpeechControlsSection: View {
   let speech: SpeechCoordinator
 
-  public init(speech: SpeechCoordinator) { self.speech = speech }
-
-  public var body: some View {
+  var body: some View {
     let now = Date.now
-    VStack(alignment: .leading, spacing: 8) {
-      SectionTitle(title: "Speech", aside: SpeechText.summary(speech, now: now))
+    PanelSection(
+      title: "Speech", aside: SpeechText.summary(speech, now: now),
+      startsOpen: speech.current != nil || !speech.queue.isEmpty || speech.call.inCall
+    ) {
       if let current = speech.current { NowSpeaking(record: current, speech: speech) }
       ForEach(speech.queue) { record in QueuedRow(record: record, speech: speech) }
       if speech.call.inCall { CallRow(speech: speech) }
       MuteRow(speech: speech, now: now)
       ForEach(speech.mutes.mutedAgents(now: now), id: \.requester) { muted in
-        HStack(alignment: .firstTextBaseline) {
+        LabeledContent {
+          Button("Unmute") { speech.unmute(agent: muted.requester) }.controlSize(.small)
+        } label: {
           Label {
             Text("\(muted.requester) muted \(SpeechText.until(muted.mute.until))")
           } icon: {
             Image(systemName: "person.crop.circle.badge.xmark")
           }
-          .font(.callout)
-          Spacer()
-          Button("Unmute") { speech.unmute(agent: muted.requester) }
-            .controlSize(.small)
         }
       }
     }
@@ -39,19 +38,26 @@ private struct NowSpeaking: View {
   let speech: SpeechCoordinator
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
+    VStack(alignment: .leading, spacing: 6) {
       Label {
-        Text(record.title).font(.callout.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(record.title).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
+          Text("Speaking · \(record.from)").font(.subheadline).foregroundStyle(.secondary)
+        }
       } icon: {
         Image(systemName: "speaker.wave.2.fill").foregroundStyle(.tint)
       }
-      Text("Speaking · \(record.from)").font(.subheadline).foregroundStyle(.secondary)
-      HStack {
-        Button("Stop") { speech.stopCurrent() }
-          .help("Stop speaking this; the queue goes on (\(SpeechHotkey.stop) from any app)")
+      HStack(spacing: 8) {
+        Button {
+          speech.stopCurrent()
+        } label: {
+          Label("Stop", systemImage: "stop.fill")
+        }
+        .help("Stop speaking this; the queue goes on (\(SpeechHotkey.stop) from any app)")
         MuteAgentMenu(requester: record.from, speech: speech)
       }
       .controlSize(.small)
+      .padding(.leading, 26)
     }
     .accessibilityElement(children: .contain)
   }
@@ -62,12 +68,19 @@ private struct QueuedRow: View {
   let speech: SpeechCoordinator
 
   var body: some View {
-    HStack(alignment: .firstTextBaseline) {
-      Label(record.title, systemImage: "speaker").font(.callout).lineLimit(1)
-      Spacer()
+    LabeledContent {
       Button("Skip") { speech.skip(id: record.id) }
         .controlSize(.small)
         .help("Don't read this aloud; it stays in the tray")
+    } label: {
+      Label {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(record.title).lineLimit(1)
+          Text("Waiting · \(record.from)").font(.subheadline).foregroundStyle(.secondary)
+        }
+      } icon: {
+        Image(systemName: "speaker")
+      }
     }
   }
 }
@@ -77,21 +90,28 @@ private struct CallRow: View {
   let speech: SpeechCoordinator
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Label(
-        speech.call.allowSpeech ? "In a call — speech allowed" : "In a call — speech held, banners only",
-        systemImage: speech.call.allowSpeech ? "phone.fill" : "phone.badge.waveform.fill"
-      )
-      .font(.callout)
-      Toggle(
-        "Allow speech during this call",
-        isOn: Binding(get: { speech.call.allowSpeech }, set: { speech.allowDuringCall($0) })
-      )
-      .toggleStyle(.switch)
-      .controlSize(.small)
-      .help("Resets when the call ends")
-      Text(speech.call.inUse.joined(separator: ", ")).font(.subheadline).foregroundStyle(.tertiary).lineLimit(2)
+    Toggle(isOn: Binding(get: { speech.call.allowSpeech }, set: { speech.allowDuringCall($0) })) {
+      Label {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Allow Speech During This Call")
+          Text(
+            speech.call.allowSpeech
+              ? "In a call: speech allowed until it ends"
+              : "In a call: speech held, banners only"
+          )
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          if !speech.call.inUse.isEmpty {
+            Text(speech.call.inUse.joined(separator: ", ")).font(.subheadline).foregroundStyle(.tertiary).lineLimit(2)
+          }
+        }
+      } icon: {
+        Image(systemName: speech.call.allowSpeech ? "phone.fill" : "phone.badge.waveform.fill")
+      }
     }
+    .toggleStyle(.switch)
+    .controlSize(.small)
+    .help("Resets when the call ends")
   }
 }
 
@@ -100,20 +120,22 @@ private struct MuteRow: View {
   let now: Date
 
   var body: some View {
-    HStack(alignment: .firstTextBaseline) {
-      if let mute = speech.mutes.all(now: now) {
-        Label("Speech muted \(SpeechText.until(mute.until))", systemImage: "speaker.slash.fill").font(.callout)
-        Spacer()
+    if let mute = speech.mutes.all(now: now) {
+      LabeledContent {
         Button("Unmute") { speech.unmuteAll() }.controlSize(.small)
-      } else {
-        Label("Speech on", systemImage: "speaker.wave.2").font(.callout)
-        Spacer()
-        Menu("Mute speech") {
+      } label: {
+        Label("Speech muted \(SpeechText.until(mute.until))", systemImage: "speaker.slash.fill")
+      }
+    } else {
+      LabeledContent {
+        Menu("Mute") {
           ForEach(Until.presets) { until in Button(until.label) { speech.muteAll(until, now: .now) } }
         }
         .fixedSize()
         .controlSize(.small)
-        .help("Speech only: banners still show")
+        .help("Mute speech; banners still show")
+      } label: {
+        Label("Speech on", systemImage: "speaker.wave.2")
       }
     }
   }

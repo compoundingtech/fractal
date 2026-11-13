@@ -3,16 +3,18 @@ import AttentionCore
 import SwiftUI
 
 extension EnvironmentValues {
-  /// Snapshot verification shows every card's answer controls without hovering.
-  @Entry var revealControls = false
   /// The scrolling body's height limit; snapshots lift it to render every section.
-  @Entry var panelMaxHeight: CGFloat = 620
+  @Entry public var panelMaxHeight: CGFloat = 620
 }
 
+/// The menu-bar panel. It draws no background of its own: the menu-bar window's material is the
+/// surface, and grouped form sections sit on it as the content layer.
 public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
-  @Environment(\.panelMaxHeight) private var maxHeight
+  @Environment(\.trayDesign) private var design
+  @State private var chosenDetail: StatusDetail?
+  @State private var detailTouched = false
 
   public init(model: AttentionModel, build: BuildIdentity) {
     self.model = model
@@ -21,615 +23,431 @@ public struct TrayPanel: View {
 
   public var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HeaderView(model: model)
-      Divider()
+      PanelHeader(model: model, build: build, detail: detail)
       if let message = model.configurationError {
-        ConfigurationErrorView(message: message)
+        PanelForm { ConfigurationSection(message: message) }
       } else {
-        ScrollView {
-          VStack(alignment: .leading, spacing: 18) {
-            AsksSection(model: model)
-            if !model.updates.isEmpty { UpdatesSection(model: model) }
-            if let speech = model.speech { SpeechControlsSection(speech: speech) }
-            AvailabilitySection(model: model)
-            SloSection(model: model)
+        PanelBody(model: model, detail: detail)
+      }
+      if design.header != .h2 { PanelFooter(build: build) }
+    }
+    .frame(width: PanelMetrics.width)
+    // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
+    .controlSize(.regular)
+  }
+
+  /// The status chip expanded in place. Until the person picks one, the inbox-first layout opens
+  /// objectives that need attention below the inbox (other layouts show them in their own place;
+  /// `H1` would push the inbox down).
+  private var detail: Binding<StatusDetail?> {
+    Binding(
+      get: {
+        if detailTouched { return chosenDetail }
+        let opensObjectives = design.layout == .l1 && design.header != .h1 && (model.sloBoard?.needsAttention ?? 0) > 0
+        return opensObjectives ? .objectives : nil
+      },
+      set: {
+        chosenDetail = $0
+        detailTouched = true
+      })
+  }
+}
+
+enum PanelMetrics {
+  static let width: CGFloat = 400
+  /// The grouped Form's content inset (card margin plus row padding): header, status strip and
+  /// footer share the leading edge of section headers and row symbols.
+  static let inset: CGFloat = 30
+}
+
+/// What a status chip expands in place, below the chips, inside the same Form.
+enum StatusDetail: Hashable {
+  case connection, availability, objectives
+}
+
+// MARK: - Body layouts
+
+private struct PanelBody: View {
+  let model: AttentionModel
+  let detail: Binding<StatusDetail?>
+  @Environment(\.trayDesign) private var design
+  @Environment(\.trayInitialPage) private var initialPage
+  @State private var page: TrayDesign.Page?
+
+  var body: some View {
+    switch design.layout {
+    case .l1:
+      PanelForm {
+        headerDetail
+        inbox
+        if design.header != .h1 {
+          Section {
+          } header: {
+            StatusStrip(model: model, showsConnection: false, detail: detail)
           }
-          .padding(.horizontal, 14)
-          .padding(.vertical, 12)
-        }
-        .frame(maxHeight: maxHeight)
-        .fixedSize(horizontal: false, vertical: true)
-      }
-      Divider()
-      FooterView(build: build)
-    }
-    .frame(width: 400)
-  }
-}
-
-private struct HeaderView: View {
-  let model: AttentionModel
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 8) {
-      Text("Attention").font(.system(size: 13, weight: .semibold))
-      ConnectionStatusView(connection: model.connection)
-      Spacer(minLength: 8)
-      Button {
-        Task { await model.refresh() }
-      } label: {
-        if model.isRefreshing {
-          ProgressView().controlSize(.small).accessibilityLabel("Refreshing")
-        } else {
-          Label("Refresh", systemImage: "arrow.clockwise")
+          DetailSections(model: model, detail: detail.wrappedValue)
         }
       }
-      .buttonStyle(.borderless)
-      .controlSize(.small)
-      .keyboardShortcut("r", modifiers: .command)
-      .disabled(model.isRefreshing || model.configurationError != nil)
-      .help(model.configurationError != nil ? "Configure AttentionTray to enable refresh" : "Refresh now (⌘R)")
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 10)
-  }
-}
-
-/// Connection and freshness. State is always carried by text + symbol, never color alone.
-private struct ConnectionStatusView: View {
-  let connection: ConnectionState
-
-  var body: some View {
-    HStack(spacing: 4) {
-      Image(systemName: symbol).foregroundStyle(tint)
-      switch connection {
-      case .unconfigured: Text("Not configured")
-      case .loading: Text("Connecting…")
-      case .fresh(let date): RelativeTime(date: date, prefix: "Updated")
-      case .stale(let last?, _): RelativeTime(date: last, prefix: "Stale · last update")
-      case .stale(nil, _): Text("Offline · never connected")
+    case .l2:
+      let selection = Binding(get: { page ?? initialPage }, set: { page = $0 })
+      VStack(spacing: 0) {
+        Picker("Page", selection: selection) {
+          Text(model.openAskCount > 0 ? "Inbox \(model.openAskCount)" : "Inbox").tag(TrayDesign.Page.inbox)
+          Text("Availability").tag(TrayDesign.Page.availability)
+          Text(objectivesTab).tag(TrayDesign.Page.objectives)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, PanelMetrics.inset)
+        .padding(.bottom, 2)
+        PanelForm {
+          headerDetail
+          switch selection.wrappedValue {
+          case .inbox: inbox
+          case .availability: AvailabilitySection(model: model)
+          case .objectives: ObjectivesSection(model: model)
+          }
+        }
+      }
+    case .l3:
+      PanelForm {
+        headerDetail
+        inbox
+        AvailabilitySection(model: model)
+        ObjectivesSection(model: model)
       }
     }
-    .font(.system(size: 11))
-    .foregroundStyle(.secondary)
-    .lineLimit(1)
-    .help(helpText)
-    .accessibilityElement(children: .combine)
   }
 
-  private var symbol: String {
-    switch connection {
-    case .unconfigured: "exclamationmark.triangle.fill"
-    case .loading: "circle.dotted"
-    case .fresh: "checkmark.circle.fill"
-    case .stale: "exclamationmark.circle.fill"
-    }
+  /// `H1` keeps its chips in the header: what they expand opens at the top of the body.
+  @ViewBuilder private var headerDetail: some View {
+    if design.header == .h1 { DetailSections(model: model, detail: detail.wrappedValue) }
   }
 
-  private var tint: Color {
-    switch connection {
-    case .unconfigured: .red
-    case .loading: .secondary
-    case .fresh: .green
-    case .stale: .orange
-    }
+  @ViewBuilder private var inbox: some View {
+    AsksSection(model: model)
+    if !model.updates.isEmpty { UpdatesSection(model: model) }
+    if let speech = model.speech { SpeechControlsSection(speech: speech) }
   }
 
-  private var helpText: String {
-    switch connection {
-    case .unconfigured(let message): message
-    case .loading: "Loading asks and objectives"
-    case .fresh(let date): "Last refreshed \(Absolute.text(date))"
-    case .stale(_, let reason): "Refresh failed: \(reason)"
-    }
+  private var objectivesTab: String {
+    let count = model.sloBoard?.needsAttention ?? 0
+    return count > 0 ? "Objectives \(count)" : "Objectives"
   }
 }
 
-private struct ConfigurationErrorView: View {
-  let message: String
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Label("Configuration needed", systemImage: "exclamationmark.triangle.fill")
-        .font(.system(size: 12.5, weight: .semibold))
-        .foregroundStyle(.red)
-      Text(message)
-        .font(.system(size: 12))
-        .fixedSize(horizontal: false, vertical: true)
-        .textSelection(.enabled)
-      Text(
-        "Set ATTENTION_FRACTAL_SOCKET, ATTENTION_FRACTAL_PERSON and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
-      )
-      .font(.system(size: 11))
-      .foregroundStyle(.secondary)
-      .fixedSize(horizontal: false, vertical: true)
-      .textSelection(.enabled)
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
-    .frame(maxWidth: .infinity, alignment: .leading)
-  }
-}
-
-// MARK: - Asks
-
-private struct AsksSection: View {
+/// The sections a status chip expands.
+private struct DetailSections: View {
   let model: AttentionModel
+  let detail: StatusDetail?
 
   var body: some View {
-    let asks = model.asks
-    VStack(alignment: .leading, spacing: 8) {
-      SectionTitle(title: "Asks", aside: "\(asks.count)")
-      SectionFailure(state: model.attention.state)
-      if !model.canAnswer, model.attention.value != nil,
-        asks.contains(where: { $0.role == .ask(.native) })
-      {
-        Note(
-          symbol: "lock",
-          text: "This session may only read (no work.done grant). Answer in Fractal.")
-      }
-      if asks.isEmpty {
-        Text(model.attention.value == nil ? "Loading…" : "Nothing needs you right now.")
-          .font(.system(size: 12))
-          .foregroundStyle(.tertiary)
+    switch detail {
+    case .connection: ConnectionSection(model: model)
+    case .availability: AvailabilitySection(model: model)
+    case .objectives: ObjectivesSection(model: model)
+    case nil: EmptyView()
+    }
+  }
+}
+
+/// A grouped section; in the collapsible layout (`L3`) its header toggles it and shows the
+/// summary while it is closed.
+struct PanelSection<Content: View, Footer: View>: View {
+  let title: String
+  var aside: String?
+  var startsOpen = true
+  @ViewBuilder let content: () -> Content
+  @ViewBuilder let footer: () -> Footer
+  @Environment(\.trayDesign) private var design
+  @State private var open: Bool?
+
+  var body: some View {
+    let collapsible = design.layout == .l3
+    let isOpen = !collapsible || (open ?? startsOpen)
+    Section {
+      if isOpen { content() }
+    } header: {
+      if collapsible {
+        Button {
+          withAnimation(.snappy) { open = !isOpen }
+        } label: {
+          HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+              .font(.caption.weight(.semibold))
+              .foregroundStyle(.secondary)
+              .rotationEffect(.degrees(isOpen ? 90 : 0))
+            SectionHeader(title: title, aside: aside)
+          }
+          .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isOpen ? "Expanded" : "Collapsed")
       } else {
-        ForEach(asks) { AskCard(record: $0, model: model) }
+        SectionHeader(title: title, aside: aside)
       }
-    }
-  }
-}
-
-private struct AskCard: View {
-  let record: AttentionRecord
-  let model: AttentionModel
-  @Environment(\.revealControls) private var revealAll
-  @State private var hovered = false
-  @State private var words = ""
-  @State private var selected: String?
-  @FocusState private var editing: Bool
-
-  private var choices: [AnswerChoice] { AnswerChoice.choices(for: record) }
-  private var state: AnswerState? { model.answers[record.id] }
-  private var sending: Bool { if case .sending = state { true } else { false } }
-  private var committed: Bool { if case .committed = state { true } else { false } }
-  private var native: Bool { record.role == .ask(.native) && model.canAnswer }
-  private var revealed: Bool {
-    revealAll || hovered || editing || !words.isEmpty || selected != nil || state != nil
-  }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text(record.title)
-        .font(.system(size: 12.5, weight: .semibold))
-        .fixedSize(horizontal: false, vertical: true)
-      if !record.detail.isEmpty, record.detail != record.title {
-        Text(record.detail)
-          .font(.system(size: 11.5))
+    } footer: {
+      // Metadata (when it was measured, presence): quieter than the header's own summary.
+      if isOpen {
+        footer()
+          .font(.subheadline)
           .foregroundStyle(.secondary)
-          .lineLimit(revealed ? 12 : 2)
-          .textSelection(.enabled)
-      }
-      CardMeta(record: record)
-      if revealed && !committed {
-        if native { answerControls } else { inFractalControls }
-      }
-      if let state { AnswerStatusView(state: state) }
-      if let speech = model.speech?.status[record.id] { SpeechStatusView(status: speech) }
-    }
-    .card()
-    .onHover { hovered = $0 }
-    .accessibilityElement(children: .contain)
-  }
-
-  @ViewBuilder private var answerControls: some View {
-    let options = choices.filter(\.isOption)
-    if !options.isEmpty {
-      ViewThatFits(in: .horizontal) {
-        HStack(spacing: 6) { optionButtons(options) }
-        VStack(alignment: .leading, spacing: 4) { optionButtons(options) }
+          .frame(maxWidth: .infinity, alignment: .leading)
       }
     }
-    if choices.contains(where: { $0.words != .none }) {
-      HStack(alignment: .bottom, spacing: 6) {
-        TextField(placeholder, text: $words, axis: .vertical)
-          .textFieldStyle(.roundedBorder)
-          .lineLimit(1...5)
-          .font(.system(size: 12))
-          .focused($editing)
-          .onSubmit(sendWords)
-        // Return in the focused field sends (onSubmit); no window-wide shortcut, which
-        // several revealed cards would share.
-        Button("Send", action: sendWords)
-          .disabled(sending || !AnswerChoice.canSend(effective, words: words))
-          .help(effective.map { "Send as “\($0.label)”" } ?? "Write an answer first")
-      }
-      .controlSize(.small)
-    }
-    HStack(spacing: 12) {
-      if let nothing = choices.first(where: { $0.kind == .nothing }) {
-        Button(nothing.label) { send(nothing) }
-          .disabled(sending || !words.isEmpty)
-          .help(AnswerWords.nothing)
-      }
-      ReadAloudButton(record: record, model: model)
-      Spacer()
-      Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
-    }
-    .buttonStyle(.borderless)
-    .controlSize(.small)
-    .font(.system(size: 11))
-  }
-
-  @ViewBuilder private func optionButtons(_ options: [AnswerChoice]) -> some View {
-    ForEach(options) { choice in
-      Button {
-        if choice.words == .required && words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          selected = choice.id
-          editing = true
-        } else {
-          send(choice)
-        }
-      } label: {
-        Text(choice.recommended ? "\(choice.label) ★" : choice.label)
-          .foregroundStyle(choice.tone == .danger ? Color.red : Color.primary)
-      }
-      .buttonStyle(.bordered)
-      .controlSize(.small)
-      .tint(choice.tone == .primary ? .accentColor : nil)
-      .disabled(sending || (choice.words == .none && !words.isEmpty))
-      .help(
-        [choice.consequence, choice.recommended ? "Recommended" : nil,
-          choice.words == .none && !words.isEmpty ? "Clear your text to pick this answer" : nil]
-          .compactMap { $0 }.joined(separator: "\n"))
-    }
-  }
-
-  private var inFractalControls: some View {
-    HStack(spacing: 12) {
-      Link("Answer in Fractal", destination: record.url).help(record.url.absoluteString)
-      ReadAloudButton(record: record, model: model)
-      Spacer()
-    }
-    .buttonStyle(.borderless)
-    .controlSize(.small)
-    .font(.system(size: 11.5))
-  }
-
-  private var effective: AnswerChoice? { AnswerChoice.effective(choices, selected: selected, words: words) }
-
-  private var placeholder: String {
-    let changes = choices.first { choice in
-      if case .named = choice.kind { choice.words == .required } else { false }
-    }
-    if let changes, selected == changes.id || !choices.contains(where: { $0.kind == .words }) {
-      return "What should change? (\(changes.label))"
-    }
-    return record.request?.type == "feedback" ? "Your feedback" : "Answer in your own words"
-  }
-
-  private func sendWords() {
-    guard let choice = effective, AnswerChoice.canSend(choice, words: words) else { return }
-    send(choice)
-  }
-
-  private func send(_ choice: AnswerChoice) {
-    guard !sending, let answer = choice.answer(words: words, request: record.request) else { return }
-    let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
-    let label = choice.kind == .words ? "“\(text)”" : text.isEmpty ? choice.label : "\(choice.label): “\(text)”"
-    Task { await model.answer(record, with: answer, label: label) }
   }
 }
 
-// MARK: - Updates
+extension PanelSection where Footer == EmptyView {
+  init(title: String, aside: String? = nil, startsOpen: Bool = true, @ViewBuilder content: @escaping () -> Content) {
+    self.init(title: title, aside: aside, startsOpen: startsOpen, content: content, footer: { EmptyView() })
+  }
+}
 
-private struct UpdatesSection: View {
+// MARK: - Header
+
+private struct PanelHeader: View {
   let model: AttentionModel
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      SectionTitle(title: "Updates", aside: "\(model.updates.count)")
-      ForEach(model.updates) { UpdateRow(record: $0, model: model) }
-    }
-  }
-}
-
-private struct UpdateRow: View {
-  let record: AttentionRecord
-  let model: AttentionModel
-  @Environment(\.revealControls) private var revealAll
-  @State private var hovered = false
-
-  private var state: AnswerState? { model.answers[record.id] }
-  private var settledOrSending: Bool {
-    switch state {
-    case .sending, .committed: true
-    case .refused, nil: false
-    }
-  }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Text(record.title)
-        .font(.system(size: 12, weight: .medium))
-        .fixedSize(horizontal: false, vertical: true)
-      if let summary = record.update?.summary ?? (record.detail.isEmpty ? nil : record.detail) {
-        Text(summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(hovered ? 8 : 2)
-      }
-      CardMeta(record: record)
-      if (revealAll || hovered) && !settledOrSending {
-        HStack(spacing: 12) {
-          if model.canAnswer {
-            Button("Mark read") {
-              Task { await model.answer(record, with: record.readAnswer, label: "Read") }
-            }
-            .help("Complete this update in Fractal; it leaves every client")
-          }
-          Spacer()
-          Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
-        }
-        .buttonStyle(.borderless)
-        .controlSize(.small)
-        .font(.system(size: 11))
-      }
-      if let state { AnswerStatusView(state: state) }
-    }
-    .card(subtle: true)
-    .onHover { hovered = $0 }
-  }
-}
-
-// MARK: - Shared card parts
-
-private struct CardMeta: View {
-  let record: AttentionRecord
-
-  var body: some View {
-    HStack(spacing: 4) {
-      Text(record.from).lineLimit(1).truncationMode(.middle)
-      if let asked = record.requestedAt {
-        Text("·")
-        RelativeTime(date: asked, prefix: "asked")
-      }
-      if let deadline = record.deadlineAt {
-        Text("·")
-        RelativeTime(date: deadline, prefix: "due")
-          .help(
-            "Answer by \(Absolute.text(deadline)), or "
-              + (record.defaultAnswerLabel.map { "“\($0)” applies" } ?? "it times out"))
-      }
-    }
-    .font(.system(size: 10.5))
-    .foregroundStyle(.tertiary)
-  }
-}
-
-private struct AnswerStatusView: View {
-  let state: AnswerState
+  let build: BuildIdentity
+  let detail: Binding<StatusDetail?>
+  @Environment(\.trayDesign) private var design
 
   var body: some View {
     Group {
-      switch state {
-      case .sending(let label):
-        HStack(spacing: 6) {
-          ProgressView().controlSize(.mini)
-          Text("Sending \(label)…")
+      switch design.header {
+      case .h1:
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(alignment: .firstTextBaseline) {
+            Text("Attention").font(.headline)
+            Spacer()
+            RefreshButton(model: model)
+          }
+          if model.configurationError == nil { StatusStrip(model: model, showsConnection: true, detail: detail) }
         }
-      case .committed(let label):
-        Label("Answered \(label) — committed in Fractal", systemImage: "checkmark.circle.fill")
-          .foregroundStyle(.green)
-      case .refused(let reason):
-        Label {
-          Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-        } icon: {
-          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+      case .h2:
+        HStack(alignment: .center, spacing: 8) {
+          titleAndFreshness
+          Spacer()
+          ControlGroup {
+            RefreshButton(model: model)
+            PanelMenu(build: build)
+          }
+          .fixedSize()
+        }
+      case .h3:
+        HStack(alignment: .center) {
+          titleAndFreshness
+          Spacer()
+          RefreshButton(model: model)
         }
       }
     }
-    .font(.system(size: 11))
+    .padding(.horizontal, PanelMetrics.inset)
+    .padding(.top, 14)
+    .padding(.bottom, 6)
+  }
+
+  private var titleAndFreshness: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text("Attention").font(.headline)
+      ConnectionStatusView(connection: model.connection)
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+    }
   }
 }
 
-// MARK: - Objectives
-
-private struct SloSection: View {
+private struct RefreshButton: View {
   let model: AttentionModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      let board = model.sloBoard
-      HStack(alignment: .firstTextBaseline) {
-        SectionTitle(
-          title: "Objectives",
-          aside: board.map { $0.needsAttention > 0 ? "\($0.needsAttention) need attention" : "all met" })
-      }
-      SectionFailure(state: model.slo.state)
-      if let board, let snapshot = model.slo.value {
-        ForEach(board.objectives) { SloRowView(entry: $0) }
-        if !board.unmeasured.isEmpty {
-          DisclosureGroup("\(board.unmeasured.count) not measured") {
-            ForEach(board.unmeasured) { SloRowView(entry: $0) }
-          }
-          .font(.system(size: 11))
-          .foregroundStyle(.secondary)
-        }
-        if !board.budgets.isEmpty {
-          SectionTitle(title: "Budgets").padding(.top, 4)
-          ForEach(board.budgets) { SloRowView(entry: $0) }
-        }
-        RelativeTime(date: snapshot.asOf, prefix: "measured")
-          .font(.system(size: 10.5))
-          .foregroundStyle(.tertiary)
-      } else if case .loading = model.slo.state {
-        Text("Loading…").font(.system(size: 12)).foregroundStyle(.tertiary)
+    Button {
+      Task { await model.refresh() }
+    } label: {
+      if model.isRefreshing {
+        ProgressView().controlSize(.small).accessibilityLabel("Refreshing")
+      } else {
+        Label("Refresh", systemImage: "arrow.clockwise")
       }
     }
+    .labelStyle(.iconOnly)
+    .buttonStyle(.borderless)
+    .keyboardShortcut("r", modifiers: .command)
+    .disabled(model.isRefreshing || model.configurationError != nil)
+    .help(model.configurationError != nil ? "Configure AttentionTray to enable refresh" : "Refresh now (⌘R)")
   }
 }
 
-private struct SloRowView: View {
-  let entry: SloEntry
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 6) {
-      Image(systemName: symbol)
-        .foregroundStyle(tint)
-        .font(.system(size: 10))
-        .accessibilityLabel(entry.status)
-      VStack(alignment: .leading, spacing: 1) {
-        HStack(alignment: .firstTextBaseline) {
-          Text(entry.id)
-            .font(.system(size: 11.5, weight: entry.tone == .red ? .semibold : .regular, design: .monospaced))
-            .lineLimit(1)
-            .truncationMode(.middle)
-          Spacer(minLength: 6)
-          Text(entry.current)
-            .font(.system(size: 11))
-            .foregroundStyle(entry.tone == .red ? .primary : .secondary)
-            .lineLimit(1)
-        }
-        HStack(spacing: 4) {
-          Text(entry.kind == .budget ? entry.window : "\(entry.target) · \(entry.window)").lineLimit(1)
-          if let percent = entry.remainingPercent {
-            Text("· \(percent.formatted(.number.precision(.fractionLength(0))))% left")
-          }
-          if let runsOut = entry.runsOutAt {
-            Text("·")
-            RelativeTime(date: runsOut, prefix: "runs out")
-          } else if let resets = entry.resetsAt {
-            Text("·")
-            RelativeTime(date: resets, prefix: "resets")
-          }
-        }
-        .font(.system(size: 10.5))
-        .foregroundStyle(.tertiary)
-      }
-    }
-    .padding(.vertical, 2)
-    .help(entry.explain.isEmpty ? entry.about : entry.explain)
-    .accessibilityElement(children: .combine)
-  }
-
-  private var symbol: String {
-    switch entry.tone {
-    case .red: "xmark.octagon.fill"
-    case .yellow: "exclamationmark.circle.fill"
-    case .green: "checkmark.circle.fill"
-    case .quiet: "circle.dotted"
-    }
-  }
-
-  private var tint: Color {
-    switch entry.tone {
-    case .red: .red
-    case .yellow: .orange
-    case .green: .green
-    case .quiet: .secondary
-    }
-  }
-}
-
-// MARK: - Shared
-
-/// Relative time that stays current, with the absolute time on hover.
-struct RelativeTime: View {
-  let date: Date
-  var prefix: String?
-
-  var body: some View {
-    TimelineView(.periodic(from: .now, by: 30)) { context in
-      Text([prefix, Self.relative(date, now: context.date)].compactMap { $0 }.joined(separator: " "))
-        .help(Absolute.text(date))
-    }
-  }
-
-  static func relative(_ date: Date, now: Date) -> String {
-    if abs(now.timeIntervalSince(date)) < 10 { return "just now" }
-    return date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
-  }
-}
-
-private enum Absolute {
-  static func text(_ date: Date) -> String { date.formatted(date: .abbreviated, time: .standard) }
-}
-
-/// A section's own failure: it keeps showing its last data, and never blanks the others.
-struct SectionFailure: View {
-  let state: ConnectionState
-
-  var body: some View {
-    if case .stale(let last, let reason) = state {
-      Label {
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Refresh failed: \(reason)").fixedSize(horizontal: false, vertical: true)
-          if let last { RelativeTime(date: last, prefix: "Showing data from") }
-        }
-      } icon: {
-        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
-      }
-      .font(.system(size: 11))
-      .foregroundStyle(.secondary)
-      .lineLimit(4)
-      .textSelection(.enabled)
-    }
-  }
-}
-
-private struct Note: View {
-  let symbol: String
-  let text: String
-
-  var body: some View {
-    Label(text, systemImage: symbol)
-      .font(.system(size: 11))
-      .foregroundStyle(.secondary)
-      .fixedSize(horizontal: false, vertical: true)
-  }
-}
-
-struct SectionTitle: View {
-  let title: String
-  var aside: String?
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline) {
-      Text(title.uppercased())
-        .font(.system(size: 10.5, weight: .semibold))
-        .kerning(0.2)
-        .foregroundStyle(.secondary)
-        .accessibilityAddTraits(.isHeader)
-      Spacer()
-      if let aside {
-        Text(aside).font(.system(size: 10.5)).monospacedDigit().foregroundStyle(.tertiary)
-      }
-    }
-  }
-}
-
-extension View {
-  func card(subtle: Bool = false) -> some View {
-    padding(10)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(subtle ? 0.25 : 0.5)))
-  }
-}
-
-private struct FooterView: View {
+/// `H2`: the footer's version, Settings and Quit, as a menu.
+private struct PanelMenu: View {
   let build: BuildIdentity
 
   var body: some View {
-    HStack {
+    Menu {
+      Button("Copy Version \(build.machineVersion)") {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(build.machineVersion, forType: .string)
+      }
+      .help(build.details)
+      Divider()
+      SettingsButton()
+      Button("Quit AttentionTray") { NSApp.terminate(nil) }
+        .keyboardShortcut("q", modifiers: .command)
+    } label: {
+      Label("More", systemImage: "ellipsis")
+    }
+    .labelStyle(.iconOnly)
+    .menuIndicator(.hidden)
+    .help("Version, Settings and Quit")
+  }
+}
+
+// MARK: - Status strip
+
+/// Availability, objectives and (in the `H1` header) connection as toggle chips. A chip shows
+/// its summary and expands its full section in place, one at a time, like a Control Center
+/// module; never a popover from the panel.
+private struct StatusStrip: View {
+  let model: AttentionModel
+  let showsConnection: Bool
+  let detail: Binding<StatusDetail?>
+
+  var body: some View {
+    // Chips keep their full summary: when one row is too narrow, the connection takes its own.
+    ViewThatFits(in: .horizontal) {
+      HStack(spacing: 6) {
+        connection
+        summaries
+        Spacer(minLength: 0)
+      }
+      VStack(alignment: .leading, spacing: 6) {
+        connection
+        HStack(spacing: 6) { summaries }
+      }
+      VStack(alignment: .leading, spacing: 6) {
+        connection
+        summaries
+      }
+    }
+    .lineLimit(1)
+    .textCase(nil)
+    .padding(.bottom, 6)
+  }
+
+  @ViewBuilder private var connection: some View {
+    if showsConnection {
+      StatusChip(id: .connection, help: "Connection", detail: detail) {
+        ConnectionStatusView(connection: model.connection)
+      }
+    }
+  }
+
+  @ViewBuilder private var summaries: some View {
+    if let availability = model.availability.value?.availability {
+      StatusChip(id: .availability, help: "Availability", detail: detail) {
+        Label(AvailabilitySection.summary(availability), systemImage: AxisRows.symbol(availability.status))
+      }
+    }
+    if let board = model.sloBoard {
+      StatusChip(id: .objectives, help: "Objectives", detail: detail) {
+        Label(
+          board.needsAttention > 0 ? "\(board.needsAttention) need attention" : "Objectives met",
+          systemImage: board.needsAttention > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle")
+      }
+    }
+  }
+}
+
+private struct StatusChip<Title: View>: View {
+  let id: StatusDetail
+  let help: String
+  let detail: Binding<StatusDetail?>
+  @ViewBuilder let title: () -> Title
+
+  var body: some View {
+    Toggle(isOn: Binding(get: { detail.wrappedValue == id }, set: { detail.wrappedValue = $0 ? id : nil })) {
+      title()
+    }
+    .toggleStyle(.button)
+    .buttonBorderShape(.capsule)
+    .controlSize(.small)
+    .fixedSize()
+    .help("\(help): show or hide its section")
+  }
+}
+
+private struct ConnectionSection: View {
+  let model: AttentionModel
+
+  var body: some View {
+    Section {
+      ConnectionStatusView(connection: model.connection)
+      SectionFailure(state: model.connection)
+    } header: {
+      SectionHeader(title: "Connection")
+    }
+  }
+}
+
+// MARK: - Configuration and footer
+
+private struct ConfigurationSection: View {
+  let message: String
+
+  var body: some View {
+    Section {
+      Label {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Configuration needed").fontWeight(.semibold)
+          Text(message).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+          Text(
+            "Set ATTENTION_FRACTAL_SOCKET, ATTENTION_FRACTAL_PERSON and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
+          )
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+          .textSelection(.enabled)
+        }
+      } icon: {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+      }
+    }
+  }
+}
+
+private struct PanelFooter: View {
+  let build: BuildIdentity
+
+  var body: some View {
+    HStack(spacing: 12) {
       Text(build.machineVersion)
-        .font(.system(size: 10.5, design: .monospaced))
+        .font(.footnote.monospaced())
         .foregroundStyle(.tertiary)
         .textSelection(.enabled)
         .help(build.details)
       Spacer()
+      SettingsButton()
       Button("Quit AttentionTray") { NSApp.terminate(nil) }
-        .buttonStyle(.borderless)
         .keyboardShortcut("q", modifiers: .command)
     }
-    .font(.system(size: 11))
-    .padding(.horizontal, 14)
-    .padding(.vertical, 8)
+    .buttonStyle(.borderless)
+    .font(.callout)
+    .padding(.horizontal, PanelMetrics.inset)
+    .padding(.top, 4)
+    .padding(.bottom, 12)
+  }
+}
+
+/// Opens the Settings window (whether the status item shows in the menu bar). The tray is an
+/// accessory app, so it comes forward first.
+private struct SettingsButton: View {
+  @Environment(\.openSettings) private var openSettings
+
+  var body: some View {
+    Button("Settings…") {
+      NSApp.activate()
+      openSettings()
+    }
+    .keyboardShortcut(",", modifiers: .command)
   }
 }

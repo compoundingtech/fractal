@@ -68,8 +68,7 @@ let speechScenarios: [Scenario] = [
   Scenario(
     id: "speech-speaking", title: "Speaking",
     description:
-      "A critical ask is being read aloud with Stop and Mute this agent; a second waits in the queue with Skip.",
-    reveal: false
+      "A critical ask is being read aloud with Stop and Mute this agent; a second waits in the queue with Skip."
   ) { now in
     let content = SpeechContent(now: now)
     let (model, _) = speechModel([content.rollback, content.diskFull], content)
@@ -79,8 +78,7 @@ let speechScenarios: [Scenario] = [
   Scenario(
     id: "speech-in-call", title: "In a call",
     description:
-      "The microphone and camera are in use: a critical ask shows as a banner but is not spoken; the person may allow speech for this call.",
-    reveal: false
+      "The microphone and camera are in use: a critical ask shows as a banner but is not spoken; the person may allow speech for this call."
   ) { now in
     let content = SpeechContent(now: now)
     let (model, speech) = speechModel([content.rollback], content)
@@ -90,8 +88,7 @@ let speechScenarios: [Scenario] = [
   },
   Scenario(
     id: "speech-muted", title: "Speech muted",
-    description: "Speech muted for an hour and one agent muted for today: critical asks still show as banners.",
-    reveal: false
+    description: "Speech muted for an hour and one agent muted for today: critical asks still show as banners."
   ) { now in
     let content = SpeechContent(now: now)
     let (model, speech) = speechModel([content.rollback], content)
