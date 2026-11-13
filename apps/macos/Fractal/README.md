@@ -254,15 +254,15 @@ the source rev. It needs a Mac with a login session and has these outputs:
   `--capture` (`--only <text>`). The guest never draws a host window:
   tart runs with `--no-graphics` and `CI=1` (without them it opens Screen
   Sharing on the host's display). `capture-vm.sh provision` prepares a host
-  once (about a minute, plus a first pull of ~25 GB): it clones the newest
-  guest the host can run (`ATTENTION_TRAY_CAPTURE_IMAGE` overrides; macOS 27
-  guests need a host on 26.6.2 or later), refuses to cross the host's
-  reclaim-disk floor (a guest takes about 30 GB), installs an SSH key and
-  grants Screen Recording to `sshd-keygen-wrapper` through the guest's System
-  Settings over the VM's loopback VNC, since neither SIP nor macOS 27 lets
-  anything grant it programmatically. The guest's macOS is the captures'
-  macOS: `capture.json` records it, so a 26.x guest shows macOS 26 glass, not
-  macOS 27's.
+  once (a few minutes, plus a first pull of ~30 GB): it clones the macOS 27.0
+  guest `ghcr.io/cirruslabs/macos-golden-gate-vanilla:27.0`, which needs a host
+  on macOS 26.6.2 or later (`ATTENTION_TRAY_CAPTURE_IMAGE` names another tart
+  image), refuses to cross the host's reclaim-disk floor (a guest takes about
+  35 GB), installs an SSH key and grants Screen Recording to
+  `sshd-keygen-wrapper` through the guest's System Settings over the VM's
+  loopback VNC, since neither SIP nor macOS 27 lets anything grant it
+  programmatically. The guest's macOS is the captures' macOS: `capture.json`
+  records it.
 
 ## review-host rollout: root agent and Ada only
 

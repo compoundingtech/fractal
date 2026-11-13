@@ -89,8 +89,9 @@ stop_if_started() {
   if ((started)) && [[ -z ${ATTENTION_TRAY_CAPTURE_KEEP:-} ]]; then ./tart/bin/tart stop "$vm" >/dev/null; fi
 }
 
-# The guest macOS: the newest the host can run (Virtualization.framework runs macOS 27 guests on
-# hosts from 26.6.2), unless ATTENTION_TRAY_CAPTURE_IMAGE names one.
+# The guest macOS: 27.0 like the Macs the tray ships to, so captures show macOS 27's glass.
+# Virtualization.framework runs macOS 27 guests on hosts from 26.6.2. ATTENTION_TRAY_CAPTURE_IMAGE
+# names another tart image (for example ghcr.io/cirruslabs/macos-tahoe-vanilla:26.5 on an older host).
 image() {
   if [[ -n ${ATTENTION_TRAY_CAPTURE_IMAGE:-} ]]; then
     echo "$ATTENTION_TRAY_CAPTURE_IMAGE"
@@ -98,11 +99,9 @@ image() {
   fi
   local major minor patch
   IFS=. read -r major minor patch _ <<<"$(sw_vers -productVersion).0.0"
-  if ((major >= 27 || (major == 26 && (minor > 6 || (minor == 6 && patch >= 2))))); then
-    echo ghcr.io/cirruslabs/macos-golden-gate-vanilla:27.0
-  else
-    echo "ghcr.io/cirruslabs/macos-tahoe-vanilla:$major.$minor"
-  fi
+  ((major >= 27 || (major == 26 && (minor > 6 || (minor == 6 && patch >= 2))))) ||
+    die "macOS $(sw_vers -productVersion) on $(hostname -s) cannot run the macOS 27 guest (needs 26.6.2 or later); update it or set ATTENTION_TRAY_CAPTURE_IMAGE"
+  echo ghcr.io/cirruslabs/macos-golden-gate-vanilla:27.0
 }
 
 host_provision() {
