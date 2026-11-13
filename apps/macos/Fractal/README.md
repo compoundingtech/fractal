@@ -223,7 +223,7 @@ The panel's views live in the `TrayViews` target and read only `AttentionCore`.
 answering, quiet, read-only, degraded, unconfigured; speech: speaking, in a
 call, muted) for the design Storybook in `design/`, from the Nix-built gallery
 (`nix run ./flakes/attention-tray#gallery -- <dir> …`). Every manifest records
-the source rev. It needs a Mac with a login session and has two outputs:
+the source rev. It needs a Mac with a login session and has these outputs:
 
 - `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
   as `@2x` PNGs, and the status item in every state, plus `manifest.json`,
@@ -245,6 +245,24 @@ the source rev. It needs a Mac with a login session and has two outputs:
   input, and need Screen Recording for the terminal they run from (System
   Settings › Privacy & Security › Screen & System Audio Recording).
   `--only <text>` redoes the captures whose file name contains it.
+- `devenv tasks run attention-tray:gallery-capture-vm`: the same captures with
+  nobody's screen involved. `scripts/capture-vm.sh` builds the gallery here and
+  runs `--capture` inside a headless macOS VM (tart, Virtualization.framework,
+  paravirtualized GPU: Liquid Glass and materials render as on a Mac) on
+  `ATTENTION_TRAY_CAPTURE_HOST` (an SSH host, default `review-host`, or `local`),
+  then writes `renders/capture/` and `capture.json`; extra arguments go to
+  `--capture` (`--only <text>`). The guest never draws a host window:
+  tart runs with `--no-graphics` and `CI=1` (without them it opens Screen
+  Sharing on the host's display). `capture-vm.sh provision` prepares a host
+  once (about a minute, plus a first pull of ~25 GB): it clones the newest
+  guest the host can run (`ATTENTION_TRAY_CAPTURE_IMAGE` overrides; macOS 27
+  guests need a host on 26.6.2 or later), refuses to cross the host's
+  reclaim-disk floor (a guest takes about 30 GB), installs an SSH key and
+  grants Screen Recording to `sshd-keygen-wrapper` through the guest's System
+  Settings over the VM's loopback VNC, since neither SIP nor macOS 27 lets
+  anything grant it programmatically. The guest's macOS is the captures'
+  macOS: `capture.json` records it, so a 26.x guest shows macOS 26 glass, not
+  macOS 27's.
 
 ## review-host rollout: root agent and Ada only
 

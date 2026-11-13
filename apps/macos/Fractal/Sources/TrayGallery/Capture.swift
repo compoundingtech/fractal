@@ -49,7 +49,8 @@ struct CaptureManifest: Encodable {
   }
 
   let generator = "TrayGallery --capture"
-  let command = "devenv tasks run attention-tray:gallery-capture"
+  /// How to regenerate: the headless VM run touches nobody's screen (README.md, Design gallery).
+  let command = "devenv tasks run attention-tray:gallery-capture-vm"
   let source = "ScreenCaptureKit, real menu-bar window and status item"
   let trayRev: String?
   let system: String

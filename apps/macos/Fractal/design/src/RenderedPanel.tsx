@@ -77,6 +77,10 @@ export const RenderFigure = ({ image, title, appearance, missing }: RenderFigure
             {sourceLabel[image.source]}
           </span>
         )}
+        {/* Glass differs between macOS releases: a capture says which one drew it. */}
+        {image?.source === 'capture' && captureManifest !== undefined ? (
+          <span>{captureManifest.system.replace(/^Version /, 'macOS ')}</span>
+        ) : null}
         <span>{rev ?? 'unversioned source'}</span>
       </figcaption>
     </figure>
