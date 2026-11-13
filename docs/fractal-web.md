@@ -839,16 +839,20 @@ the `write.availability` or `write.notes` scope must be paired again.
 
 The page reports the browser's raw presence state for as long as it lives
 (`POST /v1/client/presence`; the daemon assigns the pairing as the source and derives presence
-from the state). The state is `active` while any tab of the app is visible and focused, and
-`inactive` when every tab is hidden or blurred; a browser cannot see a locked screen or sleep,
-so it never reports `locked` or `sleeping`. `last_input_at` is the newest input (pointer, key,
-wheel or touch, or switching to a tab) in any tab. The page applies no idle threshold and sends
-no heartbeat: it reports every change of the state, again at the answer's `report_again_at`
-with the newest input, and, after a null `report_again_at`, on the first newer input while
-`active`. A drop to `inactive` waits a second, so a tab switch, which blurs one tab before
-focusing the next, stays `active`. A failed report is sent again a minute later. A refused
-report (no `write.presence` grant, or no person) stops reporting in every tab; a replay
-reports nothing.
+from the state). It starts only once the capabilities say the session may: `write.presence` is
+granted and the session actor is a person. A capabilities read that fails counts as no grant
+until the page loads again. The state is `active` while any tab of the app is visible and
+focused, and `inactive` when every tab is hidden or blurred; a browser cannot see a locked
+screen or sleep, so it never reports `locked` or `sleeping`. `last_input_at` is the newest input
+(pointer, key, wheel or touch, or switching to a tab) in any tab. The page applies no idle
+threshold and sends no heartbeat: it reports every change of the state, again at the answer's
+`report_again_at` with the newest input, and, after a null `report_again_at`, on the first newer
+input while `active`. A drop to `inactive` waits a second, so a tab switch, which blurs one tab
+before focusing the next, stays `active`. A failed report is sent again after a minute, then
+after two, four and eight, and then every fifteen minutes until one succeeds, which resets the
+wait. A refused report (403: no `write.presence` grant or no person; 404: a daemon without the
+route) stops reporting in every tab and releases the reporter role, so a tab loaded later, for
+example after pairing again, takes it up. A replay reports nothing.
 
 Every tab of the browser shares the pairing and so the one presence source, so exactly one tab
 reports. The reporter is whichever tab holds the `fractal.presence` Web Lock. The tabs tell each

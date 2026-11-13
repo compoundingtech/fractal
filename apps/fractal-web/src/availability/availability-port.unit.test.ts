@@ -73,6 +73,22 @@ describe('gatewayAvailability.reportPresence', () => {
     expect(await answering(null).reportPresence(report)).toEqual({ _tag: 'Sent', reportAgainAt: null })
     const failing = (error: Error) => gatewayAvailability({ presenceReport: async () => { throw error } } as unknown as FractalClient)
     expect(await failing(forbidden('the authenticated client session is not granted `write.presence`')).reportPresence(report)).toEqual({ _tag: 'Refused' })
+    // A daemon without the route refuses for good too, rather than being retried for the page's life.
+    const missing = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'not-found', message: 'no route', retryable: false, details: {} }, 404)
+    expect(await failing(missing).reportPresence(report)).toEqual({ _tag: 'Refused' })
     expect(await failing(new TypeError('Failed to fetch')).reportPresence(report)).toEqual({ _tag: 'Failed' })
+  })
+})
+
+describe('gatewayAvailability.mayReportPresence', () => {
+  const capabilities = (session_actor: string, state: string) => gatewayAvailability({
+    capabilities: async () => ({ snapshot, value: { session_actor, capabilities: [{ id: 'read.projections', state: 'granted', version: 1 }, { id: 'write.presence', state, version: 1 }] } }),
+  } as unknown as FractalClient)
+
+  it('allows a person session whose capabilities grant write.presence', async () => {
+    expect(await capabilities('person/robin', 'granted').mayReportPresence()).toBe(true)
+    expect(await capabilities('person/robin', 'ungranted').mayReportPresence()).toBe(false)
+    expect(await capabilities('agent/robin-helper', 'granted').mayReportPresence()).toBe(false)
+    expect(await gatewayAvailability({ capabilities: async () => { throw new TypeError('Failed to fetch') } } as unknown as FractalClient).mayReportPresence()).toBe(false)
   })
 })

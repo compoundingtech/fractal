@@ -8,8 +8,9 @@ import type { AvailabilityPort } from './availability-port.ts'
 export const SETTLE = 1_000
 /** A tab tells the others of newer input at most this often, so the reported `last_input_at` lags by at most this much. */
 export const SHARE_INPUT = 5_000
-/** A report that failed is sent again this much later. */
+/** A failed report is sent again after this long, doubling with each further failure up to `RETRY_MAX`. */
 export const RETRY = 60_000
+export const RETRY_MAX = 15 * 60_000
 /** The soonest a report repeats at `report_again_at`, so a skewed clock cannot turn it into a loop. */
 export const SOONEST = 5_000
 const INPUT = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'] as const
@@ -129,8 +130,10 @@ const iso = (at: number) => new Date(at).toISOString()
  * over the channel. It reports every change of that state, though a drop to `inactive` waits `SETTLE` so a tab
  * switch stays `active`. It reports again at the answer's `report_again_at` with the newest input, and after a null
  * one on the first newer input while active. A tab taking the role reports at once and asks the others for their
- * state, forgetting the previous holder and any tab that does not answer. A refusal (no `write.presence` grant, or
- * no person) stops every tab. Returns the stop, which hands the role on.
+ * state, forgetting the previous holder and any tab that does not answer. A failed report is retried with
+ * exponential backoff. A refusal (403: no `write.presence` grant or no person; 404: no such route) stops every tab
+ * and releases the role, so a tab loaded later, say after pairing again, takes it up. Returns the stop, which hands
+ * the role on.
  */
 export const startPresenceReports = (report: AvailabilityPort['reportPresence'], page: PresencePage = browserPage()): (() => void) => {
   const tab = Math.random().toString(36).slice(2)
@@ -149,6 +152,7 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
   let againAt: number | null | undefined
   let inFlight = false
   let pending = false
+  let failures = 0
   let answered: Set<string> | undefined
   let againTimer: number | undefined
   let settleTimer: number | undefined
@@ -188,10 +192,16 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
       inFlight = false
       if (answer._tag === 'Refused') {
         page.send({ kind: 'refused' })
-        return halt()
+        return refuse()
       }
-      const next = answer._tag === 'Sent' ? answer.reportAgainAt === null ? null : Date.parse(answer.reportAgainAt) : Number.NaN
-      againAt = next === null || Number.isFinite(next) ? next : Date.now() + RETRY
+      if (answer._tag === 'Failed') {
+        againAt = Date.now() + Math.min(RETRY * 2 ** failures, RETRY_MAX)
+        failures += 1
+      } else {
+        failures = 0
+        const next = answer.reportAgainAt === null ? null : Date.parse(answer.reportAgainAt)
+        againAt = next === null || Number.isFinite(next) ? next : Date.now() + RETRY
+      }
       if (againAt !== null) againTimer = window.setTimeout(() => evaluate('again'), Math.max(againAt - Date.now(), SOONEST))
       if (pending) {
         pending = false
@@ -223,6 +233,7 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
     againAt = undefined
     inFlight = false
     pending = false
+    failures = 0
     // The previous reporter gave the role up because it left or died; the others answer the call below.
     if (leaderTab !== undefined) others.delete(leaderTab)
     leaderTab = tab
@@ -263,11 +274,7 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
         others.delete(message.tab)
         return evaluate('change')
       case 'refused':
-        // The reporter that was refused keeps the role; this tab leaves the queue.
-        halt()
-        release?.()
-        release = undefined
-        return
+        return refuse()
     }
   }
   // Gives the role up and tells the others; the browser hands the role to the next tab in line.
@@ -290,8 +297,7 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
     tell(true)
     release = page.lead(takeLead)
   }
-  // Stops this tab for good. A refused reporter halts but keeps the role, so no other tab takes it up during this
-  // page's life only to be refused again.
+  // Stops this tab for good.
   const halt = () => {
     stopped = true
     leading = false
@@ -300,6 +306,12 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
     window.clearTimeout(rollTimer)
     unwatch()
     unhear()
+  }
+  // Fractal refused the pairing: this tab stops and gives up the role or its place in line.
+  const refuse = () => {
+    halt()
+    release?.()
+    release = undefined
   }
   const unwatch = page.watch({ input: onInput, change: onChange, hide: leave, show: rejoin })
   const unhear = page.heard(onMessage)
@@ -312,5 +324,21 @@ export const startPresenceReports = (report: AvailabilityPort['reportPresence'],
     }
     release?.()
     release = undefined
+  }
+}
+
+/**
+ * Starts the page's presence reports once Fractal says this session may report: its capabilities grant
+ * `write.presence` and its actor is a person. Returns the stop, which also cancels a start still waiting for that answer.
+ */
+export const reportPresenceWhenGranted = (port: Pick<AvailabilityPort, 'mayReportPresence' | 'reportPresence'>, page: () => PresencePage = browserPage): (() => void) => {
+  let stop: (() => void) | undefined
+  let stopped = false
+  void port.mayReportPresence().then((granted) => {
+    if (granted && !stopped) stop = startPresenceReports(port.reportPresence, page())
+  })
+  return () => {
+    stopped = true
+    stop?.()
   }
 }

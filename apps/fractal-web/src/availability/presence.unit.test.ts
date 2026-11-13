@@ -2,7 +2,7 @@
 import type { PresenceReport } from '@fractal/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { PresenceAnswer } from './availability-port.ts'
-import { SETTLE, startPresenceReports, type PageEvents, type PresencePage, type TabMessage } from './presence.ts'
+import { RETRY_MAX, SETTLE, reportPresenceWhenGranted, startPresenceReports, type PageEvents, type PresencePage, type TabMessage } from './presence.ts'
 
 const start = Date.parse('2026-11-12T09:00:00Z')
 const MINUTE = 60_000
@@ -25,10 +25,11 @@ type Sent = readonly [tab: string, state: PresenceReport['state'], lastInput: nu
  * One browser pairing: its tabs report into one sink, hear each other's messages a moment later, and queue for one
  * reporter lock that the browser grants a moment after it is free. The sink answers like the daemon: an active
  * device with input inside the idle threshold reports again when it would turn idle, anything else on its next change.
+ * `answerWith` makes it refuse (a 403 or 404) or fail (the report never arrives) instead.
  */
 const browser = () => {
   const sink: Sent[] = []
-  let refusing = false
+  let answering: 'accept' | 'refuse' | 'fail' = 'accept'
   const listeners = new Map<string, (message: TabMessage) => void>()
   const queue: { readonly name: string; readonly onLead: () => void; granted: boolean }[] = []
   const grant = () => {
@@ -43,7 +44,8 @@ const browser = () => {
     queueMicrotask(grant)
   }
   const daemon = ({ state, last_input_at }: PresenceReport): PresenceAnswer => {
-    if (refusing) return { _tag: 'Refused' }
+    if (answering === 'refuse') return { _tag: 'Refused' }
+    if (answering === 'fail') return { _tag: 'Failed' }
     const idleAt = last_input_at === undefined ? undefined : Date.parse(last_input_at) + IDLE
     return { _tag: 'Sent', reportAgainAt: state === 'active' && idleAt !== undefined && idleAt > Date.now() ? new Date(idleAt).toISOString() : null }
   }
@@ -101,7 +103,7 @@ const browser = () => {
       stop,
     }
   }
-  return { sink, open, refuse: () => { refusing = true } }
+  return { sink, open, answerWith: (next: typeof answering) => { answering = next } }
 }
 
 it('reports once while the person works in tab B and tab A sits untouched', async () => {
@@ -226,20 +228,76 @@ it('hands the role on when the reporting tab dies without pagehide, forgetting i
   b.stop()
 })
 
-it('stops every tab once Fractal refuses the pairing', async () => {
-  const { sink, open, refuse } = browser()
-  refuse()
+it('stops every tab on a refusal and frees the role for a tab loaded after pairing again', async () => {
+  const { sink, open, answerWith } = browser()
+  answerWith('refuse')
   const a = open('a')
   const b = open('b', false)
   await advance(MINUTE)
   b.focus(true)
   a.focus(false)
   b.input()
-  // Not even the refused tab giving its role up lets another tab report.
-  a.stop()
-  await advance(30 * MINUTE)
-  b.focus(false)
   await advance(30 * MINUTE)
   expect(sink).toEqual([['a', 'active', 0, 0]])
+  // The person pairs the browser again and opens the app in a new tab, which takes the role the refused tab released.
+  answerWith('accept')
+  const c = open('c')
+  await advance(0)
+  expect(sink.slice(1)).toEqual([['c', 'active', 31, 31]])
+  a.stop()
   b.stop()
+  c.stop()
+})
+
+it('retries a failed report with exponential backoff up to fifteen minutes, and starts over after a success', async () => {
+  const { sink, open, answerWith } = browser()
+  answerWith('fail')
+  const a = open('a')
+  await advance(44 * MINUTE)
+  // Waits of 1, 2, 4 and 8 minutes, then RETRY_MAX.
+  expect(RETRY_MAX).toBe(15 * MINUTE)
+  expect(sink.map(([, , , at]) => at)).toEqual([0, 1, 3, 7, 15, 30])
+  answerWith('accept')
+  await advance(MINUTE)
+  expect(sink.slice(6)).toEqual([['a', 'active', 0, 45]])
+  // The success reset the backoff: the next failure is retried a minute later.
+  answerWith('fail')
+  a.focus(false)
+  await advance(SETTLE + MINUTE)
+  expect(sink.slice(7).map(([, state, , at]) => [state, at])).toEqual([['inactive', 45 + SETTLE / MINUTE], ['inactive', 46 + SETTLE / MINUTE]])
+  a.stop()
+})
+
+/** A page alone in its browser: active, and granted the reporter role at once. */
+const lonePage = (): PresencePage => ({
+  active: () => true,
+  watch: () => () => {},
+  send: () => {},
+  heard: () => () => {},
+  lead: (onLead) => {
+    onLead()
+    return () => {}
+  },
+})
+
+it.each([[true, 1], [false, 0]])('opens the page and reports only once Fractal grants write.presence to a person (granted: %s)', async (granted, count) => {
+  const report = vi.fn(async (): Promise<PresenceAnswer> => ({ _tag: 'Sent', reportAgainAt: null }))
+  const page = vi.fn(lonePage)
+  const stop = reportPresenceWhenGranted({ mayReportPresence: async () => granted, reportPresence: report }, page)
+  await advance(0)
+  expect(page).toHaveBeenCalledTimes(count)
+  expect(report).toHaveBeenCalledTimes(count)
+  stop()
+})
+
+it('starts nothing when the page stops before Fractal answers whether it may report', async () => {
+  const granted = Promise.withResolvers<boolean>()
+  const report = vi.fn(async (): Promise<PresenceAnswer> => ({ _tag: 'Sent', reportAgainAt: null }))
+  const page = vi.fn(lonePage)
+  const stop = reportPresenceWhenGranted({ mayReportPresence: () => granted.promise, reportPresence: report }, page)
+  stop()
+  granted.resolve(true)
+  await advance(0)
+  expect(page).not.toHaveBeenCalled()
+  expect(report).not.toHaveBeenCalled()
 })

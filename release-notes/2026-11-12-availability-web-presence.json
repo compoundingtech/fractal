@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "A pairing without write.presence, or a session without a person, reports nothing; a replay reports nothing."
+    "detail": "Reports start only when the capabilities grant write.presence to a person session, so other pairings and sessions report nothing; a daemon without POST /v1/client/presence (404) stops the reports, and a replay reports nothing."
   },
   "downtime": {
     "status": "none",
