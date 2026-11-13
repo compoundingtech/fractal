@@ -386,6 +386,15 @@ and lifts the timing and enrichment bound for that one run only (its `started_at
 pages and collection windows never carry these fields, and other runs' steps omit them: absence is
 not proof of a single attempt or no waits.
 
+Detail steps also expose `executions[]`, the generic claim-backed agent invocation records.
+They distinguish an invocation from its logical attempt (a reclaim can create another invocation).
+The record joins historical declared/observed models, nullable fallback evidence, response-attributed
+token and micro-USD usage, elapsed time, trace correlation and an incarnation-matched exit receipt.
+Missing usage is unknown, not zero; a changed model does not by itself prove fallback. Older records
+can lack captured metadata. See [the execution contract](../program-engine.md#6-linked-child-runs-worker-turns-and-asks).
+The native `GET /v1/mission-runs/{run}` detail and `fractal missions show mission-run/... --json`
+carry the same per-step `executions` projection; lean work reads omit it.
+
 - `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
   opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
   `work.failed`, its terminal state, or the `step-run.retried` that opened the next attempt.

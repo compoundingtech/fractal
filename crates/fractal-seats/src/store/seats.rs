@@ -1448,8 +1448,20 @@ impl SeatsStore for Store {
         let owner_step = fields["attribution"]["step_id"].as_str().unwrap_or("");
         let host = fields["host"].as_str().unwrap_or(&self.origin);
         let connection = self.readers.get();
-        let totals = connection
-            .query_row(
+        let execution = fields["attribution"]["execution_id"].as_str();
+        let read_totals = |row: &rusqlite::Row<'_>| {
+            (0..10).map(|index| row.get::<_, u64>(index)).collect::<Result<Vec<_>, _>>()
+        };
+        let totals = if let Some(execution) = execution {
+            connection.query_row(
+                "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+                    cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
+                    unpriced_tokens, observed_at_unix_ms
+                 FROM local_step_execution_spend WHERE execution_id=?1 AND model=?2 AND account=?3 AND host=?4",
+                params![execution, model, account, host], read_totals,
+            ).optional()?
+        } else {
+            connection.query_row(
                 "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
                     cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
                     unpriced_tokens, observed_at_unix_ms
@@ -1464,13 +1476,9 @@ impl SeatsStore for Store {
                     owner_step,
                     host
                 ],
-                |row| {
-                    (0..10)
-                        .map(|index| row.get::<_, u64>(index))
-                        .collect::<Result<Vec<_>, _>>()
-                },
-            )
-            .optional()?;
+                read_totals,
+            ).optional()?
+        };
         let Some(totals) = totals else {
             return Ok(None);
         };
@@ -1487,6 +1495,9 @@ impl SeatsStore for Store {
                 Value::String(crate::pricing::PRICING_REVISION.into()),
             ),
         ]);
+        if let Some(execution) = execution {
+            fields.insert("execution_id".into(), Value::String(execution.into()));
+        }
         if !account.is_empty() {
             fields.insert("account".into(), Value::String(account.into()));
         }
