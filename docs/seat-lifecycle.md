@@ -110,6 +110,71 @@ Physical preflight does not release the failed operation. With the launch lock h
 
 A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
 
+### Native launch invocation receipts
+
+Every admitted native agent launch has a stable `invocation/<launch-operation UUID>`
+identity. The launcher supplies `FRACTAL_INVOCATION_ID` before starting the process.
+System-only `harness.invocation` claims on the agent retain immutable lifecycle
+receipts, independently of trace sampling and local runtime/timeline retention.
+The slot is `(agent, invocation_id, phase, event_key)`; repeated recovery keeps
+the original receipt instead of rewriting history. Different launches never
+replace each other.
+
+Admission and startup results are recorded in the same writer transaction as
+their local operation state. A queued cancellation, startup failure before a
+claim, revocation, producer closure and verified runtime retirement retain their
+own phases. Only exact operation/incarnation verification binds an incarnation;
+a candidate process, predecessor incarnation or missing runtime does not. An
+exact terminal runtime observation can end a previously verified invocation.
+These receipts do not manufacture usage or alter cancellation/recovery authority.
+
+Receipt metadata records known owner run, step and attempt, explicit parent
+invocation, requested model and harness selection. `launch_input_digest` and
+`provider_binary_digest` reuse the launch contract measurement. The former is an
+instruction/configuration/argv input fingerprint, **not** `prompt_digest` of the
+actual provider request. No additional executable/version probe runs for receipts.
+Unobserved harness release, provider prompt digest, transcript reference and
+fallback remain null. Resume selection is launch intent, not evidence of a fresh
+provider context; `observed_fresh` remains unknown without a native observation.
+Model drift alone never establishes a fallback or a quota reason. A fallback
+requires an explicit event, reason and originating evidence reference.
+When the native admission diagnostic supplies its already measured
+`producer_version`, an `observed` receipt retains it under that diagnostic's event
+identity. Its explicit process invocation binds the observation even before claim;
+legacy diagnostics can bind only through an already verified incarnation.
+Healthy launches that export no structured release observation remain unknown.
+
+`Store::invocation_receipts(id)` and `Store::agent_invocation_receipts(agent)`
+return phase history for projection/API joins. Join startup failures by operation
+or invocation ID, and successful runtime evidence only by verified incarnation.
+Metadata additions are optional and old prepared operations remain readable.
+
+A process invocation is not a later work turn on a standing seat. The native
+wake boundary persists a separate `invocation/turn-<identity digest>` before
+publishing input. Its identity includes run, step, attempt, readiness epoch,
+agent, incarnation and preceding claim identity. Wake reminders reuse that
+identity; retry, release/reclaim and incarnation changes do not borrow a launch
+or earlier turn identity. Each wake message is bound by a receipt `event_key`
+and a `fractal-invocation:` tag. Native `work.claimed` receipts carry the exact
+turn's `invocation_id`; an observed receipt keyed by the immutable claim ID keeps
+the historical response association after the current step changes. Repeated
+claims under an unexpired same-owner lease retain the existing turn. Launch
+lineage is separate and populated only from a verified exact incarnation.
+Inherited process environment never labels a standing turn, and none of this
+claims that a resumed or steered turn has a fresh provider context.
+
+The pi/omp channel posts the final materialized message envelope, including tag
+and attachment notices, to `/v1/invocation-input` before provider delivery:
+`{agent, incarnation, invocation_id, message_id, text}`. This is native input,
+not the provider's hidden prompt; its digest must not populate `prompt_digest`.
+Capture failure emits an `invocation-input-unavailable` harness diagnostic when
+the daemon is reachable and a channel warning; real input delivery continues.
+Codex/OpenCode direct mailbox paths assemble their final provider envelopes
+downstream of this channel hook, so exact native-input capture there remains
+unsupported/unknown rather than substituting a raw mailbox body. Transcript
+and provider response binding require their own native session evidence.
+
+
 The graph retains claimed work and pending mail.
 
 On relaunch, Fractal tries to continue the harness's last native session: `fractal agents restart`, a

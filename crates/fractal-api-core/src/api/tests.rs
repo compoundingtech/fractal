@@ -16642,3 +16642,33 @@ fn population_repository_normalizes_production_shaped_checkout_paths() {
     overlay_population_repositories(&store, &mut cards).unwrap();
     assert_eq!(cards[0]["observed_repository"], "example/repo");
 }
+
+#[tokio::test]
+async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_deletion() {
+    use fractal_store::invocation_artifacts;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.owning_person = Some("person/owner".into());
+    let invocation = "invocation/artifact-test";
+    let agent = "agent/example/worker";
+    state.store.append_claim(&ClaimInput { subject:agent.into(),kind:"harness.invocation".into(),
+        actor:None,fields:serde_json::from_value(json!({"invocation_id":invocation,
+            "operation_id":"artifact-test","phase":"admitted","agent":agent})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None }).unwrap();
+    let artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
+    invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+    let query = || Query(serde_json::from_value(json!({"invocation":invocation,"kind":"input"})).unwrap());
+    let stranger = client_v0::ClientSession::local(Some("person/stranger")).unwrap();
+    let denied = super::agent_invocations::artifact(State(state.clone()),Extension(stranger),
+        AxumPath(artifact.sha256.clone()),query()).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let owner = client_v0::ClientSession::local(Some("person/owner")).unwrap();
+    let allowed = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query()).await.unwrap();
+    assert_eq!(allowed.status(),StatusCode::OK);
+    super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query()).await.unwrap();
+    let deleted = super::agent_invocations::artifact(State(state),Extension(owner),
+        AxumPath(artifact.sha256),query()).await.unwrap_err();
+    assert_eq!(deleted.status,StatusCode::GONE);
+}
