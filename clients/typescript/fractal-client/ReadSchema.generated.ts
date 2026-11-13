@@ -1611,6 +1611,31 @@ export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
 export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
 
+/** A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown. */
+export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","hold-routine","hold-all"]).annotate({ identifier: "AvailabilityDeadlineClock", description: "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown." }))()
+export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
+export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
+
+/** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
+export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
+export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
+export type AvailabilityInterruptionsEncoded = typeof AvailabilityInterruptions.Encoded
+
+/** Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown. */
+export const AvailabilityPresence = /*#__PURE__*/ (() => openEnum(["present","idle","locked","unreported"]).annotate({ identifier: "AvailabilityPresence", description: "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown." }))()
+export type AvailabilityPresence = typeof AvailabilityPresence.Type
+export type AvailabilityPresenceEncoded = typeof AvailabilityPresence.Encoded
+
+/** A person's effective status. Readers retain future values as Unknown. */
+export const AvailabilityStatus = /*#__PURE__*/ (() => openEnum(["available","away"]).annotate({ identifier: "AvailabilityStatus", description: "A person's effective status. Readers retain future values as Unknown." }))()
+export type AvailabilityStatus = typeof AvailabilityStatus.Type
+export type AvailabilityStatusEncoded = typeof AvailabilityStatus.Encoded
+
+/** Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown. */
+export const AvailabilityStatusSource = /*#__PURE__*/ (() => openEnum(["override","presence","unreported"]).annotate({ identifier: "AvailabilityStatusSource", description: "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown." }))()
+export type AvailabilityStatusSource = typeof AvailabilityStatusSource.Type
+export type AvailabilityStatusSourceEncoded = typeof AvailabilityStatusSource.Encoded
+
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
   "data": Schema.String.annotate({ description: "Base64 of up to 512 KiB starting at offset." }),
@@ -4317,6 +4342,30 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+/** A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person. */
+export const PersonAvailability = /*#__PURE__*/ (() => Schema.Struct({
+  "deadline_clock": AvailabilityDeadlineClock,
+  "deadline_clock_since": Schema.OptionFromNullOr(Timestamp),
+  "deadline_clock_until": Schema.OptionFromNullOr(Timestamp),
+  "interruptions": AvailabilityInterruptions,
+  "interruptions_until": Schema.OptionFromNullOr(Timestamp),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "presence": Schema.OptionFromNullOr(AvailabilityPresence),
+  "presence_observed_at": Schema.OptionFromNullOr(Timestamp),
+  /** The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present. */
+  "status": AvailabilityStatus,
+  "status_source": AvailabilityStatusSource,
+  "status_until": Schema.OptionFromNullOr(Timestamp)
+}).annotate({ identifier: "PersonAvailability", description: "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person." }))()
+export type PersonAvailability = typeof PersonAvailability.Type
+export type PersonAvailabilityEncoded = typeof PersonAvailability.Encoded
+
+export const PersonAvailabilities = /*#__PURE__*/ (() => Schema.Struct({
+  "people": Schema.Array(PersonAvailability)
+}).annotate({ identifier: "PersonAvailabilities" }))()
+export type PersonAvailabilities = typeof PersonAvailabilities.Type
+export type PersonAvailabilitiesEncoded = typeof PersonAvailabilities.Encoded
+
 export const PrivateNotesAction = /*#__PURE__*/ (() => Schema.Struct({
   /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
   "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }),
@@ -4482,7 +4531,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   /** When the allowance runs out at that rate, present only when that is before it resets. */
   "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
-  "status": Schema.Literals(["met","missed","no-data","stale"]),
+  /** met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown. */
+  "status": openEnum(["met","missed","no-data","stale"]).annotate({ description: "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." }),
   "target": Schema.String,
   /** How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule. */
   "tone": optionalKey(Schema.String).annotate({ description: "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." }),
