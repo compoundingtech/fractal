@@ -54,8 +54,13 @@ Taken by the owner on 2026-11-10:
 ### Versioned
 
 - **R04 Pinned code:** a run executes exactly the bytes its mission revision pins.
-- **R05 Old runs finish on old code:** publishing new program code never changes a running
-  generation; a run moves to new code only by a new generation.
+- **R05 Generations pin code; publication replaces active stale runs:** dispatch and resume
+  execute the code pinned by their generation. New-revision publication preflights a fresh
+  replacement before ordinary source cancellation and cleanup; the replacement waits for
+  terminal cleanup, confirmed owned-runtime quiescence, and effective program-effect fencing,
+  then restarts on the new code without adopting the source journal.
+  Admission refusal leaves the source active with a visible fault. Explicit run revision
+  remains a distinct generation transition; replay never substitutes code in a journal.
 - **R06 No divergent replay:** replay never feeds a journal to different code.
 
 ### Accountable
@@ -140,6 +145,7 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
@@ -167,6 +173,21 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+For publication supersession, sending `cancel` is not sufficient to admit the replacement.
+The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
+fences recorded leftover effect groups by verified boot/process-start identity. A failed
+kill or unprovable identity remains visible as `supersession-effect-fence`; it cannot be
+converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
+and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
+wake reconciliation; no polling or replacement execution timeout is introduced. New program
+credentials are minted inside the run writer fence only for the current live attempt and
+after checking that it does not await automatic publication cutover.
+
+The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
+worker's exit promise, including native I/O still in progress, while continuing to serve
+other programs. An ended attempt remains addressable until exit, so a late cancellation
+cannot confuse removal from the run map with quiescence.
 
 ### 3. Declaration and authority
 
@@ -311,6 +332,16 @@ unrelated run. A run starts runs only as the children its program starts, never 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
 step's `definition_hash` and the mission revision. A run generation binds one revision, hence one
 bundle.
+
+For a policy-less mission, publishing a new revision automatically supersedes already-active
+stale runs, subject to [replacement admission and cleanup](mission-graph-runtime.md#automatic-publication-supersession).
+Existing human-only review and when-idle cutover policies take precedence: publication does not
+bypass review or cancel work before its declared idle boundary. Approved proposal cutover uses
+a new linked run at the exact approved revision. Neither path rewrites a generation's bundle or
+journal. The fresh replacement restarts all programs and steps, and effects must be idempotent
+against prior workspace and external effects. Republish of the same revision does nothing; a
+same-revision retry begun after publication remains selected until a later new-revision
+publication. No journal is adopted and no new data-DSL syntax is introduced.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
    sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and

@@ -55,17 +55,24 @@ const main = () => {
   const killGroup = (pid) => {
     try {
       process.kill(-pid, 'SIGKILL')
-    } catch {}
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+    }
     rmSync(join(groupsDir, `${pid}.json`), { force: true })
   }
   /** End an attempt: its worker and every effect group it started. */
   const end = (run) => {
+    if (run.termination !== undefined) return run.termination
     run.ended = true
-    if (runs.get(run.step) === run) runs.delete(run.step)
     clearInterval(run.ping)
-    void run.worker.terminate()
+    // Keep an ended attempt addressable until its worker exits: a later cancel
+    // must await termination too, not mistake removal from this map for quiescence.
+    run.termination = run.worker.terminate().then(() => {
+      if (runs.get(run.step) === run) runs.delete(run.step)
+    })
     for (const pid of run.groups) killGroup(pid)
     run.groups.clear()
+    return run.termination
   }
 
   const spawnEffect = (run, { id, argv: requested, options = {} }) => {
@@ -168,8 +175,12 @@ const main = () => {
     if (message.t === 'ping') return send({ t: 'pong', seq: message.seq })
     if (message.t === 'start') return start(message)
     const run = runs.get(message.step)
-    if (run === undefined || run.attempt !== message.attempt) return // another attempt's message
-    if (message.t === 'cancel') return end(run)
+    if (message.t === 'cancel') {
+      const cancelled = () => send({ t: 'cancelled', step: message.step, attempt: message.attempt })
+      if (run !== undefined && run.attempt === message.attempt) return end(run).then(cancelled)
+      return cancelled()
+    }
+    if (run === undefined || run.attempt !== message.attempt || run.ended) return // another or ended attempt
     run.worker.postMessage(message) // ack, nack, resolved
   })
   // The daemon is gone: its replacement resumes every program from the journal. End all effects now.

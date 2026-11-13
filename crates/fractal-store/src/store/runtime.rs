@@ -802,6 +802,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcbab08c75150 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(&transaction)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
@@ -811,6 +812,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2eda34b01b09 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(connection)?;
     }
     Ok(())
 }
@@ -1016,6 +1018,107 @@ mod schema_install_tests {
                 cookie,
                 "an unchanged reopen must not rebuild the index",
             );
+        }
+    }
+
+    #[test]
+    fn supersession_queue_counter_survives_empty_reopen_without_frontier_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue-counter.sqlite");
+        let mut previous = 0;
+        for (attempt, goal) in ["First publication.", "Second publication.", "Third publication."].into_iter().enumerate() {
+            let store = Store::open(&path, "owner").unwrap();
+            let source = format!("version 2\nmission \"counter\" state=\"ready\" {{ goal {goal:?}; step \"work\" {{ agentless }} }}\n");
+            let intent = crate::graph::parse_test_intent(&source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source, source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, &format!("counter-{attempt}")).unwrap();
+            let sequence: u64 = store.readers.get().query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(sequence > previous, "emptying and reopening must not reuse a drain ceiling");
+            previous = sequence;
+            assert_eq!(store.readers.get().query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 0, "ordinary publication drains its own head");
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            assert!(store.index().unwrap() > 0);
+            let work = scope.finish();
+            assert_eq!(work.fullscan_steps, 0, "private queue allocation must not add work to canonical frontier reads: {work:?}");
+        }
+    }
+
+    #[test]
+    fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        for (refused_table, refused_meta_insert) in [
+            ("local_mission_supersession_heads_v3", 0), ("meta", 1), ("meta", 2),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("bootstrap.sqlite");
+            let store = Store::open(&path, "owner").unwrap();
+            let source = "version 2\nmission \"existing-head\" state=\"ready\" { goal \"Recover selected heads.\"; step \"work\" { agentless } }\n";
+            let intent = crate::graph::parse_test_intent(source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, "bootstrap-head").unwrap();
+            {
+                let connection = store.connection.write();
+                connection.execute("DELETE FROM meta WHERE key=?1",
+                    [mission_supersession::BOOTSTRAP_KEY]).unwrap();
+                connection.execute("DELETE FROM local_mission_supersession_heads_v3", []).unwrap();
+                let counter = || connection.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap();
+                let counter_before = counter();
+                let meta_inserts = std::sync::atomic::AtomicUsize::new(0);
+                connection.authorizer(Some(move |context: AuthContext<'_>| {
+                    let denied = match context.action {
+                        AuthAction::Insert { table_name } if table_name == refused_table => {
+                            table_name != "meta" || meta_inserts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == refused_meta_insert
+                        }
+                        _ => false,
+                    };
+                    if denied {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }));
+                assert!(mission_supersession::install_schema(&connection).is_err());
+                connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                assert!(connection.is_autocommit(), "failed bootstrap must roll back");
+                assert_eq!(counter(), counter_before, "failed bootstrap must roll back its allocator");
+                assert_eq!(connection.query_row(
+                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap(), 0, "head seed and completion marker must commit together");
+                assert!(!connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+                    [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+                ).unwrap());
+            }
+            drop(store);
+            let store = Store::open(&path, "owner").unwrap();
+            let connection = store.connection.write();
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id='existing-head'",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 1, "reopen must recover the existing selected head");
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')",
+                [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+            ).unwrap());
+            let changes = connection.total_changes();
+            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(connection.total_changes(), changes, "complete reopen must not write");
+            assert_eq!(connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(), cookie);
         }
     }
 
