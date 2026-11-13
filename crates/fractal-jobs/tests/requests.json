@@ -1,8 +1,0 @@
-{
-  "valid": [
-    {"cpu_millicores":1,"memory_bytes":18446744073709551615,"io_weight":1,"tasks_max":1,"expected_duration_ms":1,"run_timeout_ms":2,"priority":-1,"requested_class":"build","storage_request":{"bytes":1,"purpose":"build-output"},"delegated_reservations":"opaque"},
-    {"cpu_millicores":1,"memory_bytes":1,"io_weight":1,"tasks_max":1,"expected_duration_ms":1,"priority":0,"requested_class":"build"}
-  ],
-  "invalid_units": ["cpu_millicores","memory_bytes","io_weight","tasks_max","expected_duration_ms","run_timeout_ms","storage_request"],
-  "invalid_wire": [-1,1.5,18446744073709551616,"1",null]
-}
