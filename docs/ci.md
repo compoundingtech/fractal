@@ -183,7 +183,7 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `clippy`: checks all workspace targets and the standalone conversation model,
   applies the [warning ratchet](#clippy-warning-ratchet), and runs
   `cargo run --locked -p fractal-client-codegen -- --check`.
-- `fleet-compat`: tests against the oldest deployed main source's native archive
+- `fleet-compat`: tests against the oldest deployed source's native archive
   pinned in `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and
   embedded source/target metadata. It does not rebuild the baseline or its PTY
   dependency. The log prints `compat-baseline: fleet source=SHA tag=fleet-SHA target=TARGET`,
@@ -380,7 +380,7 @@ the default devShell supplies that `node`. See [the eval contract](../evals/frac
 
 ### Rolling compatibility baselines
 
-The fleet pin tracks the oldest deployed main source; the messaging pin tracks
+The fleet pin tracks the oldest deployed source; the messaging pin tracks
 the latest published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
 `why`, `exception_reason` (`null` ordinarily), and both native archive URLs and hex SHA256
 checksums. Fleet CI downloads, verifies and extracts the published native archive instead of

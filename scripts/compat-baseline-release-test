@@ -226,6 +226,7 @@ class Archives(unittest.TestCase):
             digest = hashlib.sha256((self.dist / f'smalltalk-{target}.tar.gz').read_bytes()).hexdigest()
             self.assertEqual(value['bundles'][target]['sha256'], digest)
         baseline.validate(value, 'fixture')
+
     def test_main_fleet_release_uses_the_same_archive_provenance_checks(self):
         tag = f'fleet-{SOURCE}'
         def api(endpoint):

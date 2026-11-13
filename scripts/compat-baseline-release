@@ -181,7 +181,7 @@ def release_pin(tag, releases, fleet=False):
                 'sha256': digest,
             }
     pin = {'commit': source, 'tag': tag, 'why': (
-        'Oldest deployed main source; advance with the deployment pin, not stable publication.'
+        'Oldest deployed source; advance with the deployment pin, not stable publication.'
         if fleet else POLICY), 'exception_reason': None, 'bundles': bundles}
     validate(pin, tag)
     return pin
