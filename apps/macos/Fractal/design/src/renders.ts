@@ -7,7 +7,8 @@
  *   `cacheDisplay` (no window-server materials), plus every menu-bar variant × state as the
  *   tinted template image on a flat bar (`menubar-*.png`). Committed.
  * - `capture.json` + `capture/*.png`: real window-server captures (Liquid Glass, the status item)
- *   of the current design, the curated variants and every menu-bar variant × state. Committed.
+ *   of the current design, the curated variants and every menu-bar variant × state. Committed
+ *   when a consented capture run produces them; absent, every image falls back to the flat render.
  * - `explore.json` + `explore/*.png`: every layout × ask-row × header combination via
  *   `cacheDisplay`, for the Exploration story. Generated locally, not committed.
  */

@@ -12,8 +12,9 @@ collection, but `FractalClient` has no typed attention or availability stream.
   custom words or feedback text, Yes/No for an untyped question, or Nothing to
   Do when there are no named answers. Custom forms and harness prompts link to
   Fractal. Every control is always in place, for the keyboard and VoiceOver as
-  much as the pointer. The first answerable ask's recommended answer is the one
-  prominent button and the default action (Return) while nothing is being typed.
+  much as the pointer. The first answerable ask's recommended answer (never a
+  decline) is the one prominent button while nothing is being typed; no answer
+  takes Return, since answers are irreversible.
   Typed answers and the note draft live on the model, so closing the panel keeps
   them.
 - The tray offers no Dismiss and no snooze. Web's Dismiss sends a `work.done`
@@ -241,7 +242,8 @@ the source rev. It needs a Mac with a login session and has three outputs:
   items masked: the shipped design in every scenario, one variant change at a
   time in the busy scenario (`--all`: every combination), and each menu-bar
   variant (M) in every status state, into `renders/capture/` plus
-  `capture.json`. Committed. Captures show windows on the real screen, so they
+  `capture.json`, committed when a run produces them (until then the Storybook
+  shows the fallbacks). Captures show windows on the real screen, so they
   run only with the person's consent (`ATTENTION_TRAY_CAPTURE_CONSENT=1`,
   `--consent`), wait until the Mac has had no input for ten minutes
   (`--away <seconds>`), abort and write nothing on any input, and need Screen

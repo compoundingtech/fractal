@@ -9,7 +9,8 @@ struct ObjectivesSection: View {
   var body: some View {
     let board = model.sloBoard
     let histories = model.sloHistory.value ?? [:]
-    PanelSection(title: "Objectives", aside: board.map(Self.summary), startsOpen: (board?.needsAttention ?? 0) > 0) {
+    let missed = board?.objectives.filter { $0.tone == .red }.count ?? 0
+    PanelSection(title: "Objectives", aside: board.map { _ in missed > 0 ? "\(missed) missed" : "all met" }, startsOpen: missed > 0) {
       SectionFailure(state: model.slo.state)
       if case .stale = model.sloHistory.state, !Self.isStale(model.slo.state) {
         SectionFailure(state: model.sloHistory.state)
@@ -20,6 +21,7 @@ struct ObjectivesSection: View {
           DisclosureGroup("\(board.unmeasured.count) not measured") {
             ForEach(board.unmeasured) { SloRow(entry: $0, history: nil) }
           }
+          .disclosureGroupStyle(.trailingChevron)
           .foregroundStyle(.secondary)
         }
       } else if case .loading = model.slo.state {
@@ -37,10 +39,6 @@ struct ObjectivesSection: View {
         SloEntries(entries: board.budgets, histories: histories)
       }
     }
-  }
-
-  static func summary(_ board: SloBoard) -> String {
-    board.needsAttention > 0 ? "\(board.needsAttention) need attention" : "all met"
   }
 
   private static func isStale(_ state: ConnectionState) -> Bool {
@@ -107,6 +105,7 @@ private struct SloDisclosureRow: View {
           SloLabel(entry: entry, showsProgress: false)
         }
       }
+      .disclosureGroupStyle(.trailingChevron)
       .help([entry.id, entry.explain].filter { !$0.isEmpty }.joined(separator: "\n"))
     } else {
       SloRow(entry: entry, history: nil)
@@ -124,7 +123,7 @@ private struct SloGrid: View {
       ForEach(entries) { entry in
         VStack(alignment: .leading, spacing: 4) {
           HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Image(systemName: SloLabel.symbol(entry.tone))
+            Image(systemName: SloLabel.symbol(entry))
               .foregroundStyle(SloLabel.tint(entry.tone))
               .accessibilityLabel(entry.status)
             Text(entry.about.isEmpty ? entry.id : entry.about)
@@ -168,7 +167,7 @@ private struct SloLabel: View {
 
   var body: some View {
     HStack(alignment: .firstTextBaseline, spacing: 8) {
-      Image(systemName: Self.symbol(entry.tone))
+      Image(systemName: Self.symbol(entry))
         .foregroundStyle(Self.tint(entry.tone))
         .frame(width: 18)
         .accessibilityLabel(entry.status)
@@ -199,6 +198,15 @@ private struct SloLabel: View {
         RelativeTime(date: resets, prefix: "resets")
       }
     }
+  }
+
+  /// A failure mark for a missed objective or a spent budget; a budget with some left is a
+  /// warning, however red its tone.
+  static func symbol(_ entry: SloEntry) -> String {
+    if entry.kind == .budget, entry.tone == .red, (entry.remainingPercent ?? 0) > 0 {
+      return "exclamationmark.triangle.fill"
+    }
+    return symbol(entry.tone)
   }
 
   static func symbol(_ tone: SloTone) -> String {

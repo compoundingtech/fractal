@@ -172,12 +172,10 @@ struct PanelSection<Content: View, Footer: View>: View {
         Button {
           withAnimation(.snappy) { open = !isOpen }
         } label: {
-          HStack(spacing: 6) {
-            Image(systemName: "chevron.right")
-              .font(.caption.weight(.semibold))
-              .foregroundStyle(.secondary)
-              .rotationEffect(.degrees(isOpen ? 90 : 0))
+          // Chevron trailing, so collapsible headers keep the panel's one leading edge.
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
             SectionHeader(title: title, aside: aside)
+            DisclosureChevron(isExpanded: isOpen)
           }
           .contentShape(.rect)
         }

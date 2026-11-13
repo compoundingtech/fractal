@@ -63,8 +63,8 @@ public enum AnswerState: Sendable, Equatable {
   /// answer and a card that left Fractal drop their draft.
   public var answerDrafts: [String: AnswerDraft] = [:]
   public var noteDraft: NoteDraft?
-  /// The panel text field with keyboard focus (an attention ID, or `noteInput`), so Return
-  /// never answers an ask other than the one being typed into.
+  /// The panel text field with keyboard focus (an attention ID, or `noteInput`): while the
+  /// person types, the field's own Send or Save is the action that counts.
   public var focusedInput: String?
   public static let noteInput = "note"
   public private(set) var isRefreshing = false
@@ -234,10 +234,11 @@ public enum AnswerState: Sendable, Equatable {
       return open.contains(id)
     }
     answerDrafts = answerDrafts.filter { open.contains($0.key) }
+    if let focused = focusedInput, focused != Self.noteInput, !open.contains(focused) { focusedInput = nil }
   }
 
   /// Whether the person has typed or picked anything not yet sent, or is typing now: the
-  /// panel's default action (Return) stays off while this holds.
+  /// leading ask's recommended answer is not prominent while this holds.
   public var hasUnsentInput: Bool { focusedInput != nil || !answerDrafts.isEmpty || noteDraft != nil }
 
   // MARK: Actions

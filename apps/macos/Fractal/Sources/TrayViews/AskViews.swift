@@ -51,7 +51,7 @@ private struct AskRow: View {
   let record: AttentionRecord
   let model: AttentionModel
   let isFirst: Bool
-  /// This ask's recommended answer is the panel's one prominent button and default action.
+  /// This ask's recommended answer is the panel's one prominent button.
   let leads: Bool
   @Environment(\.trayDesign) private var design
   @State private var expanded: Bool?
@@ -87,6 +87,11 @@ private struct AskRow: View {
       } else if model.focusedInput == record.id {
         model.focusedInput = nil
       }
+    }
+    // A row removed while its field has focus (a chip, page or section switch, or the card
+    // leaving) never reports the blur.
+    .onDisappear {
+      if model.focusedInput == record.id { model.focusedInput = nil }
     }
   }
 
@@ -134,6 +139,7 @@ private struct AskRow: View {
         AskText(record: record, expanded: false, showsDetail: false)
       }
     }
+    .disclosureGroupStyle(.trailingChevron)
   }
 
   private enum Presentation { case inline, menu }
@@ -217,15 +223,15 @@ private struct AskRow: View {
     .help("Answer this ask")
   }
 
-  /// Only the leading ask's recommended answer is prominent and the default action (Return),
-  /// and only while nothing is being typed or left unsent anywhere in the panel: then the field
-  /// being typed into owns Return.
+  /// Only the leading ask's recommended answer is prominent, and only while nothing is being
+  /// typed or left unsent anywhere in the panel. A recommended decline stays red and plain.
   @ViewBuilder private func answerButtons(_ answers: [AnswerChoice]) -> some View {
     ForEach(answers) { choice in
       let blockedByWords = choice.words == .none && !words.isEmpty
       AnswerButton(
         choice: choice,
-        isDefault: leads && choice.recommended && choice.words != .required && !model.hasUnsentInput
+        prominent: leads && choice.recommended && choice.tone != .danger && choice.words != .required
+          && !model.hasUnsentInput
       ) { pick(choice) }
       .disabled(sending || blockedByWords)
       .help(
@@ -302,18 +308,18 @@ private struct AskRow: View {
   }
 }
 
-/// An answer button. At most one per panel is prominent, and it is the default action; a
-/// declining answer reads red.
+/// An answer button. At most one per panel is prominent; a declining answer reads red. None
+/// takes Return: answers are irreversible, and after a commit the next ask moves into place
+/// under the same key.
 private struct AnswerButton: View {
   let choice: AnswerChoice
-  let isDefault: Bool
+  let prominent: Bool
   let action: () -> Void
 
   var body: some View {
-    if isDefault {
+    if prominent {
       Button(choice.label, action: action)
         .buttonStyle(.borderedProminent)
-        .keyboardShortcut(.defaultAction)
         .accessibilityHint("Recommended")
     } else {
       Button(choice.label, action: action)
