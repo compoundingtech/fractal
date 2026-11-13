@@ -252,10 +252,12 @@ or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` 
 person. Without it, a person reads themselves and an agent reads the people whose directive
 notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
 gets them as `null` and sees only the effective status with `status_until`, the interruptions
-and the deadline clock.
+and the deadline clock. A local harness or peer (an agent harness or its descendant, a bound
+run, a native delivery peer) is another reader even when it names the person.
 
 Writes act as the session's own person, which the body never names; agent sessions are refused
-with `403` even though a local agent session holds every scope. The daemon records the source
+with `403` even though a local agent session holds every scope, and so is a local harness or
+peer that names the person. The daemon records the source
 of every write on its claim: the exact pairing grant for a paired device, otherwise
 `host/<member>`; a body never names it. `PUT /v1/client/availability` (`availability.set`,
 scope `write.availability`) takes an `AvailabilitySet`: each present axis names its `value`
@@ -2118,10 +2120,14 @@ An empty page means no matching published alerts, not absence of work or priorit
 This narrows output pagination, not native publication scanning, and adds no read authority.
 
 `availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
-It returns `{kind: "person-availability", availability, directive_note}`: the grant
+It returns `{kind: "person-availability", availability, directive_note, directive_note_truncated}`: the grant
 issuer's own `PersonAvailability` without raw presence (`presence` and
 `presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
-another person. `fractal_availability_get` reads it.
+another person. The availability fields are never cut. The note text (up to 4096 UTF-8
+bytes) is cut on a character boundary to what `max_response_bytes` leaves after the whole
+envelope, measured with the delivery codec, so the read never fails its budget for the note;
+`directive_note_truncated` is then true (false when the note is whole or absent). Read again
+with a larger `max_response_bytes`, up to 16384, for the whole note. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,
