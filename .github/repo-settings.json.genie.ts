@@ -40,6 +40,7 @@ export default githubRepoSettings({
             { context: 'genie-freshness', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
             { context: 'fractal-web', integration_id: 15368 },
+            { context: 'public-repo-history', integration_id: 15368 },
           ],
         },
       },

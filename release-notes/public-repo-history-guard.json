@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The required public-repo-history check uses the trusted base's scanner to check every introduced commit, including merge commits and merged side histories, without executing candidate code. A lightweight content-only pre-push guard blocks dirty history before the existing evidence-signing path. Cleaning the final tree no longer hides dirty intermediate commits; evidence signing and the separate landing-signing transition are unchanged.",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay or stored data change. The guard reads Git commit history."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, wire or checkpoint schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No runtime admission or checkpoint rule change. Repository protection requires the public-repo-history context from GitHub Actions integration 15368 in main ruleset 20563764; this change does not mutate live settings."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Every commit in merge-base(BASE, HEAD)..HEAD must pass message, path and per-parent added-content checks, including merges. A dirty intermediate commit fails even after a cleanup commit makes the head clean. ST_SKIP_EVIDENCE and ST_EVIDENCE_LOCAL affect only evidence signing, never the content guard. Existing signing behavior is unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption or runtime deployment is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Install the repository hooks with scripts/install-git-hooks. If introduced history is dirty, create a replacement branch from a clean base with only public-clean changes and messages, then open a replacement PR. Do not force-push or rebase the existing PR to conceal dirty history."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A clean head does not repair dirty history. Replace the branch and PR from a clean base rather than adding another cleanup commit or rewriting the existing PR. Bypassing the local hook does not bypass the hosted required check."
+  }
+}
