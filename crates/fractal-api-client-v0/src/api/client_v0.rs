@@ -3334,7 +3334,7 @@ fn mission_resources_filtered(
                         store.with_step_states(header.clone(), true)?
                     } else {
                         let mut run = header.clone();
-                        store.enrich_mission_run_retry_links(&mut run)?;
+                        store.enrich_mission_run_lineage(&mut run)?;
                         run
                     };
                     let done = run
@@ -3543,6 +3543,15 @@ fn mission_resources_filtered(
                     });
                     if let Some(source) = &run.retry_of {
                         value["retry_of"] = json!(source);
+                    }
+                    for (field, value_field) in [
+                        ("supersedes", &run.supersedes),
+                        ("superseded_by", &run.superseded_by),
+                        ("supersession_fault", &run.supersession_fault),
+                    ] {
+                        if let Some(text) = value_field {
+                            value[field] = json!(text);
+                        }
                     }
                     Ok::<Value, anyhow::Error>(value)
                 })
@@ -17041,6 +17050,80 @@ mission "example/retry-links" state="ready" {
             let ordinary_view = runs.iter().find(|run| run["id"] == ordinary.subject).unwrap();
             assert!(ordinary_view.get("retry_of").is_none(), "{ordinary_view}");
             assert_eq!(ordinary_view["retried_by"], json!([]));
+            for run in runs {
+                for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                    assert!(run.get(field).is_none(), "{run}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mission_public_readers_decode_supersession_links_and_input_refusal() {
+        for compatible in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "supersession-node");
+            let mission = "mission/example/supersession";
+            let source = r#"version 2
+mission "example/supersession" state="ready" {
+  input "value" kind="text"
+  goal "Keep publication lineage visible."
+  step "work" { agentless }
+}"#;
+            let publish = |source: &str, key: &str| {
+                let intent = crate::graph::parse_intent(source, "supersession-node").unwrap();
+                let preview = state.store.mission(&intent, crate::model::IntentInput {
+                    kdl: source.into(), source_name: None,
+                }).unwrap();
+                state.store.apply_as(&intent, &preview.subject_tokens, key, Some("person/operator")).unwrap();
+            };
+            publish(source, "supersession-original");
+            let original = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None,
+                inputs: BTreeMap::from([("value".into(), "retained".into())]),
+                idempotency_key: "supersession-source".into(),
+            }).unwrap();
+            let changed = if compatible {
+                source.replace("Keep publication lineage visible.", "Keep replacement lineage visible.")
+            } else {
+                source.replace("input \"value\"", "input \"replacement\"")
+            };
+            publish(&changed, "supersession-next");
+            let latest = state.store.mission_spec(mission, None).unwrap().unwrap();
+            let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+            let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+            for items in [&cards, &detail, &history] {
+                let card = items.iter().find(|item| item["id"] == mission).unwrap();
+                let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+                let runs: Vec<fractal_client::MissionRunSummary> =
+                    serde_json::from_value(card["run_details"].clone()).unwrap();
+                let old = runs.iter().find(|run| run.id == original.subject).unwrap();
+                assert!(old.retry_of.is_none());
+                assert!(old.retried_by.is_empty());
+                assert!(old.supersedes.is_none());
+                if compatible {
+                    let successor = old.superseded_by.as_ref().unwrap();
+                    let replacement = runs.iter().find(|run| &run.id == successor).unwrap();
+                    assert_eq!(replacement.supersedes.as_deref(), Some(original.subject.as_str()));
+                    assert!(replacement.superseded_by.is_none());
+                    assert!(replacement.supersession_fault.is_none());
+                    assert!(old.supersession_fault.is_none());
+                } else {
+                    assert_eq!(old.status, "running");
+                    assert!(old.superseded_by.is_none());
+                    let fault = old.supersession_fault.as_deref().unwrap();
+                    assert!(fault.contains(&original.revision), "{fault}");
+                    assert!(fault.contains(&latest.revision), "{fault}");
+                    assert!(fault.contains("replacement") && fault.contains("value"), "{fault}");
+                }
+                for run in card["run_details"].as_array().unwrap() {
+                    for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                        assert!(run.get(field).is_none_or(Value::is_string), "{run}");
+                    }
+                }
+            }
         }
     }
 
