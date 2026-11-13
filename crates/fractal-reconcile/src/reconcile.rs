@@ -21227,6 +21227,7 @@ pub fn append_work_wake_message(
     let incarnation_key = harness_incarnation_key(incarnation);
     let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
     let message_subject = format!("message/{message_id}");
+    let invocation_id = store.record_work_turn_wake(step, agent, incarnation, &message_subject)?;
     let queue = step
         .queue
         .as_deref()
@@ -21269,6 +21270,7 @@ pub fn append_work_wake_message(
                 "tags".into(),
                 Value::Array(vec![
                     Value::String(format!("st3-work:{tag_value}")),
+                    Value::String(format!("fractal-invocation:{invocation_id}")),
                     Value::String(format!("mission-run:{}", step.run)),
                     Value::String(format!("st3-wake-attempt:{wake_attempt}")),
                     Value::String(format!("st3-wake-source:{source}")),
@@ -21293,6 +21295,7 @@ pub fn append_work_wake_message(
         in_reply_to: None,
         tags: vec![
             format!("st3-work:{tag_value}"),
+            format!("fractal-invocation:{invocation_id}"),
             format!("mission-run:{}", step.run),
             format!("st3-wake-attempt:{wake_attempt}"),
             format!("st3-wake-source:{source}"),
