@@ -1,145 +1,245 @@
 // @vitest-environment jsdom
 import type { PresenceReport } from '@fractal/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { HANDOFF, HEARTBEAT, IDLE_AFTER, startPresenceReports, type PresencePage, type TabClaim } from './presence.ts'
+import type { PresenceAnswer } from './availability-port.ts'
+import { SETTLE, startPresenceReports, type PageEvents, type PresencePage, type TabMessage } from './presence.ts'
 
 const start = Date.parse('2026-11-12T09:00:00Z')
 const MINUTE = 60_000
-let visibility: DocumentVisibilityState = 'visible'
+/** The daemon's idle threshold for an active device without newer input. */
+const IDLE = 10 * MINUTE
+const minutes = (at: string) => (Date.parse(at) - start) / MINUTE
+const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms)
+
 beforeEach(() => {
   vi.useFakeTimers({ now: start })
-  visibility = 'visible'
-  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
 })
 afterEach(() => {
   vi.useRealTimers()
-  Reflect.deleteProperty(document, 'visibilityState')
 })
 
-const reporting = (answer: 'sent' | 'refused' = 'sent') => {
-  const reports: (readonly [PresenceReport['presence'], number])[] = []
-  const stop = startPresenceReports(async ({ presence, observed_at }) => {
-    reports.push([presence, (Date.parse(observed_at) - start) / MINUTE])
-    return answer
-  })
-  return { reports, stop }
-}
-const setVisibility = (next: DocumentVisibilityState) => {
-  visibility = next
-  document.dispatchEvent(new Event('visibilitychange'))
-}
+/** A report as the sink records it: the tab that sent it, the raw state, and last_input_at and observed_at in minutes. */
+type Sent = readonly [tab: string, state: PresenceReport['state'], lastInput: number | undefined, at: number]
 
-it('reports present at once, keeps it fresh below the staleness window, and idles without input', async () => {
-  const { reports, stop } = reporting()
-  // Input every minute keeps the page present; only the heartbeat reports again.
-  for (let minute = 1; minute <= 12; minute += 1) {
-    await vi.advanceTimersByTimeAsync(MINUTE)
-    window.dispatchEvent(new Event('pointermove'))
+/**
+ * One browser pairing: its tabs report into one sink, hear each other's messages a moment later, and queue for one
+ * reporter lock that the browser grants a moment after it is free. The sink answers like the daemon: an active
+ * device with input inside the idle threshold reports again when it would turn idle, anything else on its next change.
+ */
+const browser = () => {
+  const sink: Sent[] = []
+  let refusing = false
+  const listeners = new Map<string, (message: TabMessage) => void>()
+  const queue: { readonly name: string; readonly onLead: () => void; granted: boolean }[] = []
+  const grant = () => {
+    const head = queue[0]
+    if (head === undefined || head.granted) return
+    head.granted = true
+    head.onLead()
   }
-  expect(reports).toEqual([['present', 0], ['present', HEARTBEAT / MINUTE]])
-  await vi.advanceTimersByTimeAsync(IDLE_AFTER)
-  expect(reports.at(-1)).toEqual(['idle', 12 + IDLE_AFTER / MINUTE])
-  window.dispatchEvent(new Event('keydown'))
-  expect(reports.at(-1)).toEqual(['present', 17])
-  stop()
-})
-
-it('reports idle when the page is hidden and present when it returns, then stops for good', async () => {
-  const { reports, stop } = reporting()
-  await vi.advanceTimersByTimeAsync(MINUTE)
-  setVisibility('hidden')
-  await vi.advanceTimersByTimeAsync(30 * MINUTE)
-  setVisibility('visible')
-  expect(reports).toEqual([['present', 0], ['idle', 1 + HANDOFF / MINUTE], ['present', 31]])
-  stop()
-  setVisibility('hidden')
-  await vi.advanceTimersByTimeAsync(30 * MINUTE)
-  expect(reports).toHaveLength(3)
-})
-
-it('stops reporting once Fractal refuses this session', async () => {
-  const { reports } = reporting('refused')
-  await vi.advanceTimersByTimeAsync(0)
-  setVisibility('hidden')
-  setVisibility('visible')
-  await vi.advanceTimersByTimeAsync(2 * HEARTBEAT)
-  expect(reports).toEqual([['present', 0]])
-})
-
-/** Tabs of one origin sharing one presence source (the sink); each has its own visibility and input, and hears the others' claims a moment later. */
-const origin = () => {
-  const sink: (readonly [string, PresenceReport['presence'], number])[] = []
-  const listeners = new Set<(claim: TabClaim) => void>()
-  const open = (name: string, shown = true) => {
-    let visible = shown
-    let onInput = () => {}
-    let onVisibility = () => {}
-    let own: ((claim: TabClaim) => void) | undefined
+  const free = (name: string) => {
+    const at = queue.findIndex((entry) => entry.name === name)
+    if (at >= 0) queue.splice(at, 1)
+    queueMicrotask(grant)
+  }
+  const daemon = ({ state, last_input_at }: PresenceReport): PresenceAnswer => {
+    if (refusing) return { _tag: 'Refused' }
+    const idleAt = last_input_at === undefined ? undefined : Date.parse(last_input_at) + IDLE
+    return { _tag: 'Sent', reportAgainAt: state === 'active' && idleAt !== undefined && idleAt > Date.now() ? new Date(idleAt).toISOString() : null }
+  }
+  const open = (name: string, focused = true) => {
+    let active = focused
+    let gone = false
+    let events: PageEvents | undefined
     const page: PresencePage = {
-      visible: () => visible,
-      watch: (input, visibility) => {
-        onInput = input
-        onVisibility = visibility
-        return () => {}
+      active: () => active,
+      watch: (on) => {
+        events = on
+        return () => {
+          events = undefined
+        }
       },
-      claim: (claim) => {
-        for (const hear of listeners) if (hear !== own) queueMicrotask(() => hear(claim))
+      send: (message) => {
+        if (gone) return
+        for (const [other, hear] of listeners) if (other !== name) queueMicrotask(() => hear(message))
       },
-      heard: (onClaim) => {
-        own = onClaim
-        listeners.add(onClaim)
-        return () => listeners.delete(onClaim)
+      heard: (onMessage) => {
+        listeners.set(name, onMessage)
+        return () => listeners.delete(name)
+      },
+      lead: (onLead) => {
+        queue.push({ name, onLead, granted: false })
+        queueMicrotask(grant)
+        return () => free(name)
       },
     }
-    const stop = startPresenceReports(async ({ presence, observed_at }) => {
-      sink.push([name, presence, (Date.parse(observed_at) - start) / MINUTE])
-      return 'sent'
+    const stop = startPresenceReports(async (report) => {
+      if (gone) return { _tag: 'Failed' }
+      sink.push([name, report.state, report.last_input_at === undefined ? undefined : minutes(report.last_input_at), minutes(report.observed_at)])
+      return daemon(report)
     }, page)
-    const show = (next: boolean) => {
-      visible = next
-      onVisibility()
+    const leave = () => {
+      gone = true
+      listeners.delete(name)
     }
-    return { input: () => onInput(), show, stop }
+    return {
+      input: () => events?.input(),
+      focus: (next: boolean) => {
+        active = next
+        events?.change()
+      },
+      /** The tab closes: `pagehide`, then nothing. */
+      close: () => {
+        events?.hide()
+        leave()
+      },
+      /** The tab's process dies: no `pagehide` and no goodbye; the browser frees its lock. */
+      crash: () => {
+        leave()
+        free(name)
+      },
+      stop,
+    }
   }
-  return { sink, open }
+  return { sink, open, refuse: () => { refusing = true } }
 }
 
-it('keeps a tab without input from calling the person idle while they work in another tab', async () => {
-  const { sink, open } = origin()
+it('reports once while the person works in tab B and tab A sits untouched', async () => {
+  const { sink, open } = browser()
   const a = open('a')
-  await vi.advanceTimersByTimeAsync(MINUTE)
-  // A second window, say on another monitor: the person works there and leaves the first one untouched.
+  await advance(MINUTE)
+  // A second window, say on another monitor, takes the focus; the person works there.
+  a.focus(false)
   const b = open('b')
-  for (let minute = 2; minute <= 20; minute += 1) {
-    await vi.advanceTimersByTimeAsync(MINUTE)
+  for (let minute = 2; minute < 10; minute += 1) {
+    await advance(MINUTE)
     b.input()
   }
-  expect(sink).toEqual([['a', 'present', 0], ['b', 'present', 1], ['b', 'present', 1 + HEARTBEAT / MINUTE]])
-  // Leaving the working tab says idle; input back in the first one takes over and says present.
-  b.show(false)
-  await vi.advanceTimersByTimeAsync(HANDOFF)
-  expect(sink.at(-1)).toEqual(['b', 'idle', 20 + HANDOFF / MINUTE])
-  a.input()
-  await vi.advanceTimersByTimeAsync(IDLE_AFTER - MINUTE)
-  expect(sink.slice(3)).toEqual([['b', 'idle', 20 + HANDOFF / MINUTE], ['a', 'present', 20 + HANDOFF / MINUTE]])
+  expect(sink).toEqual([['a', 'active', 0, 0]])
   a.stop()
   b.stop()
 })
 
-it.each([['the hidden tab', true], ['the shown tab', false]])('ends a tab switch on present when %s hears of it first', async (_, hiddenFirst) => {
-  const { sink, open } = origin()
+it('re-reports at report_again_at with the newer input of another tab', async () => {
+  const { sink, open } = browser()
+  const a = open('a')
+  await advance(MINUTE)
+  a.focus(false)
+  const b = open('b')
+  for (let minute = 2; minute < 10; minute += 1) {
+    await advance(MINUTE)
+    b.input()
+  }
+  // Tab A's first report would turn idle at minute 10; it reports again with tab B's input from minute 9.
+  await advance(MINUTE)
+  expect(sink).toEqual([['a', 'active', 0, 0], ['a', 'active', 9, 10]])
+  await advance(IDLE)
+  expect(sink.slice(2)).toEqual([['a', 'active', 9, 19]])
+  a.stop()
+  b.stop()
+})
+
+it.each([['the blur', true], ['the focus', false]])('keeps a tab switch active when %s arrives first', async (_, blurFirst) => {
+  const { sink, open } = browser()
   const a = open('a')
   const b = open('b', false)
-  await vi.advanceTimersByTimeAsync(MINUTE)
-  if (hiddenFirst) {
-    a.show(false)
-    b.show(true)
+  await advance(MINUTE)
+  if (blurFirst) {
+    a.focus(false)
+    b.focus(true)
   } else {
-    b.show(true)
-    a.show(false)
+    b.focus(true)
+    a.focus(false)
   }
-  await vi.advanceTimersByTimeAsync(2 * HANDOFF)
-  expect(sink).toEqual([['a', 'present', 0], ['b', 'present', 1]])
+  await advance(2 * SETTLE)
+  expect(sink).toEqual([['a', 'active', 0, 0]])
   a.stop()
+  b.stop()
+})
+
+it('reports inactive once no tab is visible and focused, and active when one is again', async () => {
+  const { sink, open } = browser()
+  const a = open('a')
+  const b = open('b', false)
+  await advance(MINUTE)
+  a.focus(false)
+  await advance(SETTLE)
+  expect(sink).toEqual([['a', 'active', 0, 0], ['a', 'inactive', 0, 1 + SETTLE / MINUTE]])
+  await advance(4 * MINUTE - SETTLE)
+  b.focus(true)
+  await advance(0)
+  expect(sink.slice(2)).toEqual([['a', 'active', 5, 5]])
+  a.stop()
+  b.stop()
+})
+
+it('reports the first input after an idle stretch once report_again_at was null', async () => {
+  const { sink, open } = browser()
+  const a = open('a')
+  const b = open('b', false)
+  await advance(MINUTE)
+  a.focus(false)
+  b.focus(true)
+  // The person stops at minute 1: the daemon asks again at minute 10 and 11, then turns the browser idle.
+  await advance(IDLE)
+  expect(sink).toEqual([['a', 'active', 0, 0], ['a', 'active', 1, 10], ['a', 'active', 1, 11]])
+  await advance(4 * MINUTE)
+  b.input()
+  await advance(0)
+  b.input()
+  await advance(MINUTE)
+  expect(sink.slice(3)).toEqual([['a', 'active', 15, 15]])
+  a.stop()
+  b.stop()
+})
+
+it('hands the role on when the reporting tab closes', async () => {
+  const { sink, open } = browser()
+  const a = open('a')
+  const b = open('b', false)
+  await advance(MINUTE)
+  a.focus(false)
+  b.focus(true)
+  await advance(MINUTE)
+  a.close()
+  await advance(0)
+  // Tab B reports at once on taking the role; tab A reports nothing after it closed.
+  expect(sink).toEqual([['a', 'active', 0, 0], ['b', 'active', 1, 2]])
+  b.focus(false)
+  await advance(SETTLE)
+  expect(sink.slice(2)).toEqual([['b', 'inactive', 1, 2 + SETTLE / MINUTE]])
+  b.stop()
+})
+
+it('hands the role on when the reporting tab dies without pagehide, forgetting its state', async () => {
+  const { sink, open } = browser()
+  const a = open('a')
+  const b = open('b', false)
+  await advance(MINUTE)
+  // Tab A was the focused one; with it gone no tab is active, which tab B reports at once.
+  a.crash()
+  await advance(SETTLE)
+  expect(sink).toEqual([['a', 'active', 0, 0], ['b', 'inactive', undefined, 1]])
+  b.focus(true)
+  await advance(0)
+  expect(sink.slice(2)).toEqual([['b', 'active', 1 + SETTLE / MINUTE, 1 + SETTLE / MINUTE]])
+  b.stop()
+})
+
+it('stops every tab once Fractal refuses the pairing', async () => {
+  const { sink, open, refuse } = browser()
+  refuse()
+  const a = open('a')
+  const b = open('b', false)
+  await advance(MINUTE)
+  b.focus(true)
+  a.focus(false)
+  b.input()
+  // Not even the refused tab giving its role up lets another tab report.
+  a.stop()
+  await advance(30 * MINUTE)
+  b.focus(false)
+  await advance(30 * MINUTE)
+  expect(sink).toEqual([['a', 'active', 0, 0]])
   b.stop()
 })

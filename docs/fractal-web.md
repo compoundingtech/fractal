@@ -834,16 +834,26 @@ chosen end as its expiry; **Clear note** removes it. Each write (`PUT /v1/client
 read still in flight. A refused write keeps the summary and explains itself: a pairing without
 the `write.availability` or `write.notes` scope must be paired again.
 
-The page reports the person's presence for as long as it lives (`POST /v1/client/presence`;
-the daemon assigns the pairing as the source). A visible page with input in the last five
-minutes is `present`; a hidden page, or a visible one without input for five minutes, is
-`idle`. A browser cannot see a locked screen, so it never reports `locked`. It reports each
-change and a page becoming visible, and repeats `present` every ten minutes while present: above
-the daemon's five-minute window for an unchanged report and below its fifteen-minute staleness.
-A refused report (no `write.presence` grant, or no person) stops reporting for the page; a
-replay reports nothing. Tabs of one pairing share a source, where the newest report wins, so
-only one tab reports: the one that last had input or was last shown claims the source over a
-`BroadcastChannel`, and the others fall quiet. An untouched window therefore never calls the
-person idle while they work in another, and a reporting tab that is hidden waits a second before
-saying `idle` so the tab being shown can claim first. A tab opened in the background reports
-nothing until it is shown.
+The page reports the browser's raw presence state for as long as it lives
+(`POST /v1/client/presence`; the daemon assigns the pairing as the source and derives presence
+from the state). The state is `active` while any tab of the app is visible and focused, and
+`inactive` when every tab is hidden or blurred; a browser cannot see a locked screen or sleep,
+so it never reports `locked` or `sleeping`. `last_input_at` is the newest input (pointer, key,
+wheel or touch, or switching to a tab) in any tab. The page applies no idle threshold and sends
+no heartbeat: it reports every change of the state, again at the answer's `report_again_at`
+with the newest input, and, after a null `report_again_at`, on the first newer input while
+`active`. A drop to `inactive` waits a second, so a tab switch, which blurs one tab before
+focusing the next, stays `active`. A failed report is sent again a minute later. A refused
+report (no `write.presence` grant, or no person) stops reporting in every tab; a replay
+reports nothing.
+
+Every tab of the browser shares the pairing and so the one presence source, so exactly one tab
+reports. The reporter is whichever tab holds the `fractal.presence` Web Lock. The tabs tell each
+other their visibility, focus and input times over the `fractal.presence` `BroadcastChannel`,
+input at most every five seconds, so an untouched window never calls the person away while
+they work in another. A tab that closes or navigates (`pagehide`) says goodbye and releases the
+lock; the browser also releases it when a tab dies. The next tab in line takes the role,
+reports at once, and asks the others for their state, forgetting the previous holder and any
+tab that does not answer within a second. A tab restored from the back-forward cache asks again
+and queues for the role. Without Web Locks every tab reports on its own, each the browser
+state it hears.

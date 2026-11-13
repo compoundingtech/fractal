@@ -14,6 +14,16 @@ export type AvailabilityRead =
 /** A write's answer: the state Fractal holds after it, or why it was refused, in words a person reads. */
 export type AvailabilityWrite<A> = { readonly _tag: 'Sent'; readonly value: A } | { readonly _tag: 'Refused'; readonly detail: string }
 
+/**
+ * A presence report's answer. `Sent` carries `report_again_at`: when to report again if nothing changes, or null for
+ * the next change or the first input after an idle stretch. `Refused`: this session may not report (no
+ * `write.presence` grant, or no person). `Failed`: the report did not arrive.
+ */
+export type PresenceAnswer =
+  | { readonly _tag: 'Sent'; readonly reportAgainAt: string | null }
+  | { readonly _tag: 'Refused' }
+  | { readonly _tag: 'Failed' }
+
 /** Availability is not a followed collection: callers read it when they open, regain focus or reconnect, and after their own writes. */
 export interface AvailabilityPort {
   readonly read: () => Promise<AvailabilityRead>
@@ -21,8 +31,8 @@ export interface AvailabilityPort {
   readonly set: (change: AvailabilitySet) => Promise<AvailabilityWrite<PersonAvailability>>
   /** `PUT /v1/client/notes`: null text clears the note; the answer is the note now in force, if any. */
   readonly setNote: (change: DirectiveNoteSet) => Promise<AvailabilityWrite<DirectiveNote | undefined>>
-  /** `POST /v1/client/presence`; the daemon assigns the source. `refused`: this session may not report (no `write.presence` grant, or no person). */
-  readonly reportPresence: (report: PresenceReport) => Promise<'sent' | 'refused' | 'failed'>
+  /** `POST /v1/client/presence` with the device's raw state; the daemon derives presence and assigns the source. */
+  readonly reportPresence: (report: PresenceReport) => Promise<PresenceAnswer>
 }
 
 const unavailable = (detail: string): AvailabilityRead => ({ _tag: 'Unavailable', detail })
@@ -69,10 +79,9 @@ export const gatewayAvailability = (client: FractalClient): AvailabilityPort => 
   },
   reportPresence: async (report) => {
     try {
-      await client.presenceReport(report)
-      return 'sent'
+      return { _tag: 'Sent', reportAgainAt: (await client.presenceReport(report)).value.report_again_at }
     } catch (error) {
-      return error instanceof ClientError && error.status === 403 ? 'refused' : 'failed'
+      return error instanceof ClientError && error.status === 403 ? { _tag: 'Refused' } : { _tag: 'Failed' }
     }
   },
 })

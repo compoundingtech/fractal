@@ -62,3 +62,17 @@ describe('gatewayAvailability writes', () => {
       .toEqual({ _tag: 'Refused', detail: 'Your availability was not changed: the connection to Fractal broke (Failed to fetch).' })
   })
 })
+
+describe('gatewayAvailability.reportPresence', () => {
+  it('answers with report_again_at, and tells a refusal apart from a failed report', async () => {
+    const report = { state: 'active', last_input_at: '2026-11-12T09:58:00Z', observed_at: '2026-11-12T09:58:30Z' } as const
+    const answering = (reportAgainAt: string | null) => gatewayAvailability({
+      presenceReport: async () => ({ snapshot, value: { availability: row('person/robin', 'present'), report_again_at: reportAgainAt } }),
+    } as unknown as FractalClient)
+    expect(await answering('2026-11-12T10:08:00Z').reportPresence(report)).toEqual({ _tag: 'Sent', reportAgainAt: '2026-11-12T10:08:00Z' })
+    expect(await answering(null).reportPresence(report)).toEqual({ _tag: 'Sent', reportAgainAt: null })
+    const failing = (error: Error) => gatewayAvailability({ presenceReport: async () => { throw error } } as unknown as FractalClient)
+    expect(await failing(forbidden('the authenticated client session is not granted `write.presence`')).reportPresence(report)).toEqual({ _tag: 'Refused' })
+    expect(await failing(new TypeError('Failed to fetch')).reportPresence(report)).toEqual({ _tag: 'Failed' })
+  })
+})

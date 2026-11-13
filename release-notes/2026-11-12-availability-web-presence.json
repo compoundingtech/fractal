@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal web reports the person's presence from the most recently active tab: present with recent input, idle when hidden or untouched for five minutes",
+  "summary": "Fractal web reports the browser's raw presence state from one tab: active while any tab is visible and focused, inactive otherwise, with the newest input of any tab",
   "replay": {
     "status": "none",
     "detail": "No graph replay."
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rule change. Reports go to POST /v1/client/presence on each change and every 10 minutes while present; only one tab per browser reports."
+    "detail": "No checkpoint rule change. One tab per browser, the holder of a Web Lock, reports to POST /v1/client/presence on each change of the browser's state and again at the answer's report_again_at; no idle threshold and no heartbeat."
   },
   "compatibility": {
     "status": "changed",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "A stale report ages out after 15 minutes; set a status override to ignore presence."
+    "detail": "A device's state stops counting 24 hours after it was observed; set a status override to ignore presence."
   }
 }
