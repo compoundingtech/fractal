@@ -32,7 +32,8 @@ const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixture
 const fallbackBoundaries = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-close-boundaries.json', import.meta.url), 'utf8')).cases
 function policyTree(source) {
   const capture = {}
-  ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
+  // Disclosure is relative to this suite's normal view, not another parser's HTML-block boundaries.
+  ReactMarkdown({ children: source, remarkPlugins: [usePulldown ? pulldown.remarkPulldown : remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
   return capture.tree
 }
 
