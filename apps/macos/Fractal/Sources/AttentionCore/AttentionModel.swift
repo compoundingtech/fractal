@@ -33,12 +33,6 @@ public protocol AttentionAdapter: Sendable {
   func submit(_ submission: WorkDoneSubmission) async throws
 }
 
-/// Where snoozes live. Fractal serves no attention snooze, so they are this Mac's only.
-public protocol SnoozeStore: Sendable {
-  func load() -> [String: Date]
-  func save(_ snoozes: [String: Date])
-}
-
 /// One independently refreshed section: a failure keeps its last value and never blanks another.
 public struct LiveSection<Value: Sendable & Equatable>: Sendable, Equatable {
   public internal(set) var value: Value?
@@ -58,18 +52,11 @@ public enum AnswerState: Sendable, Equatable {
   public private(set) var answers: [String: AnswerState] = [:]
   public private(set) var isRefreshing = false
   public let configurationError: String?
-  private var snoozes: [String: Date]
   private let adapter: (any AttentionAdapter)?
-  private let snoozeStore: (any SnoozeStore)?
   private var refreshAgain = false
 
-  public init(
-    adapter: (any AttentionAdapter)?, snoozeStore: (any SnoozeStore)? = nil,
-    configurationError: String? = nil
-  ) {
+  public init(adapter: (any AttentionAdapter)?, configurationError: String? = nil) {
     self.adapter = adapter
-    self.snoozeStore = snoozeStore
-    snoozes = snoozeStore?.load() ?? [:]
     self.configurationError =
       adapter == nil
       ? configurationError
@@ -90,24 +77,16 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  public func asks(now: Date = .now) -> [AttentionRecord] {
-    records { if case .ask = $0.role { true } else { false } }.filter { !isSnoozed($0, now: now) }
-  }
-
-  public func snoozedAsks(now: Date = .now) -> [AttentionRecord] {
-    records { if case .ask = $0.role { true } else { false } }.filter { isSnoozed($0, now: now) }
-  }
+  public var asks: [AttentionRecord] { records { if case .ask = $0.role { true } else { false } } }
 
   public var updates: [AttentionRecord] { records { $0.role == .update } }
 
-  /// The menu bar count: asks waiting on the person, not snoozed. Updates ask nothing.
-  public func openAskCount(now: Date = .now) -> Int { asks(now: now).count }
+  /// The menu bar count: asks waiting on the person. Updates ask nothing.
+  public var openAskCount: Int { asks.count }
 
   public var sloBoard: SloBoard? { slo.value.map { SloBoard($0.rows) } }
 
   public var canAnswer: Bool { attention.value?.canAnswer ?? false }
-
-  public func snoozedUntil(_ record: AttentionRecord) -> Date? { snoozes[Self.snoozeKey(record)] }
 
   private func records(where keep: (AttentionRecord) -> Bool) -> [AttentionRecord] {
     (attention.value?.records ?? []).filter(keep)
@@ -137,9 +116,8 @@ public enum AnswerState: Sendable, Equatable {
 
   private func readAttention(from adapter: any AttentionAdapter, now: Date?) async {
     let result = await Self.capture { try await adapter.readAttention() }
-    let stamp = now ?? .now
-    Self.apply(result, to: &attention, now: stamp)
-    if case .success(let page) = result { prune(page, now: stamp) }
+    Self.apply(result, to: &attention, now: now ?? .now)
+    if case .success(let page) = result { prune(page) }
   }
 
   private func readSlo(from adapter: any AttentionAdapter, now: Date?) async {
@@ -167,18 +145,12 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  /// Drop answer states and snoozes of cards Fractal no longer holds open at that revision.
-  private func prune(_ page: AttentionPage, now: Date) {
+  /// Drop answer states of cards Fractal no longer holds open.
+  private func prune(_ page: AttentionPage) {
     let open = Set(page.records.map(\.id))
     answers = answers.filter { id, state in
       if case .sending = state { return true }
       return open.contains(id)
-    }
-    let keys = Set(page.records.map(Self.snoozeKey))
-    let kept = snoozes.filter { keys.contains($0.key) && $0.value > now }
-    if kept != snoozes {
-      snoozes = kept
-      snoozeStore?.save(kept)
     }
   }
 
@@ -196,40 +168,5 @@ public enum AnswerState: Sendable, Equatable {
     } catch {
       answers[record.id] = .refused(String(describing: error))
     }
-  }
-
-  public func snooze(_ record: AttentionRecord, until: Date) {
-    snoozes[Self.snoozeKey(record)] = until
-    snoozeStore?.save(snoozes)
-  }
-
-  public func unsnooze(_ record: AttentionRecord) {
-    snoozes[Self.snoozeKey(record)] = nil
-    snoozeStore?.save(snoozes)
-  }
-
-  private func isSnoozed(_ record: AttentionRecord, now: Date) -> Bool {
-    snoozes[Self.snoozeKey(record)].map { $0 > now } ?? false
-  }
-
-  /// A changed card (new revision) is new to the person and is never hidden by an old snooze.
-  static func snoozeKey(_ record: AttentionRecord) -> String { "\(record.id)#\(record.revision)" }
-}
-
-/// Snoozes persisted in the app's defaults domain.
-public struct DefaultsSnoozeStore: SnoozeStore, @unchecked Sendable {
-  private let defaults: UserDefaults
-  private let key = "snoozedAttention"
-
-  public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
-
-  public func load() -> [String: Date] {
-    (defaults.dictionary(forKey: key) as? [String: Double] ?? [:]).mapValues {
-      Date(timeIntervalSince1970: $0)
-    }
-  }
-
-  public func save(_ snoozes: [String: Date]) {
-    defaults.set(snoozes.mapValues(\.timeIntervalSince1970), forKey: key)
   }
 }

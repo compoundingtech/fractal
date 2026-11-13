@@ -20,9 +20,9 @@ final class AttentionModelTests: XCTestCase {
 
     await model.refresh(now: now)
 
-    XCTAssertEqual(model.asks(now: now), [ask])
+    XCTAssertEqual(model.asks, [ask])
     XCTAssertEqual(model.updates, [update])
-    XCTAssertEqual(model.openAskCount(now: now), 1, "updates ask nothing and are not counted")
+    XCTAssertEqual(model.openAskCount, 1, "updates ask nothing and are not counted")
     XCTAssertEqual(model.sloBoard?.objectives.map(\.id), ["read"])
     XCTAssertTrue(model.canAnswer)
     XCTAssertEqual(model.connection, .fresh(now))
@@ -40,11 +40,11 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.attention.state, .fresh(now))
     XCTAssertEqual(model.slo.state, .stale(lastSuccess: nil, reason: "slo down"))
     XCTAssertNil(model.slo.value)
-    XCTAssertEqual(model.asks(now: now), [ask])
+    XCTAssertEqual(model.asks, [ask])
 
     await model.refresh(now: later)
     XCTAssertEqual(model.attention.state, .stale(lastSuccess: now, reason: "gateway down"))
-    XCTAssertEqual(model.asks(now: later), [ask], "a failed read keeps the last asks")
+    XCTAssertEqual(model.asks, [ask], "a failed read keeps the last asks")
     XCTAssertEqual(model.slo.state, .fresh(later))
     XCTAssertEqual(model.slo.value, slo)
     XCTAssertEqual(model.connection, .stale(lastSuccess: now, reason: "gateway down"))
@@ -69,7 +69,7 @@ final class AttentionModelTests: XCTestCase {
     let model = AttentionModel(adapter: nil, configurationError: "Missing ATTENTION_FRACTAL_ENDPOINT")
     await model.refresh(now: now)
     XCTAssertEqual(model.connection, .unconfigured("Missing ATTENTION_FRACTAL_ENDPOINT"))
-    XCTAssertTrue(model.asks(now: now).isEmpty)
+    XCTAssertTrue(model.asks.isEmpty)
     XCTAssertNil(model.sloBoard)
   }
 
@@ -86,7 +86,7 @@ final class AttentionModelTests: XCTestCase {
     let sending = Task { await model.answer(ask, with: answer, label: "Ship") }
     await adapter.waitForSubmission()
     XCTAssertEqual(model.answers[ask.id], .sending("Ship"), "no optimistic success while in flight")
-    XCTAssertEqual(model.asks(now: now), [ask])
+    XCTAssertEqual(model.asks, [ask])
     await adapter.release(.success(()))
     await sending.value
 
@@ -94,7 +94,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(submitted, [WorkDoneSubmission(record: ask, answer: answer)])
     let reads = await adapter.attentionReads
     XCTAssertEqual(reads, 2, "a committed answer re-reads Fractal")
-    XCTAssertTrue(model.asks(now: now).isEmpty)
+    XCTAssertTrue(model.asks.isEmpty)
     XCTAssertNil(model.answers[ask.id], "state is dropped once Fractal no longer holds the card")
   }
 
@@ -125,39 +125,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(submitted.count, 1)
     let reads = await adapter.attentionReads
     XCTAssertEqual(reads, 1)
-    XCTAssertEqual(model.asks(now: now), [ask])
-  }
-
-  func testSnoozeHidesUntilExpiryPersistsAndAChangedRevisionResurfaces() async {
-    let ask = Fixture.record()
-    let changed = Fixture.record(revision: "claim/2", episode: "claim/2")
-    let store = MemorySnoozes()
-    let adapter = FakeAdapter(
-      attention: [.success(.init(records: [ask], canAnswer: true)), .success(.init(records: [changed], canAnswer: true))],
-      slo: [.success(slo), .success(slo)])
-    let model = AttentionModel(adapter: adapter, snoozeStore: store)
-    await model.refresh(now: now)
-
-    model.snooze(ask, until: now.addingTimeInterval(3600))
-    XCTAssertTrue(model.asks(now: now).isEmpty)
-    XCTAssertEqual(model.openAskCount(now: now), 0)
-    XCTAssertEqual(model.snoozedAsks(now: now), [ask])
-    XCTAssertEqual(model.asks(now: now.addingTimeInterval(3601)), [ask])
-    XCTAssertEqual(AttentionModel(adapter: adapter, snoozeStore: store).snoozedUntil(ask), now.addingTimeInterval(3600))
-
-    await model.refresh(now: now)
-    XCTAssertEqual(model.asks(now: now), [changed])
-    XCTAssertTrue(store.load().isEmpty, "snoozes of cards no longer open at that revision are pruned")
-  }
-
-  func testUnsnoozeShowsTheAskAgain() async {
-    let ask = Fixture.record()
-    let adapter = FakeAdapter(attention: [.success(.init(records: [ask], canAnswer: true))], slo: [.success(slo)])
-    let model = AttentionModel(adapter: adapter, snoozeStore: MemorySnoozes())
-    await model.refresh(now: now)
-    model.snooze(ask, until: now.addingTimeInterval(60))
-    model.unsnooze(ask)
-    XCTAssertEqual(model.asks(now: now), [ask])
+    XCTAssertEqual(model.asks, [ask])
   }
 }
 
@@ -239,10 +207,4 @@ private actor FakeAdapter: AttentionAdapter {
     pending?.resume(with: result)
     pending = nil
   }
-}
-
-private final class MemorySnoozes: SnoozeStore, @unchecked Sendable {
-  private var value: [String: Date] = [:]
-  func load() -> [String: Date] { value }
-  func save(_ snoozes: [String: Date]) { value = snoozes }
 }

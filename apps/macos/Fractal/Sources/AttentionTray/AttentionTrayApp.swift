@@ -37,8 +37,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
         environment: ProcessInfo.processInfo.environment)
       model = AttentionModel(
         adapter: FractalAttentionAdapter(
-          configuration: configuration, clientName: "attention-tray \(build.machineVersion)"),
-        snoozeStore: DefaultsSnoozeStore())
+          configuration: configuration, clientName: "attention-tray \(build.machineVersion)"))
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays unconfigured and refresh is inert.
@@ -85,7 +84,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       }
     }
     let line =
-      "attention \(describe(model.attention.state)) (\(model.openAskCount()) asks, \(model.updates.count) updates); "
+      "attention \(describe(model.attention.state)) (\(model.openAskCount) asks, \(model.updates.count) updates); "
       + "slo \(describe(model.slo.state)) (\(model.slo.value?.rows.count ?? 0) rows, \(model.sloBoard?.needsAttention ?? 0) need attention)"
     guard line != lastLogged else { return }
     lastLogged = line
@@ -135,7 +134,7 @@ private struct TrayLabel: View {
       Image(systemName: "exclamationmark.bubble")
         .accessibilityLabel("Attention: configuration needed")
     } else {
-      let count = model.openAskCount()
+      let count = model.openAskCount
       let slo = model.sloBoard?.needsAttention ?? 0
       HStack(spacing: 3) {
         Image(

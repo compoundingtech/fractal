@@ -7,9 +7,12 @@ Fractal, through `FractalClient`, at launch and every 30 seconds.
 - **Asks** (all attention pages, classified as Fractal web's
   `data/attention.ts` does) are answered in the panel: a decision's or choice's
   named answers (recommended first; request-changes takes words), a choice's
-  custom words or feedback text, Yes/No for an untyped question, Dismiss (named
-  answers) or Nothing to do. Custom forms and harness prompts link to Fractal.
-  Controls appear on hover or focus.
+  custom words or feedback text, Yes/No for an untyped question, or Nothing to
+  do when there are no named answers. Custom forms and harness prompts link to
+  Fractal. Controls appear on hover or focus.
+- The tray offers no Dismiss and no snooze. Web's Dismiss sends a `work.done`
+  that the asker reads as an answer; dismissing and snoozing are person
+  attention controls, distinct from answering and shared by every client.
 - Answers mirror Fractal web `alert-action-port.ts`: re-read the card, require it
   open, offering `work.done` and at the revision the person read, then submit
   one `work.done` fenced on that read. The action ID and idempotency key are
@@ -19,8 +22,6 @@ Fractal, through `FractalClient`, at launch and every 30 seconds.
   never removed optimistically.
 - **Updates** are listed apart and not counted; Mark read sends the server's
   prefilled `work.done` (`Read`, answer `read`).
-- **Snooze** hides an ask on this Mac only (defaults domain), keyed by its
-  revision, because Fractal serves no attention snooze; a changed ask resurfaces.
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   The menu bar adds a gauge when any objective is missed or budget nearly spent.
@@ -266,7 +267,7 @@ belongs to the legacy mutation `attention.resolve`
 (`crates/fractal-api-client-v0/src/api/client_v0.rs:7735-7738`), not these reads.
 At the pinned Fractal `3b8e57cb`, `attention.resolve` is always refused as
 `attention-migrated` (`crates/fractal-api-client-v0/src/api/client_v0.rs:9479`):
-answers, dismissals and reading an update all complete the source person step
+answers and reading an update both complete the source person step
 with `work.done`, whose update parameters the server prefills
 (`crates/fractal-api-core/src/api.rs:5078`). `work.done` needs
 `control.attention` (`crates/fractal-api-core/src/api/client_v0.rs:4573`
