@@ -1,12 +1,11 @@
 //! The narrow main Performance failure field of the existing repository observer: a failed
 //! `perf.yml` push run on main, or a daily long-lanes run on main whose `daily-perf-` lane failed.
 //!
-//! The same observation reads the recent completed Workspace CI runs (`fleet.yml`) and keeps them
-//! in this process only, for CI's objectives in `st slo`: they never enter the observed facts. A
-//! run that finished in the last hour has its artifacts listed once, for the tests nextest passed
-//! only on a retry (`nextest-flaky-<lane>-<N>`).
+//! The same observation reads the recent completed Workspace CI runs (`fleet.yml`) and records
+//! the ones CI's objectives read as the repository's `workspace_ci` fact, so every member computes
+//! the same rows from the replicated observation. A run that finished in the last hour has its
+//! artifacts listed once, for the tests nextest passed only on a retry (`nextest-flaky-<lane>-<N>`).
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -169,26 +168,47 @@ const FLAKY_ARTIFACT_PREFIX: &str = "nextest-flaky-";
 /// The most runs whose artifacts one poll lists, so a restart in a busy hour cannot burst; the
 /// rest are listed on the next polls while they are still in the hour.
 const FLAKY_READS_PER_POLL: usize = 20;
+/// The repository fact that records the runs CI's objectives read.
+pub const WORKSPACE_CI_FIELD: &str = "workspace_ci";
+/// How long a `workspace_ci` reading may go without following GitHub before its rows read no-data:
+/// three of the repository observer's five-minute polls, so one failed poll does not blank the
+/// rows, while an observer whose replicated state is not healthy, or whose Workspace CI reads
+/// keep failing, cannot keep them met. The reading carries no read time: an unchanged poll records
+/// the same fact, so it appends nothing and the standing observer backs off.
+pub const WORKSPACE_CI_FRESH_MS: u64 = 15 * 60_000;
 
-/// One completed Workspace CI run: a pull request's or a merge group's, with GitHub's run-level
-/// timestamps. `updated_unix_ms` is the run's `updated_at`, which a completed run last changes
-/// when it completes; it stands in for the last job's completion, which would need a jobs read
-/// per run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One completed Workspace CI run, a pull request's or a merge group's, as the `workspace_ci` fact
+/// records it: only what the rows read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRun {
-    pub run_id: u64,
-    /// 1 for the first attempt. A re-run restarts `run_started_at` and reruns only some jobs, so
-    /// a later attempt's timestamps do not measure the run.
-    pub run_attempt: u64,
+    pub id: u64,
+    /// 1 for the first attempt, and then omitted. A re-run restarts `run_started_at` and reruns
+    /// only some jobs, so a later attempt's timestamps do not measure the run.
+    #[serde(default = "first_attempt", skip_serializing_if = "is_first_attempt")]
+    pub attempt: u64,
     /// `pull_request` or `merge_group`.
     pub event: String,
     pub conclusion: String,
-    pub created_unix_ms: u64,
-    pub started_unix_ms: u64,
-    pub updated_unix_ms: u64,
+    /// Where the run's sample starts: a pull request run's `run_started_at`, a merge group run's
+    /// `created_at`, when the group entered the queue.
+    pub from_unix_ms: u64,
+    /// The run's `updated_at`, which a completed run last changes when it completes; it stands in
+    /// for the last job's completion, which would need a jobs read per run.
+    pub until_unix_ms: u64,
     /// The tests nextest passed only on a retry in the run's test lanes, from its artifacts'
-    /// names; None until they are listed (only for a run that finished in the last hour).
+    /// names; absent until they are listed (only for a run that finished in the last hour), and
+    /// then kept with the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flaky: Option<u64>,
+}
+
+fn first_attempt() -> u64 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if passes a reference.
+fn is_first_attempt(attempt: &u64) -> bool {
+    *attempt == 1
 }
 
 impl WorkspaceRun {
@@ -220,18 +240,33 @@ impl WorkspaceRun {
         if !workspace || !kind || text("status")? != "completed" {
             return None;
         }
-        let run = Self {
-            run_id: run.get("id")?.as_u64()?,
-            run_attempt: run.get("run_attempt").and_then(Value::as_u64).unwrap_or(1),
+        let (created, started, updated) = (at("created_at")?, at("run_started_at")?, at("updated_at")?);
+        if started > updated || created > updated {
+            return None;
+        }
+        Some(Self {
+            id: run.get("id")?.as_u64()?,
+            attempt: run.get("run_attempt").and_then(Value::as_u64).unwrap_or(1),
             event: event.to_owned(),
             conclusion: text("conclusion")?.to_owned(),
-            created_unix_ms: at("created_at")?,
-            started_unix_ms: at("run_started_at")?,
-            updated_unix_ms: at("updated_at")?,
+            from_unix_ms: if event == "merge_group" { created } else { started },
+            until_unix_ms: updated,
             flaky: None,
-        };
-        (run.started_unix_ms <= run.updated_unix_ms && run.created_unix_ms <= run.updated_unix_ms)
-            .then_some(run)
+        })
+    }
+
+    /// A run as a replicated fact holds it, whatever build wrote it.
+    fn valid(&self) -> bool {
+        self.id > 0
+            && self.attempt > 0
+            && matches!(self.event.as_str(), "pull_request" | "merge_group")
+            && !self.conclusion.is_empty()
+            && self.from_unix_ms <= self.until_unix_ms
+    }
+
+    /// Whether this run is a duration sample: a successful first attempt.
+    fn sample(&self) -> bool {
+        self.conclusion == "success" && self.attempt == 1
     }
 
     /// The duration this run adds to `series`, if it adds one: a successful pull request run
@@ -239,26 +274,45 @@ impl WorkspaceRun {
     /// group run from its creation, when the group entered the queue, to its last update, when it
     /// went green and the group could merge (`ci/merge-queue`). Only a first attempt adds one.
     fn duration_ms(&self, series: &str) -> Option<u64> {
-        let from = match (series, self.event.as_str()) {
-            (CRITICAL_PATH_SERIES, "pull_request") => self.started_unix_ms,
-            (MERGE_QUEUE_SERIES, "merge_group") => self.created_unix_ms,
-            _ => return None,
-        };
-        (self.conclusion == "success" && self.run_attempt == 1).then(|| self.updated_unix_ms - from)
+        let fed = matches!(
+            (series, self.event.as_str()),
+            (CRITICAL_PATH_SERIES, "pull_request") | (MERGE_QUEUE_SERIES, "merge_group")
+        );
+        (fed && self.sample()).then(|| self.until_unix_ms - self.from_unix_ms)
+    }
+
+    /// Whether a row of a reading taken at `at_unix_ms` reads this run: any run that finished in
+    /// the hour before counts for `ci/flakes`, and a duration sample that finished in the day
+    /// before for its series.
+    fn read_at(&self, at_unix_ms: u64) -> bool {
+        self.until_unix_ms > at_unix_ms.saturating_sub(HOUR_MS)
+            || (self.until_unix_ms > at_unix_ms.saturating_sub(DAY_MS) && self.sample())
     }
 }
 
-/// The recent completed Workspace CI runs as this process last read them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The recent completed Workspace CI runs one repository observation read, the `workspace_ci`
+/// fact of its `vcs.repository`: the runs a row of this reading reads. It changes only when a run
+/// is new or changed, a flaky count is listed, or its reads start or stop failing, never with the
+/// clock alone: runs that age out of the windows stay until the next change, and the rows read
+/// their windows when they are read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCi {
-    /// The repository the runs belong to. A daemon keeps one repository's runs: the first
-    /// observer to read them.
     pub repository: String,
-    pub observed_at_unix_ms: u64,
     pub runs: Vec<WorkspaceRun>,
+    /// When this reading's Workspace CI reads began to fail, each failed read recording the
+    /// reading as it was; absent while they succeed. It is set once per failure episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_since_unix_ms: Option<u64>,
 }
 
 impl WorkspaceCi {
+    /// The reading in a repository's `facts`, or None when they hold none (an observation without
+    /// `main_performance_failures`, or from an older build) or an unreadable one.
+    pub fn from_facts(facts: &Value) -> Option<Self> {
+        let ci = Self::deserialize(facts.get(WORKSPACE_CI_FIELD)?).ok()?;
+        ci.runs.iter().all(WorkspaceRun::valid).then_some(ci)
+    }
+
     /// The durations `series` holds from runs that finished after `since_unix_ms` and by
     /// `until_unix_ms`, or None when these runs do not feed `series`.
     pub fn durations(&self, series: &str, since_unix_ms: u64, until_unix_ms: u64) -> Option<Vec<u64>> {
@@ -297,7 +351,7 @@ impl WorkspaceCi {
     fn within(&self, since_unix_ms: u64, until_unix_ms: u64) -> impl Iterator<Item = &WorkspaceRun> {
         self.runs
             .iter()
-            .filter(move |run| run.updated_unix_ms > since_unix_ms && run.updated_unix_ms <= until_unix_ms)
+            .filter(move |run| run.until_unix_ms > since_unix_ms && run.until_unix_ms <= until_unix_ms)
     }
 }
 
@@ -344,16 +398,17 @@ fn flaky_reads(runs: &[WorkspaceRun], listed: &BTreeMap<u64, u64>, now_unix_ms: 
     let since = now_unix_ms.saturating_sub(HOUR_MS);
     let mut unread = runs
         .iter()
-        .filter(|run| run.updated_unix_ms > since && !listed.contains_key(&run.run_id))
-        .map(|run| (run.updated_unix_ms, run.run_id))
+        .filter(|run| run.until_unix_ms > since && !listed.contains_key(&run.id))
+        .map(|run| (run.until_unix_ms, run.id))
         .collect::<Vec<_>>();
     unread.sort_unstable_by(|left, right| right.cmp(left));
     unread.into_iter().take(FLAKY_READS_PER_POLL).map(|(_, run_id)| run_id).collect()
 }
 
-/// List the artifacts of `ci`'s runs that finished in the last hour, each at most once in this
-/// process: `listed` keeps each run's flaky test count, pruned to the runs still in the hour.
-/// Each run's `flaky` is then set from it. A failed listing is tried again on a later poll.
+/// List the artifacts of `ci`'s runs that finished in the last hour, each at most once: `listed`
+/// holds each run's flaky test count from the previous reading, pruned to the runs still in this
+/// one, so a count stays with its run after the hour. Each run's `flaky` is then set from it. A
+/// failed listing is tried again on a later poll.
 pub(crate) async fn read_flaky(
     client: &reqwest::Client,
     base: &str,
@@ -363,8 +418,7 @@ pub(crate) async fn read_flaky(
     listed: &mut BTreeMap<u64, u64>,
     now_unix_ms: u64,
 ) {
-    let since = now_unix_ms.saturating_sub(HOUR_MS);
-    listed.retain(|run_id, _| ci.runs.iter().any(|run| run.run_id == *run_id && run.updated_unix_ms > since));
+    listed.retain(|run_id, _| ci.runs.iter().any(|run| run.id == *run_id));
     for run_id in flaky_reads(&ci.runs, listed, now_unix_ms) {
         // At most 100 artifacts: a longer listing fails rather than truncates.
         let url = format!("{base}/actions/runs/{run_id}/artifacts?per_page=100");
@@ -381,30 +435,15 @@ pub(crate) async fn read_flaky(
         super::github_forget(&url).await;
     }
     for run in &mut ci.runs {
-        run.flaky = listed.get(&run.run_id).copied();
+        run.flaky = listed.get(&run.id).copied();
     }
 }
 
-fn flaky_listed() -> &'static Mutex<BTreeMap<u64, u64>> {
-    static LISTED: OnceLock<Mutex<BTreeMap<u64, u64>>> = OnceLock::new();
-    LISTED.get_or_init(Default::default)
-}
-
-fn workspace_ci_store() -> &'static Mutex<Option<WorkspaceCi>> {
-    static STORE: OnceLock<Mutex<Option<WorkspaceCi>>> = OnceLock::new();
-    STORE.get_or_init(Default::default)
-}
-
-/// The Workspace CI runs this process last read, or None when it has read none: only the member
-/// that runs a repository observer with `main_performance_failures` reads them.
-pub fn workspace_ci() -> Option<WorkspaceCi> {
-    workspace_ci_store().lock().unwrap_or_else(PoisonError::into_inner).clone()
-}
-
 /// The completed pull request and merge group runs of Workspace CI created since the start of
-/// the UTC day before `now_unix_ms`'s, which covers the last day. Two list-runs reads on the
-/// workflow the observer already reads runs from, through the same conditional cache; the date
-/// in the query changes once a day, so an unchanged listing still revalidates for free.
+/// the UTC day before `now_unix_ms`'s, which covers the last day, keeping the runs a row of this
+/// reading reads. Two list-runs reads on the workflow the observer already reads runs from,
+/// through the same conditional cache; the date in the query changes once a day, so an unchanged
+/// listing still revalidates for free.
 pub async fn workspace_ci_runs(
     client: &reqwest::Client,
     base: &str,
@@ -450,13 +489,14 @@ pub async fn workspace_ci_runs(
         listed.extend(listing.values);
     }
     let mut runs = workspace_runs(repository, &listed)?;
-    runs.sort_by_key(|run| run.run_id);
-    runs.dedup_by_key(|run| run.run_id);
-    Ok(WorkspaceCi { repository: repository.to_owned(), observed_at_unix_ms: now_unix_ms, runs })
+    runs.sort_by_key(|run| run.id);
+    runs.dedup_by_key(|run| run.id);
+    runs.retain(|run| run.read_at(now_unix_ms));
+    Ok(WorkspaceCi { repository: repository.to_owned(), runs, unread_since_unix_ms: None })
 }
 
 /// The Workspace CI runs among `listed`. Runs listed but none of them Workspace CI's means the
-/// workflow's name or path changed: that fails, so the last runs age out to no-data with a
+/// workflow's name or path changed: that fails, so the previous reading turns no-data with a
 /// warning instead of reading as an idle day.
 fn workspace_runs(repository: &str, listed: &[Value]) -> Result<Vec<WorkspaceRun>> {
     let runs = listed.iter().filter_map(|run| WorkspaceRun::from_run(repository, run)).collect::<Vec<_>>();
@@ -468,37 +508,55 @@ fn workspace_runs(repository: &str, listed: &[Value]) -> Result<Vec<WorkspaceRun
     Ok(runs)
 }
 
-/// Whether this daemon reads `repository`'s Workspace CI runs: it keeps one repository's, the
-/// first it read.
-fn reads_workspace_ci(kept: Option<&str>, repository: &str) -> bool {
-    kept.is_none_or(|kept| kept.eq_ignore_ascii_case(repository))
-}
-
-/// Read the recent Workspace CI runs and keep them for `workspace_ci`. A failed read keeps the
-/// last runs and never fails the observation: the objectives' windows age them out. One
-/// repository per daemon: once one observer's runs are kept, another repository's are not read.
+/// The `workspace_ci` fact this observation records: the recent runs read now, with the flaky
+/// test counts `previous` (the repository's facts before this observation) already holds, so a
+/// run's artifacts are listed once whichever member polls. A read that finds no run new or
+/// changed records `previous` as it was, so an unchanged poll records the same fact. A failed
+/// read records `previous` with the time its reads began to fail, and never fails the
+/// observation. None when neither read.
 pub async fn observe_workspace_ci(
     client: &reqwest::Client,
     base: &str,
     repository: &str,
     auth: &GithubAuth,
     cache_for: Duration,
+    previous: Option<&Value>,
     now_unix_ms: u64,
-) {
-    let kept = workspace_ci().map(|ci| ci.repository);
-    if !reads_workspace_ci(kept.as_deref(), repository) {
-        tracing::warn!(repository, kept, "st slo keeps one repository's Workspace CI runs; not reading this one");
-        return;
-    }
+) -> Option<WorkspaceCi> {
+    let previous = previous
+        .and_then(WorkspaceCi::from_facts)
+        .filter(|ci| ci.repository.eq_ignore_ascii_case(repository));
     match workspace_ci_runs(client, base, repository, auth, cache_for, now_unix_ms).await {
         Ok(mut ci) => {
-            let mut listed = flaky_listed().lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let mut listed = previous
+                .iter()
+                .flat_map(|previous| &previous.runs)
+                .filter_map(|run| Some((run.id, run.flaky?)))
+                .collect();
             read_flaky(client, base, auth, cache_for, &mut ci, &mut listed, now_unix_ms).await;
-            *flaky_listed().lock().unwrap_or_else(PoisonError::into_inner) = listed;
-            *workspace_ci_store().lock().unwrap_or_else(PoisonError::into_inner) = Some(ci);
+            match previous {
+                Some(mut previous) if unchanged(&previous, &ci) => {
+                    previous.unread_since_unix_ms = None;
+                    Some(previous)
+                }
+                _ => Some(ci),
+            }
         }
-        Err(error) => tracing::warn!(repository, error = %error, "could not read Workspace CI runs for st slo"),
+        Err(error) => {
+            tracing::warn!(repository, error = %error, "could not read Workspace CI runs for CI's objectives");
+            previous.map(|mut previous| {
+                previous.unread_since_unix_ms.get_or_insert(now_unix_ms);
+                previous
+            })
+        }
     }
+}
+
+/// Whether `read` holds no run that `previous` does not hold as it is: only runs that aged out of
+/// the windows, or out of the listing, are gone.
+fn unchanged(previous: &WorkspaceCi, read: &WorkspaceCi) -> bool {
+    let held = previous.runs.iter().map(|run| (run.id, run)).collect::<BTreeMap<_, _>>();
+    read.runs.iter().all(|run| held.get(&run.id) == Some(&run))
 }
 
 pub async fn main_performance_failures(
@@ -599,7 +657,7 @@ mod tests {
     fn workspace_runs_are_completed_pull_request_and_merge_group_runs_of_workspace_ci() {
         let run = workspace(1, "pull_request", "success", "2026-10-20T10:00:00Z", 9);
         let parsed = WorkspaceRun::from_run("acme/garden", &run).unwrap();
-        assert_eq!(parsed.started_unix_ms - parsed.created_unix_ms, 30_000);
+        assert_eq!(parsed.from_unix_ms, unix_ms("2026-10-20T10:00:30Z"), "a pull request run's sample starts when it starts");
         assert_eq!(parsed.duration_ms(CRITICAL_PATH_SERIES), Some(540_000));
         assert_eq!(parsed.duration_ms(MERGE_QUEUE_SERIES), None);
         let group = WorkspaceRun::from_run("ACME/garden", &workspace(2, "merge_group", "success", "2026-10-20T10:00:00Z", 9)).unwrap();
@@ -630,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn a_renamed_workflow_fails_the_read_and_one_repository_is_kept() {
+    fn a_renamed_workflow_fails_the_read() {
         assert!(workspace_runs("acme/garden", &[]).unwrap().is_empty(), "an idle day reads as no runs");
         let mut renamed = workspace(1, "pull_request", "success", "2026-10-20T10:00:00Z", 9);
         renamed["name"] = json!("Workspace checks");
@@ -638,9 +696,55 @@ mod tests {
         assert!(error.contains("none named \"Workspace CI\""), "{error}");
         let kept = workspace(2, "pull_request", "success", "2026-10-20T10:00:00Z", 9);
         assert_eq!(workspace_runs("acme/garden", &[renamed, kept]).unwrap().len(), 1);
-        assert!(reads_workspace_ci(None, "acme/garden"));
-        assert!(reads_workspace_ci(Some("acme/garden"), "ACME/garden"));
-        assert!(!reads_workspace_ci(Some("acme/garden"), "acme/orchard"));
+    }
+
+    #[test]
+    fn a_reading_keeps_the_runs_its_rows_read_and_round_trips_as_a_fact() {
+        let now = unix_ms("2026-10-21T09:30:00Z");
+        let mut rerun = workspace(4, "pull_request", "success", "2026-10-21T09:00:00Z", 3);
+        rerun["run_attempt"] = json!(2);
+        let runs = [
+            // A sample in the day, a failed group and a re-run in the hour: each is read.
+            workspace(1, "pull_request", "success", "2026-10-20T12:00:00Z", 9),
+            workspace(2, "merge_group", "failure", "2026-10-21T09:00:00Z", 3),
+            rerun,
+            // Not read: a failed group before the hour, and any run before the day.
+            workspace(5, "merge_group", "failure", "2026-10-21T07:00:00Z", 3),
+            workspace(6, "merge_group", "success", "2026-10-20T09:00:00Z", 9),
+        ];
+        let mut runs = runs.iter().filter_map(|run| WorkspaceRun::from_run("acme/garden", run)).collect::<Vec<_>>();
+        runs.retain(|run| run.read_at(now));
+        assert_eq!(runs.iter().map(|run| run.id).collect::<Vec<_>>(), [1, 2, 4]);
+        runs[1].flaky = Some(2);
+        let ci = WorkspaceCi { repository: "acme/garden".to_owned(), runs, unread_since_unix_ms: None };
+        let fact = serde_json::to_value(&ci).unwrap();
+        // No read time: the fact is the repository and its runs, so an unchanged poll records it again.
+        assert_eq!(fact.as_object().unwrap().keys().collect::<Vec<_>>(), ["repository", "runs"]);
+        assert_eq!(fact["runs"][0], json!({"id": 1, "event": "pull_request", "conclusion": "success",
+            "from_unix_ms": unix_ms("2026-10-20T12:00:30Z"), "until_unix_ms": unix_ms("2026-10-20T12:09:30Z")}));
+        assert_eq!((&fact["runs"][1]["flaky"], &fact["runs"][2]["attempt"]), (&json!(2), &json!(2)));
+        let unread = WorkspaceCi { unread_since_unix_ms: Some(now), ..ci.clone() };
+        assert_eq!(serde_json::to_value(&unread).unwrap()["unread_since_unix_ms"], json!(now));
+        // A green first attempt with GitHub's 11-digit ids is 123 bytes, the widest run at most 160:
+        // two full listings, 2,000 runs, stay under 320 KB.
+        let green = WorkspaceRun { id: 19_234_567_890, attempt: 1, event: "pull_request".into(), conclusion: "success".into(),
+            from_unix_ms: now, until_unix_ms: now, flaky: None };
+        assert_eq!(serde_json::to_string(&green).unwrap().len(), 123);
+        let widest = WorkspaceRun { attempt: 99, conclusion: "startup_failure".into(), flaky: Some(999), ..green };
+        assert!(serde_json::to_string(&widest).unwrap().len() <= 160);
+        let facts = json!({"repository_id": 7, WORKSPACE_CI_FIELD: fact});
+        assert_eq!(WorkspaceCi::from_facts(&facts), Some(ci));
+        // An observation from before the field, or without main_performance_failures, holds none.
+        assert_eq!(WorkspaceCi::from_facts(&json!({"repository_id": 7, "node_id": "R_1"})), None);
+        // A later build's extra key is read past; an unreadable run discards the reading.
+        let mut extended = facts.clone();
+        extended[WORKSPACE_CI_FIELD]["runs"][0]["head_sha"] = json!("abc");
+        assert!(WorkspaceCi::from_facts(&extended).is_some());
+        for (field, wrong) in [("event", json!("push")), ("attempt", json!(0)), ("from_unix_ms", json!(u64::MAX)), ("id", json!("7"))] {
+            let mut broken = facts.clone();
+            broken[WORKSPACE_CI_FIELD]["runs"][0][field] = wrong;
+            assert_eq!(WorkspaceCi::from_facts(&broken), None, "{field}");
+        }
     }
 
     #[test]
@@ -656,8 +760,8 @@ mod tests {
         ];
         let mut ci = WorkspaceCi {
             repository: "acme/garden".to_owned(),
-            observed_at_unix_ms: unix_ms("2026-10-21T09:30:00Z"),
             runs: runs.iter().filter_map(|run| WorkspaceRun::from_run("acme/garden", run)).collect(),
+            unread_since_unix_ms: None,
         };
         let now = unix_ms("2026-10-21T09:30:00Z");
         // Run 1 finished at 09:09:30 the day before, just outside the day.
@@ -674,9 +778,9 @@ mod tests {
         assert_eq!((day.runs, day.groups, day.ejected), (6, 4, 2));
         assert_eq!(ci.flakes(MERGE_QUEUE_SERIES, now - HOUR_MS, now), None);
         // Flaky tests count with the ejected groups, from runs whose artifacts were listed.
-        ci.runs.iter_mut().find(|run| run.run_id == 7).unwrap().flaky = Some(3);
-        ci.runs.iter_mut().find(|run| run.run_id == 5).unwrap().flaky = Some(0);
-        ci.runs.iter_mut().find(|run| run.run_id == 4).unwrap().flaky = Some(9);
+        ci.runs.iter_mut().find(|run| run.id == 7).unwrap().flaky = Some(3);
+        ci.runs.iter_mut().find(|run| run.id == 5).unwrap().flaky = Some(0);
+        ci.runs.iter_mut().find(|run| run.id == 4).unwrap().flaky = Some(9);
         assert_eq!(hour(&ci), Flakes { runs: 2, groups: 2, ejected: 1, listed: 2, flaky_tests: 3 });
         assert_eq!(hour(&ci).count(), 4);
         // A window with nothing in it holds no samples.

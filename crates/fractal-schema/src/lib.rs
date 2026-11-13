@@ -1348,6 +1348,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
+                ("workspace_ci", object()),
                 ("github_http_requests_since_start", integer()),
             ],
         ),
@@ -5123,6 +5124,7 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("workspace_ci").unwrap();
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         for field in ["phase", "admission_publication"] {
