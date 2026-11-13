@@ -137,6 +137,9 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     let mut root = text("step", id);
     protection(&mut root, *revisions_human_only, revision_reviewer.as_deref(), *timeout_ms);
     annotations(&mut root, declarations_kdl.as_deref(), revision_owners, agent_constraints);
+    if resource_lane.is_some() {
+        comment(&mut root, "display-only resource lane: embedded exec redacted; this step is not republishable source");
+    }
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
@@ -379,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_exec_lane_round_trips_without_changing_seat_capacity() {
+    fn finite_exec_lane_displays_redacted_execution_without_changing_seat_capacity() {
         let source = r#"mission "test" state="ready" {
             goal "Verify."
             step "verify" timeout="30s" {
@@ -387,7 +390,7 @@ mod tests {
                 lane "verification" host="node" max-members=2 coverage="logical" admission-timeout="2m" {
                     capacity cores=2 memory="4G"
                 }
-                exec "verify" { command "true"; }
+                exec "verify" { command "echo secret"; }
             }
         }"#;
         let mission = parse(source);
@@ -400,7 +403,25 @@ mod tests {
         assert_eq!(lane.admission_timeout_ms, Some(120_000));
         assert_eq!(step.timeout_ms, Some(30_000));
         assert!(step.capacity.is_none());
-        round_trip(source);
+        let rendered = render_mission_kdl(&mission).unwrap();
+        assert!(!rendered.legacy, "resource lanes are not legacy loop syntax");
+        assert!(rendered.text.contains("display-only resource lane"));
+        assert!(!rendered.text.contains("secret"));
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let rendered_step = document.get("mission").unwrap().children().unwrap().get("step").unwrap();
+        let children = rendered_step.children().unwrap();
+        assert!(children.get("exec").is_none());
+        assert!(children.get("capacity").is_none());
+        let rendered_lane = children.get("lane").unwrap();
+        assert_eq!(rendered_lane.get(0).unwrap().as_string(), Some("verification"));
+        assert_eq!(rendered_lane.get("host").unwrap().as_string(), Some("node"));
+        assert_eq!(rendered_lane.get("max-members").unwrap().as_integer(), Some(2));
+        assert_eq!(rendered_lane.get("coverage").unwrap().as_string(), Some("logical"));
+        assert_eq!(rendered_lane.get("admission-timeout").unwrap().as_string(), Some("120000ms"));
+        let rendered_capacity = rendered_lane.children().unwrap().get("capacity").unwrap();
+        assert_eq!(rendered_capacity.get("cores").unwrap().as_integer(), Some(2));
+        assert_eq!(rendered_capacity.get("memory").unwrap().as_string(), Some("4G"));
+        assert_eq!(crate::mission::parse_missions(&document, "node").unwrap_err().code, "invalid-step-lane");
         let old = parse(r#"mission "test" state="ready" { goal "Verify."; step "verify" { agentless; }; }"#);
         let stored = serde_json::to_value(&old.steps["verify"]).unwrap();
         assert!(stored.get("resource_lane").is_none(), "old published step bytes remain unchanged");
