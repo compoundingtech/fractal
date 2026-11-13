@@ -129,7 +129,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     FileHandle.standardError.write(Data("\(Date.now.formatted(.iso8601)) \(line)\n".utf8))
   }
 
-  /// Verification: refresh once against the configured endpoint, render the open panel to a
+  /// Verification: refresh once against the configured member, render the open panel to a
   /// PNG and exit. `ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's answer controls.
   private func snapshot(to path: String) async {
     await model.refresh()
