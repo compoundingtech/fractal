@@ -2630,6 +2630,10 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** New runs created by retrying this run; omitted when empty. */
+  "retried_by": optionalKey(Schema.Array(MissionRunId)).annotate({ description: "New runs created by retrying this run; omitted when empty." }),
+  /** Source run for this new-run retry; omitted for an ordinary start. */
+  "retry_of": optionalKey(MissionRunId),
   /** The mission revision this run is pinned to. Older daemons omit it. */
   "revision": optionalKey(Revision),
   /** Run creation, in Unix milliseconds. */
@@ -2637,7 +2641,13 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "state_since": Timestamp,
   "status": Schema.String,
   /** The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read. */
-  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." })
+  "steps": Schema.OptionFromOptionalNullOr(Schema.Array(MissionStep), NULL_NONE).annotate({ description: "The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read." }),
+  /** Fresh replacement created after a newer revision was published; omitted when absent. */
+  "superseded_by": optionalKey(MissionRunId),
+  /** Predecessor replaced by this fresh run after publication; omitted when absent. */
+  "supersedes": optionalKey(MissionRunId),
+  /** Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent. */
+  "supersession_fault": optionalKey(Schema.String).annotate({ description: "Replacement admission refusal naming source and target revisions and incompatibility; source remains active. Omitted when absent." })
 }).annotate({ identifier: "MissionRunSummary" }))()
 export type MissionRunSummary = typeof MissionRunSummary.Type
 export type MissionRunSummaryEncoded = typeof MissionRunSummary.Encoded
