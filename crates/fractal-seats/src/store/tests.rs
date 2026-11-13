@@ -2052,7 +2052,7 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
         claim.fields.insert("driver".into(), json!("codex"));
         claim.fields.insert("entry_type".into(), json!("usage"));
         let mut body = json!({"semantics":"response", "model":"gpt-6.1-sol",
-            "input_tokens":input,"output_tokens":100,"total_tokens":input+100});
+            "input_tokens":input,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":input+100});
         if reported {
             body["cost"] = json!(0.001);
         }
@@ -2478,7 +2478,7 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
         rollup
     };
     let old_usage = json!({"semantics":"response","model":"claude-opus-5-5",
-        "input_tokens":1000,"output_tokens":100,"total_tokens":1100});
+        "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100});
     let old = respond("old-a", "old-response", "old", at + 100, old_usage.clone());
     assert_eq!(old.fields["execution_id"], first.id);
     assert_eq!(old.fields["cost_microusd"], 6_000);
@@ -2486,7 +2486,7 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
     assert_eq!(duplicate.fields["total_tokens"], 1100, "native source dedup is shared");
     respond("old-c", "old-second-response", "old", at + 110,
         json!({"semantics":"response","model":"claude-opus-5-5",
-            "input_tokens":1000,"output_tokens":100,"total_tokens":1100}));
+            "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100}));
     let new = respond("new-a", "new-response", "new", at + 400,
         json!({"semantics":"response","model":"unknown-local","input_tokens":7,"total_tokens":7}));
     assert_eq!(new.fields["execution_id"], second.id);
