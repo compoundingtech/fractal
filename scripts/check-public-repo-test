@@ -94,11 +94,12 @@ class PublicHistoryCheck(unittest.TestCase):
         self.git("config", "core.hooksPath", "/dev/null")
         self.base = self.commit("example.txt", "clean\n")
 
-    def git(self, *args):
+    def git(self, *args, input=None):
         return subprocess.check_output(["git", "-C", str(self.repo), *args], env=self.env,
-                                       stderr=subprocess.DEVNULL).decode().strip()
+                                       input=input, stderr=subprocess.DEVNULL).decode().strip()
 
     def commit(self, path, content, message="Example change"):
+        (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / path).write_text(content)
         self.git("add", "--", path)
         self.git("commit", "-m", message)
@@ -118,7 +119,7 @@ class PublicHistoryCheck(unittest.TestCase):
         self.commit("example.txt", "clean change\n", "person" + "/unknown-fixture")
         self.assertTrue(any(":message:" in error for error in self.scan()))
         self.commit("docs-" + "st3" + "-network.txt", "clean")
-        self.assertTrue(any(":path:" in error for error in self.scan()))
+        self.assertTrue(any("private fleet configuration repository in path" in error for error in self.scan()))
 
     def test_side_history_and_merge_resolution(self):
         self.git("checkout", "-b", "side", self.base)
@@ -136,7 +137,7 @@ class PublicHistoryCheck(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "Merge resolution")
         head = self.git("rev-parse", "HEAD")
-        self.assertTrue(any(error.startswith(head + ":diff:") for error in self.scan()))
+        self.assertTrue(any(error.startswith(head + ":resolution.txt:") for error in self.scan()))
 
     def test_outgoing_all_refs_deletions_and_known_remote_history(self):
         self.git("update-ref", "refs/remotes/origin/main", self.base)
@@ -170,6 +171,36 @@ class PublicHistoryCheck(unittest.TestCase):
         self.commit("example.txt", "\0person" + "/unknown-fixture\n")
         self.assertTrue(self.scan())
 
+    def test_nested_path_violation_removed_before_head_fails(self):
+        path = "docs/st3/release-status.md"
+        dirty = self.commit(path, "Invented public text\n")
+        self.git("rm", path)
+        self.git("commit", "-m", "Remove example")
+        self.assertTrue(any(error.startswith(dirty + ":" + path + ":") for error in self.scan()))
+
+    def test_evidence_record_deletions_preserve_publication_and_blob_exceptions(self):
+        note = next(iter(CHECK["HOST_NAME_NOTES"]))
+        content = (Path(__file__).resolve().parent.parent / note).read_text()
+        source = self.commit(note, content)
+        # A complete immutable note is allowed at its real path, even when added.
+        self.assertEqual(self.scan(), [])
+        self.git("update-ref", "refs/remotes/origin/main", source)
+        source_tree = self.git("rev-parse", source + "^{tree}")
+        body = b'{"example": "public evidence"}\n'
+        blob = self.git("hash-object", "-w", "--stdin", input=body)
+        notes = self.git("mktree", input=f"100644 blob {blob}\t{source_tree}\n".encode())
+        record = self.git("commit-tree", notes, "-p", source, input=b"st gate observation v1\n")
+        line = f"refs/notes/evidence/{source_tree}/{record} {record} refs/notes/evidence/{source_tree}/{record} {'0' * 40}"
+        self.assertEqual(list(CHECK["outgoing_findings"](self.repo, "origin", [line])), [])
+        # A new evidence blob still passes the same content policy: no namespace bypass.
+        dirty_blob = self.git("hash-object", "-w", "--stdin", input=("person" + "/unknown-fixture").encode())
+        dirty_tree = self.git("mktree", input=f"100644 blob {dirty_blob}\t{source_tree}\n".encode())
+        dirty_record = self.git("commit-tree", dirty_tree, "-p", source, input=b"st gate observation v1\n")
+        dirty_line = f"refs/notes/evidence/{source_tree}/{dirty_record} {dirty_record} refs/notes/evidence/{source_tree}/{dirty_record} {'0' * 40}"
+        self.assertTrue(list(CHECK["outgoing_findings"](self.repo, "origin", [dirty_line])))
+        self.commit(note, content + "\n")
+        self.assertTrue(self.scan(), "changing an immutable exception must lose its allowance")
+
     def test_installed_hook_blocks_dirty_history_even_with_skip_evidence(self):
         scripts = self.repo / "scripts"
         scripts.mkdir()
@@ -198,7 +229,7 @@ class PublicHistoryCheck(unittest.TestCase):
                                 text=True, capture_output=True, cwd=self.repo,
                                 env={**self.env, "ST_SKIP_EVIDENCE": "1"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(dirty + ":diff:", result.stderr)
+        self.assertIn(dirty + ":example.txt:", result.stderr)
         result = subprocess.run(["bash", str(hook), "origin", str(self.repo)],
                                 input=f"refs/heads/clean {accepted} refs/heads/clean {'0' * 40}\n",
                                 text=True, capture_output=True, cwd=self.repo,

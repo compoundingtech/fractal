@@ -63,10 +63,6 @@
               {
                 "context": "fractal-web",
                 "integration_id": 15368
-              },
-              {
-                "context": "public-repo-history",
-                "integration_id": 15368
               }
             ]
           }

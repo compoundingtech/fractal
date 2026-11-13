@@ -122,23 +122,26 @@ def commit_findings(repo, commits):
         message = git(repo, "show", "-s", "--format=%B", commit).decode("utf-8", "replace")
         for reason in findings(Path("commit-message"), message):
             yield f"{commit}:message:{reason}"
-        # -m compares merges against EVERY parent: combined diffs omit changes inherited
-        # from only one parent. --root also covers a newly published unrelated history.
-        patch = git(
-            repo, "diff-tree", "--root", "-m", "-p", "--no-commit-id",
-            "--no-ext-diff", "--no-textconv", "--text", "--no-renames", "--unified=0", commit,
-        ).decode("utf-8", "replace")
-        for reason in findings(Path("commit-diff"), patch):
-            yield f"{commit}:diff:{reason}"
-        # Raw NUL-delimited names avoid Git's quoting hiding a forbidden path.
-        names = git(
-            repo, "diff-tree", "--root", "-m", "--no-commit-id",
-            "--name-only", "--no-renames", "-z", commit,
-        )
-        for name in set(names.split(b"\0")) - {b""}:
+        # Compare merges against EVERY parent, recursively, but scan only introduced
+        # blobs. Evidence records deliberately replace a source tree with a one-blob
+        # tree; deleted source files are not newly published content.
+        changes = git(
+            repo, "diff-tree", "--root", "-r", "-m", "--raw", "--no-abbrev",
+            "--no-commit-id", "--no-ext-diff", "--no-textconv", "--no-renames", "--diff-filter=AMT", "-z", commit,
+        ).split(b"\0")
+        seen = set()
+        for index in range(0, len(changes) - 1, 2):
+            metadata, name = changes[index:index + 2]
+            fields = metadata.split()
+            mode, blob = fields[1], fields[3].decode("ascii")
+            if (name, blob) in seen:
+                continue
+            seen.add((name, blob))
             path = Path(name.decode("utf-8", "replace"))
-            for reason in findings(path, ""):
-                yield f"{commit}:path:{reason}"
+            # Gitlinks have no local blob; their path still passes policy.
+            content = "" if mode == b"160000" else git(repo, "cat-file", "blob", blob).decode("utf-8", "replace")
+            for reason in findings(path, content):
+                yield f"{commit}:{path}:{reason}"
 
 
 def introduced_commits(repo, base, head):

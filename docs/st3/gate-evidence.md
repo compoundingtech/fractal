@@ -2084,12 +2084,19 @@ the nearest-rank p50 and p90, the maximum, the share within the objective, wheth
 slowest stages or checks; the runs left out are counted by reason (`not_full`, `cold`, `partial`: exit 4, a tree that edits a lane runs nothing for that check, and `failed`). It writes nothing.
 
 The installed stub first runs the accepted remote main's `scripts/check-public-repo` over
-every outgoing ref update. This content-only publication boundary checks newly reachable
-commit diffs and messages, including intermediate commits and side histories; it runs no
-tests and requires no evidence. A finding, missing accepted policy, or inability to scan
-refuses publication. `ST_SKIP_EVIDENCE` and `ST_EVIDENCE_LOCAL` affect only the signing
-path below, never this content guard. See [CI](../ci.md#required-public-history-guard)
-for the separate required BASE-owned history context and its ruleset configuration.
+every outgoing ref update. This content-only publication boundary recursively checks
+newly reachable commits, including intermediate commits and merged side histories:
+every commit message and each complete added, modified or type-changed blob at its real
+repository path, compared against every parent. Gitlinks receive path checks only.
+Removed lines and synthetic diff headers are not scanned. It runs no tests and requires
+no evidence. A finding, missing accepted policy, or inability to scan refuses publication.
+`ST_SKIP_EVIDENCE` and `ST_EVIDENCE_LOCAL` affect only the signing path below, never this
+content guard. Evidence-record publication also passes this boundary: the record's commit,
+message and newly reachable source ancestors are checked, with known remote history
+excluded as for other new refs. Neither the evidence namespace nor immutable record
+hashes bypass content policy; the signed bytes and hashes are not rewritten. See
+[CI](../ci.md#required-public-history-guard) for the separate required trusted workflow,
+its organization-ruleset contract and the plan prerequisite for hosted enforcement.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
