@@ -1,4 +1,16 @@
 {
+  "inputs": {
+    "sha256": "07d73ca1d1395d8a57f8645672e6d841f80416a451bac895a4c82576a324c580",
+    "files": [
+      "flake.lock",
+      "flake.nix",
+      "packages/fractal-ui/markdown-wasm/Cargo.lock",
+      "packages/fractal-ui/markdown-wasm/Cargo.toml",
+      "packages/fractal-ui/markdown-wasm/src/lib.rs",
+      "packages/fractal-ui/scripts/generate-markdown-wasm.mjs",
+      "packages/fractal-ui/scripts/markdown-wasm-inputs.mjs"
+    ]
+  },
   "sha256": "3627b320ab1925f4c133d1d8c68ee8769d43df2f88021aebbf874a8340d812e0",
   "bytes": 227079,
   "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07) (built from a source tarball)",
