@@ -96,6 +96,9 @@ The native runtime delivers it as a one-shot first-turn message keyed by
 `(subject, id)`, not as a recurring prompt. Changing either the text or the id
 restarts the agent. Text must be nonblank, contain no NUL, and fit in 64 KiB of
 UTF-8; the nonempty id must fit in 256 UTF-8 bytes, matching native admission.
+All rendered strings (including node names and property keys) use KDL v2
+escaping for control characters, Unicode newlines, BOM and directional controls.
+Unpaired UTF-16 surrogates cannot represent Unicode scalars and are rejected.
 
 `step()` and `gate.*()` validate eagerly, so a step handle's `assignedTo` must be an object with an `id`; a path-derived reference works in an inline step object, which the loader lowers.
 

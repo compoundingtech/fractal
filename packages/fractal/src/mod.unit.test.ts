@@ -66,6 +66,41 @@ const humanReviewGate = {
   reviewer: operator,
 } satisfies typeof HumanGateSchema.Encoded
 
+describe('KDL v2 string emission', () => {
+  it.each([
+    ['\u0000', '\\u{0}'],
+    ['\u0001', '\\u{1}'],
+    ['\u000b', '\\u{b}'],
+    ['\u001f', '\\u{1f}'],
+    ['\u007f', '\\u{7f}'],
+    ['\u0085', '\\u{85}'],
+    ['\u2028', '\\u{2028}'],
+    ['\u2029', '\\u{2029}'],
+    ['\ufeff', '\\u{feff}'],
+    ['\u200e', '\\u{200e}'],
+    ['\u200f', '\\u{200f}'],
+    ['\u202a', '\\u{202a}'],
+    ['\u202b', '\\u{202b}'],
+    ['\u202c', '\\u{202c}'],
+    ['\u202d', '\\u{202d}'],
+    ['\u202e', '\\u{202e}'],
+    ['\u2066', '\\u{2066}'],
+    ['\u2067', '\\u{2067}'],
+    ['\u2068', '\\u{2068}'],
+    ['\u2069', '\\u{2069}'],
+  ])('escapes %j in node names, arguments, property keys and values', (character, escaped) => {
+    expect(emit([node({ name: character, args: [character], props: { [character]: character } })]))
+      .toBe(`version 2\n"${escaped}" "${escaped}" "${escaped}"="${escaped}"\n`)
+  })
+  it('preserves ordinary Unicode, astral scalars and established short escapes', () => {
+    expect(emit([node({ name: 'text', args: ['é😀\b\f\n\r\t"\\'] })]))
+      .toBe('version 2\ntext "é😀\\b\\f\\n\\r\\t\\"\\\\"\n')
+  })
+  it.each(['\ud800', '\udfff'])('rejects non-scalar UTF-16 %j', (text) => {
+    expect(() => emit([node({ name: 'text', args: [text] })])).toThrow(RangeError)
+  })
+})
+
 describe('declared admission', () => {
   const base = {
     id: 'example/admission',
@@ -2828,7 +2863,10 @@ testWithSt(
               harness: omp({
                 model: 'example-model',
                 effort: 'xhigh',
-                message: { text: 'Start "here".\nRead C:\\notes\\plan.', id: 'startup-v1' },
+                message: {
+                  text: 'Start "here".\nRead C:\\notes\\plan.\u2028\u2029\u0001\u0085\ufeff\u200e\u202a\u2066',
+                  id: 'startup-v1',
+                },
               }),
             }),
           ]),
