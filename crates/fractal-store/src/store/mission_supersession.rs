@@ -518,9 +518,10 @@ fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result
     // A late stop report for an earlier incarnation must not retire a newer
     // execution. Fold identities separately using the same actual-claim filter
     // and canonical ordering as actual state, never desired stop declarations.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h056dec3d18d9 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h28283c8016b7 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ &format!(
         "SELECT json_extract(claims.body,'$.fields.incarnation_id'),
-                json_extract(claims.body,'$.fields.status')
+                json_extract(claims.body,'$.fields.status'),
+                json_extract(claims.body,'$.fields.reachability')
          FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {}
            AND json_type(claims.body,'$.fields.incarnation_id')='text'
@@ -532,7 +533,10 @@ fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result
     while let Some(row) = rows.next().map_err(internal)? {
         let incarnation = row.get_ref(0).map_err(internal)?.as_str().map_err(internal)?;
         let status = row.get_ref(1).map_err(internal)?.as_str().map_err(internal)?;
-        if matches!(status, "stopped" | "absent" | "exited") {
+        let reachability = row.get_ref(2).map_err(internal)?.as_str_or_null().map_err(internal)?;
+        if matches!(status, "stopped" | "absent" | "exited")
+            && !matches!(reachability, Some("unknown" | "unreachable"))
+        {
             live.remove(incarnation);
         } else {
             live.insert(incarnation.to_owned());

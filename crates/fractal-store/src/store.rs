@@ -23181,8 +23181,9 @@ pub fn mission_run_view_and_definition_tx(
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
     view.loops = loop_run_views_tx(connection, &view)?;
     view.outcome = mission_run_outcome_tx(connection, &view)?;
+    // Supersession lineage governs execution and cleanup, not only presentation.
+    enrich_mission_run_lineage_tx(connection, &mut view)?;
     if presentation {
-        enrich_mission_run_lineage_tx(connection, &mut view)?;
         view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
         if !view.steps.is_empty()
             && let Some(mission) = definitions.of(connection, &view.generation)?

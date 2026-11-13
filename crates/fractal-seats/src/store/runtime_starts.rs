@@ -1198,13 +1198,14 @@ mission "launch-publication" state="ready" {
                 // The queue pages by run id. Choose a source outside the first page,
                 // not one whose immediate cancellation already revokes its starts.
                 let source = runs.iter().max_by(|left, right| left.id.cmp(&right.id)).unwrap();
-                let subject = if gate { "gate/publication-fence" } else { "agent/publication-fence" };
+                let subject = if gate { "gate-operation/publication-fence" } else { "agent/publication-fence" };
                 let mut start = operation("publication-start", subject, None);
                 if gate {
                     start.body["subject"]["kind"] = Value::from("gate");
                     store.append_claim(&ClaimInput {
                         subject: subject.into(), kind: "gate.requested".into(), actor: None,
                         fields: BTreeMap::from([
+                            ("gate".into(), Value::from("publication-fence")),
                             ("owner".into(), Value::from(source.steps[0].subject.clone())),
                             ("runner".into(), Value::from("exec")),
                         ]),

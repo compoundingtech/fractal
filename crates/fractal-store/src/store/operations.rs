@@ -462,12 +462,13 @@ fn outcome_history_sql(collection: &str, scoped: bool) -> String {
         // Unfiltered pages walk the terminal-history index newest first. A mission page starts
         // from that mission's subjects instead; CROSS JOIN pins that order so SQLite cannot
         // fall back to scanning every terminal claim and filtering by mission afterwards.
+        // Keep this established covering driver independent of maintenance-only indexes.
         let (scope, from) = if scoped {
             (
                 "WITH scope(subject) AS (
-                   SELECT 'mission-run/' || m.id FROM mission_runs m WHERE m.mission_id=?6
+                   SELECT 'mission-run/' || m.id FROM mission_runs m INDEXED BY mission_runs_collection_latest_index WHERE m.mission_id=?6
                    UNION ALL
-                   SELECT st.subject FROM mission_runs m JOIN step_runs st ON st.run_id=m.id
+                   SELECT st.subject FROM mission_runs m INDEXED BY mission_runs_collection_latest_index JOIN step_runs st ON st.run_id=m.id
                    WHERE m.mission_id=?6)",
                 "scope CROSS JOIN claims c ON c.subject=scope.subject",
             )

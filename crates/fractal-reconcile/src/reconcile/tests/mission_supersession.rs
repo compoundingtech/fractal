@@ -98,6 +98,15 @@ mission "runtime-fence" state="ready" {
         "runtime-fence-replacement");
     let replacement = store.mission_run(&old.id).unwrap().unwrap().superseded_by.unwrap();
     store.set_mission_run_state(&old.id, "running", "cleanup-cancelled", None).unwrap();
+    // The evaluator's lightweight view must carry the same execution fences as
+    // the presentation view, without needing a second run lookup.
+    let cleanup = store.mission_run_for_reconcile(&old.id).unwrap();
+    assert_eq!(cleanup.superseded_by.as_deref(), Some(replacement.as_str()));
+    let waiting = store.mission_run(&replacement).unwrap().unwrap();
+    assert_eq!(
+        store.mission_run_for_reconcile(&waiting.id).unwrap().supersedes,
+        Some(old.subject.clone()),
+    );
     let runtime = Arc::new(NativeRuntime::new(root.path(), None, &std::env::current_exe().unwrap()));
     let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()))
         .with_cleanup_deadline(Duration::ZERO).tolerating_faults();
@@ -116,6 +125,12 @@ mission "runtime-fence" state="ready" {
     for _ in 0..2 { reconciler.reconcile_once().unwrap(); }
     held();
     observe_superseded_runtime(&store, subject, "unknown", "current", "unreachable");
+    for _ in 0..2 { reconciler.reconcile_once().unwrap(); }
+    held();
+    observe_superseded_runtime(&store, subject, "stopped", "current", "unreachable");
+    // A later reachable stop for an older incarnation must not launder the
+    // unconfirmed terminal report for the execution that still owns effects.
+    observe_superseded_runtime(&store, subject, "stopped", "earlier", "reachable");
     for _ in 0..2 { reconciler.reconcile_once().unwrap(); }
     held();
     observe_superseded_runtime(&store, subject, "stopped", "current", "reachable");

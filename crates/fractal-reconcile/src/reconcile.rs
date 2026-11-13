@@ -12241,14 +12241,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<Vec<_>>();
         let mut live = Vec::new();
         for subject in &owned {
-            // Only unrelated runs may release a never-observed stop or retained
-            // seat. Supersession requires positive execution confirmation.
-            if !supersession_cleanup && subject.kind == "stop"
-                && self.store.latest_actual_value(&subject.subject)?.is_none()
-            {
-                continue;
-            }
-            if !self.store.runtime_execution_quiescent(&subject.subject)? {
+            // Historical incarnation confirmation is a supersession admission fence,
+            // not a change to ordinary cleanup's observed-state lifecycle.
+            let quiescent = if supersession_cleanup {
+                self.store.runtime_execution_quiescent(&subject.subject)?
+            } else {
+                let actual = self.store.latest_actual_value(&subject.subject)?;
+                if subject.kind == "stop" && actual.is_none() {
+                    continue;
+                }
+                matches!(
+                    actual.as_ref().and_then(|actual| actual_field(actual, "status"))
+                        .and_then(Value::as_str),
+                    Some("stopped" | "absent" | "exited")
+                )
+            };
+            if !quiescent {
                 // A seat kept for unread mail or another run's work does not hold this run
                 // open. Its stop declaration stays and takes effect once it is free.
                 if !supersession_cleanup && subject.kind == "stop"
