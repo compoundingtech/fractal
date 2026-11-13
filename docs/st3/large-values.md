@@ -659,3 +659,14 @@ consumer change before adding SQL execution or persistence, and review the
 resulting value/column representation rather than treating these markers as a
 permanent storage exemption.
 
+### Durable host hold storage
+
+`fractal_store::store::host_holds` owns `lv-ha677d62abc9d`,
+`lv-h93ce54913c6d` and `lv-h16424da0718d`. These reviewed allow-for-now
+sites declare, insert and revision-check the authoritative local host-hold
+record. Owner/host keys and serialized hold bodies remain inline; sizes are
+not proven bounded. Their eventual representation change must preserve
+authenticated ownership, exact-revision release and the committed local
+observation in the same writer transaction. Terminal run status cannot reclaim
+an unresolved hold; reclamation needs a separate explicit retention policy.
+

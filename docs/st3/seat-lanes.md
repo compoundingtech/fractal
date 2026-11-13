@@ -452,3 +452,27 @@ A default scheduler weight is declared `not-enforced` with reason `default weigh
 inactive units and absent controllers retain their observed reasons. This fixture
 policy distinguishes an explicitly configured share from a default share; it does
 not imply that the kernel ignores default scheduler weights.
+
+## Durable host holds
+
+A host hold is a durable admission condition, not a lane reservation. The connected
+execution host alone writes its holds; authenticated ownership and expected revision
+protect resolution. A hold survives the originating run becoming terminal, a daemon
+restart, or an answered ask, and consumes no executor capacity.
+
+```sh
+fractal hosts hold worker --operation activation --reason "Investigate failed activation" --as person/operator
+fractal hosts ls --json
+fractal hosts release worker host-hold/example --expected-revision 1 --resolution "Recovery verified" --as person/operator
+```
+
+`--operation` is repeatable; `*` affects every native operation. Placement can retain
+`--originating-run` and `--receipt` references without making the run the hold's
+lifecycle owner. Active holds appear in attention/now. Resolution commits a local
+observation that invalidates registered admission reads; it does not depend on a
+reserve-probe loop.
+
+These records do not fence arbitrary shell SSH mutations. A target activation
+adapter must check target authority, hold revision and activation generation at
+the actual mutation boundary; executor exclusivity alone is not target authority.
+
