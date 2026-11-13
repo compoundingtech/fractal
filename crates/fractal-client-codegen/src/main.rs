@@ -314,6 +314,10 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
         } else if id == "mission-declaration.get" {
             writeln!(out, "    pub async fn mission_declaration_get(&self, mission: &str, revision: Option<&str>) -> Result<Envelope<MissionDeclaration>, ClientError> {{ let mut path = format!(\"/v1/client/mission-declaration?mission={{}}\", percent_encode(mission)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    pub async fn source_map_get(&self, subject: &str, revision: Option<&str>) -> Result<Envelope<SubjectSourceMap>, ClientError> {{ let mut path = format!(\"/v1/client/source-maps?subject={{}}\", percent_encode(subject)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    pub async fn source_blob_get(&self, hash: &str, subject: &str, revision: &str) -> Result<Envelope<SourceBlob>, ClientError> {{ self.get(&format!(\"/v1/client/source-blobs/{{}}?subject={{}}&revision={{}}\", percent_encode(hash), percent_encode(subject), percent_encode(revision))).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -625,6 +629,10 @@ fn swift_operation_methods(
             writeln!(out, "    public func attentionBudget(mission: String, person: String? = nil, at: UInt64? = nil) async throws -> Envelope<AttentionBudgetReport> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; if let at {{ query.append(.init(name: \"at\", value: String(at))) }}; return try await get(\"v1/client/attention-budget\", query: query) }}")?;
         } else if id == "mission-declaration.get" {
             writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    public func sourceMapGet(subject: String, revision: String? = nil) async throws -> Envelope<SubjectSourceMap> {{ var query: [URLQueryItem] = [.init(name: \"subject\", value: subject)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/source-maps\", query: query) }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    public func sourceBlobGet(hash: String, subject: String, revision: String) async throws -> Envelope<SourceBlob> {{ try await get(\"v1/client/source-blobs/\\(hash)\", query: [.init(name: \"subject\", value: subject), .init(name: \"revision\", value: revision)]) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -714,6 +722,7 @@ fn rust_field(name: &str) -> String {
         "final" => "is_final".into(),
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
+        "kdlLines" => "kdl_lines".into(),
         other => other.into(),
     }
 }
@@ -905,6 +914,15 @@ fn validate_surfaces(
         "AttentionBudgetReport",
         "AttentionBudgetRequestRef",
         "MissionDeclaration",
+        "SubjectSourceMap",
+        "SourceMapRevision",
+        "SourceMapClaim",
+        "SourceMapFile",
+        "SourceMapNode",
+        "SourceMapSpan",
+        "SourceMapPosition",
+        "SourceMapFrame",
+        "SourceBlob",
         "AgentsStatusWatermark",
         "Snapshot",
         "AgentsPublicationMetadata",
@@ -1837,6 +1855,10 @@ fn typescript_operation_methods(
             writeln!(out, "    async attentionBudget(mission: string, person?: string, at?: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AttentionBudgetReport>> {{ return this.get('{route}' + query({{ mission, person, at }}), undefined, requestOptions); }}")?;
         } else if id == "mission-declaration.get" {
             writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    async sourceMapGet(subject: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SubjectSourceMap>> {{ return this.get('{route}' + query({{ subject, revision }}), undefined, requestOptions); }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    async sourceBlobGet(hash: string, subject: string, revision: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SourceBlob>> {{ return this.get(`/v1/client/source-blobs/${{encodeURIComponent(hash)}}` + query({{ subject, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,

@@ -107,20 +107,9 @@ pub(crate) fn check_with_response(
         let fault = faults.get(&episode);
         let open = fault.map_or(&[][..], |fault| &fault.open[..]);
         if met {
+            let reason = format!("The objective {id} is met again: {}", row["current"].as_str().unwrap_or_default());
             for failure in open {
-                store.append_claim(&ClaimInput {
-                    subject: subject.clone(),
-                    kind: "operational.recovered".into(),
-                    actor: Some("daemon/runtime".into()),
-                    fields: BTreeMap::from([
-                        ("episode".into(), json!(episode)),
-                        ("failure".into(), json!(failure)),
-                        ("reason".into(), json!(format!("The objective {id} is met again: {}", row["current"].as_str().unwrap_or_default()))),
-                    ]),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("{failure}:recovered")),
-                })?;
+                recover(store, &subject, &episode, failure, &reason)?;
             }
             check.recovered += usize::from(!open.is_empty());
             continue;
@@ -170,6 +159,47 @@ pub(crate) fn check_with_response(
         check.opened += 1;
     }
     Ok(check)
+}
+
+/// End the open faults of this member's objective rows that `owns` claims and `judged` no longer
+/// holds: a row that is no longer evaluated, or that carries no goal, is never met again, so its
+/// fault would otherwise stay open. Returns the episodes ended.
+pub(crate) fn end_unjudged(store: &Store, owns: impl Fn(&str) -> bool, judged: &BTreeSet<String>) -> Result<usize, FractalError> {
+    let local = store.origin().to_owned();
+    let subject = format!("daemon/{local}");
+    let prefix = episode(&local, "");
+    let mut ended = 0;
+    for (episode, fault) in objective_faults(store, &subject).map_err(internal)? {
+        let Some(id) = episode.strip_prefix(&prefix) else {
+            continue;
+        };
+        if fault.open.is_empty() || judged.contains(id) || !owns(id) {
+            continue;
+        }
+        let reason = format!("The objective {id} is no longer judged: its row is gone or carries no goal.");
+        for failure in &fault.open {
+            recover(store, &subject, &episode, failure, &reason)?;
+        }
+        ended += 1;
+    }
+    Ok(ended)
+}
+
+fn recover(store: &Store, subject: &str, episode: &str, failure: &str, reason: &str) -> Result<(), FractalError> {
+    store.append_claim(&ClaimInput {
+        subject: subject.to_owned(),
+        kind: "operational.recovered".into(),
+        actor: Some("daemon/runtime".into()),
+        fields: BTreeMap::from([
+            ("episode".into(), json!(episode)),
+            ("failure".into(), json!(failure)),
+            ("reason".into(), json!(reason)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(format!("{failure}:recovered")),
+    })?;
+    Ok(())
 }
 
 /// One objective's faults on this member: its failures no recovery names, and its newest failure.

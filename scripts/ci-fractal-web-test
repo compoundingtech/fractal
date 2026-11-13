@@ -654,23 +654,20 @@ for shard, app, kit, build, index, expected in (
 print("passed: every shard generates Storybook inputs before building; only shard 0 runs non-kit lanes")
 print("passed: browser controls, Storybook and strict plays wait until the non-kit test streams finish")
 
-# Exercise the production hash/receipt aggregator without a browser.
+# Exercise the production cost scheduler/receipt aggregator without a browser.
 subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
 import assert from 'node:assert/strict'
-import { shardNumber, shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import { createHash } from 'node:crypto'
+import { shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import costs from './packages/fractal-ui/scripts/kit-play-costs.json' with { type: 'json' }
 const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
 const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
 const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
-assert.equal(shardNumber('story-0', 2), 1)
 for (const count of [1, 2, 3, 4]) {
   const shards = Array.from({ length: count }, (_, i) => shardStories(ids, i, count))
   assert.deepEqual(shards.flat().sort(), ids)
-  for (const id of ids) {
-    assert.equal(shardNumber(id, count), shardNumber(id, count))
-    assert.equal(shards[shardNumber(id, count)].includes(id), true)
-  }
+  assert.deepEqual(Array.from({ length: count }, (_, i) => shardStories(ids, i, count)), shards)
   assert.deepEqual(shardStories([...ids].reverse(), 0, count).sort(), shards[0])
-  assert.deepEqual(shardStories([...ids, 'new-story'], 0, count).filter(id => id !== 'new-story'), shards[0])
   const receipts = shards.map((selected, shardIndex) => ({
     ...provenance, pass: true, fullIds: ids, shardIndex, shardCount: count,
     rows: selected.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width, pass: true })))),
@@ -708,10 +705,24 @@ for (const count of [1, 2, 3, 4]) {
   }
 }
 assert.throws(() => shardStories(['story-0', 'story-0'], 0, 2))
-assert.throws(() => shardStories(['story-0', 'story-2'], 0, 2))
+assert.deepEqual(shardStories(['story-0', 'story-2'], 0, 2), ['story-2'])
 assert.deepEqual(shardStories(['story-0'], 0, 2), [])
 for (const count of [0, -1, NaN, 1.5]) assert.throws(() => shardStories(ids, 0, count))
-console.log('passed: stable hashes, exact union, configurable count, missing/empty/failed/duplicate shards')
+for (const index of [-1, 4, NaN, 1.5]) assert.throws(() => shardStories(ids, index, 4))
+const measuredIds = Object.keys(costs.storyMilliseconds)
+const loads = Array.from({ length: 4 }, (_, index) => shardStories(measuredIds, index, 4)
+  .reduce((total, id) => total + costs.storyMilliseconds[id], 0))
+const total = loads.reduce((a, b) => a + b, 0)
+assert.ok(loads[0] < Math.min(...loads.slice(1)) / 2, 'reserve room for shard 0 non-play lanes')
+loads[0] += total * 0.2
+assert.ok(Math.max(...loads) - Math.min(...loads) <= Math.max(...Object.values(costs.storyMilliseconds)),
+  'balanced projected work differs by no more than one largest story')
+assert.deepEqual(Array.from({ length: 4 }, (_, i) => shardStories([...measuredIds].reverse(), i, 4)),
+  Array.from({ length: 4 }, (_, i) => shardStories(measuredIds, i, 4)))
+assert.ok(Object.values(costs.storyMilliseconds).every(value => Number.isSafeInteger(value) && value > 0))
+assert.ok(Number.isSafeInteger(costs.newStoryMilliseconds) && costs.newStoryMilliseconds > 0)
+assert.equal(createHash('sha256').update(JSON.stringify(costs.storyMilliseconds)).digest('hex'), costs.inputSha256)
+console.log('passed: deterministic cost balance, shard-0 reserve, exact union, configurable count, missing/failed/duplicate shards')
 console.log('passed: workflow provenance, same-head older attempts, newest-attempt precedence')
 ''', text=True)
 sharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"

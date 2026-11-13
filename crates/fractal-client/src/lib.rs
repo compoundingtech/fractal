@@ -1432,9 +1432,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
         }
     }
 
@@ -2360,6 +2360,31 @@ impl Client {
             path.push_str(&format!("&revision={}", percent_encode(revision)));
         }
         self.get(&path).await
+    }
+    pub async fn source_map_get(
+        &self,
+        subject: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<SubjectSourceMap>, ClientError> {
+        let mut path = format!("/v1/client/source-maps?subject={}", percent_encode(subject));
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
+    pub async fn source_blob_get(
+        &self,
+        hash: &str,
+        subject: &str,
+        revision: &str,
+    ) -> Result<Envelope<SourceBlob>, ClientError> {
+        self.get(&format!(
+            "/v1/client/source-blobs/{}?subject={}&revision={}",
+            percent_encode(hash),
+            percent_encode(subject),
+            percent_encode(revision)
+        ))
+        .await
     }
     pub async fn subject_definition(
         &self,
@@ -5217,7 +5242,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
         // WebSocket sender cutover does not change the HTTP API/error versions.
-        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1").unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
@@ -5905,8 +5930,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),

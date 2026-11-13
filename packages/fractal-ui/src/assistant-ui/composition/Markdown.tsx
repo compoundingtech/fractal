@@ -457,9 +457,11 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
+  // `--fractal-syntax-muted` so muted tokens keep AA contrast on the tint.
+  syntaxComment: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})`, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: textColor.fgMuted },
+  syntaxString: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})` },
   syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
