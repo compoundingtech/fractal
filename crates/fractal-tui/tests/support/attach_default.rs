@@ -33,6 +33,7 @@ fn ask(agent: &str) -> Attention {
     Attention {
         deadline: None,
         requested_at: None,
+        snoozed_until: None,
         id: "ask/probe".into(),
         tier: Tier::Stopped,
         title: "Ship the release?".into(),
