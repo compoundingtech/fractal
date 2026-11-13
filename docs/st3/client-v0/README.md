@@ -283,6 +283,11 @@ routes. See the [read fixture](fixtures/person-availability.json), the
 [presence fixture](fixtures/presence-report.json) with its
 [result](fixtures/presence-report-result.json).
 
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
@@ -385,6 +390,15 @@ and lifts the timing and enrichment bound for that one run only (its `started_at
 (Rust `missions_get_run`); `missionsGet(id)` keeps its signature and never sends `run`. Lists,
 pages and collection windows never carry these fields, and other runs' steps omit them: absence is
 not proof of a single attempt or no waits.
+
+Detail steps also expose `executions[]`, the generic claim-backed agent invocation records.
+They distinguish an invocation from its logical attempt (a reclaim can create another invocation).
+The record joins historical declared/observed models, nullable fallback evidence, response-attributed
+token and micro-USD usage, elapsed time, trace correlation and an incarnation-matched exit receipt.
+Missing usage is unknown, not zero; a changed model does not by itself prove fallback. Older records
+can lack captured metadata. See [the execution contract](../program-engine.md#6-linked-child-runs-worker-turns-and-asks).
+The native `GET /v1/mission-runs/{run}` detail and `fractal missions show mission-run/... --json`
+carry the same per-step `executions` projection; lean work reads omit it.
 
 - `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
   opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
@@ -1061,7 +1075,7 @@ snapshot's retained sends directly instead of writing or observing a later commi
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
 `until_ms`, `messages`, `calibrated_messages`, `low_microusd`, `high_microusd`,
-`usage_cost_microusd`, `unpriced_tokens` and nullable `low_percent`/`high_percent`.
+`usage_cost_microusd`, `unpriced_tokens`, optional `unpriced_responses` and nullable `low_percent`/`high_percent`.
 Usage costs use the same cumulative snapshots and baseline/reset rules as period rows, in the
 same pass. A zero priced denominator makes the percentages unknown; unpriced coverage remains
 visible. The range can exceed 100% and is never capped. This is a planning allowance that
@@ -1099,8 +1113,10 @@ value is `UsagePeriod { since_ms, until_ms, rows }`, with one `UsageRow` per age
 step, model, paying account and host, largest first. A row carries the token counts (`total`,
 `input`, `output`, `cache_write`, `cache_write_1h`, `cached`), `cost_microusd` (API-equivalent
 cost: the harness's own figure when it reports one, else Fractal's pricing table, named by `pricing`),
-`reported_cost_microusd` (the part the harness reported) and `unpriced_tokens` (tokens neither
-could price, which a client shows as unknown cost, never as free). An identity Fractal does not know,
+`reported_cost_microusd` (the part the harness reported), `unpriced_tokens` (observed total tokens
+neither could price) and optional `unpriced_responses` (responses without any price, even when
+their total tokens are absent). Either nonzero unpriced counter means the known cost is only a
+lower bound, never a known free bill. Reported zero cost remains a known price. An identity Fractal does not know,
 such as the mission run of a standing seat, is absent from the row. A period whose start is after
 its end is `validation-failed`. `limits` lists each account's selected limits reading: `account`
 (a label such as `claude/<digest>`, or `DRIVER/unknown`), `driver`, optional `account_ref`,
@@ -1128,7 +1144,10 @@ See [account limits](../accounts.md#at-the-limit) for the policy and external ba
 Rows also carry optional `native_session_id` (the provider's session UUID, fenced by incarnation)
 and `pricing_provenance`. The legacy `pricing` label remains readable. Each provenance entry
 names `cost_source` (`provider_reported`, `computed`, or `unpriced`), disjoint token buckets,
-`cost_microusd`, `reported_cost_microusd` and `unpriced_tokens`. Computed entries name
+`cost_microusd`, `reported_cost_microusd`, `unpriced_tokens` and optional `unpriced_responses`. The
+response counter shares the existing cumulative provenance store and rollup, not another ledger.
+Older rows without the counter retain their original token-based coverage; no historical response
+counts or token totals are inferred. Computed entries name
 `price_table_id` (`st.api-list`), `price_table_version` (date plus SHA-256 of the complete table),
 and `rates_usd_per_million_tokens` (`input`, `output`, `cache_read`, `cache_write_5m`,
 `cache_write_1h`), with long-context multipliers already applied. Provider-reported entries
@@ -1373,6 +1392,11 @@ It is absent when no agent is behind the item. `conversation_ids` lists every co
 shows in, starting with `conversation_id`: a harness login alert is one alert per login directory
 and host, naming every seat that shares it, since one sign-in answers them all. Daemons that
 predate alerts omit these fields.
+
+`urgent` is the one server rule for urgency: an ask whose asker gave it priority `critical`
+(`work ask --priority critical`); every other row is not urgent. A client that honours
+interruptions `urgent`, speaks, or raises a banner decides from this field alone, never from a
+deadline. Daemons that predate it omit it, which reads as not urgent.
 
 A `model-drift` item tells a person that agents they own run on another model than they
 declare, usually because a harness fell back after provider rate limits. There is one per person,
@@ -2140,6 +2164,16 @@ filtering before offset selection and byte packing. Continuations bind the exact
 grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
+
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note, directive_note_truncated}`: the grant
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. The availability fields are never cut. The note text (up to 4096 UTF-8
+bytes) is cut on a character boundary to what `max_response_bytes` leaves after the whole
+envelope, measured with the delivery codec, so the read never fails its budget for the note;
+`directive_note_truncated` is then true (false when the note is whole or absent). Read again
+with a larger `max_response_bytes`, up to 16384, for the whole note. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,

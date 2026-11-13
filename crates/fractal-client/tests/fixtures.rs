@@ -62,6 +62,40 @@ fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
 
 
 #[test]
+fn response_evidence_schema_and_typed_models_preserve_observations() {
+    let bodies: Vec<serde_json::Value> = decode("response-evidence.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/TimelineUsageBody"
+    })).unwrap();
+    for raw in bodies {
+        assert!(validator.is_valid(&raw));
+        let body: TimelineUsageBody = serde_json::from_value(raw.clone()).unwrap();
+        let encoded = serde_json::to_value(&body).unwrap();
+        for (key, value) in raw.as_object().unwrap() {
+            assert_eq!(&encoded[key], value, "{key}");
+        }
+        assert_eq!(body.response_id.as_deref(), raw["response_id"].as_str());
+    }
+    let unknown = serde_json::json!({
+        "semantics":"response", "driver":"omp", "attribution":{"agent_id":"agent/example"}
+    });
+    assert!(validator.is_valid(&unknown));
+    let body: TimelineUsageBody = serde_json::from_value(unknown.clone()).unwrap();
+    assert!(body.total_tokens.is_none());
+    assert!(body.cost.is_none());
+    assert!(body.provider_quota.is_none());
+    assert!(body.reasoning_tokens.is_none());
+    assert!(body.cache_write_1h_tokens.is_none());
+    let mut invalid = unknown;
+    invalid["provider_quota"] = serde_json::json!({"unit":"tokens","quantity":1});
+    assert!(!validator.is_valid(&invalid));
+    invalid["provider_quota"] = serde_json::json!({"unit":"premium_requests","quantity":-1});
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
 fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
     let cases: serde_json::Value = decode("message-sender-outcomes.json");
     let schema: serde_json::Value = serde_json::from_str(include_str!(

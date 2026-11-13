@@ -217,6 +217,30 @@ for cancel in [false, true] {
 }
 
 #[test]
+fn person_rows_preserve_urgency_during_backfill_and_incremental_maintenance() {
+for backfill in [true, false] {
+    for priority in [None, Some("normal"), Some("low"), Some("high"), Some("critical")] {
+        let (store, _, mut request) = person_work::tests::fixture();
+        request.priority = priority.map(Into::into);
+        let views = views(&store);
+        if !backfill {
+            install(&store, &views);
+        }
+        let ask = store.ask_person(&request).unwrap();
+        if backfill {
+            install(&store, &views);
+        } else {
+            maintain(&store, &views);
+        }
+        let cards = parity(&store, &views, PERSON_VIEW, "person/avery", u128::MAX);
+        let card = cards.iter().find(|row| row["source_id"] == ask.subject).unwrap();
+        assert_eq!(card["priority"], priority.unwrap_or("normal"));
+        assert_eq!(card["urgent"], priority == Some("critical"));
+    }
+}
+}
+
+#[test]
 fn custom_rows_preserve_form_identity_order_and_recipient_changes() {
 let store = Store::open_memory("alder").unwrap();
 let views = views(&store);

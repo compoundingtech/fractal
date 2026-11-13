@@ -205,6 +205,7 @@ fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let step = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

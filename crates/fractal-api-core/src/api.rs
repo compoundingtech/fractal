@@ -5021,6 +5021,7 @@ fn client_attention_resources_from_items(
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
         let alert = item.is_alert();
+        let urgent = item.is_urgent();
         let conversations = item.conversations();
         let mut resource = json!({
             "id": id, "kind": "attention", "attention_kind": item.kind,
@@ -5032,6 +5033,7 @@ fn client_attention_resources_from_items(
             "targets": item.targets, "actions": client_attention_actions(&item.kind, item.review_mode.as_deref()),
             "operational": {"layer": "current", "actionable": true, "reasons": []},
             "alert": alert,
+            "urgent": urgent,
         });
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);

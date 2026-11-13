@@ -154,6 +154,7 @@ impl Harness {
 
     fn ask(&self, key: &str, title: &str) -> String {
         self.state.store.ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None, person: OWNER.into(), title: title.into(), reason: "Owner must choose".into(),

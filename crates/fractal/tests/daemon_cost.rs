@@ -328,6 +328,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/missions-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/agents-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/summary", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/availability", "requires a paired assistant granted read.assistant.availability and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the grant person's availability and directive note read"),
     ("GET /v1/client/assistant/attention", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),

@@ -1294,6 +1294,20 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
 }
 
 #[test]
+fn usage_report_marks_unpriced_responses_without_inventing_tokens() {
+    let report = json!({"rows":[{"agent":"agent/incomplete","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":1}]});
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("SPEND  $0.00+ · 0 tokens"));
+    assert!(output.contains("UNPRICED  1 responses without a known price"));
+    let zero = json!({"rows":[{"agent":"agent/zero","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":0}]});
+    let output = render_usage_report(&zero, 24, None);
+    assert!(output.contains("SPEND  $0.00 · 0 tokens"));
+    assert!(!output.contains("UNPRICED"));
+}
+
+#[test]
 fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let report = json!({"rows": [
         {"agent":"agent/cheap","mission_run":"mission-run/one","step":"step-run/one/build","model":"model-a","account":"claude/aaaa","host":"host/a","cost_microusd":250000,"total_tokens":900,"input_tokens":200,"output_tokens":100,"cache_write_tokens":0,"cached_tokens":600,"unpriced_tokens":0},
@@ -2856,15 +2870,13 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
             Some(("Tests pass\nnext: docs", 60_000)),
         ),
         step("step-run/two/review", "Review the parser", None),
-        StepRunView {
-            status: "verifying".into(),
-            completion_summary: Some("Published the guide".into()),
-            ..step(
-                "step-run/two/docs",
-                "Write the guide",
-                Some(("Drafting", 0)),
-            )
-        },
+        StepRunView { executions: None, status: "verifying".into(),
+        completion_summary: Some("Published the guide".into()),
+        ..step(
+            "step-run/two/docs",
+            "Write the guide",
+            Some(("Drafting", 0)),
+        ) },
     ];
 
     let card = render_client_agent(&agent, &current, 360_000);
