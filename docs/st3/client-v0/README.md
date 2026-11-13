@@ -625,6 +625,34 @@ different from fleet replication secrets. A remote client is always online: v0 h
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
 
+### A person's desktop app on the local socket
+
+A native app the person runs on the member's own host, such as a menu-bar tray, calls this API over
+the trusted local `fractal.sock`, as `fractal note set` does: no pairing and no bearer credential.
+Each request names the person with `x-st3-person: person/NAME` (`x-fractal-person` is also
+accepted). That session acts as the person and holds every scope; without the header the session is
+the read-only `client/local/read-only`. Every `/v1/client/` route is served, WebSocket streams
+included. The daemon ignores the HTTP `Host`; send `localhost`.
+
+Trust comes from the host, not from a credential:
+
+- The socket is mode 0600, owned by the daemon's Unix user, so only that user (or root) can connect.
+- For each connection the daemon asks the kernel for the peer process (`LOCAL_PEERPID` on macOS,
+  `SO_PEERCRED` on Linux) and reads the exec-time environment of it and each same-user ancestor. An
+  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent, and a person header
+  naming anyone else is refused with 403; a run credential binds its mission run; an ancestry the
+  daemon cannot read refuses the person header. An app launched by launchd (a login item, Finder,
+  `open`) has launchd as its parent and is taken for the person.
+- This is cooperative attribution between processes of one Unix user
+  ([replication.md](../replication.md)), not a boundary against code already running as that user.
+  Never forward this socket to TCP. A device on another host pairs and uses `fractal-client.sock`.
+
+The socket is `run/fractal.sock` in the daemon's state directory
+(`~/.local/state/st3/run/fractal.sock` on a default install); the daemon links it there even when
+it binds under `XDG_RUNTIME_DIR`. The Swift client connects with
+`FractalClient(localSocketPath:person:client:)`, which carries every request and stream over that
+socket; the Rust client's `Client::unix_as` does the same.
+
 ### Native Fabric carrier
 
 The CLI and native generated-client transports accept
