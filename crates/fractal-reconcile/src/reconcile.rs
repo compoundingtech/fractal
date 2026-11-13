@@ -12663,7 +12663,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &view.subject,
                     Some(&selector),
                 ) {
-                    Ok(child) => child,
+                    Ok(child) => {
+                        // A newly created view did not pass through the annotated child lookup.
+                        // Follow its outcome now, including a child that ends before our next read.
+                        smallclaims::touched::note_read(|| child.subject.clone());
+                        child
+                    }
                     Err(error) if error.code == "mission-run-capacity" => {
                         self.note_mission_capacity_holders(&mission)?;
                         return Ok((false, UsedMissionOutcome::Pending));

@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Used-mission parents track capacity holders before attempting a child start and after a capacity refusal, sharing the program engine's dependency tracking. Holder transitions and subsequent holder handoffs re-evaluate waiting parents without a polling workaround or periodic full pass."
+    "detail": "Used-mission parents track capacity holders before attempting a child start and after a capacity refusal, sharing the program engine's dependency tracking. A newly admitted parent follows its child's outcome immediately, before any subsequent lookup. Holder transitions and subsequent holder handoffs re-evaluate waiting parents without a polling workaround or periodic full pass."
   }
 }
