@@ -11516,7 +11516,7 @@ fn account_name(label: &Value, declared: &Value) -> String {
 fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> String {
     use std::fmt::Write as _;
 
-    const COLUMNS: [&str; 7] = [
+    const COLUMNS: [&str; 8] = [
         "cost_microusd",
         "total_tokens",
         "input_tokens",
@@ -11524,6 +11524,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         "cache_write_tokens",
         "cached_tokens",
         "unpriced_tokens",
+        "unpriced_responses",
     ];
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let sum = |rows: &mut dyn Iterator<Item = &Value>| {
@@ -11536,12 +11537,12 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         values
     };
     // Cost is API-equivalent: what the tokens would cost at list price. A trailing `+` marks a
-    // figure that leaves out tokens on models without a price.
+    // figure that leaves out responses without a known price.
     let dollars = |values: &[u64; COLUMNS.len()]| {
         format!(
             "${:.2}{}",
             values[0] as f64 / 1_000_000.0,
-            if values[6] > 0 { "+" } else { "" }
+            if values[6] > 0 || values[7] > 0 { "+" } else { "" }
         )
     };
     let mut output = String::new();
@@ -11558,6 +11559,9 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             "UNPRICED  {} tokens on models without a price",
             total[6]
         );
+    }
+    if total[7] > 0 {
+        let _ = writeln!(output, "UNPRICED  {} responses without a known price", total[7]);
     }
     if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
         let _ = write!(
@@ -11608,7 +11612,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             let share = match (day["low_percent"].as_f64(), day["high_percent"].as_f64()) {
                 (Some(low), Some(high)) => format!(
                     "{low:.1}–{high:.1}%{}",
-                    if day["unpriced_tokens"].as_u64().unwrap_or(0) > 0 {
+                    if day["unpriced_tokens"].as_u64().unwrap_or(0) > 0 || day["unpriced_responses"].as_u64().unwrap_or(0) > 0 {
                         "*"
                     } else {
                         ""
@@ -11658,7 +11662,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 format!(
                     "credits {}{} of {} this month",
                     dollars(&credits["used_microusd"]),
-                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 || credits["unpriced_responses"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
                     dollars(&credits["budget_microusd"])
                 )
             } else if let Some(limit) = limit {

@@ -1123,6 +1123,8 @@ pub struct AgentMessageDay {
     pub usage_cost_microusd: u64,
     pub unpriced_tokens: u64,
     #[serde(default)]
+    pub unpriced_responses: u64,
+    #[serde(default)]
     pub low_percent: Option<f64>,
     #[serde(default)]
     pub high_percent: Option<f64>,
@@ -1156,6 +1158,8 @@ pub struct UsageCredits {
     pub budget_microusd: u64,
     pub used_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
     pub period_start_ms: u64,
 }
 /// An account's 5-hour and weekly limits, as the seat that measured it most recently read them.
@@ -1217,6 +1221,8 @@ pub struct UsageRow {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 
 /// Effective USD-per-million rates applied to the disjoint token buckets.
@@ -1248,6 +1254,8 @@ pub struct UsagePricing {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 
 /// A normalized KDL node. Empty optional collections are omitted just as in the stored AST.
@@ -1979,6 +1987,8 @@ pub struct StepExecutionUsage {
     pub cost_microusd: u64,
     pub reported_cost_microusd: u64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub unpriced_responses: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionStepProgram {
@@ -3658,6 +3668,24 @@ pub struct TimelineUsageBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
@@ -3665,6 +3693,10 @@ pub struct TimelineUsageBody {
     pub cached_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3684,10 +3716,38 @@ pub struct TimelineUsageBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_components: Option<TimelineResponseCostComponents>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_quota: Option<TimelineProviderQuota>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     pub attribution: TimelineAttribution,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct TimelineResponseCostComponents {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct TimelineProviderQuota {
+    pub unit: TimelineProviderQuotaUnit,
+    pub quantity: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineProviderQuotaUnit {
+    PremiumRequests,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
