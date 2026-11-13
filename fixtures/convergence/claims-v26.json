@@ -5857,28 +5857,6 @@
     "projection": "missions",
     "wakes_reconciler": true
   },
-  "mission.run.trace": {
-    "kind": "mission.run.trace",
-    "subjects": [
-      "mission-run"
-    ],
-    "fields": {
-      "trace": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "once",
-    "projection": null,
-    "wakes_reconciler": false,
-    "source_kdl": [
-      "observability"
-    ]
-  },
   "observer.observed": {
     "kind": "observer.observed",
     "subjects": [
@@ -6950,34 +6928,6 @@
     "projection": "principals",
     "wakes_reconciler": false
   },
-  "program.attempt.trace": {
-    "kind": "program.attempt.trace",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "trace": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false,
-    "source_kdl": [
-      "observability"
-    ]
-  },
   "program.step": {
     "kind": "program.step",
     "subjects": [
@@ -7028,12 +6978,6 @@
           "completed",
           "failed"
         ],
-        "immutable": false,
-        "reference": false
-      },
-      "trace": {
-        "value_type": "any",
-        "required": false,
         "immutable": false,
         "reference": false
       },

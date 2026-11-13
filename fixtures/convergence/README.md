@@ -359,3 +359,16 @@ observed every fixed seed converge and trim a checkpoint, including v25's non-tr
 and 233 and the earlier availability corpus's seed 21. The exact v26 `NEVER_TRIMS` set is empty:
 no previous corpus's schedule-specific exception carries forward. There are no untrimmed seeds
 requiring the old-build excusal and next-cut continuation in this corpus.
+
+`claims-v27.json` adds the durable `mission.run.trace` and `program.attempt.trace` kinds and
+the merged `program.step` fields to v26. Versions 1 through 26 remain frozen. Generate the
+complete merged registry with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v27.json`;
+do not hand-edit it. The simulation and audit reports select v27.
+
+The initial scoped Linux characterization converged for all 32 fixed seeds: 30 trimmed a
+checkpoint, while seeds 13 and 21 did not during their ordinary schedules. The exact
+`NEVER_TRIMS` set is therefore `[13, 21]`, not v26's empty set. Those two tests retain the
+old-build excusal and next-cut continuation, which must trim on every modern node; all
+other fixed seeds must trim without that continuation. Hosted Linux checks remain the
+authority for schedule-specific characterization (#6210).
