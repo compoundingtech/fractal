@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Dismiss Inbox items with middle-click in the terminal UI",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Existing keyboard dismissal behavior and backend actions are unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime or migration is required."},
+  "manual": {"status": "none", "detail": "No user action is required. Middle-click on Inbox rows and card [x] buttons now dismisses the item; requests are dismissed immediately without confirmation."},
+  "recovery": {"status": "none", "detail": "No recovery changes; existing dismissal and read actions are reused."}
+}
