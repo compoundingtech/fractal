@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "summary": "Backfill for #6343: the program engine no longer restarts a step attempt it has just ended. A reconciler pass that read the step before the attempt finished or missed its liveness deadline now gets a refusal instead of starting that attempt again and clearing the step's host fault.",
+  "commits": ["7acc4ce35f4e09bd48166bc109ad9d53a98834b6"],
+  "replay": {"status": "none", "detail": "No claim, journal or projection change. The ended-attempt record lives only in memory and is released as soon as the engine writes the step's new state."},
+  "schema": {"status": "none", "detail": "No database schema, table, index or storage version change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or registry digest change. The fix is local to each daemon's reconciler and program engine; mixed builds do not interact through it."},
+  "compatibility": {"status": "none", "detail": "No client, wire, program SDK or harness contract change. Dispatched::Left is an internal reconciler outcome; the step's stored state already says why the attempt stopped."},
+  "downtime": {"status": "none", "detail": "Takes effect at the normal daemon restart. No additional interruption."},
+  "manual": {"status": "none", "detail": "No operator steps. Steps that were wrongly re-dispatched before the upgrade keep their recorded state; the fix only prevents new re-dispatches."},
+  "recovery": {"status": "none", "detail": "An older binary restores the previous race. A stale pass could then restart an ended attempt again. No data has to be repaired."}
+}
