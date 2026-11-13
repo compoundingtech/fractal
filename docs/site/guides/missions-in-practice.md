@@ -144,6 +144,26 @@ fractal work revision generations mission-run/garden/readme/one
 
 The run keeps its identity and gets a new generation. Publishing a changed mission by itself does not revise a running instance. Changed work and its dependents may need to run again.
 
+## Retry a failed run from the top
+
+After a run has failed and become terminal, retry it against the latest published mission revision:
+
+```sh
+fractal missions retry mission-run/garden/readme/one \
+  --reason 'Restart with the published link check.' --as person/example
+```
+
+To repeat the source run's current revision instead, make that choice explicit:
+
+```sh
+fractal missions retry mission-run/garden/readme/one \
+  --same-revision --reason 'Repeat the same plan.' --as person/example
+```
+
+Copy the new run ID from the result and inspect it with `fractal missions show`. Its `retry_of` points to the source; the source's `retried_by` lists its retries. Retry does not change the source's status, generation, or history and does not carry completed steps forward.
+
+The new run reuses the exact resolved inputs and workspace. Latest-revision retry refuses if those inputs no longer fit, naming both revisions and the reason; it never silently selects the source revision. All steps and the program restart from the top, so write idempotent work that handles existing files and external effects safely. A person or the owning agent needs ordinary run-start authority.
+
 ## Queue follow-on work
 
 To start a separately published summary mission only after this run succeeds:

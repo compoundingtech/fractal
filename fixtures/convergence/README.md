@@ -294,3 +294,19 @@ admission and that the oracle receives the claim with its text.
 With v22 every fixed seed converges; seed 34 is the exact never-trim set, observed by hosted
 linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
 cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).
+
+`claims-v23.json` adds the durable, system-written `mission-run.retry-linked` kind from
+`fractal_schema::registry()`. Versions 1 through 22 stay frozen. Generate the complete
+registry snapshot with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v23.json`;
+do not hand-edit it. The simulation and its audit reports select v23. The kind uses the generic
+draw and append paths: `source` and `retry` are required `mission-run` references, and `reason`
+is an optional string. The focused regression validates a generated input against the native
+registry, admits it, and replicates it to the oracle. Each revision still applies its own
+admission rules; old-build checkpoint and comparison semantics are unchanged.
+
+Adding this kind changes the shared random schedule. Hosted
+[run 43269741954](https://github.com/compoundingtech/fractal/actions/runs/43269741954)
+exercised every fixed seed: all trimmed, including seed 34. Therefore v23 requires actual
+checkpoint trimming for every fixed seed; v22's negative seed-34 expectation is not carried
+forward. Convergence and checkpoint checks remain mandatory.

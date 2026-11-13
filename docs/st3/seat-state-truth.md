@@ -58,8 +58,11 @@ raises a non-blocking per-seat fault (`Seat runs on a fallback model`, condition
 or crash-loops the seat, and recovers when usage returns to the declared model or the
 declaration adopts the live model. If the live model moves to another undeclared model while
 drifted, the fault is recovered and raised again naming the new model, keeping its first
-`since`. The fault is owned by the seat's declaring agent, so it shows in
-`fractal now` and the agent's faults rather than any person's inbox. `fractal agents show`
+`since`. The fault is owned by the seat's declaring agent and is never a person's item. A
+person instead sees one `model-drift` attention item over every drifting agent they own
+(`fractal alerts ls`, under updates, and Now's today group): "3 agents declared X run Y since
+09:14Z (oldest agent/...)". It is derived from the current faults, so it follows them and is
+gone once no agent drifts. `fractal agents show`
 prints `LIVE MODEL`, and a step script reads `.live_model` from `agents show --json` to flag
 what a one-shot reviewer actually ran on. Model names compare after the pricing table's
 canonicalization (provider prefix, bracketed variant, date snapshot stripped). A Claude alias

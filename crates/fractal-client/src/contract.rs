@@ -81,6 +81,8 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("document-references.get", "/v1/client/document-references"),
     ("publication.definition", "/v1/client/publication-definition"),
     ("mission-declaration.get", "/v1/client/mission-declaration"),
+    ("source-map.get", "/v1/client/source-maps"),
+    ("source-blob.get", "/v1/client/source-blobs/{id}"),
     ("subject.definition", "/v1/client/subject-definition"),
     ("mail-backlog.summary", "/v1/client/mail-backlog"),
     ("slo.list", "/v1/client/slo"),

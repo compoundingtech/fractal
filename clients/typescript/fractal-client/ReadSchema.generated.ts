@@ -1123,6 +1123,7 @@ export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
   "fault",
   "harness-login",
   "harness-prompt",
+  "model-drift",
   "custom",
   "unknown"
 ]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
@@ -1523,7 +1524,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "agent-request",
   "fault",
   "harness-login",
-  "harness-prompt"
+  "harness-prompt",
+  "model-drift"
 ]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
   "because": optionalKey(Schema.String),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
@@ -2628,6 +2630,12 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** New runs created by retrying this run; omitted when empty. */
+  "retried_by": optionalKey(Schema.Array(MissionRunId)).annotate({ description: "New runs created by retrying this run; omitted when empty." }),
+  /** Source run for this new-run retry; omitted for an ordinary start. */
+  "retry_of": optionalKey(MissionRunId),
+  /** The mission revision this run is pinned to. Older daemons omit it. */
+  "revision": optionalKey(Revision),
   /** Run creation, in Unix milliseconds. */
   "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Run creation, in Unix milliseconds." }),
   "state_since": Timestamp,
@@ -4484,6 +4492,14 @@ export const SloList = /*#__PURE__*/ (() => Schema.Struct({
 export type SloList = typeof SloList.Type
 export type SloListEncoded = typeof SloList.Encoded
 
+/** The UTF-8 text of one source file version, by sha256. Immutable. Requires read.declarations. */
+export const SourceBlob = /*#__PURE__*/ (() => Schema.Struct({
+  "hash": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "text": Schema.String
+}).annotate({ identifier: "SourceBlob", description: "The UTF-8 text of one source file version, by sha256. Immutable. Requires read.declarations." }))()
+export type SourceBlob = typeof SourceBlob.Type
+export type SourceBlobEncoded = typeof SourceBlob.Encoded
+
 export const StatusTransition = /*#__PURE__*/ (() => Schema.Struct({
   "observed_at": Timestamp,
   /** An incarnation starts here. A runtime reset without a harness observation has a null state. */
@@ -4516,6 +4532,102 @@ export const SubjectDefinition = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "SubjectDefinition" }))()
 export type SubjectDefinition = typeof SubjectDefinition.Type
 export type SubjectDefinitionEncoded = typeof SubjectDefinition.Encoded
+
+export const SourceMapFile = /*#__PURE__*/ (() => Schema.Struct({
+  /** The git blob id at the source commit. */
+  "blob": Schema.String.annotate({ description: "The git blob id at the source commit." }),
+  /** sha256 of the file text; read it with source-blob.get. */
+  "blob_hash": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ description: "sha256 of the file text; read it with source-blob.get." }),
+  /** Repository-relative path. */
+  "path": Schema.String.annotate({ description: "Repository-relative path." }),
+  "repository": Schema.String
+}).annotate({ identifier: "SourceMapFile" }))()
+export type SourceMapFile = typeof SourceMapFile.Type
+export type SourceMapFileEncoded = typeof SourceMapFile.Encoded
+
+export const SourceMapPosition = /*#__PURE__*/ (() => Schema.Struct({
+  "column": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "line": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+}).annotate({ identifier: "SourceMapPosition" }))()
+export type SourceMapPosition = typeof SourceMapPosition.Type
+export type SourceMapPositionEncoded = typeof SourceMapPosition.Encoded
+
+export const SourceMapFrame = /*#__PURE__*/ (() => Schema.Struct({
+  "end": SourceMapPosition,
+  "file": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** exact: the property or call itself; enclosing: the whole initializer around a computed access. */
+  "precision": openEnum(["exact","enclosing"]).annotate({ description: "exact: the property or call itself; enclosing: the whole initializer around a computed access." }),
+  "role": openEnum(["declaration","helper","value","constructor","fragment"]),
+  "start": SourceMapPosition
+}).annotate({ identifier: "SourceMapFrame" }))()
+export type SourceMapFrame = typeof SourceMapFrame.Type
+export type SourceMapFrameEncoded = typeof SourceMapFrame.Encoded
+
+export const SourceMapSpan = /*#__PURE__*/ (() => Schema.Struct({
+  "end": SourceMapPosition,
+  "file": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "start": SourceMapPosition
+}).annotate({ identifier: "SourceMapSpan" }))()
+export type SourceMapSpan = typeof SourceMapSpan.Type
+export type SourceMapSpanEncoded = typeof SourceMapSpan.Encoded
+
+export const SourceMapNode = /*#__PURE__*/ (() => Schema.Struct({
+  /** declaration → helper → value, outermost first. */
+  "frames": Schema.Array(SourceMapFrame).annotate({ description: "declaration → helper → value, outermost first." }),
+  /** KDL node path, the join key: agent, mission, step and gate by name, other nodes by sibling index, e.g. mission[x]/step[review]/goal[0]. */
+  "kdl": Schema.String.annotate({ description: "KDL node path, the join key: agent, mission, step and gate by name, other nodes by sibling index, e.g. mission[x]/step[review]/goal[0]." }),
+  /** First and last line in the published KDL; a hint only, canonical KDL differs. */
+  "kdlLines": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).check(Schema.isMinLength(2)).check(Schema.isMaxLength(2)).annotate({ description: "First and last line in the published KDL; a hint only, canonical KDL differs." }),
+  "span": SourceMapSpan
+}).annotate({ identifier: "SourceMapNode" }))()
+export type SourceMapNode = typeof SourceMapNode.Type
+export type SourceMapNodeEncoded = typeof SourceMapNode.Encoded
+
+/** The source.mapped claim body, verbatim. File indices refer to `files`; lines and columns are 1-based, columns in UTF-16 code units. */
+export const SourceMapClaim = /*#__PURE__*/ (() => Schema.Struct({
+  /** Index of the subject's own file. */
+  "declaration": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Index of the subject's own file." }),
+  "files": Schema.Array(SourceMapFile),
+  /** Indices of the static import closure. */
+  "inputs": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Indices of the static import closure." }),
+  "nodes": Schema.Array(SourceMapNode),
+  "ref": Schema.String,
+  "repository": Schema.String,
+  "revision": Revision,
+  "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "set_revision": Schema.String,
+  "sha": Schema.String.check(Schema.isPattern(new RegExp("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", "u"))),
+  "subject": Schema.String
+}).annotate({ identifier: "SourceMapClaim", description: "The source.mapped claim body, verbatim. File indices refer to `files`; lines and columns are 1-based, columns in UTF-16 code units." }))()
+export type SourceMapClaim = typeof SourceMapClaim.Type
+export type SourceMapClaimEncoded = typeof SourceMapClaim.Encoded
+
+export const SourceMapRevision = /*#__PURE__*/ (() => Schema.Struct({
+  "recorded_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "ref": Schema.String,
+  "repository": Schema.String,
+  "revision": Revision,
+  "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "set_revision": Schema.String,
+  "sha": Schema.String.check(Schema.isPattern(new RegExp("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", "u")))
+}).annotate({ identifier: "SourceMapRevision" }))()
+export type SourceMapRevision = typeof SourceMapRevision.Type
+export type SourceMapRevisionEncoded = typeof SourceMapRevision.Encoded
+
+/** Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get). */
+export const SubjectSourceMap = /*#__PURE__*/ (() => Schema.Struct({
+  /** The subject's current revision; absent when it has none. Agent declaration ids are not revisions. */
+  "current": optionalKey(Revision),
+  /** Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes. */
+  "kdl": Schema.String.annotate({ description: "Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes." }),
+  "map": SourceMapClaim,
+  "revision": Revision,
+  /** The subject's mapped revisions, newest first. Only revisions whose render changed have one. */
+  "revisions": Schema.Array(SourceMapRevision).annotate({ description: "The subject's mapped revisions, newest first. Only revisions whose render changed have one." }),
+  "subject": Schema.String.check(Schema.isPattern(new RegExp("^(agent|mission)/[^\\s@]+$", "u")))
+}).annotate({ identifier: "SubjectSourceMap", description: "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get)." }))()
+export type SubjectSourceMap = typeof SubjectSourceMap.Type
+export type SubjectSourceMapEncoded = typeof SubjectSourceMap.Encoded
 
 export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */

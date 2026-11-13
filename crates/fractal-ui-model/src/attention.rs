@@ -110,6 +110,9 @@ pub fn card(
         custom if custom.starts_with("custom.") => (Some(Tier::Today), Some(Kind::Request)),
         "harness-prompt" => (Some(Tier::Stopped), Some(Kind::Prompt)),
         "harness-login" => (Some(Tier::Stopped), Some(Kind::Login)),
+        // Seats running on another model than they declare: nothing waits on it, but it is
+        // today's fleet state, read as information.
+        "model-drift" => (Some(Tier::Today), Some(Kind::Update)),
         // st sends each fault to the agent that owns it: a fault card, never on Now.
         "fault" => (None, Some(Kind::Fault)),
         // A message stays in its conversation.

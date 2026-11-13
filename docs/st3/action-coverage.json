@@ -1803,6 +1803,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st missions retry",
+      "description": "Start a new run from a failed terminal run's exact inputs and workspace",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::mission_retry_command_creates_distinct_runs_through_the_api"
+      ],
+      "verification": "native command dispatcher over a private Unix socket; repeated invocations create distinct linked runs"
+    },
+    {
       "command": "st missions show",
       "description": "Explain one mission run, its goals, state, work, and usage",
       "tests": [
@@ -2712,7 +2720,7 @@
     },
     {
       "command": "st work cancel-ask",
-      "description": "Cancel your own ask and resume its live origin",
+      "description": "Cancel your own ask; fail its waiting native origin or propagate typed AskCancelled to its program",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],
