@@ -348,7 +348,8 @@ export function run(
 /**
  * Runs a command as its own process group, which the host ends when the program is cancelled.
  * `priority: 'background'` runs it as background work. Commands are not journaled: run them
- * inside a step.
+ * inside a step. In a lane-bound run, repeated commands in one fiber use successive keys within
+ * their durable activity. Concurrent branches must use separate steps (or explicit lane.exec ids).
  */
 export const command = (
   argv: readonly string[],
@@ -359,16 +360,14 @@ export const command = (
     if (program.host.resourceMembership === undefined)
       return yield* Effect.promise(() => program.host.spawn(argv, options))
     const scope = Option.getOrElse(yield* Effect.serviceOption(ResourceCommandScope), () => 'program')
-    const base = `resource.command/${scope}`
-    const occurrence = (program.occurrences.get(base) ?? 0) + 1
-    program.occurrences.set(base, occurrence)
-    const key = occurrence === 1 ? base : `${base}#${occurrence}`
-    return yield* Effect.flatMap(Effect.promise((signal) => program.host.resource({
-      key, operation: 'resource.lane.exec',
-      payload: { membership: program.host.resourceMembership, argv, options: options ?? {} },
-    }, signal)), (exit) => exit._tag === 'Success'
-      ? Effect.orDie(Schema.decodeUnknownEffect(CommandResultSchema)(exit.value))
-      : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(ResourceError)(exit.error)), Effect.fail))
+    return yield* keyed(`resource.command/${scope}`, (key) =>
+      Effect.flatMap(Effect.promise((signal) => program.host.resource({
+        key, operation: 'resource.lane.exec',
+        payload: { membership: program.host.resourceMembership, argv, options: options ?? {} },
+      }, signal)), (exit) => exit._tag === 'Success'
+        ? Effect.orDie(Schema.decodeUnknownEffect(CommandResultSchema)(exit.value))
+        : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(ResourceError)(exit.error)), Effect.fail)),
+    )
   })
 
 /** The run's `ST_*` variables (`ST_MISSION_RUN`, `ST_STEP_RUN`, …). */

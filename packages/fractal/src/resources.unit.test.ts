@@ -241,3 +241,125 @@ it.effect('inherits native membership in child commands and keeps command keys s
     payload: { membership, argv: ['second'], options: {} },
   }])
 }))
+
+it.effect('rejects cross-fiber inherited command reuse in either arrival order, including replay', () => Effect.gen(function* () {
+  for (const scope of ['program', 'checks']) {
+    let reversed = false
+    const program = Fractal.mission(intent, () => Effect.gen(function* () {
+      yield* Fractal.step({ id: 'completed' }, Effect.void)
+      const { promise, resolve } = Promise.withResolvers<void>()
+      const branches = Effect.asVoid(Effect.all(
+        ['first', 'second'].map((id) => Effect.gen(function* () {
+          // The losing branch arrives only after the other command has completed. Ownership
+          // must survive completion, not merely prevent overlapping native requests.
+          if (id === (reversed ? 'first' : 'second')) yield* Effect.promise(() => promise)
+          yield* Fractal.command([id])
+          resolve()
+        })),
+        { concurrency: 'unbounded' },
+      ))
+      yield* scope === 'program' ? branches : Fractal.step({ id: scope }, branches)
+    }))
+    const liveRequests: ResourceRequest[] = []
+    const live = fakeHost({
+      resourceMembership: membership,
+      resource: async (request) => {
+        liveRequests.push(request)
+        return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
+      },
+    })
+    const liveExit = yield* start(program, live)
+    expect(liveExit).toMatchObject({ _tag: 'Failure', error: { _tag: 'Defect' } })
+    expect(JSON.stringify(liveExit)).toContain(`steps in concurrent branches share the id \`resource.command/${scope}\``)
+    expect(liveRequests).toEqual([{
+      key: `resource.command/${scope}`, operation: 'resource.lane.exec',
+      payload: { membership, argv: ['first'], options: {} },
+    }])
+    reversed = true
+    const replayRequests: ResourceRequest[] = []
+    const replay = fakeHost({
+      resourceMembership: membership,
+      journal: journalOf(live.recorded),
+      resource: async (request) => {
+        replayRequests.push(request)
+        return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
+      },
+    })
+    const replayExit = yield* start(program, replay)
+    expect(replayExit).toMatchObject({ _tag: 'Failure', error: { _tag: 'Defect' } })
+    expect(JSON.stringify(replayExit)).toContain(`steps in concurrent branches share the id \`resource.command/${scope}\``)
+    expect(replayRequests).toEqual([{
+      key: `resource.command/${scope}`, operation: 'resource.lane.exec',
+      payload: { membership, argv: ['second'], options: {} },
+    }])
+    expect(replay.started).not.toContain('completed')
+  }
+}))
+
+it.effect('keeps same-fiber inherited command occurrence keys stable when an unfinished activity replays', () => Effect.gen(function* () {
+  const program = Fractal.mission(intent, () => Fractal.step({ id: 'checks' }, Effect.gen(function* () {
+    yield* Fractal.command(['first'])
+    yield* Fractal.command(['second'], { cwd: '/source', env: { CHECK: 'yes' } })
+    yield* Fractal.command(['first'])
+  })))
+  const attempts: ResourceRequest[][] = []
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const requests: ResourceRequest[] = []
+    const host = fakeHost({
+      resourceMembership: membership,
+      // Native commands may have completed without the enclosing activity being journaled.
+      resource: async (request) => {
+        requests.push(request)
+        return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
+      },
+    })
+    expect((yield* start(program, host))._tag).toBe('Success')
+    attempts.push(requests)
+  }
+  expect(attempts[0]).toEqual([
+    { key: 'resource.command/checks', operation: 'resource.lane.exec', payload: { membership, argv: ['first'], options: {} } },
+    { key: 'resource.command/checks#2', operation: 'resource.lane.exec', payload: { membership, argv: ['second'], options: { cwd: '/source', env: { CHECK: 'yes' } } } },
+    { key: 'resource.command/checks#3', operation: 'resource.lane.exec', payload: { membership, argv: ['first'], options: {} } },
+  ])
+  expect(attempts[1]).toEqual(attempts[0])
+}))
+
+it.effect('allows concurrent inherited commands in distinct durable activities', () => Effect.gen(function* () {
+  const requests: ResourceRequest[] = []
+  const program = Fractal.mission(intent, () => Effect.asVoid(Effect.all(
+    ['first', 'second'].map((id) => Fractal.step({ id }, Fractal.command([id]))),
+    { concurrency: 'unbounded' },
+  )))
+  const host = fakeHost({
+    resourceMembership: membership,
+    resource: async (request) => {
+      requests.push(request)
+      return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
+    },
+  })
+  expect((yield* start(program, host))._tag).toBe('Success')
+  expect(requests).toHaveLength(2)
+  for (const id of ['first', 'second'])
+    expect(requests).toContainEqual({
+      key: `resource.command/${id}`, operation: 'resource.lane.exec',
+      payload: { membership, argv: [id], options: {} },
+    })
+}))
+
+it.effect('preserves concurrent non-lane commands through ordinary host spawn', () => Effect.gen(function* () {
+  const spawned: string[][] = []
+  const program = Fractal.mission(intent, () => Effect.asVoid(Effect.all(
+    [Fractal.command(['first']), Fractal.command(['second'])],
+    { concurrency: 'unbounded' },
+  )))
+  const host = fakeHost({
+    spawn: async (argv) => {
+      spawned.push([...argv])
+      return { code: 0, signal: null, stdout: '', stderr: '' }
+    },
+  })
+  expect((yield* start(program, host))._tag).toBe('Success')
+  expect(spawned).toHaveLength(2)
+  expect(spawned).toContainEqual(['first'])
+  expect(spawned).toContainEqual(['second'])
+}))

@@ -605,6 +605,18 @@ value. The success value is encoded with `intent.output` and journaled under the
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.
 
+In a lane-bound run, `Fractal.command` inherits the native membership and uses command keys scoped
+to its durable activity (`resource.command/<activity-key>`, then `#2`, `#3`, … for same-fiber
+repeats). Outside an activity the scope is `program`. A second fiber using the same command scope
+is a defect, even after the first command completes: concurrent arrival order is not replay
+identity. Put concurrent commands in distinct `Fractal.step({ id }, …)` activities, or use
+`lane.exec(id, argv, options)` with distinct explicit ids. Non-lane commands continue to use the
+ordinary host spawn path.
+Native adoption also binds each key to a digest of its argv and command options (including cwd
+and caller environment) before physical preparation. Replaying that key with a changed payload
+is refused rather than adopting another command's execution or starting a replacement. Attempt
+credentials and trace context remain authoritative runtime environment, not caller identity.
+
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
 bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun
 --minify-whitespace`, which drops Bun's per-module path comments so the bytes do not depend on where

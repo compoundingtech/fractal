@@ -16,7 +16,7 @@ struct Acquire {
 }
 fn one() -> u32 { 1 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct CommandOptions {
     cwd: Option<String>,
@@ -53,6 +53,25 @@ fn success(value: impl serde::Serialize) -> Value {
 
 fn execution_id(request: &program::Request) -> String {
     format!("program-resource-{}", hex::encode(sha2::Sha256::digest(request.idempotency_key().as_bytes())))
+}
+
+/// Bind the durable request key to the caller's payload before any physical preparation.
+/// Authoritative attempt env is intentionally not hashed: credentials rotate on host replay.
+fn command_execution_id(base: &str, command: &Execute) -> Result<String> {
+    let payload = serde_json::to_vec(&(&command.argv, &command.options))?;
+    Ok(format!("{base}-{}", hex::encode(sha2::Sha256::digest(payload))))
+}
+
+fn command_root<'a>(
+    roots: &'a [crate::store::resource_membership::ExecutionRoot],
+    base: &str,
+    expected: &str,
+) -> Result<Option<&'a crate::store::resource_membership::ExecutionRoot>> {
+    let prefix = format!("{base}-");
+    let root = roots.iter().find(|root| root.runtime_id == base || root.runtime_id.starts_with(&prefix));
+    anyhow::ensure!(root.is_none_or(|root| root.runtime_id == expected),
+        "resource command payload changed for its durable key; execution custody retained");
+    Ok(root)
 }
 
 /// Match spawnEffect: command options are defaults below the attempt's authoritative `run.env`.
@@ -208,9 +227,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let command: Execute = serde_json::from_value(payload.clone())?;
                 let record = self.program_membership(run, request, &command.membership)?;
                 if cancelled {
-                    let id = execution_id(request);
-                    if record.roots.iter().any(|root| root.runtime_id == id) {
-                        self.runtime.retire_resource_exec(&self.store, &record.request, &id)?;
+                    let base = execution_id(request);
+                    let prefix = format!("{base}-");
+                    for root in record.roots.iter().filter(|root| root.runtime_id == base || root.runtime_id.starts_with(&prefix)) {
+                        self.runtime.retire_resource_exec(&self.store, &record.request, &root.runtime_id)?;
                         self.resource_changed(&record.request);
                     }
                     engine.resolve_resource(request, failure("cancelled", "Resource execution was cancelled."))?;
@@ -267,8 +287,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             "resource scope is not live");
         let timeout = command.options.timeout.as_deref()
             .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?;
-        let runtime_id = execution_id(request);
-        let root = record.roots.iter().find(|root| root.runtime_id == runtime_id);
+        let base = execution_id(request);
+        let runtime_id = command_execution_id(&base, &command)?;
+        let root = command_root(&record.roots, &base, &runtime_id)?;
         if root.is_none() {
             let environment = command_environment(
                 command.options.env,
@@ -350,6 +371,36 @@ mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
 
+
+    #[test]
+    fn native_command_adoption_rejects_changed_payload_for_the_same_key() {
+        let command = |argv: &str, cwd: &str, value: &str| -> Execute {
+            serde_json::from_value(serde_json::json!({
+                "membership": {
+                    "membershipId": "scope", "generation": "generation", "authorityEpoch": "epoch", "coverage": "logical"
+                },
+                "argv": ["sh", "-c", argv],
+                "options": { "cwd": cwd, "env": { "VALUE": value } }
+            })).unwrap()
+        };
+        let original = command("printf first", "/workspace", "first");
+        let id = command_execution_id("request-key", &original).unwrap();
+        let roots = vec![crate::store::resource_membership::ExecutionRoot {
+            runtime_id: id.clone(), execution: None,
+            payload_released_at: None, execution_ended_at: None,
+        }];
+        assert!(command_root(&roots, "request-key", &id).unwrap().is_some());
+        for changed in [
+            command("printf second", "/workspace", "first"),
+            command("printf first", "/other", "first"),
+            command("printf first", "/workspace", "second"),
+        ] {
+            let changed_id = command_execution_id("request-key", &changed).unwrap();
+            assert!(command_root(&roots, "request-key", &changed_id).unwrap_err()
+                .to_string().contains("payload changed"));
+        }
+        assert!(command_root(&roots, "other-key", "other-key-payload").unwrap().is_none());
+    }
     #[test]
     fn native_command_inherits_authoritative_attempt_environment() {
         let attempt = BTreeMap::from([
