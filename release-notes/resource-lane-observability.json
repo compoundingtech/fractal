@@ -6,6 +6,6 @@
   "rules": { "status": "none", "detail": "Observations never grant admission, resolve holds, or release physical custody." },
   "compatibility": { "status": "changed", "detail": "Adds st.resource.admission, st.resource.execution and st.resource.release INTERNAL root spans linked to run/attempt traces, plus structured resource.lane.phase logs. Adds st.resource.occupancy, st.resource.queue and st.resource.holds observable gauges, and st.resource.wait.duration, st.resource.execution.duration, st.resource.release.duration and st.resource.hold.duration histograms in seconds. Configured lane is the only identity dimension on metrics; phase histograms also have bounded outcome. Run, step, attempt, membership, generation and invocation remain on traces/logs only." },
   "downtime": { "status": "none", "detail": "Normal binary rollout; no telemetry backfill." },
-  "manual": { "status": "none", "detail": "Uses existing independent OTLP signal configuration and exporter providers." },
+  "manual": { "status": "none", "detail": "Uses existing independent OTLP signal configuration and exporter providers. Native lane spans capture OpenTelemetry contexts directly, independently of program-attempt trace serialization." },
   "recovery": { "status": "changed", "detail": "Recovery recreates only live observation segments with explicit clock uncertainty and persisted prior elapsed age; completed histogram samples are not replayed. Older readers ignore the additive retirement clock field; ordinary binary rollback retains custody records." }
 }
