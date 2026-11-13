@@ -43,7 +43,7 @@ fractal availability clear status
 
 `set` needs at least one of `--status`, `--interruptions` and `--deadline-clock`; `--for DURATION` or `--until RFC3339` applies to each one it names. `clear` with no axis clears all three: status follows presence again, interruptions return to `all` and the deadline clock to `run`. `--json` prints the client API response.
 
-`fractal availability presence active|inactive|locked|sleeping [--last-input-at RFC3339]` reports a device's raw state the way a paired client does: once per transition, never as a heartbeat. The daemon derives presence (`present`, `idle`, `locked`, or `unreported`) with one idle threshold for every device and prints when to report again if nothing changes.
+`fractal availability presence active|inactive|locked|sleeping [--last-input-at RFC3339] [--observed-at RFC3339]` reports a device's raw state the way a paired client does: once per transition, never as a heartbeat. `--observed-at` is when the device saw that state and defaults to now; the daemon refuses one older than 15 minutes or more than 2 minutes ahead of its clock. The daemon derives presence (`present`, `idle`, `locked`, or `unreported`) with one idle threshold for every device and prints when to report again if nothing changes.
 
 Only you can change your availability; an agent may only read it. You see your own device presence. An agent sees the people it works for, and `--person person/NAME` shows one person, without their presence.
 
