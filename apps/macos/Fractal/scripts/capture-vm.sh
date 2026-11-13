@@ -163,12 +163,13 @@ host_capture() {
   shift
   exists || die "no $vm VM on $(hostname -s): run capture-vm.sh provision first"
   start
+  # Stop the guest this run started on every exit, so a failed capture leaves no VM running.
+  trap stop_if_started EXIT
   guest 'rm -rf ~/gallery && mkdir ~/gallery && tar -x -C ~/gallery -f -'
   log "capturing on macOS $(guest 'sw_vers -productVersion') ($vm on $(hostname -s))"
   # Nobody uses the guest's screen: consent is implied and there is no idle wait.
   guest "cd ~/gallery && TRAY_GALLERY_REV=$(printf %q "$rev") ./TrayGallery renders --capture --consent --away 0 $(printf '%q ' "$@")" >&2
   guest 'cd ~/gallery/renders && tar -c -f - capture.json capture'
-  stop_if_started
 }
 
 if [[ ${1:-} == host ]]; then
