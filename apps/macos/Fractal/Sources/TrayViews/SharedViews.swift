@@ -95,9 +95,9 @@ struct SectionFailure: View {
   }
 }
 
-/// The result of an answer or availability write, as Fractal reported it.
+/// The result of an answer, attention control or availability write, as Fractal reported it.
 struct WriteStatusView: View {
-  enum Write { case answer, availability }
+  enum Write { case answer, control, availability }
 
   let state: AnswerState
   let write: Write
@@ -108,15 +108,11 @@ struct WriteStatusView: View {
       case .sending(let label):
         HStack(spacing: 6) {
           ProgressView().controlSize(.mini)
-          Text(write == .answer ? "Sending \(label)…" : "Saving \(label)…")
+          Text(write == .availability ? "Saving \(label)…" : "Sending \(label)…")
         }
         .foregroundStyle(.secondary)
       case .committed(let label):
-        Label(
-          write == .answer ? "Answered \(label) — committed in Fractal" : "Saved \(label) in Fractal",
-          systemImage: "checkmark.circle.fill"
-        )
-        .foregroundStyle(.green)
+        Label(committed(label), systemImage: "checkmark.circle.fill").foregroundStyle(.green)
       case .refused(let reason):
         Label {
           Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
@@ -126,6 +122,14 @@ struct WriteStatusView: View {
       }
     }
     .font(.callout)
+  }
+
+  private func committed(_ label: String) -> String {
+    switch write {
+    case .answer: "Answered \(label) — committed in Fractal"
+    case .control: "\(label) — committed in Fractal"
+    case .availability: "Saved \(label) in Fractal"
+    }
   }
 }
 

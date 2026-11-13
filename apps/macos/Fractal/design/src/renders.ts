@@ -23,6 +23,7 @@ export const appearances: readonly Appearance[] = ['light', 'dark']
 export const scenarioIds = [
   'busy',
   'answering',
+  'controls',
   'quiet',
   'read-only',
   'degraded',

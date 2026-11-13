@@ -6,6 +6,13 @@ extension Until {
 }
 
 extension AttentionModel {
+  /// An answer or control of this card is in flight: nothing else is sent for it meanwhile.
+  public func isSending(_ record: AttentionRecord) -> Bool {
+    if case .sending = answers[record.id] { return true }
+    if case .sending = controls[record.id] { return true }
+    return false
+  }
+
   /// The panel showed this card to the person: tell Fractal once per revision, unless Fractal
   /// already has it seen. A failure is forgotten, so the next showing tries again.
   public func markSeen(_ record: AttentionRecord) async {
@@ -37,9 +44,7 @@ extension AttentionModel {
   /// Sends one control while no answer or control of the card is in flight. Nothing shows as
   /// done until Fractal commits it; the refresh after a commit hides or drops the card.
   private func control(_ record: AttentionRecord, _ control: AttentionControl, label: String) async -> AnswerState? {
-    guard let adapter else { return nil }
-    if case .sending = controls[record.id] { return nil }
-    if case .sending = answers[record.id] { return nil }
+    guard let adapter, !isSending(record) else { return nil }
     controls[record.id] = .sending(label)
     do {
       try await adapter.control(AttentionControlSubmission(record: record, control: control))
