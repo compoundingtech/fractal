@@ -39,6 +39,7 @@ import { gatewayAgentControls } from '../agents/agent-control-port.ts'
 import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
 import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
+import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
@@ -1294,6 +1295,7 @@ export const liveSource = ({
       prompts: gatewayPromptAnswers(client),
       alertActions: gatewayAlertActions(client),
       documents: gatewayDocuments(client),
+      availability: gatewayAvailability(client),
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
