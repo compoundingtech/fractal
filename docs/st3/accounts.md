@@ -247,8 +247,8 @@ subcommands in its `args`. Codex configuration overrides (`-c`) are allowed.
 
 Token spend across the fleet is available by agent, mission, step, model, account, or host, with
 its API-equivalent cost: what the tokens would cost at the provider's list price, from a pricing
-table built into Fractal. Tokens on a model the table does not price are counted as unpriced, and a
-cost that leaves them out ends in `+`. An account is a short digest of the harness's own login,
+table built into Fractal. Responses without a known price are counted independently of their
+observed token totals, and a cost that leaves them out ends in `+`. An account is a short digest of the harness's own login,
 never the login itself. The graph keeps hourly usage for about a week and each series' total
 after that; `[observations.otlp]` sends every response to OpenTelemetry for longer history. The
 period ends now:
@@ -294,10 +294,11 @@ neither a future renewal nor a delayed ready receipt extends earlier ownership.
 
 `usage: null` means no response accounting evidence. A usage object carries input, output,
 cache-write (including one-hour writes), cache-read and total tokens, known `cost_microusd`,
-provider-reported cost, and `unpriced_tokens`. A nonzero unpriced count means the known cost is
-only a priced portion, never a full zero bill. `duration_ms` measures claim to the earliest applicable
-terminal work receipt or recorded native exit; later cleanup cannot lengthen an ended invocation.
-It stays null while the invocation has no ending evidence. Product values and worker reports
+provider-reported cost, `unpriced_tokens` and `unpriced_responses`. Either nonzero unpriced count
+means the known cost is only a priced portion, never a full zero bill. `duration_ms` measures
+claim to the earliest applicable terminal work receipt or recorded native exit; later cleanup
+cannot lengthen an ended invocation. It stays null while the invocation has no ending evidence.
+Product values and worker reports
 remain independent of execution metadata.
 
 ### Automatic stops
