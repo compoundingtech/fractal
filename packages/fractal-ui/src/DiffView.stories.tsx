@@ -51,6 +51,7 @@ export const scenarioExemptions: readonly string[] = [
   'NarrowLight:primitive',
   'RendererDrawsNothing:primitive',
   'RendererNeverPaints:primitive',
+  'RendererReplaced:primitive',
   'RendererReportsError:primitive',
   'RendererThrows:primitive',
   'SchemeSwitch:primitive',
@@ -179,27 +180,42 @@ export const TranscriptToolDiffLightNarrow: Story = { args: { scheme: 'light', w
 
 /**
  * The Changes panel: each file's body is a DiffView; the toolbar's layout, wrap and whitespace toggles drive it.
- * Hiding whitespace removes a reindented pair, an unpaired blank addition and an unpaired blank deletion.
+ * Hiding whitespace removes a reindented pair, an unpaired blank addition and an unpaired blank deletion, and a
+ * final-line edit that only adds or removes trailing space, whichever sides lack a final newline.
  */
+const eofEdit = (removedMarker: boolean, addedMarker: boolean) => ['@@ -1,2 +1,2 @@', ' export const e = 1', '-export const f = 2 ', ...(removedMarker ? ['\\ No newline at end of file'] : []), '+export const f = 2', ...(addedMarker ? ['\\ No newline at end of file'] : [])]
+const eofPaths = ['src/eof-both.ts', 'src/eof-old.ts', 'src/eof-new.ts'] as const
 export const ChangesPanel: Story = {
   render: ({ scheme, width }) => <Canvas scheme={scheme} width={width}><div style={{ height: 640, display: 'flex' }}><DiffPanel open title="Changes" showSurfaceTabs={false} branchFiles={[
     { path: 'src/rows.ts', diff: samplePatch.split('\n').slice(4), added: 3, removed: 2 },
     { path: 'src/space.ts', diff: ['@@ -1,5 +1,5 @@', '-const  a = 1', '+const a = 1', ' const b = 2', '+', ' const c = 3', '-  ', ' const d = 4'], added: 2, removed: 2 },
     { path: 'src/blank.ts', diff: ['@@ -0,0 +1,1 @@', '+'], added: 1, removed: 0 },
+    { path: eofPaths[0], diff: eofEdit(true, true), added: 1, removed: 1 },
+    { path: eofPaths[1], diff: eofEdit(true, false), added: 1, removed: 1 },
+    { path: eofPaths[2], diff: eofEdit(false, true), added: 1, removed: 1 },
   ]} /></div></Canvas>,
   play: async ({ canvasElement }) => {
     const views = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="diff-code"]')]
-    await expect(views().length).toBe(3)
+    await expect(views().length).toBe(6)
     for (const view of views()) await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
     await expect(views()[0]!.getAttribute('aria-label')).toBe('Diff lines for src/rows.ts')
     await expect([views()[1]!.dataset.added, views()[1]!.dataset.removed]).toEqual(['2', '2'])
+    for (const view of views().slice(3)) await expect([view.dataset.added, view.dataset.removed]).toEqual(['1', '1'])
     await userEvent.click(canvasElement.querySelector<HTMLElement>('[aria-label="Hide whitespace-only changes"]')!)
     // The reindent and both unpaired blank lines leave space.ts; the blank-only file has nothing left to draw.
-    await waitFor(() => expect(views().map(view => view.getAttribute('aria-label'))).toEqual(['Diff lines for src/rows.ts', 'Diff lines for src/space.ts']))
+    await waitFor(() => expect(views().map(view => view.getAttribute('aria-label'))).toEqual(['Diff lines for src/rows.ts', 'Diff lines for src/space.ts', ...eofPaths.map(path => `Diff lines for ${path}`)]))
     await expect([views()[1]!.dataset.added, views()[1]!.dataset.removed]).toEqual(['0', '0'])
     await waitFor(() => expect(views()[1]!.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
     await waitFor(() => expect(shadowText(views()[1]!)).toContain('const d = 4'), { timeout: 10_000 })
     await expect(canvasElement.querySelector('section[aria-label^="src/blank.ts"]')?.textContent).toContain('No non-whitespace changes.')
+    // A no-newline marker never splits the trailing-space pair: each final-line edit collapses to context.
+    for (const [index, path] of eofPaths.entries()) {
+      const view = views()[2 + index]!
+      await expect([view.dataset.added, view.dataset.removed]).toEqual(['0', '0'])
+      await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+      await waitFor(() => expect(shadowText(view)).toContain('export const f = 2'), { timeout: 10_000 })
+      await expect(canvasElement.querySelector(`section[aria-label^="${path}"]`)?.textContent).toContain('No non-whitespace changes.')
+    }
   },
 }
 export const ChangesPanelLightNarrow: Story = { args: { scheme: 'light', width: 440 }, render: ChangesPanel.render, play: ChangesPanel.play }
@@ -327,6 +343,69 @@ export const RendererThrows: Story = {
 export const RendererReportsError: Story = {
   render: ({ scheme, width }) => <SubstituteRenderer renderer={PaintsError} scheme={scheme} width={width} />,
   play: failsVisibly('The diff renderer failed: Injected Pierre error'),
+}
+
+/** Draws one diff line into its shadow root only once asked to for the current patch; notifies after every commit either way. */
+const DrawRequest = React.createContext(false)
+function DrawsWhenAsked({ onRendered }: PierrePatchProps) {
+  const node = React.useRef<HTMLDivElement>(null)
+  const draw = React.useContext(DrawRequest)
+  React.useLayoutEffect(() => {
+    const host = node.current!
+    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+    root.innerHTML = draw ? '<div data-line>stub row</div>' : ''
+    onRendered(host)
+  }, [draw, onRendered])
+  return <div ref={node} data-renderer-stub />
+}
+const replacementPatch = samplePatch.replace('retained row', 'replacement row')
+/** The same DiffView instance throughout: only the renderer context, the patch and the draw request change. */
+function ReplacedRenderer({ scheme, width }: { readonly scheme: 'dark' | 'light'; readonly width: number }) {
+  const [replaced, setReplaced] = React.useState(false)
+  const [patch, setPatch] = React.useState(samplePatch)
+  const [drawFor, setDrawFor] = React.useState<string | undefined>(undefined)
+  return <Canvas scheme={scheme} width={width}>
+    <button type="button" onClick={() => setReplaced(true)}>Replace renderer</button>
+    <button type="button" onClick={() => setPatch(replacementPatch)}>Replace patch</button>
+    <button type="button" onClick={() => setDrawFor(patch)}>Draw</button>
+    <DiffRendererContext.Provider value={replaced ? DrawsWhenAsked : undefined}><DrawRequest.Provider value={drawFor === patch}><DiffView patch={patch} /></DrawRequest.Provider></DiffRendererContext.Provider>
+  </Canvas>
+}
+
+/**
+ * A paint confirms one renderer and one patch. After Pierre has rendered, a replacement renderer that has
+ * drawn nothing brings the plain lines back and the host back to `rendering`; its own drawn lines complete
+ * it. A new patch does the same.
+ */
+export const RendererReplaced: Story = {
+  render: ({ scheme, width }) => <ReplacedRenderer scheme={scheme} width={width} />,
+  play: async ({ canvasElement }) => {
+    const view = await rendered(canvasElement)
+    const button = (name: string) => [...canvasElement.querySelectorAll('button')].find(entry => entry.textContent === name)!
+    const pending = async (text: string) => {
+      await waitFor(() => expect(view.dataset.diffState).toBe('rendering'))
+      await expect(view.getAttribute('aria-busy')).toBe('true')
+      // The patch reaches the view through a deferred value.
+      const plain = await waitFor(() => { const lines = view.querySelector<HTMLElement>('[data-diff-plain]'); expect(lines?.textContent).toContain(text); return lines! })
+      await expect(getComputedStyle(plain).visibility).toBe('visible')
+      await expect(getComputedStyle(view.querySelector<HTMLElement>('[data-renderer-stub]')!).visibility).toBe('hidden')
+      await expect(view.querySelector('[role="alert"]')).toBeNull()
+    }
+    const complete = async () => {
+      await waitFor(() => expect(view.dataset.diffState).toBe('rendered'))
+      await expect(view.hasAttribute('aria-busy')).toBe(false)
+      await expect(view.querySelector('[data-diff-plain]')).toBeNull()
+      await expect(view.querySelector('[data-renderer-stub]')?.shadowRoot?.textContent).toBe('stub row')
+    }
+    await userEvent.click(button('Replace renderer'))
+    await pending('retained row')
+    await userEvent.click(button('Draw'))
+    await complete()
+    await userEvent.click(button('Replace patch'))
+    await pending('replacement row')
+    await userEvent.click(button('Draw'))
+    await complete()
+  },
 }
 
 const styles = stylex.create({

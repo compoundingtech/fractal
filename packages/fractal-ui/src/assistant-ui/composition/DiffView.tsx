@@ -83,13 +83,15 @@ function paintOutcome(node: HTMLElement, collapsed: boolean): 'rendered' | Error
 /**
  * Contains one file's renderer failure: React reports the caught error (the root's onCaughtError,
  * console.error by default), the host reports `render-failed`, and the plain lines stay under a
- * visible notice. A new patch for the file retries.
+ * visible notice. A new patch or a new renderer for the file retries.
  */
-class RenderBoundary extends React.Component<{ readonly fileKey: string; readonly patch: string; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly children: React.ReactNode }, { readonly error: Error | undefined; readonly patch: string }> {
-  override state: { readonly error: Error | undefined; readonly patch: string } = { error: undefined, patch: this.props.patch }
+type BoundaryProps = { readonly fileKey: string; readonly patch: string; readonly Renderer: React.ComponentType<PierrePatchProps>; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly children: React.ReactNode }
+type BoundaryState = { readonly error: Error | undefined; readonly patch: string; readonly Renderer: React.ComponentType<PierrePatchProps> }
+class RenderBoundary extends React.Component<BoundaryProps, BoundaryState> {
+  override state: BoundaryState = { error: undefined, patch: this.props.patch, Renderer: this.props.Renderer }
   // oxlint-disable-next-line overeng/named-args -- React's required getDerivedStateFromProps ABI supplies props and state positionally.
-  static getDerivedStateFromProps(props: { readonly patch: string }, state: { readonly patch: string }) {
-    return props.patch === state.patch ? null : { error: undefined, patch: props.patch }
+  static getDerivedStateFromProps(props: BoundaryProps, state: BoundaryState) {
+    return props.patch === state.patch && props.Renderer === state.Renderer ? null : { error: undefined, patch: props.patch, Renderer: props.Renderer }
   }
   static getDerivedStateFromError(error: unknown) {
     return { error: error instanceof Error ? error : new Error(String(error)) }
@@ -161,15 +163,20 @@ function PlainDiff({ file, wrap, focusable }: { readonly file: NormalizedDiffFil
  * Pierre paints asynchronously (an empty frame first). The plain lines hold the same grid cell, and
  * stay the visible content, until a post-render notification shows drawn diff lines; then the cells
  * swap, so the region never collapses. Until then the file stays `rendering`; a renderer error
- * throws into the boundary.
+ * throws into the boundary. A paint confirms one revision (renderer, patch, collapsed): a new
+ * revision shows the plain lines and reports `rendering` again until its own drawn lines arrive,
+ * and a later notification for the same revision with nothing drawn withdraws the confirmation.
  */
 function RenderedFile({ Renderer, fileKey, report, plain, props }: { readonly Renderer: React.ComponentType<PierrePatchProps>; readonly fileKey: string; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly props: Omit<PierrePatchProps, 'onRendered'> }) {
-  const [outcome, setOutcome] = React.useState<'rendering' | 'rendered' | Error>('rendering')
   const collapsed = props.collapsed === true
+  const patch = props.file.patch
+  const [confirmed, setConfirmed] = React.useState<{ readonly Renderer: React.ComponentType<PierrePatchProps>; readonly patch: string; readonly collapsed: boolean; readonly outcome: 'rendered' | Error } | undefined>(undefined)
+  const outcome = confirmed !== undefined && confirmed.Renderer === Renderer && confirmed.patch === patch && confirmed.collapsed === collapsed ? confirmed.outcome : 'rendering'
   const onRendered = React.useCallback((node: HTMLElement) => {
     const painted = paintOutcome(node, collapsed)
-    if (painted !== undefined) setOutcome(painted)
-  }, [collapsed])
+    if (painted !== undefined) setConfirmed({ Renderer, patch, collapsed, outcome: painted })
+    else setConfirmed(previous => previous !== undefined && previous.Renderer === Renderer && previous.patch === patch && previous.collapsed === collapsed ? undefined : previous)
+  }, [Renderer, patch, collapsed])
   React.useLayoutEffect(() => { if (!(outcome instanceof Error)) report(fileKey, outcome) }, [fileKey, outcome, report])
   if (outcome instanceof Error) throw outcome
   const painted = outcome === 'rendered'
@@ -216,7 +223,7 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
       const key = keys[index]!
       const plain = <PlainDiff file={file} wrap={wrap} focusable={density !== 'compact'} />
       return <div key={key} data-diff-file={file.path} {...stylex.props(styles.file)}>
-        {Renderer ? <RenderBoundary fileKey={key} patch={file.patch} report={report} plain={plain}><RenderedFile Renderer={Renderer} fileKey={key} report={report} plain={plain} props={{ file, layout, wrap, focusable: density !== 'compact', header, lineNumbers: lineNumbers ?? (density !== 'compact' && !file.excerpt), scheme, collapsed }} /></RenderBoundary> : plain}
+        {Renderer ? <RenderBoundary fileKey={key} patch={file.patch} Renderer={Renderer} report={report} plain={plain}><RenderedFile Renderer={Renderer} fileKey={key} report={report} plain={plain} props={{ file, layout, wrap, focusable: density !== 'compact', header, lineNumbers: lineNumbers ?? (density !== 'compact' && !file.excerpt), scheme, collapsed }} /></RenderBoundary> : plain}
       </div>
     })}
     {prepared.hidden > 0 ? <p data-diff-more {...stylex.props(styles.more)}>{prepared.hidden} more {prepared.hidden === 1 ? 'line' : 'lines'}</p> : null}

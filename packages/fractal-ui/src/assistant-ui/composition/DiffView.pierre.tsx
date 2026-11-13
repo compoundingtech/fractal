@@ -54,8 +54,10 @@ export interface PierrePatchProps {
 
 export default function PierrePatch({ file, layout, wrap, focusable, header, lineNumbers, scheme, collapsed, renderHeaderMetadata, onRendered }: PierrePatchProps) {
   // The options object is Pierre's identity for re-rendering; read the latest callback through a ref.
+  // Each callback confirms one revision (renderer, patch), so the ref must be current before PatchDiff's
+  // own effects paint the new patch: insertion effects run before every layout and passive effect.
   const rendered = React.useRef(onRendered)
-  React.useLayoutEffect(() => { rendered.current = onRendered }, [onRendered])
+  React.useInsertionEffect(() => { rendered.current = onRendered }, [onRendered])
   const options = React.useMemo(() => ({
     theme: { dark: `${FRACTAL_DIFF_THEME}-dark`, light: `${FRACTAL_DIFF_THEME}-light` },
     themeType: scheme,
