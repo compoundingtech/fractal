@@ -2,10 +2,10 @@ import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
 import { fullHistoryCheckoutSteps } from './workspace-ci.ts'
 
-// Admission requires an organization ruleset's `workflows` rule selecting this
-// path at an approved immutable SHA, not a shared Actions app status context.
-// github.workflow_sha pins the scanner and policy to the same trusted revision.
-// Candidate code is Git data only; the pinned revision must contain the scanner.
+// Ordinary content check until a separate trust anchor is activated.
+// A future organization `workflows` rule can select this path at an approved SHA.
+// Only then does github.workflow_sha pin scanner/policy to a trusted revision;
+// without that rule a candidate can change its own workflow and scanner.
 export default githubWorkflow(auditCaches({
   name: 'Public repository history',
   on: {
@@ -45,5 +45,5 @@ export default githubWorkflow(auditCaches({
     },
   },
 }, {
-  'public-repo-history': 'Reads candidate Git objects with the pinned workflow scanner and policy; never executes candidate code or signs evidence.',
+  'public-repo-history': 'Scans introduced Git content; trusted scanner identity requires the separately activated required-workflow rule.',
 }))

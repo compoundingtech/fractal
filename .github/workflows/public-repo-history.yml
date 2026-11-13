@@ -69,5 +69,5 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Reads candidate Git objects with the pinned workflow scanner and policy; never executes candidate code or signs evidence.
+          CACHE_REASON: Scans introduced Git content; trusted scanner identity requires the separately activated required-workflow rule.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

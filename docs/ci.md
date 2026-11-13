@@ -1548,16 +1548,19 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
-| `public-repo-history.yml` | Trusted required-workflow contract on pull requests and merge groups, using immutable event base/head SHAs on GitHub-hosted Ubuntu; activation prerequisites below. |
+| `public-repo-history.yml` | Ordinary content check on pull requests and merge groups; ready for separately activated trusted required-workflow identity, but not currently a forgery-proof admission boundary. |
 | `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
 ### Required public history guard
 
-`public-repo-history` requires every introduced commit to be public-clean, not just the
-candidate's final tree. Hosted scanning takes `scripts/check-public-repo` and its policy
-from the required workflow's pinned `github.workflow_sha`; the local hook takes the
-accepted remote main's scanner. `BASE` and `HEAD` select the immutable history range,
-not the hosted scanner revision:
+`public-repo-history` checks every introduced commit for public-clean content, not just the
+candidate's final tree. It currently runs as an ordinary check to catch honest mistakes.
+The forgery-proof trust anchor (organization required workflows or a dedicated producer
+App) is a separate decision; no such enforcement is claimed here. Hosted scanning loads
+`scripts/check-public-repo` and its policy from `github.workflow_sha`. That revision is
+trusted only when a required-workflow rule pins it to an approved source; ordinary candidate
+workflows can change their own scanner. The local hook uses accepted remote main's scanner.
+`BASE` and `HEAD` select the immutable history range, not the hosted scanner revision:
 
 ```sh
 python3 <trusted-copy>/check-public-repo --repo "$PWD" --base BASE --head HEAD

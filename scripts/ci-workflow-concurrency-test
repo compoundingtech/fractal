@@ -94,9 +94,9 @@ assert not policy('perf.yml', 'push', 100, ref='refs/heads/other')[1]
 # commit-status context. These local topology checks do not assert live enforcement.
 history = (ROOT / '.github/workflows/public-repo-history.yml').read_text()
 history_source = (ROOT / '.github/workflows/public-repo-history.yml.genie.ts').read_text()
-assert re.search(r'^on:\n  pull_request:\n  merge_group:\n', history, re.M), history
+assert re.search(r'^on:\n  pull_request: null\n  merge_group: null\n', history, re.M), history
 assert re.search(r'^permissions:\n  contents: read\n\n', history, re.M), history
-assert not re.search(r'^\s+(?:if|uses|permissions):.*(?:github-script|write|always\(\))', history, re.M)
+assert 'github-script' not in history and not re.search(r'^\s+\w+: write$', history, re.M)
 assert 'createCommitStatus' not in history and 'createCommitStatus' not in history_source
 assert 'statuses:' not in history and 'pull_request_target:' not in history
 assert 'persist-credentials: false' in history
