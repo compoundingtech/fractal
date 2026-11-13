@@ -47,7 +47,7 @@ function lookup<T>(table: Readonly<Record<string, T>>, word: string): T | undefi
 const STATUS: Readonly<Record<string, string>> = { available: 'Available', away: 'Away' };
 const INTERRUPTIONS: Readonly<Record<string, readonly [string, string]>> = {
   all: ['Interruptions: all', 'Agents may ask you anything'],
-  urgent: ['Interruptions: urgent only', 'Only asks due within an hour reach you'],
+  urgent: ['Interruptions: urgent only', 'Only asks with priority critical reach you'],
   none: ['Interruptions: none', 'No asks reach you'],
 };
 const CLOCK: Readonly<Record<string, readonly [string, string]>> = {
