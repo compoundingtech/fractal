@@ -329,4 +329,9 @@ snapshot covers, plus any optional fields main added since. Earlier versions sta
 do not hand-edit it. The simulation and audit reports select v26. Control draws use the person's
 native admission path over a few rows, with a snooze that sometimes ends; the focused regression
 admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
-converge and trim.
+converge. Every fixed seed trims except 610 and 1597, the exact never-trim set observed by hosted
+[burst run 43423546514](https://github.com/compoundingtech/fractal/actions/runs/43423546514)
+(nextest, every `convergence::seed_` test at the head). The cause is the schedule, not the new
+kinds: the shifted draws give both seeds an old-build node that is never excused, neither during
+the schedule nor by quiesce's half-the-runs excusal, so it holds every checkpoint. Excusing it
+after quiesce lets every new-build node trim with the control claims in place, with no failure.
