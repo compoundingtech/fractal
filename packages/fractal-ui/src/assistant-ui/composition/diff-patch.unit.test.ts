@@ -102,6 +102,40 @@ test('a file whose only changes are blank lines keeps no hunks and counts nothin
   equal([hidden.added, hidden.removed, hidden.patch], [0, 0, '--- a/w.ts\n+++ b/w.ts\n'], 'nothing left to draw')
 })
 
+const noNewline = '\\ No newline at end of file'
+const finalLine = (removed: readonly string[], added: readonly string[]) => normalizePatch(['--- a/n.ts', '+++ b/n.ts', '@@ -1,2 +1,2 @@', ' z', ...removed, ...added].join('\n'))[0]!
+
+test('no-newline markers on both sides do not interrupt pairing: a whitespace-only final-line edit is hidden', () => {
+  const collapsed = collapseWhitespaceChanges(finalLine(['-a ', noNewline], ['+a', noNewline]))
+  equal([collapsed.added, collapsed.removed], [0, 0], 'hidden')
+  equal(collapsed.patch.split('\n').slice(2), ['@@ -1,2 +1,2 @@', ' z', ' a', noNewline, ''], 'one context line, still without a final newline')
+})
+
+test('a no-newline marker on one side only pairs too, and the collapsed line drops it', () => {
+  for (const [removed, added] of [[['-a ', noNewline], ['+a']], [['-a '], ['+a', noNewline]]] as const) {
+    const collapsed = collapseWhitespaceChanges(finalLine(removed, added))
+    equal([collapsed.added, collapsed.removed], [0, 0], `hidden: ${JSON.stringify([removed, added])}`)
+    equal(collapsed.patch.split('\n').slice(2), ['@@ -1,2 +1,2 @@', ' z', ' a', ''], 'a missing final newline on one side is whitespace too')
+  }
+})
+
+test('a kept final-line change keeps its no-newline markers on each side', () => {
+  const collapsed = collapseWhitespaceChanges(finalLine(['-a', noNewline], ['+b', noNewline]))
+  equal([collapsed.added, collapsed.removed], [1, 1], 'real change')
+  equal(collapsed.patch.split('\n').slice(2), ['@@ -1,2 +1,2 @@', ' z', '-a', noNewline, '+b', noNewline, ''], 'markers stay with their lines')
+  const added = collapseWhitespaceChanges(finalLine(['-a'], ['+b', noNewline]))
+  equal(added.patch.split('\n').slice(2), ['@@ -1,2 +1,2 @@', ' z', '-a', '+b', noNewline, ''], 'addition side only')
+  const removed = collapseWhitespaceChanges(finalLine(['-a', noNewline], ['+b']))
+  equal(removed.patch.split('\n').slice(2), ['@@ -1,2 +1,2 @@', ' z', '-a', noNewline, '+b', ''], 'removal side only')
+})
+
+test('a dropped blank final line takes its no-newline marker with it', () => {
+  const [file] = normalizePatch(['--- a/n.ts', '+++ b/n.ts', '@@ -1,1 +1,2 @@', ' z', '+ ', noNewline].join('\n'))
+  const collapsed = collapseWhitespaceChanges(file!)
+  equal([collapsed.added, collapsed.removed], [0, 0], 'hidden')
+  equal(collapsed.patch.split('\n').slice(2), ['@@ -1,1 +1,1 @@', ' z', ''], 'no orphan marker')
+})
+
 test('truncatePatch keeps the first body lines and reports what it hid', () => {
   const [file] = normalizePatch(['--- a/t.ts', '+++ b/t.ts', '@@ -1,4 +1,4 @@', ' a', '-b', '+c', ' d', ' e'].join('\n'))
   const { file: short, hidden } = truncatePatch(file!, 3)

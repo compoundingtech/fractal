@@ -151,7 +151,10 @@ function mapHunks(file: NormalizedDiffFile, transform: (body: readonly string[],
  * Hide whitespace-only changes: each `-`/`+` pair equal up to whitespace becomes one context line
  * (new text), and an unpaired change whose text is blank is dropped. A dropped line ends its hunk
  * and the rest continues as a new hunk one line further on that side, so every hunk range and
- * every later line number stays the file's real one.
+ * every later line number stays the file's real one. A `\ No newline at end of file` marker
+ * belongs to the line before it: it never interrupts pairing, a kept change keeps it, a dropped
+ * change drops it, and a collapsed pair keeps it only when both sides end without a newline
+ * (a newline that only one side lacks is whitespace too).
  */
 export function collapseWhitespaceChanges(file: NormalizedDiffFile): NormalizedDiffFile {
   const lines = file.patch.replace(/\n$/, '').split('\n')
@@ -173,31 +176,39 @@ export function collapseWhitespaceChanges(file: NormalizedDiffFile): NormalizedD
       suffix = ''
     }
     const keep = (line: string) => {
-      // A `\ No newline` marker belongs to the line before it; a dropped line takes its marker along.
+      // A marker with no line before it in this segment has nothing to describe.
       if (line.startsWith('\\') && segment.body.length === 0) return
       segment.body.push(line)
       if (line.startsWith('-') || line.startsWith(' ')) oldLine++
       if (line.startsWith('+') || line.startsWith(' ')) newLine++
     }
-    const change = (line: string) => {
-      if (line.slice(1).trim() !== '') { keep(line); return }
+    type Change = { readonly line: string; readonly marker: string | undefined }
+    const change = ({ line, marker }: Change) => {
+      if (line.slice(1).trim() !== '') { keep(line); if (marker !== undefined) keep(marker); return }
       close()
       if (line.startsWith('-')) oldLine++
       else newLine++
       segment = { old: oldLine, new: newLine, body: [] }
     }
     let at = 0
+    const take = (sign: '-' | '+') => {
+      const group: Change[] = []
+      while (at < body.length && body[at]!.startsWith(sign)) {
+        const line = body[at++]!
+        group.push({ line, marker: body[at]?.startsWith('\\') ? body[at++] : undefined })
+      }
+      return group
+    }
     while (at < body.length) {
       if (!body[at]!.startsWith('-') && !body[at]!.startsWith('+')) { keep(body[at++]!); continue }
-      const removed: string[] = [], added: string[] = []
-      while (at < body.length && body[at]!.startsWith('-')) removed.push(body[at++]!)
-      while (at < body.length && body[at]!.startsWith('+')) added.push(body[at++]!)
-      const pending: string[] = []
+      const removed = take('-'), added = take('+')
+      const pending: Change[] = []
       for (let pair = 0; pair < Math.max(removed.length, added.length); pair++) {
         const old = removed[pair], next = added[pair]
-        if (old !== undefined && next !== undefined && old.slice(1).replace(/\s/g, '') === next.slice(1).replace(/\s/g, '')) {
+        if (old !== undefined && next !== undefined && old.line.slice(1).replace(/\s/g, '') === next.line.slice(1).replace(/\s/g, '')) {
           pending.splice(0).forEach(change)
-          keep(` ${next.slice(1)}`)
+          keep(` ${next.line.slice(1)}`)
+          if (old.marker !== undefined && next.marker !== undefined) keep(next.marker)
           continue
         }
         if (old !== undefined) change(old)
