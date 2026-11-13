@@ -831,6 +831,13 @@ impl World {
         let Some(input) = input else {
             return;
         };
+        if ZZ_NEW_KINDS.contains(&input.kind.as_str()) {
+            if ZZ_SKIP_NEW.load(std::sync::atomic::Ordering::Relaxed) {
+                self.note(format!("ZZNEW {} skipped {} {}", self.nodes[index].name, input.kind, input.subject));
+                return;
+            }
+            self.note(format!("ZZNEW {} writes {} {} old_build={} day {}", self.nodes[index].name, input.kind, input.subject, self.nodes[index].old_build, self.days));
+        }
         // Latest observations derive replicated status timing from the reader's clock as
         // well as the writer's. Pin both to this node's simulated time so omitted source
         // timestamps cannot put host wall time into a seeded claim.
@@ -2244,4 +2251,34 @@ fn explore() {
         .unwrap_or(100);
     let start = now_ms() as u64;
     run_seeds((0..runs).map(|offset| start.wrapping_add(offset)));
+}
+
+const ZZ_NEW_KINDS: &[&str] = &["person.status-set", "person.interruptions-set", "person.deadline-clock-set", "person.presence-observed"];
+static ZZ_SKIP_NEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[test]
+fn zz_trace_seed_tmp() {
+    for skip in [false, true] {
+        ZZ_SKIP_NEW.store(skip, std::sync::atomic::Ordering::Relaxed);
+        let seed = 21u64;
+        let tag = format!("TRACE{seed}-skip{skip}");
+        let _identity = smallclaims::store::checkpoint_test_identity(
+            "seeded-convergence-v1",
+            "seeded-convergence-executable-v1",
+        );
+        let mut world = World::new(seed, Sabotage::None);
+        let steps = 300 + world.rng.below(300);
+        world.run_schedule(steps);
+        let quiet = world.quiesce();
+        world.check();
+        for node in &world.nodes {
+            eprintln!("{tag}-END {} old_build={} online={} trimmed={:?}", node.name, node.old_build, node.online, node.store.trimmed_checkpoint().unwrap().map(|t| t.id));
+        }
+        eprintln!("{tag}-END quiet={quiet} failures={:?}", world.failures);
+        for line in &world.schedule {
+            if line.contains("old build") || line.contains("excuse") || line.contains("checkpoint") || line.contains("ZZNEW") || line.contains("upgrade") {
+                eprintln!("{tag}-SCHED {line}");
+            }
+        }
+    }
 }
