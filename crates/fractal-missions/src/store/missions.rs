@@ -1460,6 +1460,8 @@ fn mission_run_steps_view_tx(
         .collect::<Result<Vec<_>, _>>()?;
     apply_step_states_tx(connection, &mut view.steps, summaries)?;
     view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
+    (view.retry_of, view.retried_by) =
+        fractal_store::store::mission_run_retry_links_tx(connection, &view.subject)?;
     Ok(view)
 }
 
@@ -3243,6 +3245,8 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         apply_step_states_tx(&connection, &mut run.steps, summaries)?;
         run.scheduler_fault = first_readiness_fault_tx(&connection, &run.subject)?;
+        (run.retry_of, run.retried_by) =
+            fractal_store::store::mission_run_retry_links_tx(&connection, &run.subject)?;
         Ok(run)
     }
 
