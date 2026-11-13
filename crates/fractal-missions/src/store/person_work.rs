@@ -983,7 +983,8 @@ impl PersonWorkStore for Store {
                 "an update waits for nobody, so it has no deadline or default answer",
             ));
         }
-        if input.priority.is_some() {
+        // `normal` is what every ask has without a priority, so naming it changes nothing.
+        if ask_priority(input)?.is_some() {
             return Err(FractalError::new(
                 "invalid-ask-priority",
                 "an update asks nothing, so it has no priority",

@@ -5490,14 +5490,11 @@ async fn availability_surfaces_to_an_asking_agent_in_ask_and_now() {
     assert_eq!(seen["deadline_clock"], "hold-all");
     assert!(seen["presence"].is_null(), "an asker never sees raw presence");
     assert_eq!(asked["urgent"], false);
-    assert_eq!(asked["deadline_held"], true, "hold-all holds every ask");
+    assert!(asked.get("deadline_held").is_none(), "an ask without --deadline has no known deadline to hold: {asked}");
     let human = run_lane_cli(&socket, &config_home, Some(&agent), false, &ask).await;
     assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
     let human = String::from_utf8_lossy(&human.stdout);
-    assert!(
-        human.trim_end().ends_with(&format!("{expected}\nthis ask is not urgent; hold-all holds its deadline")),
-        "{human}"
-    );
+    assert!(human.trim_end().ends_with(&format!("{expected}\nthis ask is not urgent")), "{human}");
 
     // The person's own Now names their availability before the ask waiting on them.
     let own = run_lane_cli(&socket, &config_home, None, false, &["now"]).await;
@@ -5519,17 +5516,28 @@ async fn availability_surfaces_to_an_asking_agent_in_ask_and_now() {
     assert_eq!(people[0]["status"], "away");
     assert!(people[0]["presence"].is_null());
 
-    // A critical ask is urgent; hold-all still holds its deadline.
-    let critical = run_lane_cli(&socket, &config_home, Some(&agent), false, &[
-        "work", "ask", "--for", "person/ada", "--title", "Stop the rollout?",
-        "--reason", "The rollout is failing", "--new-run", "rollout-stop",
-        "--idempotency-key", "availability-critical-ask", "--priority", "critical",
-    ]).await;
+    // With ask deadlines on, a critical ask that names a deadline is urgent and hold-all still
+    // holds that deadline; a routine one is held too.
+    store.set_ask_deadlines(true);
+    let deadline_ask = |key: &'static str, priority: &'static str| {
+        [
+            "work", "ask", "--for", "person/ada", "--title", "Stop the rollout?",
+            "--reason", "The rollout is failing", "--new-run", key,
+            "--idempotency-key", key, "--priority", priority, "--deadline", "4h",
+        ]
+    };
+    let critical = run_lane_cli(&socket, &config_home, Some(&agent), false, &deadline_ask("rollout-stop", "critical")).await;
     assert!(critical.status.success(), "{}", String::from_utf8_lossy(&critical.stderr));
     let critical = String::from_utf8_lossy(&critical.stdout);
     assert!(
         critical.trim_end().ends_with("this ask is urgent (priority critical); hold-all holds its deadline"),
         "{critical}"
+    );
+    let routine = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &deadline_ask("rollout-check", "normal")).await);
+    assert_eq!(
+        (&routine["urgent"], &routine["deadline_held"]),
+        (&serde_json::json!(false), &serde_json::json!(true)),
+        "{routine}"
     );
 
     // With no override, a locked device makes the person away; the agent never sees the raw
