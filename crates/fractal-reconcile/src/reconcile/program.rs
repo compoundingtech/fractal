@@ -1195,6 +1195,7 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
     };
     let title = text("title")?;
     Ok(Wait::Ask(Box::new(PersonAskRequest {
+        priority: None,
         legacy_request: None,
         person: text("for")?,
         reason: title.clone(),
