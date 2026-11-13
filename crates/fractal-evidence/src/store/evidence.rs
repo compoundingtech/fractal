@@ -433,7 +433,10 @@ impl EvidenceStore for Store {
             format!("({})", crate::store::gate_runners::FROM_CLAIMS)
         };
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h16daeb7e7a0e owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT DISTINCT subject, origin, owner FROM {source}"
+            "SELECT DISTINCT runner.subject,
+                    COALESCE(json_extract(request.body, '$.fields.host'), runner.origin),
+                    runner.owner
+             FROM {source} runner JOIN claims request ON request.id=runner.claim_id"
         ))?;
         let mut requests = BTreeMap::<String, Vec<(String, String)>>::new();
         for row in statement.query_map([], |row| {

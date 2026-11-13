@@ -3098,6 +3098,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             if self.store.run_projection_pending(&runner.owner_run)? {
                 continue;
             }
+            if !runner.retired && runner.host == self.host {
+                let _ = self.isolate("gate", &runner.subject, || {
+                    self.execute_remote_mechanical_gate(runner)
+                });
+            }
             if runner.retired && runner.host == self.host {
                 let _ = self.isolate("gate", &runner.subject, || {
                     let runtime_id = runner.subject.replace('/', ".");
@@ -19010,14 +19015,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             },
         };
-        if host != self.host {
-            return Ok(if check == 1 {
-                GateOutcome::Pending
-            } else {
-                GateOutcome::NotYet
-            });
-        }
         let operation = gate_check_subject(&result_subject, check);
+        if host != self.host {
+            // Only the origin advances the run. Its durable request wakes the declared host;
+            // the executor's replicated gate.result wakes the origin, without remote polling.
+            if self.store.latest_claim(&operation, Some("gate.requested"))?.is_none() {
+                let dispatch = RemoteMechanicalGate {
+                    stage: stage.clone(),
+                    name: name.into(),
+                    command: command.into(),
+                    host: host.into(),
+                    workspace: workspace.into(),
+                    environment: environment.clone(),
+                    time_limit_ms,
+                    result_subject,
+                    check,
+                };
+                self.record_once(&operation, "gate.requested", BTreeMap::from([
+                    ("status".into(), Value::String("requested".into())),
+                    ("runner".into(), Value::String("exec".into())),
+                    ("owner".into(), Value::String(gate_owner_step(&stage.subject)
+                        .unwrap_or_else(|| stage.subject.clone()))),
+                    ("host".into(), Value::String(host.into())),
+                    ("dispatch".into(), serde_json::to_value(dispatch)?),
+                ]))?;
+            }
+            return Ok(GateOutcome::Pending);
+        }
         let runtime_id = operation.replace('/', ".");
         let report = self.gate_report_path(&runtime_id);
         let check_result =
@@ -19035,6 +19059,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(requested) = self
             .store
             .latest_claim(&operation, Some("gate.requested"))?
+            .filter(|requested| requested.origin == self.host)
         {
             if let Some(error) = self.store.runtime_start_failure(&operation)? {
                 return self.record_gate_check(stage, check_result(None, Vec::new(), Some(error)));
@@ -19109,15 +19134,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        self.record_once(
-            &operation,
-            "gate.requested",
-            BTreeMap::from([
-                ("status".into(), Value::String("requested".into())),
-                ("runner".into(), Value::String("exec".into())),
-                ("owner".into(), Value::String(stage.subject.clone())),
-            ]),
-        )?;
+        let mut fields = self.store.latest_claim(&operation, Some("gate.requested"))?
+            .map(|request| request.body["fields"].as_object().cloned()
+                .context("the mechanical gate request has no fields"))
+            .transpose()?
+            .unwrap_or_default();
+        fields.extend([
+            ("status".into(), Value::String("requested".into())),
+            ("runner".into(), Value::String("exec".into())),
+            ("owner".into(), Value::String(gate_owner_step(&stage.subject)
+                .unwrap_or_else(|| stage.subject.clone()))),
+        ]);
+        // Distinguish executor admission from the origin's dispatch request. The executor's
+        // request starts the probe's time budget and authenticates its local driver receipt.
+        if fields.contains_key("dispatch") {
+            fields.insert("executor".into(), Value::String(self.host.clone()));
+        }
+        self.record_once(&operation, "gate.requested", fields.into_iter().collect())?;
         let requested = self
             .store
             .latest_claim(&operation, Some("gate.requested"))?
@@ -19177,6 +19210,43 @@ impl<R: RuntimeControl> Reconciler<R> {
             .saturating_add(u128::from(time_limit_ms)), crate::reconcile_telemetry::WakeCause::TimerGateTimeout);
         self.arm_gate_poll(&member.runtime_id);
         Ok(GateOutcome::Pending)
+    }
+
+    /// Drive only the outstanding check the origin requested, never a later check or run state.
+    fn execute_remote_mechanical_gate(&self, runner: &crate::store::MissionGateRunner) -> Result<()> {
+        let Some(request) = self.store.latest_claim(&runner.subject, Some("gate.requested"))? else {
+            return Ok(());
+        };
+        let Some(dispatch) = request.body.pointer("/fields/dispatch") else {
+            return Ok(()); // Local gates remain driven by their owning run.
+        };
+        let dispatch: RemoteMechanicalGate = serde_json::from_value(dispatch.clone())?;
+        let owner = gate_owner_step(&dispatch.stage.subject)
+            .unwrap_or_else(|| dispatch.stage.subject.clone());
+        let expected_result = gate_result_subject(&dispatch.stage, &dispatch.name,
+            &serde_json::json!({
+                "type": "mechanical",
+                "command": dispatch.command,
+                "host": dispatch.host,
+                "workspace": dispatch.workspace,
+                "environment": dispatch.environment,
+                "time_limit_ms": dispatch.time_limit_ms,
+            }))?;
+        anyhow::ensure!(dispatch.host == self.host
+            && request.body["fields"]["owner"].as_str() == Some(owner.as_str())
+            && dispatch.stage.run == runner.owner_run
+            && dispatch.result_subject == expected_result
+            && gate_check_subject(&expected_result, dispatch.check) == runner.subject,
+            "the remote gate request does not match its owner, definition or executor");
+        if self.store.latest_claim(&dispatch.result_subject, Some("gate.result"))?
+            .is_some_and(|result| result.body.pointer("/fields/value/check")
+                .and_then(Value::as_u64).is_some_and(|check| check >= dispatch.check))
+        {
+            return Ok(());
+        }
+        self.run_mechanical(&dispatch.stage, &dispatch.name, &dispatch.command,
+            &dispatch.host, &dispatch.workspace, &dispatch.environment, dispatch.time_limit_ms)?;
+        Ok(())
     }
 
     /// Record one finished exec gate check on the gate's result subject and answer for it.
@@ -21759,6 +21829,20 @@ pub fn exec_check_broken(
         )),
         None => Some("its check ended without an exit status: something killed it".into()),
     }
+}
+
+/// The complete mechanical probe the run origin asks another member to execute.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RemoteMechanicalGate {
+    stage: GateContext,
+    name: String,
+    command: String,
+    host: String,
+    workspace: String,
+    environment: BTreeMap<String, String>,
+    time_limit_ms: u64,
+    result_subject: String,
+    check: u64,
 }
 
 /// One finished exec gate check, ready to record.
@@ -30788,6 +30872,93 @@ mission "proof" state="ready" {{
         path: &str,
     ) -> &'a crate::model::StepRunView {
         run.steps.iter().find(|step| step.step == path).unwrap()
+    }
+
+    #[test]
+    fn a_remote_mechanical_gate_delivers_its_result_to_the_origin() {
+        for code in [0, 1, 2] {
+            let origin = Arc::new(Store::open_memory("origin").unwrap());
+            let executor = Arc::new(Store::open_memory("node").unwrap());
+            publish_as(&origin, &exec_gate_mission("test -e merged", "."),
+                "remote-source", "person/pat");
+            let run = start_proof_run(&origin, "remote-run");
+            let origin_runtime = Arc::new(FakeRuntime::default());
+            let executor_runtime = Arc::new(FakeRuntime::default());
+            let mut origin_reconciler = Reconciler::new(origin.clone(), origin_runtime.clone(),
+                "origin".into(), Arc::new(Notify::new()));
+            origin_reconciler.gate_recheck_base_ms = 0;
+            let executor_reconciler = Reconciler::new(executor.clone(), executor_runtime.clone(),
+                "node".into(), Arc::new(Notify::new()));
+            for _ in 0..4 {
+                origin_reconciler.reconcile_once().unwrap();
+            }
+            assert!(gate_runners(&origin_runtime).is_empty());
+            executor.import_replication("origin", &origin.export_replication(0).unwrap()).unwrap();
+            executor_reconciler.reconcile_once().unwrap();
+            let runner = gate_runners(&executor_runtime).pop().expect("the remote gate never ran");
+            assert_eq!(runner.host, "node");
+            assert_eq!(runner.environment["ST_MISSION_RUN"], run.id);
+            assert_eq!(step_of(&executor.mission_run(&run.id).unwrap().unwrap(), "verify").status,
+                "working", "the executor must not advance the origin's run");
+            // A restarted executor adopts the persisted admission instead of launching twice.
+            drop(executor_reconciler);
+            let executor_reconciler = Reconciler::new(executor.clone(), executor_runtime.clone(),
+                "node".into(), Arc::new(Notify::new()));
+            executor_reconciler.reconcile_once().unwrap();
+            assert_eq!(gate_runners(&executor_runtime).len(), 1);
+            exit_gate_runner(&executor_runtime, &runner, Some(code), "remote probe result\n");
+            executor_reconciler.reconcile_once().unwrap();
+            let result = executor.latest_claim(&gate_runner_subject(&runner), Some("gate.result"))
+                .unwrap().expect("the executor did not persist its gate result");
+            assert_eq!(result.origin, "node");
+            assert_eq!(result.body["fields"]["value"]["exit_code"], code);
+            assert_eq!(origin.mission_run(&run.id).unwrap().unwrap().status, "running");
+            origin.import_replication("node", &executor.export_replication(0).unwrap()).unwrap();
+            origin_reconciler.evaluate_mission_runs().unwrap();
+            let current = origin.mission_run(&run.id).unwrap().unwrap();
+            if code == 0 {
+                assert_eq!(step_of(&current, "verify").status, "completed");
+            } else {
+                assert_eq!(step_of(&current, "verify").status, "working");
+            }
+            if code == 1 {
+                // Only a fresh origin request authorizes the next probe, not a local pass.
+                executor_reconciler.reconcile_once().unwrap();
+                assert_eq!(gate_runners(&executor_runtime).len(), 1);
+                executor.import_replication("origin", &origin.export_replication(0).unwrap()).unwrap();
+                executor_reconciler.reconcile_once().unwrap();
+                let second = gate_runners(&executor_runtime).pop().unwrap();
+                assert_ne!(second.runtime_id, runner.runtime_id);
+                exit_gate_runner(&executor_runtime, &second, Some(0), "");
+                executor_reconciler.reconcile_once().unwrap();
+                origin.import_replication("node", &executor.export_replication(0).unwrap()).unwrap();
+                origin_reconciler.evaluate_mission_runs().unwrap();
+                assert_eq!(step_of(&origin.mission_run(&run.id).unwrap().unwrap(), "verify").status,
+                    "completed");
+            }
+            assert!(gate_runners(&origin_runtime).is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelling_a_remote_gate_before_dispatch_does_not_start_its_process() {
+        let origin = Arc::new(Store::open_memory("origin").unwrap());
+        let executor = Arc::new(Store::open_memory("node").unwrap());
+        publish_as(&origin, &exec_gate_mission("true", "."), "remote-source", "person/pat");
+        let run = start_proof_run(&origin, "remote-cancelled");
+        let origin_reconciler = Reconciler::new(origin.clone(), Arc::new(FakeRuntime::default()),
+            "origin".into(), Arc::new(Notify::new()));
+        for _ in 0..4 {
+            origin_reconciler.reconcile_once().unwrap();
+        }
+        origin.request_mission_run_cancellation(&run.id, "cancel before dispatch").unwrap();
+        origin_reconciler.reconcile_once().unwrap();
+        executor.import_replication("origin", &origin.export_replication(0).unwrap()).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let executor_reconciler = Reconciler::new(executor, runtime.clone(),
+            "node".into(), Arc::new(Notify::new()));
+        executor_reconciler.reconcile_once().unwrap();
+        assert!(gate_runners(&runtime).is_empty());
     }
 
     #[test]
