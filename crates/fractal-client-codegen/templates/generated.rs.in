@@ -693,6 +693,10 @@ pub struct Attention {
     /// Whether this item blocks or waits on its person's answer; absent on older daemons.
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub alert: Option<bool>,
+    /// Whether this item is urgent (an ask with priority `critical`); absent on older daemons,
+    /// which is not urgent.
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub urgent: Option<bool>,
     /// The agent whose conversation this item belongs to.
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub conversation_id: Option<String>,
@@ -4716,6 +4720,8 @@ pub enum AssistantScope {
     CustomReply,
     #[serde(rename = "write.assistant.answers")]
     Answers,
+    #[serde(rename = "read.assistant.availability")]
+    Availability,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

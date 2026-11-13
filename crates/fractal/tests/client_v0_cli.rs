@@ -5291,6 +5291,185 @@ async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
         assert!(!refusal.contains("daemon"), "{refusal}");
     }
 }
+
+/// A daemon on a private socket and a client config whose person is `person`.
+async fn availability_fixture(
+    root: &Path,
+    person: &str,
+) -> (Arc<Store>, PathBuf, PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let config_home = root.join("config");
+    std::fs::create_dir_all(config_home.join("st3")).unwrap();
+    std::fs::write(config_home.join("st3/config.toml"), format!("person = \"{person}\"\n")).unwrap();
+    let state = test_state(root);
+    let store = state.store.clone();
+    let socket = root.join("st3.sock");
+    let served = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix_with_ready(&served, fractal_daemon::api::router(state), || {
+            ready.send(()).unwrap();
+        })
+        .await
+    });
+    started.await.unwrap();
+    (store, socket, config_home, server)
+}
+
+/// Declare `agent/<origin>.NAME` authored by `person`, so the agent works for that person.
+fn declare_agent_for(store: &Store, name: &str, person: &str) -> String {
+    let source = format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; command \"true\" }}");
+    let intent = fractal_daemon::graph::parse_intent(&source, store.origin()).unwrap();
+    let preview = store
+        .mission(&intent, IntentInput { kdl: source.clone(), source_name: None })
+        .unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, &format!("declare-{name}"), Some(person)).unwrap();
+    format!("agent/{}.{name}", store.origin())
+}
+
+fn rfc3339_ms(value: &Value) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap().timestamp_millis()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_cli_person_sets_reports_presence_and_clears() {
+    let root = tempfile::tempdir().unwrap();
+    let (_store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let cli = |json: bool, args: &'static [&'static str]| run_lane_cli(&socket, &config_home, None, json, args);
+
+    let fresh = value(&cli(true, &["availability"]).await);
+    assert_eq!(fresh["people"].as_array().unwrap().len(), 1);
+    let own = &fresh["people"][0];
+    assert_eq!(own["person"], "person/ada");
+    assert_eq!(own["status"], "available", "with no device reporting, agents ask normally");
+    assert_eq!(own["status_source"], "unreported");
+    assert_eq!(own["presence"], "unreported");
+    assert_eq!(own["interruptions"], "all");
+    assert_eq!(own["deadline_clock"], "run");
+
+    let before = chrono::Utc::now().timestamp_millis();
+    let set = value(&cli(true, &["availability", "set", "--status", "away", "--for", "1h"]).await);
+    let after = chrono::Utc::now().timestamp_millis();
+    assert_eq!(set["status"], "away");
+    assert_eq!(set["status_source"], "override");
+    let until = rfc3339_ms(&set["status_until"]);
+    assert!((before + 3_600_000..=after + 3_600_000).contains(&until), "{set}");
+    let shown = value(&cli(true, &["availability", "show"]).await);
+    assert_eq!(shown["people"][0], set);
+    let human = cli(false, &["availability"]).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.starts_with("person/ada\n"), "{human}");
+    assert!(
+        human.contains(&format!("status          away (set) until {}", set["status_until"].as_str().unwrap())),
+        "{human}"
+    );
+    assert!(human.contains("presence        unreported"), "{human}");
+
+    // With the override cleared and no device reporting, status is available and unreported.
+    let cleared = value(&cli(true, &["availability", "clear", "status"]).await);
+    assert_eq!(cleared["status"], "available");
+    assert_eq!(cleared["status_source"], "unreported");
+    assert!(cleared["status_until"].is_null());
+    // A locked device makes the derived status away; an active one makes it available and
+    // says when to report again if nothing changes (ten minutes after the last input).
+    let locked = value(&cli(true, &["availability", "presence", "locked"]).await);
+    assert_eq!(locked["availability"]["presence"], "locked");
+    assert_eq!(locked["availability"]["status"], "away");
+    assert_eq!(locked["availability"]["status_source"], "presence");
+    assert!(locked["report_again_at"].is_null(), "{locked}");
+    let before = chrono::Utc::now().timestamp_millis();
+    let active = value(&cli(true, &["availability", "presence", "active"]).await);
+    let after = chrono::Utc::now().timestamp_millis();
+    let present = &active["availability"];
+    assert_eq!(present["presence"], "present");
+    assert_eq!(present["status"], "available");
+    assert_eq!(present["status_source"], "presence");
+    assert!(present["presence_observed_at"].is_string());
+    let again = rfc3339_ms(&active["report_again_at"]);
+    assert!((before + 600_000..=after + 600_000).contains(&again), "{active}");
+    let human = cli(false, &["availability", "presence", "active"]).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("presence        present observed "), "{human}");
+    assert!(human.contains("Report again at "), "{human}");
+
+    let held = value(&cli(true, &[
+        "availability", "set", "--interruptions", "none", "--deadline-clock", "hold-all",
+        "--until", "2099-01-01T00:00:00Z",
+    ]).await);
+    assert_eq!(held["interruptions"], "none");
+    assert_eq!(held["interruptions_until"], "2099-01-01T00:00:00.000Z");
+    assert_eq!(held["deadline_clock"], "hold-all");
+    assert!(held["deadline_clock_since"].is_string());
+    assert_eq!(held["deadline_clock_until"], "2099-01-01T00:00:00.000Z");
+    let defaults = value(&cli(true, &["availability", "clear"]).await);
+    assert_eq!(defaults["status"], "available");
+    assert_eq!(defaults["status_source"], "presence");
+    assert_eq!(defaults["interruptions"], "all");
+    assert!(defaults["interruptions_until"].is_null());
+    assert_eq!(defaults["deadline_clock"], "run");
+    assert!(defaults["deadline_clock_since"].is_null() && defaults["deadline_clock_until"].is_null());
+
+    // Another person's read never carries presence.
+    let other = value(&cli(true, &["availability", "--person", "person/ada", "--actor", "person/avery"]).await);
+    assert_eq!(other["people"][0]["person"], "person/ada");
+    assert_eq!(other["people"][0]["status"], "available");
+    assert!(other["people"][0]["presence"].is_null());
+    let invalid: [&'static [&'static str]; 3] = [
+        &["availability", "set", "--status", "away", "--until", "2000-01-01T00:00:00Z"],
+        &["availability", "set", "--status", "away", "--until", "soon"],
+        &["availability", "presence", "inactive", "--observed-at", "2000-01-01T00:00:00Z"],
+    ];
+    for args in invalid {
+        assert!(!cli(true, args).await.status.success(), "{args:?}");
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_cli_agent_reads_without_presence_and_cannot_write() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let agent = declare_agent_for(&store, "helper", "person/ada");
+    value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "availability", "set", "--status", "away", "--interruptions", "urgent", "--for", "2h",
+    ]).await);
+
+    let read = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["availability"]).await);
+    let people = read["people"].as_array().unwrap();
+    assert_eq!(people.len(), 1, "{read}");
+    assert_eq!(people[0]["person"], "person/ada");
+    assert_eq!(people[0]["status"], "away");
+    assert_eq!(people[0]["interruptions"], "urgent");
+    assert!(people[0]["presence"].is_null() && people[0]["presence_observed_at"].is_null());
+    let human = run_lane_cli(&socket, &config_home, Some(&agent), false, &["availability"]).await;
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("interruptions   urgent"), "{human}");
+    assert!(!human.contains("presence "), "{human}");
+
+    let index = store.index().unwrap();
+    for args in [
+        vec!["availability", "set", "--status", "available"],
+        vec!["availability", "clear"],
+        vec!["availability", "presence", "active"],
+        vec!["availability", "set", "--status", "available", "--actor", "person/ada"],
+    ] {
+        let refusal = failure(&run_lane_cli(&socket, &config_home, Some(&agent), true, &args).await);
+        assert!(refusal.contains("agent"), "{refusal}");
+    }
+    let explicit = ["availability", "clear", "--actor", agent.as_str()];
+    let refusal = failure(&run_lane_cli(&socket, &config_home, None, true, &explicit).await);
+    assert!(refusal.contains("only a person can change their own availability"), "{refusal}");
+    assert_eq!(store.index().unwrap(), index, "a refused write reached the daemon");
+    server.abort();
+
+    // Refusal happens before any request: no daemon is needed to refuse.
+    let absent = root.path().join("absent.sock");
+    let refusal = failure(&run_lane_cli(&absent, &config_home, Some("agent/helper"), true, &[
+        "availability", "set", "--status", "away",
+    ]).await);
+    assert!(refusal.contains("agent") && !refusal.contains("daemon"), "{refusal}");
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
     let root = tempfile::tempdir().unwrap();
@@ -5696,6 +5875,7 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     let update = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

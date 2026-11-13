@@ -235,6 +235,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -8373,6 +8374,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {
