@@ -97,9 +97,9 @@ export const AXES = {
 /** The value that clears an axis, so it takes no end: status follows the devices, every ask may interrupt, the clock runs. */
 export const CLEARED = { status: null, interruptions: 'all', deadline_clock: 'run' } as const;
 
-/** One axis's change. An absent `until` holds until the person changes it. */
-export function axisChange(axis: Axis, value: string | null, until: Date | null): AvailabilitySet {
-  return { [axis]: { value, ...(until ? { until: until.toISOString() } : {}) } } as AvailabilitySet;
+/** One axis's change, with a value the generated change type for that axis accepts. An absent `until` holds until the person changes it. */
+export function axisChange<A extends Axis>(axis: A, value: NonNullable<AvailabilitySet[A]>['value'], until: Date | null): AvailabilitySet {
+  return { [axis]: { value, ...(until ? { until: until.toISOString() } : {}) } };
 }
 
 export const UNTIL_PRESETS = ['30 minutes', '1 hour', '2 hours', 'Until tomorrow 9:00'] as const;
