@@ -650,7 +650,8 @@ Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedba
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
 carries an update; a launch approval is `today` · `launch`; a revision approval is `today` ·
 `revision`; a `custom.*` kind is `today` · `request`; a harness prompt is `stopped` · `prompt`;
-a harness login is `stopped` · `login`; a model drift is `today` · `update`. A fault is a `fault` card with no tier: Fractal sends each
+a harness login is `stopped` · `login`; a host hold is `stopped` · `request` until its owner
+releases it; a model drift is `today` · `update`. A fault is a `fault` card with no tier: Fractal sends each
 fault to the agent that owns it, and neither client shows one on Now. An unread message has
 neither.
 
