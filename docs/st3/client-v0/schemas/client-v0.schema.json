@@ -3830,6 +3830,7 @@
         "type": {"const": "update"},
         "about": {"$ref": "#/$defs/Id", "description": "Where the person asked: their mission run or step run, or their message to the agent."},
         "summary": {"type": "string"},
+        "speech": {"type": "string", "minLength": 1, "maxLength": 300, "description": "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it."},
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}}
       }
     },
@@ -4196,6 +4197,7 @@
       "read.assistant.agents",
       "read.assistant.conversation",
       "read.assistant.terminal",
+      "read.assistant.slo",
       "write.assistant.messages",
       "write.assistant.custom-reply",
       "write.assistant.answers"

@@ -185,6 +185,24 @@ fn a_report_observed_before_the_recorded_one_is_not_recorded() {
 }
 
 #[test]
+fn clock_ahead_reports_keep_their_original_observation_order() {
+    let store = store();
+    {
+        let _clock = Clock::at(T0);
+        store.report_person_presence(ADA, "mac", device(DeviceState::Active, Some(T0 + 2 * MINUTE), T0 + 2 * MINUTE), T0).unwrap();
+    }
+    let late = {
+        let now = T0 + 1_000;
+        let _clock = Clock::at(now);
+        store.report_person_presence(ADA, "mac", device(DeviceState::Locked, None, T0 + MINUTE), now).unwrap()
+    };
+    assert_eq!(presence_claims(&store), 1);
+    assert_eq!((late.availability.status, late.availability.presence), (Status::Available, Some(Presence::Present)));
+    assert_eq!(late.availability.presence_observed_at, rfc3339(T0), "presence still clamps the client clock to acceptance");
+    assert_eq!(late.report_again_at, rfc3339(T0 + PRESENCE_IDLE_MS));
+}
+
+#[test]
 fn interruptions_and_the_deadline_clock_expire_to_their_defaults() {
     let store = store();
     let initial = store.person_availability(ADA, T0).unwrap();

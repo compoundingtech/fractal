@@ -244,6 +244,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",

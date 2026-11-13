@@ -157,25 +157,3 @@ objective "database" {
   target "live-gb" max=8
   target "growth-mb-per-day" max=300
 }
-objective "merge-latency" {
-  about "A pull request's time in the merge queue, from entering it to merging"
-  indicator "ci-duration" {
-    series "ci/merge-queue"
-  }
-  target "p50" within="10m"
-  target "p95" within="10m"
-}
-objective "ci-critical-path" {
-  about "The workspace CI's critical path, from a change to all checks green"
-  indicator "ci-duration" {
-    series "ci/workspace-critical-path"
-  }
-  target "p95" within="13m"
-}
-objective "flakes" {
-  about "Flaky results: tests nextest passed only on a retry, and merge groups ejected from the queue"
-  indicator "ci-count" {
-    series "ci/flakes"
-  }
-  target "per-hour" max=0
-}

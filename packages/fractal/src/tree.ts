@@ -86,9 +86,12 @@ const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   schedule: 'A schedule file must declare a mission with a schedule',
 }
 
-/** A fleet declares only interval objectives named `NAMESPACE/NAME`; Fractal ships the rest. */
+/** A fleet declares only interval or count objectives named `NAMESPACE/NAME`; Fractal ships the rest. */
 const declaredObjective = (id: string) =>
-  `A declared objective is an interval over claims named NAMESPACE/NAME; objective/${id} is not`
+  `A declared objective is an interval or count over claims named NAMESPACE/NAME; objective/${id} is not`
+
+/** The indicators a fleet declares: over claims. */
+const declarable = (kind: unknown): boolean => kind === 'interval' || kind === 'count'
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>
   typeof value === 'object' && value !== null && '_tag' in value && value._tag === 'SubjectRef'
@@ -566,8 +569,8 @@ export const programMission = Effect.fn('fractal.programMission')(function* ({
 
 /**
  * Checks an objective module's intent: its `name`, if given, is the path ID; `onBreach` agent
- * references resolve to `agent/<id>`; and it is an interval over claims named `NAMESPACE/NAME`,
- * the only objective a fleet declares (the native telemetry ones ship with Fractal).
+ * references resolve to `agent/<id>`; and it is an interval or count over claims named
+ * `NAMESPACE/NAME`, the only objectives a fleet declares (the native telemetry ones ship with Fractal).
  */
 const loadObjective = Effect.fnUntraced(function* ({
   root,
@@ -610,7 +613,7 @@ const loadObjective = Effect.fnUntraced(function* ({
     try: () => objective(named as ObjectiveInput),
     catch: (cause) => new SubjectTreeError({ path, message: 'Invalid objective declaration', cause }),
   })
-  if (value.indicator.kind !== 'interval' || id.includes('/') === false) {
+  if (declarable(value.indicator.kind) === false || id.includes('/') === false) {
     return yield* new SubjectTreeError({ path, message: declaredObjective(id) })
   }
   const subject: Subject = {
@@ -666,7 +669,7 @@ const loadKdl = Effect.fnUntraced(function* ({
   }
   if (
     kind === 'objective' &&
-    (declaration.children?.findNodeByName('indicator')?.getArgument(0) !== 'interval' ||
+    (declarable(declaration.children?.findNodeByName('indicator')?.getArgument(0)) === false ||
       id.includes('/') === false ||
       validName(id) === false)
   ) {
@@ -686,7 +689,7 @@ const loadKdl = Effect.fnUntraced(function* ({
  * TS module's default export is a `define*` definition for its own path and kind, a plain intent, or
  * a factory; factories receive `context`. Typed references are lowered, then intents are decoded
  * with `AgentSchema` or `MissionSchema`, or checked by `Fractal.objective`. A declared objective is an
- * interval over claims. Subject modules are trusted code and are imported.
+ * interval or count over claims. Subject modules are trusted code and are imported.
  *
  * A program mission (`Fractal.mission(intent, program)` from `fractal/effect`) is bundled with
  * `bun build --target=bun` from the tree root into `bundleDir`, and loads as the mission that runs

@@ -334,7 +334,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `fractal slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for the `fractal/flakes` objective; the poller reads only the name (`docs/st3/plugins.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
@@ -884,37 +884,55 @@ story-identity checks, matrix size and job timeout are unchanged.
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
 out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
-**full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
-cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
-configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+**full** Storybook index, then assigns longest measured stories first to the least-loaded
+shard, breaking ties by story ID and shard index. The committed `kit-play-costs.json`
+beside the runner records full four-case story costs from hosted merge-group logs.
+New stories use the manifest's median story cost. Shard 0 starts with a reservation
+equal to 20% of total estimated play work for its non-play lanes. Assignment is
+independent of index ordering and runner speed; adding a story can rebalance existing
+stories. `kitShardCount` in `.github/workflows/workspace-ci.ts` configures N.
+`KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
 Every shard generates and checks the app changelog registry after the frozen install,
 before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
-assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
+assertions. A small index may leave a shard with no plays; its receipt still participates
+in exact full-index coverage. Shard 0 runs every
 stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
 Storybook build and their strict plays. Browser controls and Storybook wait for every
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
 
-The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
-exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
-spent about four minutes preparing the runner, six minutes installing and running
-the non-play streams, and two minutes on browser controls/builds before strict plays.
-Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
-shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
-story partition: shard 0 also owns the other lanes. Play speed varies too:
-[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
-took 20m39s for shard 1's same 1,265 cases, leaving little room even without
-the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
-took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
-EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
-contention on a local build host. Four shards halve each old parity partition while preserving
-the stable hash rule, all cases, axe and receipt coverage. A third shard would
-reduce plays by only about a third, leaving less headroom for shard 0's fixed work
-and the observed runner variation. Extra shards duplicate setup and the small
-Storybook build; they do not duplicate app tests or browser controls. These are
-historical timings, not a measured runtime guarantee for the four-shard workflow.
+The job timeout stays **25 minutes**. The ten most recent merge-group runs inspected
+on 2026-11-13 contained six executing web matrices, three skipped lanes and one matrix
+not yet scheduled. Job durations (minutes, including setup and cleanup) were:
+
+| Run | Shard 0 | Shard 1 | Shard 2 | Shard 3 |
+| --- | ---: | ---: | ---: | ---: |
+| [43382323570](https://github.com/compoundingtech/fractal/actions/runs/43382323570) | 25.53 cancelled | 16.73 | 10.48 | 10.50 |
+| [43344153135](https://github.com/compoundingtech/fractal/actions/runs/43344153135) | 24.05 | 17.28 | 9.22 | 14.48 |
+| [43343940579](https://github.com/compoundingtech/fractal/actions/runs/43343940579) | 0.55 failed before plays | 14.20 | 11.47 | 12.15 |
+| [43339162862](https://github.com/compoundingtech/fractal/actions/runs/43339162862) | 23.63 failed | 17.47 | 11.37 | 12.38 |
+| [43325952348](https://github.com/compoundingtech/fractal/actions/runs/43325952348) | 25.42 cancelled | 13.33 | 9.45 | 13.38 |
+| [43288610870](https://github.com/compoundingtech/fractal/actions/runs/43288610870) | 17.40 | 17.27 | 11.50 | 14.32 |
+
+The old equal-probability hash partition ignored both story cost and shard 0's other
+work. In run 43382323570, shard 0 reached strict plays only at 07:22:13Z after starting
+at 07:07:08Z, leaving under ten minutes for its unchanged story share. Reserving
+non-play work and distributing measured story costs addresses this structural skew
+without adding runners, increasing the timeout, or dropping stories or axe.
+The same shard-1 set took 13.63–14.24 play minutes on EPYC 7763 runners and
+10.53–10.56 on EPYC 9V74 runners in this sample. Runner speed contributes, but
+cannot explain away shard 0's fixed overhead. The longest measured individual
+case was `sidebar-tree--filter-keystroke-to-paint` (111–172 seconds); the scheduler
+spreads such expensive stories instead of treating them like static stories.
+The manifest uses the median of each story's complete observed case samples;
+partial story prefixes from cancelled jobs are excluded when a complete sample exists.
+Refresh it explicitly with `node packages/fractal-ui/scripts/kit-play-costs.mjs`
+followed by its `sourceJobs` IDs (or a newly reviewed sample). This fetches hosted
+logs; ordinary execution and CI remain offline with respect to the manifest.
+Manual `gh workflow run fleet.yml --ref BRANCH` forces all web inputs and selects
+the same full story/a11y matrix as merge groups; no trigger or label change is needed.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
@@ -1530,11 +1548,112 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `public-repo-history.yml` | Ordinary content check on pull requests and merge groups; ready for separately activated trusted required-workflow identity, but not currently a forgery-proof admission boundary. |
 | `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
-The content guard still rejects real machine/home identities and private fleet configuration
-references. Release workflows remain separate from the required gate; neither package
-verification nor the Nix package/check graph is made redundant by workspace nextest.
+### Required public history guard
+
+`public-repo-history` checks every introduced commit for public-clean content, not just the
+candidate's final tree. It currently runs as an ordinary check to catch honest mistakes.
+The forgery-proof trust anchor (organization required workflows or a dedicated producer
+App) is a separate decision; no such enforcement is claimed here. Hosted scanning loads
+`scripts/check-public-repo` and its policy from `github.workflow_sha`. That revision is
+trusted only when a required-workflow rule pins it to an approved source; ordinary candidate
+workflows can change their own scanner. The local hook uses accepted remote main's scanner.
+`BASE` and `HEAD` select the immutable history range, not the hosted scanner revision:
+
+```sh
+python3 <trusted-copy>/check-public-repo --repo "$PWD" --base BASE --head HEAD
+```
+
+It traverses `merge-base(BASE, HEAD)..HEAD`, recursively including merged side histories
+and merge commits. Every commit message is checked. Against every parent, additions,
+modifications and type changes contribute the complete introduced blobs, checked at
+their real repository paths; removed lines and synthetic diff headers are not authored
+content to scan. Gitlinks receive path checks only because they reference commits, not
+local blobs. This keeps path-specific policy intact and detects forbidden content anywhere
+in an introduced blob, not just on its added lines. Candidate scripts, configuration and
+dependencies are not executed to decide whether their content is public-clean.
+The content policy rejects real machine/home identities and private fleet configuration
+references. A dirty intermediate commit followed by a cleanup commit still fails, even when
+the head tree and the aggregate base-to-head diff are clean: merging retains that history.
+
+Create a replacement branch from a clean base, apply only public-clean changes and commit
+messages, and open a replacement PR. Do not force-push or rebase the existing PR to remove
+the offending history. A clean head cannot repair an already dirty introduced commit.
+
+The protection must require the **workflow identity**, not a `public-repo-history` status
+context attributed to the GitHub Actions app. Any candidate workflow with `statuses: write`
+can forge that context using the same app identity; a job name or integration ID does not
+identify trusted workflow code. Candidate `merge_group` YAML is likewise not a trust root.
+
+Use GitHub's organization-level **Require workflows to pass before merging** rule, selecting
+the public source repository `compoundingtech/fractal` (repository ID `1310762902`), path
+`.github/workflows/public-repo-history.yml`, and `sha` set to the full approved commit
+ID containing both the repaired workflow and scanner. Do not select a candidate PR or
+queue ref, or use a floating `ref` in place of the approved SHA. Scanner and policy
+are loaded from that same workflow SHA, not from a future main or candidate revision.
+Updates require a reviewed SHA repin. Keep main's pull-request, deletion and force-push
+protections and an empty bypass list. This rule belongs to an organization ruleset,
+not repository main ruleset `20563764`.
+
+**Activation prerequisite:** the observed organization plan is GitHub Free. GitHub documents
+[organization rulesets](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization)
+for Team and Enterprise plans; the required-workflow rule is not a repository-level rule,
+even for this public repository. Upgrade the organization to a supported plan before
+activation. If that is unavailable, a separately controlled, dedicated non-Actions GitHub
+App would be needed instead; no such app is provisioned by this change. The Actions status
+context is not an acceptable substitute. This change does not mutate live settings or
+claim that trusted enforcement is already active.
+
+After landing the workflow and history-capable scanner on trusted main, an administrator
+sets `TRUSTED_WORKFLOW_SHA` to that full approved landing commit ID. The following prints
+the exact organization ruleset payload for `POST /orgs/compoundingtech/rulesets`; it does
+not send a request. No activation SHA can be supplied before that trusted landing exists.
+
+```sh
+jq -n --arg sha "$TRUSTED_WORKFLOW_SHA" '{
+  "name": "public-repo-history",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "repository_id": { "repository_ids": [1310762902] },
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
+  },
+  "rules": [{
+    "type": "workflows",
+    "parameters": {
+      "do_not_enforce_on_create": false,
+      "workflows": [{
+        "repository_id": 1310762902,
+        "path": ".github/workflows/public-repo-history.yml",
+        "sha": $sha
+      }]
+    }
+  }]
+}'
+```
+
+The selected trusted workflow handles `pull_request` and `merge_group`, checks out
+`github.workflow_sha` for scanner and policy, and fetches immutable event base/head
+objects without checking out or executing the candidate. The event base remains the
+scanner's `--base`; it does not select scanner code. A trusted source without the scanner
+contract fails rather than falling back to candidate code. The token has only
+`contents: read`, is not persisted in the checkout, and publishes no commit status.
+After activation or a reviewed SHA repin, retrigger the PR and merge-queue runs so the
+required workflow runs under the new policy.
+
+Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-only pre-push
+guard, using the trusted base's scanner before the existing evidence-signing path. The guard
+does not run candidate code, builds, tests or signing. `ST_SKIP_EVIDENCE=1` and
+`ST_EVIDENCE_LOCAL=off` do not skip it; bypassing the local hook does not bypass the hosted
+required check. Existing evidence-signing waits, background execution and non-blocking
+signing failures are unchanged. A landing-signing transition is a separate change, not part
+of this guard.
+
+Release workflows remain separate from the required gate; neither package verification nor
+the Nix package/check graph is made redundant by workspace nextest.
 
 ## Merge queue
 
@@ -1546,16 +1665,19 @@ gh pr merge NUMBER --auto --match-head-commit REVIEWED_HEAD
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
-`merge_group` event; see the
-trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
+`linux-gate`, `genie-freshness`, `typescript-client`, `fractal-web` and `public-repo-history`
+(these run on the `merge_group` event; see `fleet.yml.genie.ts` and
+`public-repo-history.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
-The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
-bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
+The repository ruleset (`.github/repo-settings.json`, generated from
+`repo-settings.json.genie.ts`, applied by an administrator and never by CI) requires the
+four workspace checks from GitHub Actions with an empty bypass list. The separate
+organization required-workflow rule described above supplies the public-history trust
+boundary; requiring a fifth Actions status context would not do so. The repository
+ruleset keeps the pull-request, deletion and force-push protections and configures the queue:
 merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.

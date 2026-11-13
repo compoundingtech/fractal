@@ -367,9 +367,12 @@ impl AvailabilityStore for Store {
         let recorded = self.counting_presence(person, now).map_err(internal)?
             .iter()
             .find(|claim| claim.body["fields"]["source"] == source)
-            .and_then(DeviceReport::from_claim);
-        let changes = recorded.is_none_or(|recorded| {
-            report.observed_at >= recorded.observed_at
+            .and_then(|claim| {
+                let observed_at = u128::from(claim.body["fields"]["observed_at_unix_ms"].as_u64()?);
+                DeviceReport::from_claim(claim).map(|report| (observed_at, report))
+            });
+        let changes = recorded.is_none_or(|(observed_at, recorded)| {
+            report.observed_at >= observed_at
                 && (recorded.state != report.state
                     || recorded.presence_at(now) != report.presence_at(now)
                     || (report.state == DeviceState::Active
@@ -389,7 +392,7 @@ impl AvailabilityStore for Store {
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             })?;
         }
-        let effective = if changes { Some(report) } else { recorded };
+        let effective = if changes { Some(report) } else { recorded.map(|(_, report)| report) };
         Ok(PresenceReported {
             availability: self.person_availability(person, now)?,
             report_again_at: effective.and_then(|report| report.idle_at(now)).and_then(rfc3339),
