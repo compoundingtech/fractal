@@ -1174,18 +1174,19 @@ async fn assistant_other_read_deadline_errors_keep_the_denial_audit() {
 #[tokio::test]
 async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant_person() {
     use fractal_api_core::DirectiveNotesStore as _;
-    use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore as _, Interruptions, Presence, Status};
+    use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore as _, DeviceReport, DeviceState, Interruptions, Status};
     let granted = fixture(SCOPES, true).await;
     let store = &granted.state.store;
     // Directive notes need an anchored fleet member; the shared fixture enables one.
     fractal_store::store::directive_notes::tests_shared_seats::enable(store);
     let now = client_now_ms();
-    store.set_person_availability(OWNER, &[AvailabilityChange::Status(Some(Status::Away), Some(now + 3_600_000)),
+    store.set_person_availability(OWNER, "host/example", &[AvailabilityChange::Status(Some(Status::Away), Some(now + 3_600_000)),
         AvailabilityChange::Interruptions(Interruptions::None, None)], now).unwrap();
-    store.report_person_presence(OWNER, "host/example", Presence::Locked, now, now).unwrap();
-    store.set_directive_note(OWNER, OWNER, Some("Hold routine asks until the review lands"), None).unwrap();
-    store.set_person_availability("person/ada", &[AvailabilityChange::Status(Some(Status::Available), None)], now).unwrap();
-    store.set_directive_note("person/ada", "person/ada", Some("Another person's note"), None).unwrap();
+    store.report_person_presence(OWNER, "host/example",
+        DeviceReport { state: DeviceState::Locked, last_input_at: None, observed_at: now }, now).unwrap();
+    store.set_directive_note(OWNER, OWNER, "host/example", Some("Hold routine asks until the review lands"), None).unwrap();
+    store.set_person_availability("person/ada", "host/example", &[AvailabilityChange::Status(Some(Status::Available), None)], now).unwrap();
+    store.set_directive_note("person/ada", "person/ada", "host/example", Some("Another person's note"), None).unwrap();
 
     let payload = granted.payload("availability", "");
     let (status, value, _) = granted.request("/v1/client/assistant/availability",
