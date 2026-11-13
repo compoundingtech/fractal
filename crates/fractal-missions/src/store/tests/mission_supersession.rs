@@ -528,3 +528,24 @@ fn mission_supersession_single_head_sql_work_scales_linearly_without_warming() {
     assert!(large.vm_steps < small.vm_steps * 6,
         "source paging and capacity admission must have bounded per-source work: {small:?} -> {large:?}");
 }
+
+#[test]
+fn mission_run_capacity_admission_sql_is_population_independent() {
+    fn work(count: usize) -> smallclaims::sqlite::work::SqliteWork {
+        let store = Store::open_memory("owner").unwrap();
+        let sources = population(&store, count);
+        let mission = store.mission_spec("retry-work", Some(&sources[0].revision)).unwrap().unwrap();
+        let reader = store.readers.get();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        for _ in 0..8 {
+            fractal_store::store::enforce_mission_run_capacity(&reader, &mission).unwrap();
+        }
+        scope.finish()
+    }
+    let small = work(32);
+    let large = work(256);
+    assert!(large.statements <= small.statements + 8,
+        "admission must not load one definition per active run: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps * 2,
+        "admission must seek the maintained count and minimum, not fold the active population: {small:?} -> {large:?}");
+}
