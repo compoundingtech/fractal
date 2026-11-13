@@ -83,6 +83,9 @@
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
 "github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
+# One claim per completed Workspace CI run, written once by a repository's poller; CI's declared
+# objectives read the last day of them.
+"github.workflow-run" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.

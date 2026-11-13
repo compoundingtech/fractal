@@ -294,3 +294,10 @@ admission and that the oracle receives the claim with its text.
 With v22 every fixed seed converges; seed 34 is the exact never-trim set, observed by hosted
 linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
 cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).
+
+`claims-v23.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a
+completed Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md).
+Versions 1 through 22 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v23.json`;
+do not hand-edit it. The simulation selects v23; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`.

@@ -7809,7 +7809,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
-                fractal_daemon::objective_faults::check_and_report(&store, &rows);
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)

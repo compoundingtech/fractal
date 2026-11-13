@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v22.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v23.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1188,6 +1188,7 @@ impl World {
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
             "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
+            "github-workflow-run" => format!("github-workflow-run/convergence/repo-{small}/{}", self.fresh("run")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -2207,7 +2208,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v22.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v23.json"
         }))
         .unwrap(),
     )

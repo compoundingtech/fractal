@@ -1241,6 +1241,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_plugin::WORKFLOW_RUN_FAMILY,
+            "github-workflow-run/OWNER/REPO/RUN_ID",
+            "One completed CI run of a GitHub repository, written once by its repository's poller.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
@@ -2110,6 +2116,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         (
             github_plugin::EVENT,
             &[github_plugin::EVENT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("resources"),
+            true,
+            &[],
+        ),
+        (
+            github_plugin::WORKFLOW_RUN,
+            &[github_plugin::WORKFLOW_RUN_FAMILY],
             WritePolicy::SystemOnly,
             Cardinality::Once,
             Some("resources"),
@@ -3222,6 +3237,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
+        github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -5091,6 +5107,8 @@ mod tests {
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.remove(github_plugin::WORKFLOW_RUN).unwrap();
+        current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
