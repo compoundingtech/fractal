@@ -25,7 +25,8 @@ if sys.argv[1:] == ['--offline']:
     hook = re.search(r"sccacheShellHook = (''\n.*?\n        '');", source, re.S).group(1)
     hook = hook.replace('${./scripts/sccache-read-cache-env}',
                         '${' + str(root / 'scripts/sccache-read-cache-env') + '}')
-    assert source.count("shellHook = sccacheShellHook + ''") == 2
+    assert source.count("shellHook = sccacheShellHook + ") == 2
+    assert source.count("shellHook = sccacheShellHook + cargoDebugShellHook + ''") == 2
     assert not re.search(r'^\s*RUSTC_WRAPPER\s*=', source, re.M)
     expression = 'let sccache = "/fixture/sccache-0.19.0"; ciRustcWrapper = "/fixture/ci-rustc-wrapper"; in ' + hook
     hook = subprocess.check_output(['nix', '--offline', 'eval', '--impure', '--raw', '--expr', expression], text=True)
