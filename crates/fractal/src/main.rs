@@ -1320,19 +1320,6 @@ enum MissionViewCommand {
     },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-    /// Legacy: use `fractal apply FILE`; publish authored KDL after checking exec gates.
-    ///
-    /// Goals, constraints and named documents encode every known rule and decision.
-    /// `depends-on` orders steps; `missions start --after` orders runs without reports.
-    /// A final step assigned to the author, depending on the last real step, reaches the
-    /// author once when work is done. Review gates mark decisions only a person can make.
-    /// Preview with --dry-run before publication; it runs no exec gates unless --check is set.
-    /// Actual publication checks mission and step scripts and refuses broken answers, allowing
-    /// valid "not yet" answers. Loop until scripts are not checked; they run after each round.
-    /// See fractal skill for goals, evidence, review and feedback loops.
-    Publish(MissionPublishArgs),
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     /// Check mission and step exec gates once and report pass (exit 0), not yet (exit 1),
     /// broken (anything else), or unchecked. Loop until scripts are not checked;
     /// they run after each round.
@@ -1431,7 +1418,7 @@ struct MissionPublishArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
-    /// Set by `fractal apply --force --reason`; `missions publish` never forces.
+    /// Set by `fractal apply --force --reason`.
     #[arg(skip)]
     force_reason: Option<String>,
 }
@@ -2972,10 +2959,6 @@ enum AgentsCommand {
         #[arg(long)]
         host: Option<String>,
     },
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-    /// Legacy: use `fractal apply FILE`; preview and apply authored KDL.
-    Apply(AgentApplyArgs),
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     /// Start a durable agent, patching only explicitly supplied declaration fields. A stopped
     /// mission agent starts again on its run's own declaration.
     Start(AgentStartArgs),
@@ -3733,20 +3716,6 @@ async fn run_owned_sets(
     }
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-#[derive(Args)]
-struct AgentApplyArgs {
-    /// KDL file to publish; use `-` to read standard input.
-    file: PathBuf,
-    /// Complete person or agent subject authoring the publication.
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", value_parser = parse_publication_actor)]
-    actor: String,
-    /// Print the resolved publication preview without applying or running exec gates.
-    #[arg(long, visible_alias = "preview")]
-    dry_run: bool,
-}
-// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
 
 #[derive(Args)]
 struct AgentStartArgs {
@@ -6546,9 +6515,6 @@ fn guard_mutating_cli_actor(
             })?)
         }
         Command::Missions { command } => match command {
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-            MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
@@ -6575,9 +6541,6 @@ fn guard_mutating_cli_actor(
             AgentsCommand::New(args) => Some(args.actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness `fractal agents new` needs explicit --as {own}; it cannot use the configured person")
             })?),
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-            AgentsCommand::Apply(args) => Some(args.actor.as_str()),
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             AgentsCommand::Start(args) => Some(args.actor.as_str()),
             AgentsCommand::Stop(args) => Some(args.actor.as_str()),
             AgentsCommand::Retire(args) => Some(args.actor.as_str()),
@@ -8287,17 +8250,6 @@ fn notice_ignored_read_actor(actor: Option<&str>) {
     }
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-async fn publish_mission_file(
-    client: &Client,
-    args: MissionPublishArgs,
-    json_output: bool,
-) -> Result<()> {
-    let (kdl, source_name) = read_intent(Some(&args.file))?;
-    let intent = IntentInput { kdl, source_name };
-    publish_mission_intent(client, intent, args, json_output).await
-}
-// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
 
 async fn publish_mission_intent(
     client: &Client,

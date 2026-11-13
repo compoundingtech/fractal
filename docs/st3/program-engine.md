@@ -312,8 +312,8 @@ foreign-actor checks and enforced authorization remain identical on every daemon
 Environment isolation and explicit endpoints are requirements of the test harness, not
 capabilities that authenticate it to a fleet.
 
-**Publication.** A run publishes with `fractal apply` like any other author: `apply` and
-`fractal missions publish` take `--as mission-run/RUN`, and `apply` without `--as` publishes as
+**Publication.** A run publishes with `fractal apply` like any other author: `apply`
+takes `--as mission-run/RUN`, and without `--as` publishes as
 the harness's own seat, else as the run whose credential it holds. Its `publish` rules decide
 which missions it may publish. The commands no run authority grants (agent lifecycle, owned sets,
 mission retirement, run outcomes) still take only a person or an agent.
