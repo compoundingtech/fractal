@@ -309,13 +309,19 @@ mod tests {
 
     #[test]
     fn out_of_order_receipts_do_not_regress_spend_or_end_a_later_reclaim() {
+        use crate::model::ReplicationInventory;
+        use crate::store::tests_shared::{exchange_from, receive_and_project};
         let store = Store::open_memory("source").unwrap();
+        let delayed = Store::open_memory("delayed").unwrap();
         let first = claim(&store, 1, "one", 100);
         let second = claim(&store, 1, "one", 200);
-        // Receiver-local insertion order differs from canonical source chronology.
-        event(&store, STEP, "work.released", 150, json!({"attempt":1}));
+        // A writer's accepted clock is monotonic. Produce older receipts on another
+        // writer, then replicate them after the newer local receipts.
+        event(&delayed, STEP, "work.released", 150, json!({"attempt":1}));
+        rollup(&delayed, &second, "observed", 10, 220);
         rollup(&store, &second, "observed", 25, 230);
-        rollup(&store, &second, "observed", 10, 220);
+        receive_and_project(&store, delayed.origin(),
+            &exchange_from(&delayed, &ReplicationInventory::default()));
         let connection = store.readers.get();
         assert_eq!(response_execution(&connection, AGENT, "one", 210).unwrap(),
             Some((second.id.clone(), STEP.into())));
