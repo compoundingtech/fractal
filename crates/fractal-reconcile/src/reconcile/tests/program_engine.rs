@@ -319,8 +319,53 @@ mission "program-test" state="ready" {{
     let original = fixture.store.retry_mission_run(&source.run, &crate::model::MissionRunRetryRequest {
         same_revision: true, idempotency_key: "retry-original-program".into(), ..options
     }).unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    assert!(fixture.store.mission_run(&original.id).unwrap().unwrap().superseded_by.is_none(),
+        "an explicit same-revision retry admitted after publication must not be superseded");
     fixture.until("same revision retries the original failure", || fixture.status(&original.steps[0].subject) == "failed");
     assert_eq!(original.revision, failed.revision);
     assert!(fixture.journal(&original.steps[0].subject).contains(&("first".into(), "completed".into())));
+    assert!(fixture.store.mission_run(&original.id).unwrap().unwrap().superseded_by.is_none());
     assert_eq!(fixture.store.mission_run(&source.run).unwrap().unwrap().generation, failed.generation);
+}
+
+#[test]
+fn publication_restarts_a_mid_journal_program_fresh_and_stops_old_effect_groups() {
+    let fixture = fixture(Liveness::default());
+    let old = fixture.start("superseded", "wait");
+    fixture.until("the old effect starts", || pids(&old.pids).is_some());
+    let old_pids = pids(&old.pids).unwrap();
+    let journal = fixture.journal(&old.step);
+    assert!(journal.contains(&("first".into(), "completed".into())));
+    let fixed = BUNDLE.replace("({ attempt: ctx.attempt })", "({ fresh: true, attempt: ctx.attempt })");
+    let bundle = fixture.dir.path().join("published.mjs");
+    std::fs::write(&bundle, &fixed).unwrap();
+    let hash = fixture.store.put_blob(fixed.as_bytes()).unwrap();
+    apply_source(&fixture.store, &format!(r#"version 2
+mission "program-test" state="ready" {{
+  goal "Run the corrected program from its top."
+  concurrent-runs max=4
+  input "mode" kind="text"
+  input "pids" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, bundle.display()), "superseding-program");
+    let source = fixture.store.mission_run(&old.run).unwrap().unwrap();
+    let replacement = fixture.store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    assert_eq!(replacement.phase, "supersession-waiting");
+    let step = replacement.steps[0].subject.clone();
+    assert!(fixture.journal(&step).is_empty());
+    // Even evaluation in reverse order cannot dispatch the replacement early.
+    fixture.reconciler.evaluate_mission_run_ids(vec![replacement.id.clone()]).unwrap();
+    assert!(fixture.journal(&step).is_empty());
+    fixture.until("the replacement journals first", || fixture.journal(&step).contains(&("first".into(), "completed".into())));
+    fixture.without_passes("old effects are reaped", || old_pids.iter().all(|pid| !alive(*pid)));
+    assert_eq!(fixture.store.mission_run(&old.run).unwrap().unwrap().phase, "terminal");
+    assert_eq!(fixture.journal(&old.step), journal, "the retired program wrote no later journal result");
+    let first = fixture.store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .find(|claim| claim.body["fields"]["key"] == "first" && claim.body["fields"]["status"] == "completed").unwrap();
+    assert_eq!(first.body["fields"]["value"]["fresh"], true, "the old journal was not replayed");
+    std::fs::write(&old.gate, "").unwrap();
+    fixture.until("the fresh program completes", || fixture.status(&step) == "completed");
+    assert_eq!(fixture.store.mission_run(&replacement.id).unwrap().unwrap().inputs, source.inputs);
 }
