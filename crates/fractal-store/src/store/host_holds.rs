@@ -196,6 +196,20 @@ mod tests {
     use super::*;
     fn request() -> PlaceHostHold { PlaceHostHold { actor: "person/operator".into(), host: "host-a".into(), reason: "Investigate activation".into(), operations: vec!["activation".into()], originating_run: Some("mission-run/terminal".into()), receipt: Some("receipt/failure".into()) } }
     #[test]
+    fn alternate_store_constructors_initialize_host_hold_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let views = std::sync::Arc::new(smallclaims::ivm::Views::new(vec![]).unwrap());
+        let stores = [
+            Store::open_shared_memory("host-a").unwrap(),
+            Store::open_with_ivm_views(&root.path().join("graph.db"), "host-a", views).unwrap(),
+        ];
+        for store in stores {
+            assert!(store.host_holds(None, false).unwrap().is_empty());
+            let hold = store.place_host_hold("person/operator", &request()).unwrap();
+            assert_eq!(store.host_holds(None, false).unwrap(), vec![hold]);
+        }
+    }
+    #[test]
     fn owner_and_revision_fence_release_without_occupying_capacity() {
         let store = Store::open_memory("host-a").unwrap();
         let hold = store.place_host_hold("person/operator", &request()).unwrap();
