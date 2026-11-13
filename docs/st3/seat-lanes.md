@@ -599,3 +599,7 @@ membership/generation identities, occupancy and hold observations. These observa
 do not grant launch authority. Required Linux enforcement is checked before release;
 Darwin remains explicit about logical-only coverage and uncertain escaped descendants.
 
+Known-live linked children remain `retiring` while cancellation completes, retaining
+custody and a reactive child-state dependency. A missing child record or unprovable
+process cleanup remains `uncertain`; neither condition releases a successor early.
+
