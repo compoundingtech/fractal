@@ -102,18 +102,15 @@ impl Store {
                     )
                     .optional()?
                     .flatten();
-                let (retry_of, retried_by) = mission_run_retry_links_tx(&connection, &subject)?;
                 let mut item = json!({
                     "id": subject, "generation_id": format!("run-generation/{generation}"),
                     "requester": short(&requester), "status": status, "phase": phase,
-                    "revision": revision, "retried_by": retried_by,
+                    "revision": revision,
                     "created_at_unix_ms": created.parse::<u128>()?,
                     "updated_at_unix_ms": updated.parse::<u128>()?,
                     "reason": reason.as_deref().map(short),
                 });
-                if let Some(source) = retry_of {
-                    item["retry_of"] = Value::String(source);
-                }
+                mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut item);
                 items.push(item);
             }
             previews.push(items);
@@ -200,14 +197,11 @@ impl Store {
             }));
         }
         let subject = format!("mission-run/{run}");
-        let (retry_of, retried_by) = mission_run_retry_links_tx(&connection, &subject)?;
         let mut metadata = json!({
-            "id": subject, "status": status, "retried_by": retried_by,
+            "id": subject, "status": status,
             "progress": {"total": steps.len(), "done": done}, "steps": steps,
         });
-        if let Some(source) = retry_of {
-            metadata["retry_of"] = Value::String(source);
-        }
+        mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut metadata);
         Ok(Some(metadata))
     }
 

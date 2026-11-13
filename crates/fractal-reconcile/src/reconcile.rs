@@ -10695,6 +10695,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.store.supersede_mission_publications()?;
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
         self.incremental.observe_execs(|runtime_id| {
@@ -10713,6 +10714,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.store.supersede_mission_publications()?;
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -10993,6 +10995,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_evaluation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let superseded = self.store.supersede_mission_publications()?;
         let mut cursor = self
             .mission_reads_cursor
             .lock()
@@ -11012,7 +11015,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
-        let mut changed = false;
+        let mut changed = superseded;
         for subject in &changed_runs {
             let Some(id) = subject.strip_prefix("mission-run/") else {
                 continue;
@@ -11147,6 +11150,71 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         mission: Option<MissionSpec>,
     ) -> Result<bool> {
+        if matches!(run.phase.as_str(), "normal" | "supersession-waiting")
+            && self.store.supersede_current_mission_run(run)?
+        {
+            return Ok(true);
+        }
+        if run.phase != "normal"
+            && run.phase != "supersession-waiting"
+            && !run.phase.starts_with("cleanup-")
+            && run.supersedes.is_some()
+            && !self.store.mission_run_supersession_predecessors_terminal(run)?
+        {
+            // Cancellation changes the phase before ordinary finally/cleanup runs.
+            // A replacement that never admitted still cannot overlap its source.
+            return Ok(false);
+        }
+        if run.supersedes.is_some() && run.phase.starts_with("final-")
+            && let Some(engine) = self.program_engine.get()
+        {
+            match engine.fence_left_effects() {
+                Ok(false) => return Ok(false),
+                Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
+                Err(error) => {
+                    self.record_fault(&run.subject, "supersession-effect-fence", Err(error))?;
+                    return Ok(false);
+                }
+            }
+        }
+        if run.phase == "supersession-waiting" {
+            let ready = self.store.mission_run_supersession_predecessors_terminal(run)?;
+            // The predecessor may have reached terminal since its last evaluation. Release its
+            // program host before promoting the replacement: the host processes cancellation
+            // (including killing effect groups) before any later replacement dispatch.
+            if let Some(engine) = self.program_engine.get() {
+                let mut predecessor = run.supersedes.clone();
+                let mut seen = BTreeSet::new();
+                while let Some(subject) = predecessor {
+                    anyhow::ensure!(seen.insert(subject.clone()), "mission supersession ancestry contains a cycle at {subject}");
+                    let Some(view) = self.store.mission_run(&subject)? else { break };
+                    engine.release_left(&view)?;
+                    predecessor = view.supersedes;
+                }
+                if ready {
+                    match engine.fence_left_effects() {
+                        Ok(false) => return Ok(false),
+                        Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
+                        Err(error) => {
+                            self.record_fault(&run.subject, "supersession-effect-fence", Err(error))?;
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            if !ready {
+                if let Some(predecessor) = &run.supersedes
+                    && self.store.mission_run(predecessor)?.is_some_and(|view| view.phase == "terminal")
+                {
+                    self.record_fault(&run.subject, "supersession-runtime-quiescence", Err(anyhow::anyhow!(
+                        "replacement execution is fenced: terminal predecessor ancestry still has live or unconfirmed execution"
+                    )))?;
+                }
+                return Ok(false);
+            }
+            self.record_fault(&run.subject, "supersession-runtime-quiescence", Ok(()))?;
+            return self.store.resume_superseding_mission_run(&run.id).map_err(Into::into);
+        }
         if run.phase == "normal"
             && let Some(reason) = self.store.stale_subscription_pull_request_run(run)?
         {
@@ -11176,23 +11244,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some(&reason),
             )?;
             return Ok(changed);
-        }
-        if run.phase == "revision-draining" {
-            if self.store.apply_drained_revision(&run.id)?.is_some() {
-                return Ok(true);
-            }
-            // A replica can receive the old proposal's draining claim after the
-            // successor generation. Recover the persisted run phase when no
-            // draining proposal still targets its current generation.
-            if !self
-                .store
-                .revision_proposal_for_run(&run.id)?
-                .is_some_and(|proposal| proposal.status == "draining")
-            {
-                return self
-                    .store
-                    .set_mission_run_state(&run.id, &run.status, "normal", None);
-            }
         }
         // Cleanup reads only the run's owned declarations. It never waits for the mission
         // revision or its steps, so a run whose revision is unavailable still stops its runtimes.
@@ -11229,6 +11280,25 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_run(&self, run: &MissionRunView, mission: &MissionSpec) -> Result<bool> {
+        let idle_cutover = self.store.supersede_idle_mission_run(run, mission)?;
+        if idle_cutover == Some(true) {
+            return Ok(true);
+        }
+        // A late proposal claim can leave a stale draining phase. An automatic idle
+        // hold uses that same phase and must not be released while work is active.
+        if run.phase == "revision-draining" && idle_cutover.is_none() {
+            if self.store.apply_drained_revision(&run.id)?.is_some() {
+                return Ok(true);
+            }
+            if !self.store.revision_proposal_for_run(&run.id)?
+                .is_some_and(|proposal| proposal.status == "draining")
+            {
+                return self.store.set_mission_run_state(&run.id, &run.status, "normal", None);
+            }
+        }
+        if run.phase == "supersession-waiting" {
+            return self.evaluate_active_mission_run(run, None);
+        }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
         }
@@ -11831,6 +11901,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     if let Some(after) = awaited_run(run, &step, view)? {
+                        let after = self.store.mission_run_supersession_successor(&after)?;
                         match self.store.mission_run_status(&after)?.as_deref() {
                             Some("completed") => {}
                             Some(status @ ("failed" | "cancelled")) => {
@@ -12021,6 +12092,19 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_mission_run_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        // A child can still own execution after its superseded parent ended.
+        // Preserve its cleanup confirmation and recovery path as well.
+        let mut supersession_cleanup = run.superseded_by.is_some();
+        let mut parent_step = run.parent_step_run.clone();
+        let mut seen = BTreeSet::new();
+        while !supersession_cleanup {
+            let Some(step) = parent_step else { break };
+            anyhow::ensure!(seen.insert(step.clone()), "mission cleanup ancestry cycles at {step}");
+            let Some(step) = self.store.step_run(&step)? else { break };
+            let Some(parent) = self.store.mission_run(&step.run)? else { break };
+            supersession_cleanup = parent.superseded_by.is_some();
+            parent_step = parent.parent_step_run;
+        }
         let owner_runs = if run.mode == "eval" {
             self.store
                 .mission_runs_for_root(&run.id)?
@@ -12064,21 +12148,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<Vec<_>>();
         let mut live = Vec::new();
         for subject in &owned {
-            let actual = self.store.latest_actual_value(&subject.subject)?;
-            // A stop declaration for a runtime that never existed has no process
-            // to await. Otherwise cleanup can remain pending forever.
-            if subject.kind == "stop" && actual.is_none() {
+            // Only unrelated runs may release a never-observed stop or retained
+            // seat. Supersession requires positive execution confirmation.
+            if !supersession_cleanup && subject.kind == "stop"
+                && self.store.latest_actual_value(&subject.subject)?.is_none()
+            {
                 continue;
             }
-            let status = actual
-                .as_ref()
-                .and_then(|actual| actual_field(actual, "status"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if !matches!(status.as_deref(), Some("stopped" | "absent" | "exited")) {
+            if !self.store.runtime_execution_quiescent(&subject.subject)? {
                 // A seat kept for unread mail or another run's work does not hold this run
                 // open. Its stop declaration stays and takes effect once it is free.
-                if subject.kind == "stop"
+                if !supersession_cleanup && subject.kind == "stop"
                     && self
                         .seat_retention(&subject.subject, &run.subject)?
                         .is_some()
@@ -12129,12 +12209,30 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(intake_stopped);
             }
             unstopped = Some(format!(
-                "cleanup ended at its deadline with runtimes still live: {}",
+                "{}: {}",
+                if supersession_cleanup {
+                    "cleanup deadline expired with runtimes still live or unconfirmed"
+                } else {
+                    "cleanup ended at its deadline with runtimes still live"
+                },
                 live.iter()
                     .map(|subject| subject.subject.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+            // A superseding run shares this workspace. Expiring cleanup releases
+            // neither execution authority nor its runtime-confirmation dependency.
+            if supersession_cleanup {
+                self.record_fault(
+                    &run.subject,
+                    "cleanup-runtime-quiescence",
+                    Err(anyhow::anyhow!("{}", unstopped.as_deref().unwrap())),
+                )?;
+                return Ok(intake_stopped);
+            }
+        }
+        if supersession_cleanup && live.is_empty() {
+            self.record_fault(&run.subject, "cleanup-runtime-quiescence", Ok(()))?;
         }
         let mut status = run.phase.strip_prefix("cleanup-").unwrap_or("failed");
         let mut changed = intake_stopped;
@@ -12453,7 +12551,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 (child, true)
             };
-        if child.mission != format!("mission/{mission}") || child.revision != revision {
+        if child.mission != format!("mission/{mission}")
+            || (child.revision != revision && child.supersedes.is_none())
+        {
             return Ok((
                 changed,
                 UsedMissionOutcome::Failed(
@@ -12461,6 +12561,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ),
             ));
         }
+        let successor = self.store.mission_run_supersession_successor(&child.subject)?;
+        let child = if successor == child.subject {
+            child
+        } else {
+            self.store.mission_run(&successor)?.context("the superseding used mission disappeared")?
+        };
         let outcome = match child.status.as_str() {
             "completed" => UsedMissionOutcome::Completed,
             "failed" | "cancelled" => UsedMissionOutcome::Failed(format!(
@@ -12552,6 +12658,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{base_key}:dispatch-{dispatch}")
         };
         let expected = self.store.mission_run_subject_for_idempotency_key(&key);
+        let expected = self.store.mission_run_supersession_successor(&expected)?;
         let existed = self.store.mission_run_status(&expected)?.is_some();
         let mut inputs: BTreeMap<String, String> = run
             .inputs
@@ -13243,6 +13350,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             candidate.map_or_else(|| "round".into(), |value| format!("candidate-{value}"))
         );
         let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+        let subject = self.store.mission_run_supersession_successor(&subject)?;
         if let Some(status) = self.store.mission_run_status(&subject)? {
             return Ok(match status.as_str() {
                 "completed" => LoopBranchOutcome::Completed,
@@ -13459,6 +13567,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+            let subject = self.store.mission_run_supersession_successor(&subject)?;
             if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
@@ -13638,6 +13747,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
+            let subject = self.store.mission_run_supersession_successor(&subject)?;
             if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
@@ -14744,6 +14854,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<bool> {
         let idempotency_key = request.idempotency_key();
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
             // The runs holding the mission's capacity are read before the start and again after a
             // refusal, so the end of any holder, even one that ends in between, evaluates this run.
@@ -21760,6 +21871,7 @@ pub mod tests {
     mod slo_breach_flow_tests;
     mod final_cancel_gate_exit;
     mod final_cancel_missing_assignee;
+    mod mission_supersession;
     mod gate_on_demand;
     mod github_watch_selection;
     mod stream_dirty_marking;
@@ -25472,10 +25584,22 @@ version 2
 "#,
             "retire-first",
         );
+        let second = publish(
+            r#"
+version 2
+
+  mission "retire" state="ready" {
+    goal "Retire superseded generation members."
+    step "team" { goal "Use the replacement team." }
+  }
+
+"#,
+            "retire-second",
+        );
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: first.id,
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -25561,18 +25685,6 @@ version 2
             )
             .unwrap();
 
-        let second = publish(
-            r#"
-version 2
-
-  mission "retire" state="ready" {
-    goal "Retire superseded generation members."
-    step "team" { goal "Use the replacement team." }
-  }
-
-"#,
-            "retire-second",
-        );
         let revised = store
             .adopt_mission_revision(
                 &run.id,
@@ -29567,10 +29679,16 @@ mission "render-retire" state="ready" {{
             workspace.path().display().to_string()
         );
         apply_source(&store, &first, "render-retire-first");
+        let first_revision = store.mission_spec("render-retire", None).unwrap().unwrap();
+        let second = r#"version 2
+mission "render-retire" state="ready" { goal "Retire a broken renderer."; step "wait" { goal "Replacement without the worker." } }
+"#;
+        apply_source(&store, second, "render-retire-second");
+        let intent = parse_intent(second, "node").unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "render-retire".into(),
-                revision: None,
+                revision: Some(first_revision.revision),
                 workspace: workspace.path().display().to_string(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -29605,11 +29723,6 @@ mission "render-retire" state="ready" {{
         fs::remove_file(workspace.path().join("output")).unwrap();
         fs::create_dir(workspace.path().join("output")).unwrap();
         assert!(crate::render::apply(&store, &member.desired, workspace.path()).is_err());
-        let second = r#"version 2
-mission "render-retire" state="ready" { goal "Retire a broken renderer."; step "wait" { goal "Replacement without the worker." } }
-"#;
-        apply_source(&store, second, "render-retire-second");
-        let intent = parse_intent(second, "node").unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -30320,10 +30433,18 @@ mission "proof" state="ready" {{
     }
 
     fn start_proof_run(store: &Store, key: &str) -> crate::model::MissionRunView {
+        start_proof_revision(store, None, key)
+    }
+
+    fn start_proof_revision(
+        store: &Store,
+        revision: Option<String>,
+        key: &str,
+    ) -> crate::model::MissionRunView {
         store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "proof".into(),
-                revision: None,
+                revision,
                 workspace: "/tmp".into(),
                 requester: Some("person/requester".into()),
                 mode: Some("run".into()),
@@ -30732,8 +30853,10 @@ mission "proof" state="ready" {{
             )
         };
         let broken = "export PATH=/usr/bin:/bin; cargo test -p example --test suite";
-        publish_as(&store, &source(broken), "regate-one", "agent/node.planner");
-        let run = start_proof_run(&store, "regate-run");
+        let first = publish_as(&store, &source(broken), "regate-one", "agent/node.planner");
+        let fixed = "export PATH=/opt/mold/bin:/usr/bin:/bin; cargo test -p example --test suite";
+        let revised = publish_as(&store, &source(fixed), "regate-two", "agent/node.planner");
+        let run = start_proof_revision(&store, Some(first.revision), "regate-run");
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(
             store.clone(),
@@ -30799,8 +30922,6 @@ mission "proof" state="ready" {{
         assert_eq!(fault.item.step.as_deref(), Some(land.as_str()));
 
         // The publisher corrects only the gate. The work stays submitted and the new gate checks it.
-        let fixed = "export PATH=/opt/mold/bin:/usr/bin:/bin; cargo test -p example --test suite";
-        let revised = publish_as(&store, &source(fixed), "regate-two", "agent/node.planner");
         let adopted = store
             .adopt_mission_revision(
                 &run.id,
@@ -44791,10 +44912,13 @@ mission "intake" state="ready" {{
             "intake-first",
         );
         let first = store.mission_spec("intake", None).unwrap().unwrap();
+        let standing = "observer/github/acme/garden";
+        apply_source(&store, &intake(standing, ""), "intake-second");
+        let second = store.mission_spec("intake", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: first.id,
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -44815,7 +44939,6 @@ mission "intake" state="ready" {{
             reconciler.reconcile_once().unwrap();
         }
         let own = format!("observer/{}/repository", run.id);
-        let standing = "observer/github/acme/garden";
         let resource = "resource/github/acme/old";
         let reviews = format!("subscription/{}/reviews", run.id);
         let triage = format!("subscription/{}/triage", run.id);
@@ -44893,8 +45016,6 @@ mission "intake" state="ready" {{
 
         // The revision moves both subscriptions onto the standing observer, which takes the
         // intake observer's resource; the intake observer stops.
-        apply_source(&store, &intake(standing, ""), "intake-second");
-        let second = store.mission_spec("intake", None).unwrap().unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -45983,10 +46104,17 @@ version 2
 
 "#;
         apply_source(&store, source, "publish-keep");
+        let first = store.mission_spec("keep", None).unwrap().unwrap();
+        apply_source(
+            &store,
+            &source.replace("Use the first goal.", "Use the second goal."),
+            "publish-keep-two",
+        );
+        let revised = store.mission_spec("keep", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "keep".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -46043,12 +46171,6 @@ version 2
                 },
             )
             .unwrap();
-        apply_source(
-            &store,
-            &source.replace("Use the first goal.", "Use the second goal."),
-            "publish-keep-two",
-        );
-        let revised = store.mission_spec("keep", None).unwrap().unwrap();
         let adopted = store
             .adopt_mission_revision(
                 &run.id,
@@ -46105,10 +46227,17 @@ version 2
             &standing_intake_source(&standing_intake(&review)),
             "standing-with-intake",
         );
+        let first = store.mission_spec("standing", None).unwrap().unwrap();
+        apply_source(
+            &store,
+            &standing_intake_source(""),
+            "standing-without-intake",
+        );
+        let revised = store.mission_spec("standing", None).unwrap().unwrap();
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "standing".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: None,
@@ -46136,12 +46265,6 @@ version 2
                 .unwrap_or_else(|| panic!("`{subject}` is desired"))
         };
         assert!(!intake_is_stopped(&desired(&subscription), "node"));
-        apply_source(
-            &store,
-            &standing_intake_source(""),
-            "standing-without-intake",
-        );
-        let revised = store.mission_spec("standing", None).unwrap().unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -49918,10 +50041,14 @@ mission "carry" state="ready" {{
             )
         };
         apply_source(&store, &source("Use the first goal."), "carry-blocked-one");
+        let first = store.mission_spec("carry", None).unwrap().unwrap();
+        let second = source("Use the second goal.");
+        apply_source(&store, &second, "carry-blocked-two");
+        let intent = parse_intent(&second, "node").unwrap();
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "carry".into(),
-                revision: None,
+                revision: Some(first.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
@@ -49946,9 +50073,6 @@ mission "carry" state="ready" {{
         assert_eq!(before.status, "blocked", "{before:?}");
         assert!(before.blocked_reason.is_some(), "{before:?}");
 
-        let second = source("Use the second goal.");
-        apply_source(&store, &second, "carry-blocked-two");
-        let intent = parse_intent(&second, "node").unwrap();
         store
             .adopt_mission_revision(
                 &run.id,
@@ -51765,12 +51889,21 @@ mission "fresh" state="ready" {
 
         /// Start a run a little later than the last so join times differ.
         fn start(&self, mission: &str, key: &str) -> crate::model::MissionRunView {
+            self.start_revision(mission, None, key)
+        }
+
+        fn start_revision(
+            &self,
+            mission: &str,
+            revision: Option<String>,
+            key: &str,
+        ) -> crate::model::MissionRunView {
             std::thread::sleep(std::time::Duration::from_millis(2));
             let run = self
                 .store
                 .create_mission_run(&crate::model::MissionRunRequest {
                     mission: mission.into(),
-                    revision: None,
+                    revision,
                     workspace: "/tmp".into(),
                     requester: Some("person/requester".into()),
                     mode: Some("run".into()),
@@ -51895,22 +52028,24 @@ mission "fresh" state="ready" {
             .replace("agent/node.worker", SEAT);
         let legacy_source = canonical_source.replace(SEAT, "node/worker");
         apply_source(&seat.store, &legacy_source, "literal-wake-legacy-definition");
-        let a = seat.start("queued", "literal-wake-a");
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
+        let canonical = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
+        apply_source(&seat.store, &revised_source, "literal-wake-revision");
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let a = seat.start_revision("queued", Some(first.revision), "literal-wake-a");
         let legacy = a.steps.iter().find(|step| step.step == "work").unwrap();
         assert_eq!(legacy.assigned_to.as_deref(), Some("node/worker"));
         assert_eq!(legacy.created_at_unix_ms, 1);
         smallclaims::store::set_thread_clock(Some(10));
         seat.store.set_write_clock_at(10).unwrap();
-        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
-        let b = seat.start("queued", "literal-wake-b");
+        let b = seat.start_revision("queued", Some(canonical.revision), "literal-wake-b");
         let b_work = SeatQueueFixture::step(&b, "work");
         smallclaims::store::set_thread_clock(Some(20));
         seat.store.set_write_clock_at(20).unwrap();
         // A new generation joins the literal seat at 20, while its old
         // generation keeps the alias join at 1 for presentation.
-        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
-        apply_source(&seat.store, &revised_source, "literal-wake-revision");
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let a = seat.store.adopt_mission_revision(
             &a.id, &revision, "person/requester", "join the literal seat",
             "literal-wake-adopt",
@@ -52819,8 +52954,18 @@ mission "draining" state="ready" revision-cutover="when-idle" {
     #[test]
     fn a_revision_keeps_the_place_of_work_the_seat_held() {
         let seat = SeatQueueFixture::new();
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(
+            &seat.store,
+            &SEAT_QUEUE_SOURCE.replace(
+                "Give the durable seat one step in each run.",
+                "Give the durable seat one revised step in each run.",
+            ),
+            "seat-revision-publish",
+        );
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let gated = seat.start("gated", "seat-revision-gated");
-        let queued = seat.start("queued", "seat-revision-queued");
+        let queued = seat.start_revision("queued", Some(first.revision), "seat-revision-queued");
         let held = SeatQueueFixture::step(&queued, "work");
         let earlier = SeatQueueFixture::step(&gated, "work");
         seat.work(&held, "claim", "seat-revision-claim").unwrap();
@@ -52842,15 +52987,6 @@ mission "draining" state="ready" revision-cutover="when-idle" {
             "the seat still holds the later run's step"
         );
 
-        apply_source(
-            &seat.store,
-            &SEAT_QUEUE_SOURCE.replace(
-                "Give the durable seat one step in each run.",
-                "Give the durable seat one revised step in each run.",
-            ),
-            "seat-revision-publish",
-        );
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let revised = seat
             .store
             .adopt_mission_revision(
@@ -52892,8 +53028,18 @@ mission "draining" state="ready" revision-cutover="when-idle" {
     #[test]
     fn a_released_carried_step_returns_to_queue_order() {
         let seat = SeatQueueFixture::new();
+        let first = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        apply_source(
+            &seat.store,
+            &SEAT_QUEUE_SOURCE.replace(
+                "Give the durable seat one step in each run.",
+                "Give the durable seat one released step in each run.",
+            ),
+            "seat-release-publish",
+        );
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let gated = seat.start("gated", "seat-release-gated");
-        let queued = seat.start("queued", "seat-release-queued");
+        let queued = seat.start_revision("queued", Some(first.revision), "seat-release-queued");
         let held = SeatQueueFixture::step(&queued, "work");
         let earlier = SeatQueueFixture::step(&gated, "work");
         seat.work(&held, "claim", "seat-release-claim").unwrap();
@@ -52909,15 +53055,6 @@ mission "draining" state="ready" revision-cutover="when-idle" {
             "ready",
             "the earlier run now has ready work for the seat"
         );
-        apply_source(
-            &seat.store,
-            &SEAT_QUEUE_SOURCE.replace(
-                "Give the durable seat one step in each run.",
-                "Give the durable seat one released step in each run.",
-            ),
-            "seat-release-publish",
-        );
-        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
         let revised = seat
             .store
             .adopt_mission_revision(
