@@ -1383,6 +1383,18 @@ impl Ui {
                 action: Action::Usage,
             },
         );
+        // The person's own availability and note, in a tab.
+        choices.insert(
+            2,
+            Choice {
+                section: 0,
+                glyph: ("◐", theme::PERSON),
+                label: "Availability".into(),
+                detail: "your status, interruptions, deadline clock and note".into(),
+                search: "availability status away available interruptions deadline clock hold note".into(),
+                action: Action::Open(Pane::Availability),
+            },
+        );
         // Starting things: an agent from the query, or the empty form.
         let name = query.trim();
         let start = |label: String, detail: &str, search: String, action| Choice {
@@ -3109,6 +3121,7 @@ impl Ui {
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
             Pane::Usage(None) => "Usage".into(),
+            Pane::Availability => "Availability".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
         }
@@ -3412,7 +3425,8 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
-        // A document page or the documents list has no box to type in: its plain letters act.
+        // A document page, the documents list or Availability has no box to type in: its plain
+        // letters act.
         if !sidebar_keys
             && !self.home_open()
             && !self.editing
@@ -3421,7 +3435,7 @@ impl Ui {
             && self.chat.as_ref().is_none_or(|chat| !chat.editing)
             && self.confirm.is_none()
             && self.popover.is_none()
-            && self.document_key(key)
+            && (self.document_key(key) || self.availability_key(key))
         {
             return true;
         }
