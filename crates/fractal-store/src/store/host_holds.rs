@@ -39,6 +39,17 @@ pub struct ReleaseHostHold {
     pub resolution: String,
 }
 
+/// Operator recovery is distinct from an owner's ordinary resolution.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverHostHold {
+    pub actor: String,
+    pub host: String,
+    pub id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+}
+
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha677d62abc9d owner=fractal_store::store::host_holds TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_host_holds (
         id TEXT PRIMARY KEY, host TEXT NOT NULL, owner TEXT NOT NULL,
@@ -155,6 +166,21 @@ impl Store {
     }
 
     pub fn release_host_hold(&self, authenticated_actor: &str, request: &ReleaseHostHold) -> Result<HostHold, FractalError> {
+        self.resolve_host_hold(authenticated_actor, request, false)
+    }
+
+    pub fn recover_host_hold(&self, authenticated_actor: &str, configured_operator: &str, request: &RecoverHostHold) -> Result<HostHold, FractalError> {
+        authenticate(authenticated_actor, &request.actor)?;
+        if authenticated_actor != configured_operator || !configured_operator.starts_with("person/") {
+            return Err(FractalError::new("host-hold-recovery-authority", "only the configured host operator may recover a hold"));
+        }
+        self.resolve_host_hold(authenticated_actor, &ReleaseHostHold {
+            actor: request.actor.clone(), host: request.host.clone(), id: request.id.clone(),
+            expected_revision: request.expected_revision, resolution: request.reason.clone(),
+        }, true)
+    }
+
+    fn resolve_host_hold(&self, authenticated_actor: &str, request: &ReleaseHostHold, recovery: bool) -> Result<HostHold, FractalError> {
         authenticate(authenticated_actor, &request.actor)?;
         if request.host != self.origin {
             return Err(FractalError::new("host-hold-authority", "only the target host may release its holds"));
@@ -168,11 +194,27 @@ impl Store {
             params![request.id, request.host], |row| row.get(0)).optional().map_err(internal)?
             .ok_or_else(|| FractalError::new("host-hold-not-found", "no such hold on this host"))?;
         let mut hold: HostHold = serde_json::from_str(&body).map_err(internal)?;
-        if hold.owner != authenticated_actor {
+        if !recovery && hold.owner != authenticated_actor {
             return Err(FractalError::new("host-hold-owner", "only the authenticated hold owner may release it"));
         }
         if hold.revision != request.expected_revision || hold.released_at_unix_ms.is_some() {
             return Err(FractalError::new("host-hold-revision", "hold revision changed; read the hold before resolving it"));
+        }
+        if recovery {
+            let owner_run = if hold.owner.starts_with("mission-run/") {
+                Some(hold.owner.clone())
+            } else {
+                transaction.query_row("SELECT owner_run FROM desired WHERE subject=?1", [&hold.owner],
+                    |row| row.get::<_, Option<String>>(0)).optional().map_err(internal)?.flatten()
+            };
+            let run = owner_run.ok_or_else(|| FractalError::new(
+                "host-hold-recovery-owner", "only a run-owned hold can be recovered; other owners must release their holds"))?;
+            let phase: Option<String> = transaction.query_row(
+                "SELECT phase FROM mission_runs WHERE id=?1",
+                [run.strip_prefix("mission-run/").unwrap_or(&run)], |row| row.get(0)).optional().map_err(internal)?;
+            if phase.as_deref() != Some("terminal") {
+                return Err(FractalError::new("host-hold-owner-live", "the owning run is not proven terminal; its owner must release the hold"));
+            }
         }
         hold.revision += 1;
         hold.released_at_unix_ms = Some(u64::try_from(now_ms()).unwrap_or(u64::MAX));
@@ -182,6 +224,19 @@ impl Store {
         smallclaims::touched::note_wrote(|| dependency(&hold.host));
         smallclaims::touched::note_wrote(|| "host-holds".into());
         changed_tx(&transaction, &self.origin, &hold)?;
+        insert_local_observation_tx(&transaction, &self.origin, &ClaimInput {
+            subject: hold.id.clone(),
+            kind: if recovery { "host-hold.recovered" } else { "host-hold.released" }.into(),
+            actor: Some(authenticated_actor.into()),
+            fields: BTreeMap::from([
+                ("original_owner".into(), json!(hold.owner)),
+                ("host".into(), json!(hold.host)),
+                ("expected_revision".into(), json!(request.expected_revision)),
+                ("revision".into(), json!(hold.revision)),
+                ("reason".into(), json!(request.resolution)),
+            ]),
+            evidence: Vec::new(), idempotency_key: None, expected_subject: None,
+        }, now_ms())?;
         transaction.commit().map_err(internal)?;
         drop(writer);
         self.host_holds_changed();
@@ -193,6 +248,58 @@ impl Store {
 mod tests {
     use super::*;
     fn request() -> PlaceHostHold { PlaceHostHold { actor: "person/operator".into(), host: "host-a".into(), reason: "Investigate activation".into(), operations: vec!["activation".into()], originating_run: Some("mission-run/terminal".into()), receipt: Some("receipt/failure".into()) } }
+    #[test]
+    fn recovery_retains_unknown_run_and_non_run_owner_custody() {
+        let store = Store::open_memory("host-a").unwrap();
+        for actor in ["person/operator", "mission-run/missing"] {
+            let mut placement = request(); placement.actor = actor.into();
+            let hold = store.place_host_hold(actor, &placement).unwrap();
+            assert!(store.recover_host_hold("person/operator", "person/operator", &RecoverHostHold {
+                actor: "person/operator".into(), host: hold.host.clone(), id: hold.id.clone(),
+                expected_revision: hold.revision, reason: "operator investigated".into(),
+            }).is_err());
+            assert!(store.host_holds(None, false).unwrap().contains(&hold));
+        }
+    }
+    #[test]
+    fn live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited() {
+        let store = Store::open_memory("host-a").unwrap();
+        store.connection.write().execute(
+            "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms) VALUES ('RUN','example','rev','gen','rev','RUN','/workspace','person/operator','{}','normal','running','running','10','10')", []).unwrap();
+        let mut placement = request(); placement.actor = "mission-run/RUN".into();
+        let hold = store.place_host_hold(&placement.actor, &placement).unwrap();
+        let recovery = RecoverHostHold { actor: "person/operator".into(), host: hold.host.clone(),
+            id: hold.id.clone(), expected_revision: hold.revision, reason: "owner finished; host repaired".into() };
+        assert!(store.recover_host_hold("person/operator", "person/other", &recovery).is_err());
+        assert!(store.recover_host_hold("agent/worker", "person/operator", &recovery).is_err());
+        assert!(store.recover_host_hold("person/operator", "person/operator", &recovery).is_err());
+        let other = store.place_host_hold(&placement.actor, &placement).unwrap();
+        let released = store.release_host_hold(&other.owner, &ReleaseHostHold {
+            actor: other.owner.clone(), host: other.host, id: other.id, expected_revision: other.revision,
+            resolution: "owner repaired while live".into(),
+        }).unwrap();
+        assert_eq!(released.revision, 2);
+        store.connection.write().execute("UPDATE mission_runs SET status='succeeded',phase='terminal' WHERE id='RUN'", []).unwrap();
+        assert_eq!(store.host_holds(None, false).unwrap(), vec![hold.clone()], "terminal runs must never release holds");
+        let mut stale = recovery.clone(); stale.expected_revision += 1;
+        assert!(store.recover_host_hold("person/operator", "person/operator", &stale).is_err());
+        let recovered = store.recover_host_hold("person/operator", "person/operator", &recovery).unwrap();
+        assert_eq!(recovered.owner, hold.owner);
+        assert_eq!(recovered.revision, hold.revision + 1);
+        assert!(store.recover_host_hold("person/operator", "person/operator", &recovery).is_err());
+        let connection = store.readers.get();
+        let (actor, body): (String, String) = connection.query_row(
+            "SELECT actor,body FROM local_observations WHERE subject=?1 AND kind='host-hold.recovered'",
+            [&hold.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(actor, "person/operator");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["fields"]["original_owner"], hold.owner);
+        assert_eq!(body["fields"]["reason"], recovery.reason);
+        let owner_releases: i64 = connection.query_row(
+            "SELECT count(*) FROM local_observations WHERE kind='host-hold.released' AND actor='mission-run/RUN'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(owner_releases, 1);
+    }
     #[test]
     fn alternate_store_constructors_initialize_host_hold_schema() {
         let root = tempfile::tempdir().unwrap();

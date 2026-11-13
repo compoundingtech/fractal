@@ -464,6 +464,7 @@ restart, or an answered ask, and consumes no executor capacity.
 fractal hosts hold worker --operation activation --reason "Investigate failed activation" --as person/operator
 fractal hosts ls --json
 fractal hosts release worker host-hold/example --expected-revision 1 --resolution "Recovery verified" --as person/operator
+fractal hosts recover worker host-hold/example --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
 ```
 
 `--operation` is repeatable; `*` affects every native operation. Placement can retain
@@ -471,6 +472,18 @@ fractal hosts release worker host-hold/example --expected-revision 1 --resolutio
 lifecycle owner. Active holds appear in attention/now. Resolution commits a local
 observation that invalidates registered admission reads; it does not depend on a
 reserve-probe loop.
+
+Ordinary release requires the authenticated hold owner, including while its run is
+live. `hosts recover` is a distinct recovery action available only to the execution
+host's configured owning person through the local operator API; bound agents and
+runs cannot borrow that person's identity. Recovery requires the exact observed
+revision and a reason, and only applies to a run-owned hold whose owning mission
+run (directly or through the owner's declaration) is positively terminal. A missing
+or nonterminal run retains custody; other owners must use ordinary release.
+Recovery preserves the original owner and records a separate `host-hold.recovered`
+history fact with the acting operator, original owner, reason and revisions.
+Ordinary release records `host-hold.released`. Neither terminal runs nor answered
+asks automatically resolve a hold.
 
 These records do not fence arbitrary shell SSH mutations. A target activation
 adapter must check target authority, hold revision and activation generation at

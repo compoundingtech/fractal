@@ -32,6 +32,17 @@ pub(super) enum HostsCommand {
         #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
         actor: Option<String>,
     },
+    /// Recover an orphaned hold as the configured host operator; live runs must release their own.
+    Recover {
+        host: String,
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
+        actor: Option<String>,
+    },
 }
 
 pub(super) async fn run(client: &Client, person: Option<&str>, command: HostsCommand, json_output: bool) -> Result<()> {
@@ -44,6 +55,10 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: HostsCom
         HostsCommand::Release { host, id, expected_revision, resolution, actor } => {
             let actor = actor.as_deref().or(person).context("hosts release requires --as, ST_AGENT, or a configured person")?;
             client.post("/v1/hosts/holds/release", &json!({"host":host,"id":id,"expected_revision":expected_revision,"resolution":resolution,"actor":actor})).await?
+        }
+        HostsCommand::Recover { host, id, expected_revision, reason, actor } => {
+            let actor = actor.as_deref().or(person).context("hosts recover requires the configured host operator")?;
+            client.post("/v1/hosts/holds/recover", &json!({"host":host,"id":id,"expected_revision":expected_revision,"reason":reason,"actor":actor})).await?
         }
     };
     if json_output { return print_value(&value, true); }
@@ -58,6 +73,44 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: HostsCom
 mod tests {
     use super::*;
     #[test]
+    fn host_hold_commands_preserve_revision_and_identity() {
+        let parse = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Hosts { command } = cli.command else { panic!("expected hosts command") };
+            command
+        };
+        assert!(matches!(parse(&["fractal", "hosts", "ls"]), HostsCommand::Ls));
+        match parse(&["fractal", "hosts", "hold", "host-a", "--reason", "investigate",
+            "--operation", "activation", "--as", "person/operator", "--originating-run", "mission-run/RUN",
+            "--receipt", "receipt/failure"]) {
+            HostsCommand::Hold { host, actor, reason, operations, originating_run, receipt } => {
+                assert_eq!(host, "host-a"); assert_eq!(actor.as_deref(), Some("person/operator"));
+                assert_eq!(reason, "investigate"); assert_eq!(operations, ["activation"]);
+                assert_eq!(originating_run.as_deref(), Some("mission-run/RUN"));
+                assert_eq!(receipt.as_deref(), Some("receipt/failure"));
+            }
+            _ => panic!("expected hold"),
+        }
+        match parse(&["fractal", "hosts", "release", "host-a", "host-hold/example",
+            "--expected-revision", "7", "--resolution", "repaired", "--as", "person/operator"]) {
+            HostsCommand::Release { host, id, actor, expected_revision, resolution } => {
+                assert_eq!(host, "host-a"); assert_eq!(id, "host-hold/example");
+                assert_eq!(actor.as_deref(), Some("person/operator")); assert_eq!(expected_revision, 7);
+                assert_eq!(resolution, "repaired");
+            }
+            _ => panic!("expected release"),
+        }
+        match parse(&["fractal", "hosts", "recover", "host-a", "host-hold/example",
+            "--expected-revision", "9", "--reason", "owner finished", "--as", "person/operator"]) {
+            HostsCommand::Recover { host, id, actor, expected_revision, reason } => {
+                assert_eq!(host, "host-a"); assert_eq!(id, "host-hold/example");
+                assert_eq!(actor.as_deref(), Some("person/operator")); assert_eq!(expected_revision, 9);
+                assert_eq!(reason, "owner finished");
+            }
+            _ => panic!("expected recovery"),
+        }
+    }
+    #[test]
     fn holds_require_affected_operations_and_release_requires_revision() {
         assert!(Cli::try_parse_from(["fractal", "hosts", "hold", "host-a", "--reason", "investigate"]).is_err());
         assert!(Cli::try_parse_from(["fractal", "hosts", "hold", "host-a", "--reason", "investigate",
@@ -66,6 +119,15 @@ mod tests {
             "--resolution", "repaired", "--as", "person/operator"]).is_err());
         assert!(Cli::try_parse_from(["fractal", "hosts", "release", "host-a", "host-hold/example",
             "--expected-revision", "1", "--resolution", "repaired", "--as", "person/operator"]).is_ok());
+    }
+    #[test]
+    fn recovery_requires_revision_and_reason() {
+        assert!(Cli::try_parse_from(["fractal", "hosts", "recover", "host-a", "host-hold/example",
+            "--reason", "owner ended", "--as", "person/operator"]).is_err());
+        assert!(Cli::try_parse_from(["fractal", "hosts", "recover", "host-a", "host-hold/example",
+            "--expected-revision", "1", "--as", "person/operator"]).is_err());
+        assert!(Cli::try_parse_from(["fractal", "hosts", "recover", "host-a", "host-hold/example",
+            "--expected-revision", "1", "--reason", "owner ended", "--as", "person/operator"]).is_ok());
     }
     #[test]
     fn bound_agents_cannot_borrow_a_hold_owners_identity() {

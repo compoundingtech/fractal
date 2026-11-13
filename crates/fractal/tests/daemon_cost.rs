@@ -395,6 +395,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
     ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
+    ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",

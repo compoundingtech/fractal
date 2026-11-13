@@ -6543,7 +6543,8 @@ fn guard_mutating_cli_actor(
     let actor = match command {
         Command::Apply(args) => args.actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
-            | hosts_cli::HostsCommand::Release { actor, .. } } => actor.as_deref(),
+            | hosts_cli::HostsCommand::Release { actor, .. }
+            | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
