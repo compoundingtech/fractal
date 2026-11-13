@@ -1,0 +1,124 @@
+{
+  "command" : "devenv tasks run attention-tray:gallery",
+  "generator" : "TrayGallery",
+  "renders" : [
+    {
+      "appearance" : "light",
+      "file" : "busy-light.png",
+      "height" : 2614,
+      "scenario" : "busy",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "busy-dark.png",
+      "height" : 2614,
+      "scenario" : "busy",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "answering-light.png",
+      "height" : 2014,
+      "scenario" : "answering",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "answering-dark.png",
+      "height" : 2014,
+      "scenario" : "answering",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "quiet-light.png",
+      "height" : 1150,
+      "scenario" : "quiet",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "quiet-dark.png",
+      "height" : 1150,
+      "scenario" : "quiet",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "read-only-light.png",
+      "height" : 1922,
+      "scenario" : "read-only",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "read-only-dark.png",
+      "height" : 1922,
+      "scenario" : "read-only",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "degraded-light.png",
+      "height" : 2360,
+      "scenario" : "degraded",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "degraded-dark.png",
+      "height" : 2360,
+      "scenario" : "degraded",
+      "width" : 800
+    },
+    {
+      "appearance" : "light",
+      "file" : "unconfigured-light.png",
+      "height" : 420,
+      "scenario" : "unconfigured",
+      "width" : 800
+    },
+    {
+      "appearance" : "dark",
+      "file" : "unconfigured-dark.png",
+      "height" : 420,
+      "scenario" : "unconfigured",
+      "width" : 800
+    }
+  ],
+  "scale" : 2,
+  "scenarios" : [
+    {
+      "description" : "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent.",
+      "id" : "busy",
+      "title" : "Busy inbox"
+    },
+    {
+      "description" : "Answers in flight and settled: one still sending, one committed by Fractal, one refused by Fractal with its reason.",
+      "id" : "answering",
+      "title" : "Answering"
+    },
+    {
+      "description" : "Nothing needs the person; away until tomorrow 9:00 with urgent interruptions only and routine deadlines held.",
+      "id" : "quiet",
+      "title" : "Quiet"
+    },
+    {
+      "description" : "The device may read but not answer: native asks link to Fractal and the panel says why.",
+      "id" : "read-only",
+      "title" : "Read-only device"
+    },
+    {
+      "description" : "The last read failed: every section is marked stale and keeps the data it last had.",
+      "id" : "degraded",
+      "title" : "Fractal unreachable"
+    },
+    {
+      "description" : "The tray started without its Fractal configuration and says what to set.",
+      "id" : "unconfigured",
+      "title" : "Not configured"
+    }
+  ],
+  "trayRev" : "src.ec50433"
+}
