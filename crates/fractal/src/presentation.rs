@@ -114,6 +114,12 @@ pub(crate) fn render_mission_run(
         short_subject(&selected.mission, "mission/")
     );
     let _ = writeln!(output, "RUN       {}", selected.subject);
+    if let Some(source) = &selected.retry_of {
+        let _ = writeln!(output, "RETRY OF  {source}");
+    }
+    for retry in &selected.retried_by {
+        let _ = writeln!(output, "RETRIED BY {retry}");
+    }
     let _ = writeln!(
         output,
         "STATE     {} · {}",
@@ -1752,6 +1758,8 @@ mod tests {
             root_revision: "root-revision".into(),
             root_mission_run: "mission-run/demo/run".into(),
             parent_step_run: parent.map(str::to_owned),
+            retry_of: None,
+            retried_by: Vec::new(),
             workspace: "/workspace".into(),
             requester: "person/tester".into(),
             inputs: BTreeMap::from([(
@@ -1778,6 +1786,26 @@ mod tests {
             stuck_gates: Vec::new(),
             scheduler_fault: None,
         }
+    }
+
+    #[test]
+    fn mission_show_displays_exact_retry_links() {
+        let mut selected = run("mission-run/demo/retry", None, Vec::new());
+        selected.retry_of = Some("mission-run/demo/original".into());
+        selected.retried_by = vec![
+            "mission-run/demo/retry-again".into(),
+            "mission-run/demo/another-retry".into(),
+        ];
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains("RETRY OF  mission-run/demo/original"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/retry-again"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/another-retry"));
+        let plain = run("mission-run/demo/original", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("RETRY OF"));
+        assert!(!rendered.contains("RETRIED BY"));
     }
 
     fn terminal(subject: &str, status: &str) -> SubjectStatus {

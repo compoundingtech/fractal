@@ -993,6 +993,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(runs::get_run_revision_proposal),
         )
         .route("/v1/mission-runs/{run}/revision", post(runs::revise_mission_run))
+        .route("/v1/mission-runs/{run}/retry", post(runs::retry_mission_run))
         .route(
             "/v1/mission-runs/{run}/outcome",
             post(runs::set_mission_run_outcome),

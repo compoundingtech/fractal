@@ -2630,6 +2630,10 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** New runs created by retrying this run; omitted when empty. */
+  "retried_by": optionalKey(Schema.Array(MissionRunId)).annotate({ description: "New runs created by retrying this run; omitted when empty." }),
+  /** Source run for this new-run retry; omitted for an ordinary start. */
+  "retry_of": optionalKey(MissionRunId),
   /** The mission revision this run is pinned to. Older daemons omit it. */
   "revision": optionalKey(Revision),
   /** Run creation, in Unix milliseconds. */
