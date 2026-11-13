@@ -228,17 +228,22 @@ public enum AnswerState: Sendable, Equatable {
 
   // MARK: Actions
 
-  /// Sends one answer. Nothing is shown as answered until Fractal commits it.
-  public func answer(_ record: AttentionRecord, with answer: WorkDoneAnswer, label: String) async {
-    guard let adapter else { return }
-    if case .sending = answers[record.id] { return }
+  /// Sends one answer. Nothing is shown as answered until Fractal commits it. Returns how it
+  /// ended (nil when nothing was sent): the refresh after a commit drops the closed card's state.
+  @discardableResult
+  public func answer(_ record: AttentionRecord, with answer: WorkDoneAnswer, label: String) async -> AnswerState? {
+    guard let adapter else { return nil }
+    if case .sending = answers[record.id] { return nil }
     answers[record.id] = .sending(label)
     do {
       try await adapter.submit(WorkDoneSubmission(record: record, answer: answer))
       answers[record.id] = .committed(label)
       await refresh()
+      return .committed(label)
     } catch {
-      answers[record.id] = .refused(String(describing: error))
+      let refused = AnswerState.refused(String(describing: error))
+      answers[record.id] = refused
+      return refused
     }
   }
 }

@@ -53,6 +53,18 @@ final class SpeechCoordinatorTests: XCTestCase {
     XCTAssertEqual(deliveries.shown.map(\.id), [first.id, second.id])
   }
 
+  func testOneItemPerRequesterInFlightTheNextIsABanner() async {
+    let output = ScriptedSpeech()
+    let (speech, deliveries) = coordinator(output)
+    let first = urgent("one", from: "release-captain")
+    let second = urgent("two", from: "release-captain")
+    consider(speech, [first, second])
+    await output.waitForRequests(1)
+    XCTAssertEqual(speech.queue, [])
+    XCTAssertEqual(speech.status[second.id], .held(.rateLimited))
+    XCTAssertEqual(deliveries.shown.last, .init(id: second.id, delivery: .held(.rateLimited)))
+  }
+
   func testSkipDropsAQueuedItemWithoutSendingIt() async {
     let output = ScriptedSpeech()
     let (speech, _) = coordinator(output)
