@@ -1,4 +1,6 @@
 //! Data DSL lanes lower to the host's native finite-execution membership boundary.
+//! Inherited exec attempts use distinct roots while the parent scope retains one membership and
+//! custody of every root through retirement.
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
 
@@ -184,6 +186,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(lane) = &step.spec.resource_lane else {
             if let Some(context) = self.store.resource_context_for_run(&run.subject)? {
                 anyhow::ensure!(context.request.host == member.host, "child execution must run on its resource authority host");
+                // Retries share the parent's membership, but each execution needs its own root.
+                member.runtime_id = crate::graph::runtime_id(&format!(
+                    "{}/{}/attempt/{}/{}", run.generation, view.subject, view.attempt, member.runtime_id,
+                ));
                 set_request(member, &context.request)?;
             }
             return Ok(());
@@ -200,6 +206,108 @@ impl<R: RuntimeControl> Reconciler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inherited_exec_retries_keep_distinct_roots_in_parent_retirement_custody() {
+        use super::super::tests::{FakeRuntime, apply_source};
+
+        let source = r#"version 2
+        mission "child" state="ready" {
+            goal "Retry inherited execution."
+            step "verify" {
+                agentless
+                exec "verify" { command "true"; }
+            }
+        }"#;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, source, "inherited-retry");
+        let parent = LaneRequest {
+            id: "program-parent".into(), name: "verification".into(), host: "node".into(),
+            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            owner: Owner {
+                run: "mission-run/parent".into(), step: "mission-step/parent/work".into(),
+                attempt: 1, invocation: None,
+            },
+        };
+        store.start_resource_authority("node", "authority").unwrap();
+        let Admission::Admitted(grant) = store.request_resource_membership(&parent, Fit::default(), 100).unwrap()
+            else { panic!("parent membership must admit"); };
+        let child = store.mission_run_subject_for_idempotency_key("inherited-retry-run");
+        store.attach_resource_child(&grant, &parent.owner, &child).unwrap();
+        let created = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "child".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "inherited-retry-run".into(),
+        }).unwrap();
+        let run = store.mission_run(&created.id).unwrap().unwrap();
+        let mut view = run.steps[0].clone();
+        let intent = crate::graph::parse_intent(source, "node").unwrap();
+        let spec = &intent.missions["child"].steps["verify"];
+        let step = RuntimeStep {
+            spec, dependency_prefix: String::new(), parent: None, mission_capacity: None,
+        };
+        let declarations = crate::graph::parse_execution_intent(
+            spec.declarations_kdl.as_deref().unwrap(), "node", &run.id,
+        ).unwrap();
+        let mut subject = declarations.subjects.values()
+            .find(|subject| subject.member.as_ref().is_some_and(|member| member.kind == MemberKind::Exec))
+            .unwrap().clone();
+        subject.owner_run = Some(run.subject.clone());
+        subject.owner_step = Some(view.subject.clone());
+        let original = subject.member.as_ref().unwrap().clone();
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let mut roots = Vec::new();
+        for attempt in [1, 2] {
+            view.attempt = attempt;
+            let mut member = original.clone();
+            reconciler.bind_resource_lane(&run, &step, &view, &mut member, &subject.subject).unwrap();
+            assert_eq!(request(&member).unwrap(), Some(parent.clone()));
+            let mut replay = original.clone();
+            reconciler.bind_resource_lane(&run, &step, &view, &mut replay, &subject.subject).unwrap();
+            assert_eq!(replay.runtime_id, member.runtime_id, "same attempt materializes the same root");
+            assert!(!roots.contains(&member.runtime_id), "retry must not reuse an already-prepared root");
+            store.prepare_resource_membership(&grant, &member.runtime_id).unwrap();
+            let execution: fractal_runtime::ExecGeneration = serde_json::from_value(serde_json::json!({
+                "schema": "st.runtime.exec-generation.v1", "pid": 1, "createdAtUnixMs": 100,
+                "startToken": 1, "generationId": format!("generation-{attempt}"),
+                "payloadReleasedAtUnixMs": 200 + u64::from(attempt)
+            })).unwrap();
+            store.launch_resource_membership(&grant, &member.runtime_id, &execution, 300).unwrap();
+            let mut observation = RuntimeObservation {
+                runtime_id: member.runtime_id.clone(), terminal: false, status: "exited".into(),
+                exit_code: Some(1), incarnation_id: Some("stale-generation".into()),
+            };
+            assert!(reconciler.observe_resource_retirement(&subject, &member, &observation).unwrap());
+            let record = store.resource_membership_for_grant(&grant).unwrap();
+            assert!(record.roots.last().unwrap().execution_ended_at.is_none());
+            observation.incarnation_id = Some(execution.generation_id);
+            // The fake runtime has no membership-retirement implementation: ending an inherited
+            // root must only record its exit, never attempt to retire the parent's scope.
+            assert!(reconciler.observe_resource_retirement(&subject, &member, &observation).unwrap());
+            roots.push(member.runtime_id);
+            assert_eq!(store.resource_memberships_for_host("node").unwrap().len(), 1);
+            let record = store.resource_context_for_run(&run.subject).unwrap().unwrap();
+            assert_eq!(record.request, parent);
+            assert_eq!(record.state, "launched");
+            assert_eq!(record.child_runs, vec![run.subject.clone()]);
+            assert!(record.roots.iter().all(|root| root.execution_ended_at.is_some()));
+        }
+        let mut successor = run.clone();
+        successor.generation.push_str("-successor");
+        let mut member = original;
+        reconciler.bind_resource_lane(&successor, &step, &view, &mut member, &subject.subject).unwrap();
+        assert!(!roots.contains(&member.runtime_id), "new generation must not reuse an earlier root");
+        assert_eq!(request(&member).unwrap(), Some(parent.clone()));
+        store.cancel_resource_membership(&grant, &parent.owner, 400).unwrap();
+        let retiring = store.resource_membership_for_grant(&grant).unwrap();
+        assert_eq!(retiring.request, parent);
+        assert_eq!(retiring.state, "retiring");
+        assert_eq!(retiring.roots.iter().map(|root| root.runtime_id.clone()).collect::<Vec<_>>(), roots);
+        assert!(retiring.roots.iter().all(|root| root.execution_ended_at.is_some()));
+        assert!(store.prepare_resource_membership(&grant, &member.runtime_id).is_err());
+    }
+
 
     #[test]
     fn data_and_program_requests_share_native_admission_and_queue_clocks() {
@@ -245,5 +353,125 @@ mod tests {
         let admitted = store.resource_membership_record("program", &program.owner).unwrap();
         assert_eq!(admitted.admitted_at, Some(400));
         assert!(admitted.payload_released_at.is_none());
+    }
+
+    #[test]
+    fn inherited_lane_context_does_not_stop_agentless_execution_clocks() {
+        use super::super::tests::{FakeRuntime, apply_source};
+
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+        }
+        let _clock = Clock;
+        const START: u128 = 1_800_000_000_000;
+        for kind in ["gate", "after-run", "program", "inherited-exec", "queued-exec"] {
+            smallclaims::store::set_thread_clock(Some(START));
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            store.set_write_clock_at(START).unwrap();
+            let bundle_hash = store.put_blob(b"export default {}").unwrap();
+            let body = match kind {
+                "gate" => r#"agentless
+                    gate "wait" { field "state" "resource/never" is "ready"; }"#.to_owned(),
+                "after-run" => r#"after-run "mission-run/upstream""#.to_owned(),
+                "program" => format!("program \"/unused.mjs\" sha256=\"{bundle_hash}\""),
+                "inherited-exec" => r#"agentless
+                    exec "payload" { command "true"; }"#.to_owned(),
+                "queued-exec" => r#"agentless
+                    lane "checks" host="node" max-members=1 coverage="logical"
+                    exec "payload" { command "true"; }"#.to_owned(),
+                _ => unreachable!(),
+            };
+            apply_source(&store, &format!(r#"version 2
+                mission "child" state="ready" {{
+                    goal "Bound agentless work inside an inherited lane."
+                    step "work" timeout="1s" {{ {body} }}
+                }}
+                mission "upstream" state="ready" {{
+                    goal "Keep the awaited run open."
+                    step "hold" {{
+                        agentless
+                        gate "wait" {{ field "state" "resource/never" is "ready"; }}
+                    }}
+                }}"#), "clock-definitions");
+            let start = |mission: &str| store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: mission.into(), revision: None, workspace: "/tmp".into(),
+                requester: None, mode: None, inputs: BTreeMap::new(),
+                idempotency_key: mission.into(),
+            }).unwrap();
+            let upstream = start("upstream");
+            let child = start("child");
+            // Use the real awaited subject, independent of the store's run-id allocation.
+            let mut mission = store.mission_spec("child", Some(&child.revision)).unwrap().unwrap();
+            if kind == "after-run" {
+                mission.steps.get_mut("work").unwrap().after_run = Some(upstream.subject.clone());
+            }
+            let owner = Owner {
+                run: upstream.subject.clone(), step: upstream.steps[0].subject.clone(),
+                attempt: upstream.steps[0].attempt, invocation: None,
+            };
+            let parent = LaneRequest {
+                id: "parent".into(), name: "checks".into(), host: "node".into(),
+                max_members: 1, capacity: None, coverage: Coverage::Logical,
+                admission_timeout_ms: None, owner: owner.clone(),
+            };
+            store.start_resource_authority("node", "clock-authority").unwrap();
+            let Admission::Admitted(grant) = store.request_resource_membership(
+                &parent, Fit::default(), START as u64,
+            ).unwrap() else { panic!("parent must be admitted"); };
+            store.attach_resource_child(&grant, &owner, &child.subject).unwrap();
+            assert!(store.resource_context_for_run(&child.subject).unwrap().is_some());
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            );
+            // As in the program-host fault regression, prevent a JavaScript host from starting
+            // without depending on installed runtimes, process scheduling, or wall-clock sleeps.
+            let dir = tempfile::tempdir().unwrap();
+            if kind == "program" {
+                let programs = dir.path().join("programs");
+                std::fs::create_dir_all(&programs).unwrap();
+                std::fs::write(programs.join("groups"), b"").unwrap();
+                let engine = program::ProgramEngine::new(
+                    store.clone(), Arc::new(|_: &str| {}), programs, program::Liveness::default(),
+                );
+                assert!(reconciler.program_engine.set(engine).is_ok());
+            }
+            // Evaluate only mission transitions: payload launch and runtime observations are
+            // deliberately absent, so admission can never be mistaken for payload release.
+            for _ in 0..4 {
+                let run = store.mission_run(&child.id).unwrap().unwrap();
+                reconciler.evaluate_mission_run(&run, &mission).unwrap();
+            }
+            let active = store.mission_run(&child.id).unwrap().unwrap();
+            let view = active.steps.iter().find(|step| step.step == "work").unwrap();
+            let payload = matches!(kind, "inherited-exec" | "queued-exec");
+            assert_eq!(reconciler.resource_step_has_lane(view).unwrap(), payload, "{kind}");
+            assert_eq!(view.status, if payload { "ready" } else { "working" }, "{kind}");
+            assert_eq!(view.execution_started_at_unix_ms, (!payload).then_some(START), "{kind}");
+            if kind == "queued-exec" {
+                let desired = store.desired_subjects_for_owner_step(&view.subject).unwrap();
+                let request = desired.iter().filter_map(|subject| subject.member.as_ref())
+                    .find_map(|member| request(member).unwrap()).unwrap();
+                assert!(matches!(store.request_resource_membership(
+                    &request, Fit::default(), START as u64,
+                ).unwrap(), Admission::Queued { .. }));
+            }
+            smallclaims::store::set_thread_clock(Some(START + 1_001));
+            store.set_write_clock_at(START + 1_001).unwrap();
+            let run = store.mission_run(&child.id).unwrap().unwrap();
+            let view = run.steps.iter().find(|step| step.step == "work").unwrap();
+            assert_eq!(view.execution_elapsed_ms, if payload { 0 } else { 1_001 }, "{kind}");
+            let steps = flatten_mission_steps(&mission);
+            let step = steps.iter().find(|step| step.spec.path == "work").unwrap();
+            assert_eq!(reconciler.step_timed_out(view, step).unwrap(), !payload, "{kind}");
+            reconciler.evaluate_mission_run(&run, &mission).unwrap();
+            let terminal = store.mission_run(&child.id).unwrap().unwrap();
+            let view = terminal.steps.iter().find(|step| step.step == "work").unwrap();
+            assert_eq!(view.status, if payload { "ready" } else { "failed" }, "{kind}");
+            if payload {
+                assert_eq!(reconciler.resource_step_elapsed(view).unwrap(), None, "{kind}");
+                assert_eq!(view.execution_started_at_unix_ms, None, "{kind}");
+            }
+        }
     }
 }
