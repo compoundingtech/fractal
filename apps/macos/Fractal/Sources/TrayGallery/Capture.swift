@@ -82,8 +82,8 @@ struct CaptureApp: App {
   var body: some Scene {
     MenuBarExtra {
       TrayPanel(model: stage.model, build: GalleryBuild.identity)
-        // Every section in view: captures are for review, not for the scroll limit.
-        .environment(\.panelMaxHeight, .infinity)
+        // Whole pages in view: captures are for review, not for the scroll limit.
+        .environment(\.panelScrollHeight, .infinity)
         .id(stage.generation)
     } label: {
       TrayMenuBarLabel(model: stage.model)

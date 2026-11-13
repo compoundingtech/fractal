@@ -134,15 +134,19 @@ struct WriteStatusView: View {
 }
 
 /// A Form section header: the title, and a trailing count or summary. Smaller and secondary, so
-/// the panel title stays the one headline (as in the Wi-Fi and Bluetooth extras).
+/// the page title stays the one headline (as in the Wi-Fi and Bluetooth extras). On a module's
+/// page the section named like the page shows only its summary.
 struct SectionHeader: View {
   let title: String
   var aside: String?
+  @Environment(\.pageTitle) private var pageTitle
 
   var body: some View {
     HStack(alignment: .firstTextBaseline) {
-      Text(title).fontWeight(.semibold).accessibilityAddTraits(.isHeader)
-      Spacer()
+      if title != pageTitle {
+        Text(title).fontWeight(.semibold).accessibilityAddTraits(.isHeader)
+        Spacer()
+      }
       if let aside {
         Text(aside).monospacedDigit()
       }
@@ -152,9 +156,37 @@ struct SectionHeader: View {
   }
 }
 
+/// A grouped section: a subheadline header with its summary, and a quieter metadata footer.
+struct PanelSection<Content: View, Footer: View>: View {
+  let title: String
+  var aside: String?
+  @ViewBuilder let content: () -> Content
+  @ViewBuilder let footer: () -> Footer
+
+  var body: some View {
+    Section {
+      content()
+    } header: {
+      SectionHeader(title: title, aside: aside)
+    } footer: {
+      // Metadata (when it was measured, presence): quieter than the header's own summary.
+      footer()
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+}
+
+extension PanelSection where Footer == EmptyView {
+  init(title: String, aside: String? = nil, @ViewBuilder content: @escaping () -> Content) {
+    self.init(title: title, aside: aside, content: content, footer: { EmptyView() })
+  }
+}
+
 /// A grouped, scrolling form on the panel's own material: no background of its own.
 struct PanelForm<Content: View>: View {
-  @Environment(\.panelMaxHeight) private var maxHeight
+  @Environment(\.panelScrollHeight) private var maxHeight
   @ViewBuilder let content: () -> Content
 
   var body: some View {

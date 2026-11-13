@@ -12,7 +12,7 @@ struct Scenario: Sendable {
 
 /// Deterministic Fractal content relative to the render time, so relative times read the same
 /// on every run.
-private struct Content {
+struct Content {
   let now: Date
   let url = URL(string: "https://fractal.example/attention")!
 
@@ -22,12 +22,13 @@ private struct Content {
     askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false, snoozedFor: TimeInterval? = nil
   ) -> AttentionRecord {
     AttentionRecord(
-      id: "attention/\(id)", revision: "claim/1", kind: kind, state: "open", sourceID: "work/\(id)",
-      episode: "claim/1", title: title, detail: detail, from: from, requestedAt: now - askedAgo,
-      deadlineAt: deadlineIn.map { now + $0 }, defaultAnswerLabel: nil, actions: actions,
+      id: "attention/\(id)", revision: "claim/1", kind: kind, state: "open", sourceID: "step-run/\(id)",
+      episode: "claim/1", title: title, detail: detail, from: from.replacingOccurrences(of: "agent/", with: ""),
+      requestedAt: now - askedAgo, deadlineAt: deadlineIn.map { now + $0 }, defaultAnswerLabel: nil, actions: actions,
       promptAnswers: [], request: request, update: update,
       workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url,
-      isUrgent: urgent, snoozedUntil: snoozedFor.map { now + $0 })
+      isUrgent: urgent, snoozedUntil: snoozedFor.map { now + $0 },
+      conversationID: from.hasPrefix("agent/") ? from : nil)
   }
 
   var shipDecision: RequestForm {
@@ -160,11 +161,11 @@ private struct Content {
   }
 }
 
-@MainActor private func model(_ fractal: FixtureFractal, speech: SpeechCoordinator? = nil) -> AttentionModel {
+@MainActor func model(_ fractal: FixtureFractal, speech: SpeechCoordinator? = nil) -> AttentionModel {
   AttentionModel(adapter: fractal, availabilityAdapter: fractal, speech: speech)
 }
 
-@MainActor private func answer(_ model: AttentionModel, _ record: AttentionRecord, choice id: String) async {
+@MainActor func answer(_ model: AttentionModel, _ record: AttentionRecord, choice id: String) async {
   guard let choice = AnswerChoice.choices(for: record).first(where: { $0.id == id }),
     let answer = choice.answer(words: "", request: record.request)
   else { preconditionFailure("fixture \(record.id) offers no \(id)") }

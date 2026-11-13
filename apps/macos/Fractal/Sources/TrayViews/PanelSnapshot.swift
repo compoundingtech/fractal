@@ -8,8 +8,20 @@ import SwiftUI
 /// panel sits on the plain window background instead. The window is never key, so controls draw
 /// inactive (the default button is not tinted). TrayGallery's capture mode has the real thing.
 @MainActor public enum PanelSnapshot {
-  public static func png(model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name) async -> Data? {
-    await png(TrayPanel(model: model, build: build).environment(\.panelMaxHeight, .infinity), appearance: appearance)
+  /// The live panel's scroll limit, for renders that measure what the person sees.
+  public static let liveScrollHeight = PanelMetrics.scrollHeight
+
+  /// `scrollHeight` caps the scrolling content as the live panel does; the default renders
+  /// whole pages. `placement` picks the V4 answer-placement variant.
+  public static func png(
+    model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name, placement: AnswerPlacement = .inline,
+    scrollHeight: CGFloat = .infinity
+  ) async -> Data? {
+    await png(
+      TrayPanel(model: model, build: build)
+        .environment(\.panelScrollHeight, scrollHeight)
+        .environment(\.answerPlacement, placement),
+      appearance: appearance)
   }
 
   /// The status item as the menu bar tints its template image, on a flat bar of the appearance

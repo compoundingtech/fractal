@@ -6,6 +6,7 @@ import {
   resolvePanel,
   scenarioById,
   v2History,
+  v3History,
   type Appearance,
   type ImageSource,
   type ResolvedImage,
@@ -17,12 +18,14 @@ const placeholderSize = { width: 400, height: 320 }
 const sourceLabel: Record<ImageSource, string> = {
   capture: 'Real capture · window server, Liquid Glass',
   fallback: 'Fallback · cacheDisplay, no materials, controls drawn inactive',
+  'history-v3': 'V3 history · cacheDisplay, frozen',
   history: 'V2 history · cacheDisplay, frozen',
 }
 
 const sourceRev: Record<ImageSource, string | null | undefined> = {
   capture: captureManifest?.trayRev,
   fallback: manifest?.trayRev,
+  'history-v3': v3History?.trayRev,
   history: v2History?.trayRev,
 }
 

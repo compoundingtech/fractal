@@ -1,8 +1,9 @@
 import AttentionCore
 import Foundation
 
-/// Speech states of the panel, driven through the real `SpeechCoordinator` (refreshes, call
-/// devices, mutes), plus the native notification's content model.
+/// Speech states of the panel's Speech page (the speech tile drilled into), driven through the
+/// real `SpeechCoordinator` (refreshes, call devices, mutes), plus the native notification's
+/// content model.
 private struct SpeechContent {
   let now: Date
   let url = URL(string: "https://fractal.example/attention")!
@@ -19,7 +20,7 @@ private struct SpeechContent {
 
   var rollback: AttentionRecord {
     ask(
-      "rollback", title: "Roll back the Fractal deploy on dev5?", from: "agent/LandFractal",
+      "rollback", title: "Roll back the Fractal deploy on dev5?", from: "LandFractal",
       request: RequestForm(
         type: "decision", question: "Error rate is 4% since 14:02. Roll back to 90e674c?",
         answers: [
@@ -31,12 +32,12 @@ private struct SpeechContent {
   }
 
   var diskFull: AttentionRecord {
-    ask("disk", title: "dev5 store is 97% full: run GC now?", from: "agent/janitor", askedAgo: 30)
+    ask("disk", title: "dev5 store is 97% full: run GC now?", from: "janitor", askedAgo: 30)
   }
 
   var copyReview: AttentionRecord {
     ask(
-      "copy", title: "Which wording for the call banner?", from: "agent/TrayDesign",
+      "copy", title: "Which wording for the call banner?", from: "TrayDesign",
       request: RequestForm(type: "feedback", question: "", answers: [], custom: false, recommendedAnswerID: nil),
       askedAgo: 120)
   }
@@ -73,6 +74,7 @@ let speechScenarios: [Scenario] = [
     let content = SpeechContent(now: now)
     let (model, _) = speechModel([content.rollback, content.diskFull], content)
     await model.refresh(now: now)
+    model.open(.speech)
     return model
   },
   Scenario(
@@ -84,6 +86,7 @@ let speechScenarios: [Scenario] = [
     let (model, speech) = speechModel([content.rollback], content)
     speech.callDevices(["camera: FaceTime HD Camera", "microphone: us.zoom.xos"], now: now)
     await model.refresh(now: now)
+    model.open(.speech)
     return model
   },
   Scenario(
@@ -93,8 +96,9 @@ let speechScenarios: [Scenario] = [
     let content = SpeechContent(now: now)
     let (model, speech) = speechModel([content.rollback], content)
     speech.muteAll(.hours(1), now: now)
-    speech.mute(agent: "agent/janitor", .endOfToday, now: now)
+    speech.mute(agent: "janitor", .endOfToday, now: now)
     await model.refresh(now: now)
+    model.open(.speech)
     return model
   },
 ]

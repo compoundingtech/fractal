@@ -48,6 +48,15 @@ struct Manifest: Encodable {
   var renders: [Render] = []
   var menuBarStates: [Entry] = []
   var menuBar: [MenuBarRender] = []
+  /// The panel's height in points as the person sees it (scrolling capped at the live limit)
+  /// and uncapped, in the light appearance.
+  var heights: [Height] = []
+
+  struct Height: Encodable {
+    let scenario: String
+    let live: Int
+    let full: Int
+  }
 }
 
 enum GalleryBuild {
@@ -69,7 +78,7 @@ let out = URL(fileURLWithPath: outArgument, isDirectory: true)
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-let panels = scenarios + speechScenarios
+let panels = scenarios + pageScenarios + speechScenarios
 
 if arguments.first == "--capture" {
   // Captures put a backdrop and the panel on the real screen: only with the person's consent,
@@ -120,7 +129,7 @@ _ = NSApplication.shared
 NSApp.setActivationPolicy(.prohibited)
 
 let wanted = Set(arguments)
-if let unknown = wanted.subtracting(panels.map(\.id) + noticeScenarios.map(\.id)).first {
+if let unknown = wanted.subtracting(panels.map(\.id) + variantScenarios.map(\.scenario.id) + noticeScenarios.map(\.id)).first {
   fail("unknown scenario \(unknown)", code: 2)
 }
 var manifest = Manifest(trayRev: GalleryBuild.rev)
@@ -138,6 +147,38 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
       .init(scenario: scenario.id, appearance: appearance.name, file: file, width: bitmap.pixelsWide, height: bitmap.pixelsHigh))
     print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
   }
+}
+// The open design question, at the live panel's scroll limit so the fold shows.
+for (scenario, placement) in variantScenarios where wanted.isEmpty || wanted.contains(scenario.id) {
+  manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))
+  for appearance in GalleryAppearance.all {
+    let model = await scenario.prepare(.now)
+    guard
+      let png = await PanelSnapshot.png(
+        model: model, build: GalleryBuild.identity, appearance: appearance.value, placement: placement,
+        scrollHeight: PanelSnapshot.liveScrollHeight),
+      let bitmap = NSBitmapImageRep(data: png)
+    else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
+    let file = "\(scenario.id)-\(appearance.name).png"
+    try png.write(to: out.appendingPathComponent(file))
+    manifest.renders.append(
+      .init(scenario: scenario.id, appearance: appearance.name, file: file, width: bitmap.pixelsWide, height: bitmap.pixelsHigh))
+    print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
+  }
+}
+// Space: every panel scenario's height as shown (scroll-capped) and uncapped.
+for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
+  var points: [Int] = []
+  for limit in [PanelSnapshot.liveScrollHeight, .infinity] {
+    let model = await scenario.prepare(.now)
+    guard
+      let png = await PanelSnapshot.png(
+        model: model, build: GalleryBuild.identity, appearance: .aqua, scrollHeight: limit),
+      let bitmap = NSBitmapImageRep(data: png)
+    else { fail("could not measure \(scenario.id)", code: 1) }
+    points.append(bitmap.pixelsHigh / manifest.scale)
+  }
+  manifest.heights.append(.init(scenario: scenario.id, live: points[0], full: points[1]))
 }
 for scenario in noticeScenarios where wanted.isEmpty || wanted.contains(scenario.id) {
   manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))

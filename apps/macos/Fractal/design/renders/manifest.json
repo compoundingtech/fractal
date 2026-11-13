@@ -1,6 +1,98 @@
 {
   "command" : "devenv tasks run attention-tray:gallery",
   "generator" : "TrayGallery",
+  "heights" : [
+    {
+      "full" : 280,
+      "live" : 280,
+      "scenario" : "busy"
+    },
+    {
+      "full" : 228,
+      "live" : 228,
+      "scenario" : "answering"
+    },
+    {
+      "full" : 256,
+      "live" : 256,
+      "scenario" : "controls"
+    },
+    {
+      "full" : 128,
+      "live" : 128,
+      "scenario" : "quiet"
+    },
+    {
+      "full" : 270,
+      "live" : 270,
+      "scenario" : "read-only"
+    },
+    {
+      "full" : 337,
+      "live" : 337,
+      "scenario" : "degraded"
+    },
+    {
+      "full" : 197,
+      "live" : 197,
+      "scenario" : "unconfigured"
+    },
+    {
+      "full" : 1170,
+      "live" : 563,
+      "scenario" : "ask-decision"
+    },
+    {
+      "full" : 574,
+      "live" : 563,
+      "scenario" : "ask-choice"
+    },
+    {
+      "full" : 403,
+      "live" : 403,
+      "scenario" : "ask-feedback"
+    },
+    {
+      "full" : 177,
+      "live" : 177,
+      "scenario" : "ask-in-fractal"
+    },
+    {
+      "full" : 269,
+      "live" : 269,
+      "scenario" : "update-page"
+    },
+    {
+      "full" : 1193,
+      "live" : 563,
+      "scenario" : "ask-sending"
+    },
+    {
+      "full" : 382,
+      "live" : 382,
+      "scenario" : "page-availability"
+    },
+    {
+      "full" : 660,
+      "live" : 563,
+      "scenario" : "page-objectives"
+    },
+    {
+      "full" : 275,
+      "live" : 275,
+      "scenario" : "speech-speaking"
+    },
+    {
+      "full" : 228,
+      "live" : 228,
+      "scenario" : "speech-in-call"
+    },
+    {
+      "full" : 184,
+      "live" : 184,
+      "scenario" : "speech-muted"
+    }
+  ],
   "menuBar" : [
     {
       "appearance" : "light",
@@ -123,7 +215,7 @@
       "title" : "Twelve asks"
     },
     {
-      "description" : "Four asks, one due within the hour; an objective missed.",
+      "description" : "Four asks, one urgent; an objective missed.",
       "id" : "urgent",
       "title" : "Urgent"
     },
@@ -142,128 +234,282 @@
     {
       "appearance" : "light",
       "file" : "busy-light.png",
-      "height" : 2802,
+      "height" : 560,
       "scenario" : "busy",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "busy-dark.png",
-      "height" : 2802,
+      "height" : 560,
       "scenario" : "busy",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "answering-light.png",
-      "height" : 1312,
+      "height" : 456,
       "scenario" : "answering",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "answering-dark.png",
-      "height" : 1312,
+      "height" : 456,
       "scenario" : "answering",
-      "width" : 800
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "controls-light.png",
+      "height" : 512,
+      "scenario" : "controls",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "controls-dark.png",
+      "height" : 512,
+      "scenario" : "controls",
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "quiet-light.png",
-      "height" : 532,
+      "height" : 256,
       "scenario" : "quiet",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "quiet-dark.png",
-      "height" : 532,
+      "height" : 256,
       "scenario" : "quiet",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "read-only-light.png",
-      "height" : 1060,
+      "height" : 540,
       "scenario" : "read-only",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "read-only-dark.png",
-      "height" : 1060,
+      "height" : 540,
       "scenario" : "read-only",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "degraded-light.png",
-      "height" : 2736,
+      "height" : 674,
       "scenario" : "degraded",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "degraded-dark.png",
-      "height" : 2736,
+      "height" : 674,
       "scenario" : "degraded",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "unconfigured-light.png",
-      "height" : 558,
+      "height" : 394,
       "scenario" : "unconfigured",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "unconfigured-dark.png",
-      "height" : 558,
+      "height" : 394,
       "scenario" : "unconfigured",
-      "width" : 800
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "ask-decision-light.png",
+      "height" : 2340,
+      "scenario" : "ask-decision",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "ask-decision-dark.png",
+      "height" : 2340,
+      "scenario" : "ask-decision",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "ask-choice-light.png",
+      "height" : 1148,
+      "scenario" : "ask-choice",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "ask-choice-dark.png",
+      "height" : 1148,
+      "scenario" : "ask-choice",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "ask-feedback-light.png",
+      "height" : 806,
+      "scenario" : "ask-feedback",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "ask-feedback-dark.png",
+      "height" : 806,
+      "scenario" : "ask-feedback",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "ask-in-fractal-light.png",
+      "height" : 354,
+      "scenario" : "ask-in-fractal",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "ask-in-fractal-dark.png",
+      "height" : 354,
+      "scenario" : "ask-in-fractal",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "update-page-light.png",
+      "height" : 538,
+      "scenario" : "update-page",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "update-page-dark.png",
+      "height" : 538,
+      "scenario" : "update-page",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "ask-sending-light.png",
+      "height" : 2386,
+      "scenario" : "ask-sending",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "ask-sending-dark.png",
+      "height" : 2386,
+      "scenario" : "ask-sending",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "page-availability-light.png",
+      "height" : 764,
+      "scenario" : "page-availability",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "page-availability-dark.png",
+      "height" : 764,
+      "scenario" : "page-availability",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "page-objectives-light.png",
+      "height" : 1320,
+      "scenario" : "page-objectives",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "page-objectives-dark.png",
+      "height" : 1320,
+      "scenario" : "page-objectives",
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "speech-speaking-light.png",
-      "height" : 1304,
+      "height" : 550,
       "scenario" : "speech-speaking",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "speech-speaking-dark.png",
-      "height" : 1304,
+      "height" : 550,
       "scenario" : "speech-speaking",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "speech-in-call-light.png",
-      "height" : 1098,
+      "height" : 456,
       "scenario" : "speech-in-call",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "speech-in-call-dark.png",
-      "height" : 1098,
+      "height" : 456,
       "scenario" : "speech-in-call",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "light",
       "file" : "speech-muted-light.png",
-      "height" : 1018,
+      "height" : 368,
       "scenario" : "speech-muted",
-      "width" : 800
+      "width" : 720
     },
     {
       "appearance" : "dark",
       "file" : "speech-muted-dark.png",
-      "height" : 1018,
+      "height" : 368,
       "scenario" : "speech-muted",
-      "width" : 800
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "variant-d1-light.png",
+      "height" : 1126,
+      "scenario" : "variant-d1",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "variant-d1-dark.png",
+      "height" : 1126,
+      "scenario" : "variant-d1",
+      "width" : 720
+    },
+    {
+      "appearance" : "light",
+      "file" : "variant-d2-light.png",
+      "height" : 1318,
+      "scenario" : "variant-d2",
+      "width" : 720
+    },
+    {
+      "appearance" : "dark",
+      "file" : "variant-d2-dark.png",
+      "height" : 1318,
+      "scenario" : "variant-d2",
+      "width" : 720
     },
     {
       "appearance" : "light",
@@ -296,14 +542,14 @@
     {
       "appearance" : "light",
       "file" : "notice-answered-light.png",
-      "height" : 566,
+      "height" : 534,
       "scenario" : "notice-answered",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "notice-answered-dark.png",
-      "height" : 566,
+      "height" : 534,
       "scenario" : "notice-answered",
       "width" : 800
     }
@@ -311,7 +557,7 @@
   "scale" : 2,
   "scenarios" : [
     {
-      "description" : "A decision due within the hour (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent.",
+      "description" : "An urgent decision (being read aloud), a choice, a yes/no question, a form answered in Fractal and an update; an objective missed and a budget nearly spent.",
       "id" : "busy",
       "title" : "Busy inbox"
     },
@@ -319,6 +565,11 @@
       "description" : "Answers in flight and settled: one still sending, one committed by Fractal, one refused by Fractal with its reason.",
       "id" : "answering",
       "title" : "Answering"
+    },
+    {
+      "description" : "The person's own controls: a snooze still sending, a dismissal Fractal refused for a form answered in Fractal (its reason verbatim), and one ask snoozed out of view.",
+      "id" : "controls",
+      "title" : "Snooze and dismiss"
     },
     {
       "description" : "Nothing needs the person; away until tomorrow 9:00 with urgent interruptions only and routine deadlines held.",
@@ -341,6 +592,46 @@
       "title" : "Not configured"
     },
     {
+      "description" : "The urgent decision drilled into: the question in markdown, why it needs the person, reasons, the recommendation, a PR whose head moved since the ask, an attached image, the work step, the answers (one prominent) and the asker’s recent conversation.",
+      "id" : "ask-decision",
+      "title" : "Decision page"
+    },
+    {
+      "description" : "A choice that also takes the person’s own words: options, the words field and Send, a summary and reasons.",
+      "id" : "ask-choice",
+      "title" : "Choice page"
+    },
+    {
+      "description" : "A feedback ask with words typed and not sent: the draft lives on the model, so it survives the panel closing; nothing is prominent while it is unsent.",
+      "id" : "ask-feedback",
+      "title" : "Feedback page with a draft"
+    },
+    {
+      "description" : "A custom form the tray cannot answer: its detail and Answer in Fractal as the one prominent action.",
+      "id" : "ask-in-fractal",
+      "title" : "Form answered in Fractal"
+    },
+    {
+      "description" : "An update drilled into: its summary, the merged PR it is about, Mark Read and Snooze.",
+      "id" : "update-page",
+      "title" : "Update page"
+    },
+    {
+      "description" : "The decision’s answer is on its way to Fractal: the answers wait, the row on the top level shows it in flight.",
+      "id" : "ask-sending",
+      "title" : "Answer sending"
+    },
+    {
+      "description" : "The availability tile drilled into: the header switch (Available), status, interruptions and deadline clock with their until presets, and the note for agents.",
+      "id" : "page-availability",
+      "title" : "Availability page"
+    },
+    {
+      "description" : "The objectives tile drilled into: each objective and budget with its 24-hour histogram; the worst open.",
+      "id" : "page-objectives",
+      "title" : "Objectives page"
+    },
+    {
       "description" : "A critical ask is being read aloud with Stop and Mute this agent; a second waits in the queue with Skip.",
       "id" : "speech-speaking",
       "title" : "Speaking"
@@ -354,6 +645,16 @@
       "description" : "Speech muted for an hour and one agent muted for today: critical asks still show as banners.",
       "id" : "speech-muted",
       "title" : "Speech muted"
+    },
+    {
+      "description" : "Answers after the request and before the conversation, as requested; at the live scroll limit they can sit below the fold.",
+      "id" : "variant-d1",
+      "title" : "D1: answers inline"
+    },
+    {
+      "description" : "Answers pinned under the scrolling content: always in reach, the request and conversation scroll above them.",
+      "id" : "variant-d2",
+      "title" : "D2: answers pinned"
     },
     {
       "description" : "The decision being read aloud: Stop, its answers as buttons, Request changes as a text reply, Mute this agent, Open in Fractal.",
@@ -371,5 +672,5 @@
       "title" : "Answered from the notification"
     }
   ],
-  "trayRev" : "src.c460f78"
+  "trayRev" : "preview"
 }
