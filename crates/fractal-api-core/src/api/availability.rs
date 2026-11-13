@@ -13,11 +13,15 @@ fn is_person(actor: &str) -> bool {
 }
 
 /// The person a write acts as: the session's own concrete person holding `scope`. Agents are
-/// refused even though a local agent session holds every scope.
+/// refused even though a local agent session holds every scope, and so is a local harness or
+/// peer naming a person: only the person writes their own state.
 pub(super) fn person_writer(session: &client_v0::ClientSession, scope: &str) -> Result<String, ApiError> {
     client_v0::require_scope(session, scope)?;
     if !is_person(&session.authority_actor) {
         return Err(client_v0::forbidden("only a person writes their own availability, presence or note; agents are refused"));
+    }
+    if session.local_peer {
+        return Err(client_v0::forbidden("local harnesses and peers cannot write a person's availability, presence or note"));
     }
     Ok(session.authority_actor.clone())
 }
@@ -61,8 +65,10 @@ pub async fn list(
     Query(query): Query<AvailabilityQuery>,
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
     client_v0::require_scope(&session, "read.projections")?;
+    // A local harness or peer naming a person is still no person: it reads only coarsely.
+    let person_reader = is_person(&session.authority_actor);
+    let own_reader = person_reader && !session.local_peer;
     let reader = session.authority_actor;
-    let person_reader = is_person(&reader);
     if !person_reader && !reader.starts_with("agent/") {
         return Err(client_v0::forbidden("identify the person or agent reading availability"));
     }
@@ -81,7 +87,7 @@ pub async fn list(
             let mut views = Vec::with_capacity(people.len());
             for person in people {
                 let view = state.store.person_availability(&person, now)?;
-                views.push(if person == reader { view } else { view.without_presence() });
+                views.push(if own_reader && person == reader { view } else { view.without_presence() });
             }
             Ok((client_snapshot_at(&state, index), views))
         })

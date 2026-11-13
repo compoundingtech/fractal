@@ -191,7 +191,7 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
 /// reporting (`unreported`) is the default, available, and stays quiet. A word this client does
 /// not know departs from the default and shows.
 pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
-    availability.status_source == AvailabilityStatusSource::Override
+    matches!(availability.status_source, AvailabilityStatusSource::Override | AvailabilityStatusSource::Unknown)
         || availability.status != AvailabilityStatus::Available
         || availability.interruptions != AvailabilityInterruptions::All
         || availability.deadline_clock != AvailabilityDeadlineClock::Run
@@ -238,15 +238,18 @@ pub(super) fn holds_deadline(availability: &PersonAvailability, urgent: bool) ->
     }
 }
 
-/// The asker's line about its own ask: whether it is urgent and, when the person's availability
-/// was read and their deadline clock is not `run`, whether that clock holds the ask's deadline.
-pub(super) fn ask_line(urgent: bool, availability: Option<&PersonAvailability>) -> String {
+/// The asker's line about its own ask: whether it is urgent and, when the ask is known to have a
+/// deadline (`--deadline` names one; a daemon with ask deadlines off refuses it) and the person's
+/// availability was read, whether their deadline clock holds that deadline. Without `--deadline`
+/// the client cannot tell whether the fleet gave the ask a default deadline, so it says nothing
+/// about one.
+pub(super) fn ask_line(urgent: bool, deadline: bool, availability: Option<&PersonAvailability>) -> String {
     let mut line = if urgent {
         "this ask is urgent (priority critical)".to_owned()
     } else {
         "this ask is not urgent".to_owned()
     };
-    let Some(availability) = availability else { return line };
+    let Some(availability) = availability.filter(|_| deadline) else { return line };
     match holds_deadline(availability, urgent) {
         Some(true) => line.push_str(&format!("; {} holds its deadline", availability.deadline_clock)),
         Some(false) if availability.deadline_clock == AvailabilityDeadlineClock::HoldRoutine => {
@@ -544,6 +547,10 @@ mod tests {
             ..available.clone()
         }));
         assert!(worth_showing(&PersonAvailability {
+            status_source: AvailabilityStatusSource::Unknown,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
             interruptions: AvailabilityInterruptions::Urgent,
             ..available.clone()
         }));
@@ -585,20 +592,21 @@ mod tests {
             deadline_clock_until: None,
         };
         let routine = with_clock(AvailabilityDeadlineClock::HoldRoutine);
-        assert_eq!(ask_line(false, Some(&routine)), "this ask is not urgent; hold-routine holds its deadline");
+        assert_eq!(ask_line(false, true, Some(&routine)), "this ask is not urgent; hold-routine holds its deadline");
         assert_eq!(
-            ask_line(true, Some(&routine)),
+            ask_line(true, true, Some(&routine)),
             "this ask is urgent (priority critical); its deadline runs through hold-routine"
         );
         let all = with_clock(AvailabilityDeadlineClock::HoldAll);
-        assert_eq!(ask_line(true, Some(&all)), "this ask is urgent (priority critical); hold-all holds its deadline");
+        assert_eq!(ask_line(true, true, Some(&all)), "this ask is urgent (priority critical); hold-all holds its deadline");
         let run = with_clock(AvailabilityDeadlineClock::Run);
         assert_eq!(holds_deadline(&run, false), Some(false));
-        assert_eq!(ask_line(false, Some(&run)), "this ask is not urgent");
+        assert_eq!(ask_line(false, true, Some(&run)), "this ask is not urgent");
         let newer = with_clock(AvailabilityDeadlineClock::Unknown);
         assert_eq!(holds_deadline(&newer, false), None);
-        assert_eq!(ask_line(false, Some(&newer)), "this ask is not urgent; deadline clock not known to this client");
-        // Without a read, only the urgency is known.
-        assert_eq!(ask_line(true, None), "this ask is urgent (priority critical)");
+        assert_eq!(ask_line(false, true, Some(&newer)), "this ask is not urgent; deadline clock not known to this client");
+        // Without a known deadline there is nothing to hold; without a read, only the urgency is known.
+        assert_eq!(ask_line(false, false, Some(&all)), "this ask is not urgent");
+        assert_eq!(ask_line(true, true, None), "this ask is urgent (priority critical)");
     }
 }
