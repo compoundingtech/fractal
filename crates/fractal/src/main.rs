@@ -7751,6 +7751,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("startup.isolation", || fractal_runtime::initialize_isolation(&isolation_environment)))
         .await
         .context("probe task isolation during daemon startup")?;
+    let producer_root = pty_root.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("startup.pty_producers", || {
+        if let Err(error) = fractal_runtime::PtyRuntime::new(producer_root).reconcile_producers_at_daemon_startup() {
+            tracing::warn!(error = %error, "PTY producer startup reconciliation incomplete");
+        }
+    })).await.context("reconcile PTY producers during daemon startup")?;
     let pty_binary = match args.pty_binary.clone() {
         Some(pty_binary) => pty_binary,
         None => fractal_runtime::resolve_executable("pty", &login_environment)?,
