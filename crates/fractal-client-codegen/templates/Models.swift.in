@@ -679,7 +679,7 @@ public struct UsagePricing: Codable, Sendable {
     public let unpricedResponses: UInt64?
     enum CodingKeys: String, CodingKey { case priceTableID = "price_table_id", priceTableVersion = "price_table_version", costSource = "cost_source", ratesUsdPerMillionTokens = "rates_usd_per_million_tokens", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" }
 }
-public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" } }
+public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let executionID, invocationID: String?; public let attempt: UInt?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, attempt, executionID = "execution_id", invocationID = "invocation_id", accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" } }
 /// Declared admission — declared, not enforced.
 public struct DeclaredAttentionBudget: Codable, Sendable { public let person: String; public let asks: UInt64 }
 public struct DeclaredBudgets: Codable, Sendable { public let cpuSeconds, tokenBudget: UInt64?; public let memoryMax, diskMax: String?; public let attention: [DeclaredAttentionBudget]?; enum CodingKeys: String, CodingKey { case attention, cpuSeconds = "cpu_seconds", memoryMax = "memory_max", diskMax = "disk_max", tokenBudget = "token_budget" } }
@@ -775,6 +775,7 @@ public struct StepExecution: Codable, Sendable {
     public let id, stepSubject, agent: String
     public let attempt: UInt
     public let incarnationID, declaredModel: String?
+    public let invocationID: String?
     public let observedModels: [String]
     public let fallback: Bool?
     public let startedAtUnixMS: UInt64
@@ -783,6 +784,7 @@ public struct StepExecution: Codable, Sendable {
     public let usage: StepExecutionUsage?
     enum CodingKeys: String, CodingKey {
         case id, stepSubject = "step_subject", attempt, agent, incarnationID = "incarnation_id", declaredModel = "declared_model", observedModels = "observed_models", fallback, startedAtUnixMS = "started_at_unix_ms", endedAtUnixMS = "ended_at_unix_ms", durationMS = "duration_ms", status, traceID = "trace_id", exitEvidence = "exit_evidence", usage
+        case invocationID = "invocation_id"
     }
 }
 public struct StepExecutionUsage: Codable, Sendable {
@@ -1330,7 +1332,7 @@ public struct TimelineToolCallBody: Codable, Sendable { public let blocks: [Time
 public struct TimelineToolResultBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let callID: String; public let status: TimelineToolStatus; public let mediaType: String; public let content: JSONValue; enum CodingKeys: String, CodingKey { case blocks; case callID = "call_id", status, mediaType = "media_type", content } }
 public struct TimelineStatusBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let status: TimelineStatus; public let detail: String? }
 public struct TimelineErrorBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let code: String; public let message: String; public let retryable: Bool; public let details: [String: JSONValue] }
-public struct TimelineAttribution: Codable, Sendable { public let agentID: String; public let missionRunID: String?; public let generationID: String?; public let stepID: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", missionRunID = "mission_run_id", generationID = "generation_id", stepID = "step_id" } }
+public struct TimelineAttribution: Codable, Sendable { public let agentID: String; public let missionRunID: String?; public let generationID: String?; public let stepID: String?; public let executionID, invocationID: String?; public let attempt: UInt?; enum CodingKeys: String, CodingKey { case attempt, executionID = "execution_id", invocationID = "invocation_id", agentID = "agent_id", missionRunID = "mission_run_id", generationID = "generation_id", stepID = "step_id" } }
 public struct TimelineUsageBody: Codable, Sendable {
     public let blocks: [TimelineBlock]?
     public let semantics: TimelineUsageSemantics

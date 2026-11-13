@@ -10759,6 +10759,96 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Status alone is not a stopped provider: require the exact launch's complete scope and
+    /// producer closure before reading its durably bound native file.
+    fn retain_stopped_invocation_transcripts(&self, observation: &crate::model::ClaimRecord) -> Result<()> {
+        use crate::invocation_artifacts as artifacts;
+        use crate::external_sessions::find_bound_pi_family_transcript;
+        use crate::external_sessions::ExternalDriver;
+        self.store.record_invocation_runtime_end(observation)?;
+        let fields = &observation.body["fields"];
+        if !matches!(fields["status"].as_str(), Some("stopped" | "exited")) {
+            return Ok(());
+        }
+        let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
+        let mut invocations = BTreeMap::new();
+        for receipt in self.store.agent_invocation_receipts(&observation.subject)? {
+            if receipt.incarnation.as_deref() == Some(incarnation) {
+                invocations.insert(receipt.invocation_id.clone(), receipt);
+            }
+        }
+        if invocations.is_empty() { return Ok(()); }
+        let Some(state) = self.driver_state_dir.parent() else { return Ok(()); };
+        let mut stopped_launches = BTreeMap::new();
+        for receipt in invocations.values() {
+            let Some(member) = self.store.invocation_launch_member(&receipt.invocation_id)? else { continue; };
+            let member: MemberSpec = serde_json::from_value(member)?;
+            if member.tags.get(start_jobs::OPERATION_TAG) == Some(&receipt.operation_id)
+                && fields["runtime_id"].as_str() == Some(member.runtime_id.as_str())
+                && self.runtime.start_operation_closed(&member)?
+            {
+                stopped_launches.insert(receipt.invocation_id.clone(), member.driver);
+            }
+        }
+        let binding = self.store.claims_for(&observation.subject, Some("harness.session-file"))?
+            .into_iter().rev().find(|claim|
+                claim.origin == self.store.origin()
+                    && claim.actor.as_deref() == Some(observation.subject.as_str())
+                    && claim.body["fields"]["incarnation_id"].as_str() == Some(incarnation));
+        let retained = self.store.claims_for(&observation.subject, Some("harness.invocation-artifact"))?;
+        for invocation in invocations.keys() {
+            // Captured bytes and identity metadata are immutable, including after deletion/expiry.
+            if let Some(claim) = retained.iter().find(|claim| claim.body["fields"]["invocation_id"] == *invocation
+                && claim.body["fields"]["kind"] == "transcript"
+                && claim.body["fields"]["artifact"].is_object()) {
+                let artifact = serde_json::from_value(claim.body["fields"]["artifact"].clone())?;
+                self.store.record_invocation_transcript_reference(&invocations[invocation], &artifact)?;
+                continue;
+            }
+            let unavailable = |reason| artifacts::unavailable(&self.store,
+                &observation.subject, invocation, "transcript", reason);
+            // A whole native session is launch-context evidence, not an exact standing-turn
+            // transcript interval. Only an admitted, positively closed launch can own it.
+            let Some(harness) = stopped_launches.get(invocation) else {
+                unavailable("exact-stopped-launch-transcript-unverified")?;
+                continue;
+            };
+            let Some(binding) = binding.as_ref() else {
+                unavailable("exact-native-binding-unavailable")?;
+                continue;
+            };
+            let bound = &binding.body["fields"];
+            if harness.as_deref() != bound["harness"].as_str() {
+                unavailable("native-provider-identity-unverified")?;
+                continue;
+            }
+            let driver = match bound["harness"].as_str() {
+                Some("pi") => ExternalDriver::Pi,
+                Some("omp") => ExternalDriver::Omp,
+                _ => { unavailable("provider-transcript-unsupported")?; continue; }
+            };
+            let (Some(path), Some(native_id)) = (bound["path"].as_str(), bound["session_id"].as_str()) else {
+                unavailable("exact-native-binding-unavailable")?;
+                continue;
+            };
+            let Ok(Some(session)) = find_bound_pi_family_transcript(driver, Path::new(path), native_id) else {
+                unavailable("native-transcript-identity-unverified")?;
+                continue;
+            };
+            let Ok(mut artifact) = artifacts::capture_transcript(state, invocation, &session.transcript, now_ms()) else {
+                unavailable("native-transcript-capture-failed")?;
+                continue;
+            };
+            artifact.incarnation = Some(incarnation.into());
+            artifact.native_session_id = Some(native_id.into());
+            artifact.binding_claim = Some(binding.id.clone());
+            artifact.harness = bound["harness"].as_str().map(str::to_owned);
+            artifacts::record(&self.store, &observation.subject, &artifact)?;
+            self.store.record_invocation_transcript_reference(&invocations[invocation], &artifact)?;
+        }
+        Ok(())
+    }
+
     fn record_once_with_evidence(
         &self,
         subject: &str,
@@ -10786,6 +10876,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             if kind == "runtime.observed" {
                 self.record_runtime_observation_admission(subject, false)?;
+                if let Some(previous) = previous {
+                    self.retain_stopped_invocation_transcripts(previous)?;
+                }
             }
             return Ok(());
         }
@@ -10810,6 +10903,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             self.store.append_claim(&input)?
         };
+        if kind == "runtime.observed" {
+            self.retain_stopped_invocation_transcripts(&record)?;
+        }
         if crate::store::local_observation_position(&record).is_some() {
             // Only this node reads a local observation, and it cannot advance a mission.
             self.event_notify
@@ -21223,6 +21319,7 @@ pub fn append_work_wake_message(
     let incarnation_key = harness_incarnation_key(incarnation);
     let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
     let message_subject = format!("message/{message_id}");
+    let invocation_id = store.record_work_turn_wake(step, agent, incarnation, &message_subject)?;
     let queue = step
         .queue
         .as_deref()
@@ -21265,6 +21362,7 @@ pub fn append_work_wake_message(
                 "tags".into(),
                 Value::Array(vec![
                     Value::String(format!("st3-work:{tag_value}")),
+                    Value::String(format!("fractal-invocation:{invocation_id}")),
                     Value::String(format!("mission-run:{}", step.run)),
                     Value::String(format!("st3-wake-attempt:{wake_attempt}")),
                     Value::String(format!("st3-wake-source:{source}")),
@@ -21289,6 +21387,7 @@ pub fn append_work_wake_message(
         in_reply_to: None,
         tags: vec![
             format!("st3-work:{tag_value}"),
+            format!("fractal-invocation:{invocation_id}"),
             format!("mission-run:{}", step.run),
             format!("st3-wake-attempt:{wake_attempt}"),
             format!("st3-wake-source:{source}"),
@@ -27607,6 +27706,105 @@ mission "feedback-review" state="ready" {
             "found evidence must use no SQLite statements on repeated passes: {cost:?}"
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
+        for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
+            "unsupported", "unproven-stop"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let subject = "agent/example/transcript";
+            apply_source(&store,
+                "version 2\nagent \"example/transcript\" { workspace \"/tmp\"; command \"true\"; }",
+                "transcript-fixture");
+            let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+            let mut member = desired.member.clone().unwrap();
+            member.driver = Some(if case == "unsupported" { "codex" } else { "omp" }.into());
+            let operation_id = uuid::Uuid::now_v7().to_string();
+            member.tags.insert(start_jobs::OPERATION_TAG.into(), operation_id.clone());
+            let invocation = format!("invocation/{operation_id}");
+            let mut operation = RuntimeStartOperation {
+                id: operation_id.clone(), subject: subject.into(), owner: "fixture".into(),
+                body: serde_json::json!({"subject":desired,
+                    "selected_token":store.selected_desired_token(subject).unwrap().unwrap(),
+                    "request":null, "member":desired.member, "launch_member":member, "reason":"fixture"}),
+                revoked_by:None, finished:false, result:None, applied:false,
+                cleanup_verified:false, dispatched:false, receipted:false,
+            };
+            if case != "unproven-stop" {
+                store.admit_runtime_start(&mut operation, 2).unwrap();
+                assert!(store.invocation_launch_member(&invocation).unwrap().is_some());
+            }
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                actor:None, fields:serde_json::from_value(serde_json::json!({
+                    "invocation_id":invocation, "operation_id":operation_id, "agent":subject,
+                    "phase":"started", "incarnation":"exact-incarnation", "harness":member.driver
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            if case == "exact" {
+                store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                    actor:None, fields:serde_json::from_value(serde_json::json!({
+                        "invocation_id":"invocation/turn-capture", "operation_id":"turn-capture",
+                        "agent":subject, "phase":"started", "incarnation":"exact-incarnation",
+                        "parent_invocation_id":invocation, "event_key":"message/turn"
+                    })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            }
+            let runtime_fields = |status: &str, incarnation: &str| BTreeMap::from([
+                ("status".into(), Value::from(status)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("runtime_id".into(), Value::from(member.runtime_id.clone())),
+                ("terminal".into(), Value::from(member.terminal)),
+            ]);
+            let bound_incarnation = if case == "wrong-incarnation" { "other-incarnation" } else { "exact-incarnation" };
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"runtime.observed".into(),
+                actor:None, fields:runtime_fields("running", bound_incarnation),
+                evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let transcript = root.path().join("native.jsonl");
+            fs::write(&transcript, format!("{}\n{}\n",
+                serde_json::json!({"type":"session","id":"native-exact","cwd":root.path()}),
+                serde_json::json!({"type":"message","id":"m1","message":{
+                    "role":"user","content":"token=fixture-secret"}}))).unwrap();
+            let binding = store.append_claim(&ClaimInput {
+                subject:subject.into(), kind:"harness.session-file".into(), actor:Some(subject.into()),
+                fields:serde_json::from_value(serde_json::json!({
+                    "harness":member.driver, "incarnation_id":bound_incarnation,
+                    "session_id":if case == "wrong-session" { "native-other" } else { "native-exact" },
+                    "path":transcript,
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let runtime = Arc::new(FakeRuntime::default());
+            let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            reconciler.driver_state_dir = root.path().join("drivers");
+            let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
+            // Exercise the actual observation writer, including its unchanged-observation retry.
+            for _ in 0..2 {
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+            }
+            let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
+            let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
+            if case == "exact" {
+                assert_eq!(captured.len(), 1);
+                let artifact: crate::invocation_artifacts::InvocationArtifact =
+                    serde_json::from_value(captured[0].body["fields"]["artifact"].clone()).unwrap();
+                assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+                assert_eq!(artifact.native_session_id.as_deref(), Some("native-exact"));
+                assert_eq!(artifact.binding_claim.as_deref(), Some(binding.id.as_str()));
+                assert_eq!(artifact.invocation_id, invocation);
+                assert!(store.invocation_receipts(&invocation).unwrap().iter().any(|receipt|
+                    receipt.transcript_ref == Some(format!("sha256:{}", artifact.sha256))));
+                assert!(store.invocation_receipts("invocation/turn-capture").unwrap().iter()
+                    .all(|receipt| receipt.transcript_ref.is_none()));
+                assert!(!claims.iter().any(|claim|
+                    claim.body["fields"]["invocation_id"] == "invocation/turn-capture"
+                        && claim.body["fields"]["status"] == "retained"));
+                let bytes = crate::invocation_artifacts::read(root.path(), &artifact, now_ms()).unwrap().unwrap();
+                assert!(!String::from_utf8(bytes).unwrap().contains("fixture-secret"));
+                fs::write(&transcript, "not the original transcript").unwrap();
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                assert_eq!(store.claims_for(subject, Some("harness.invocation-artifact")).unwrap().len(), claims.len());
+            } else {
+                assert!(captured.is_empty(), "{case} must never retain guessed or live bytes");
+            }
+        }
     }
 
     #[test]

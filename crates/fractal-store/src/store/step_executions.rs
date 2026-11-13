@@ -8,7 +8,6 @@ pub(super) fn accumulate_response(
     buckets: [u64; 9], at: u128,
 ) -> Result<()> {
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-ha2dcdd19ebd4 owner=fractal_store::store::step_executions TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_step_execution_spend(execution_id,model,account,host,input_tokens,output_tokens,
          cache_write_tokens,cache_write_1h_tokens,cached_tokens,total_tokens,cost_microusd,
          reported_cost_microusd,unpriced_tokens,observed_at_unix_ms)
@@ -131,6 +130,29 @@ pub(super) fn execution_lease_at(connection: &Connection, claim: &str, at: u128)
     Ok(expiry)
 }
 
+/// Join only immutable work-claim receipts or a unique verified launch incarnation.
+/// A caller's invocation label and the current declaration are never authorities.
+pub(super) fn response_invocation(connection: &Connection, agent: &str, incarnation: &str,
+    execution: Option<&str>) -> Result<Option<fractal_schema::invocation::InvocationReceipt>> {
+    if incarnation.is_empty() { return Ok(None); }
+    let mut statement = connection.prepare(
+        "SELECT body FROM claims WHERE subject=?1 AND kind='harness.invocation'
+         AND json_extract(body,'$.fields.incarnation')=?2
+         AND ((?3 IS NOT NULL AND json_extract(body,'$.fields.event_key')=?3)
+           OR (?3 IS NULL AND json_extract(body,'$.fields.operation_id') NOT LIKE 'turn-%'))")?;
+    let rows = statement.query_map(params![agent, incarnation, execution], |row| row.get::<_, String>(0))?;
+    let mut matched: Option<fractal_schema::invocation::InvocationReceipt> = None;
+    for row in rows {
+        let body: Value = serde_json::from_str(&row?)?;
+        let receipt: fractal_schema::invocation::InvocationReceipt = serde_json::from_value(body["fields"].clone())?;
+        if matched.as_ref().is_some_and(|prior| prior.invocation_id != receipt.invocation_id
+            || prior.owner_attempt != receipt.owner_attempt || prior.owner_step != receipt.owner_step
+            || prior.owner_run != receipt.owner_run) { return Ok(None); }
+        matched = Some(receipt);
+    }
+    Ok(matched)
+}
+
 impl Store {
     /// Every durable agent invocation of this step, including failed/no-usage invocations.
     /// Usage comes from replicated response rollups plus this host's held latest readings;
@@ -138,7 +160,7 @@ impl Store {
     pub fn step_executions(&self, step_subject: &str) -> Result<Vec<StepExecution>> {
         smallclaims::touched::note_read(|| step_subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0d0d4dd29070 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(&canonical_sql(
             "SELECT id, kind, actor, body, accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND (kind LIKE 'work.%' OR kind='step-run.state') ORDER BY CANONICAL_ASC(claims)",
         ))?;
@@ -162,9 +184,12 @@ impl Store {
                     }
                 }
                 executions.push(StepExecution {
-                    id, step_subject: step_subject.to_owned(), attempt: attempt.unwrap_or(0),
+                    id: id.clone(), step_subject: step_subject.to_owned(), attempt: attempt.unwrap_or(0),
                     agent: agent.to_owned(),
                     incarnation_id: fields["claim_incarnation"].as_str().map(str::to_owned),
+                    invocation_id: response_invocation(&connection, agent,
+                        fields["claim_incarnation"].as_str().unwrap_or(""), Some(&id))?
+                        .map(|receipt| receipt.invocation_id),
                     declared_model: fields["declared_model"].as_str().map(str::to_owned),
                     trace_id: fields["trace_id"].as_str().map(str::to_owned),
                     fallback: fields["fallback"].as_bool(),
@@ -183,7 +208,7 @@ impl Store {
             }
         }
         for execution in &mut executions {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h04350d02a7bb owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
+            let mut statement = connection.prepare(&canonical_sql(
                 "SELECT body FROM claims WHERE subject=?1 AND kind='harness.usage'
                    AND json_extract(body,'$.fields.execution_id')=?2 ORDER BY CANONICAL_ASC(claims)",
             ))?;
@@ -359,6 +384,125 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn response_ownership_ends_at_expiry_before_the_ready_receipt() {
+        let store = Store::open_memory("source").unwrap();
+        let first = event(&store, STEP, "work.claimed", 0, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600,
+        }));
+        event(&store, STEP, "step-run.state", 700, json!({"attempt":1,"status":"ready"}));
+        let connection = store.readers.get();
+        assert_eq!(response_execution(&connection, AGENT, "one", 599).unwrap(),
+            Some((first.id.clone(), STEP.into())), "late ingestion retains genuine earlier responses");
+        assert_eq!(response_execution(&connection, AGENT, "one", 600).unwrap(), None);
+        assert_eq!(response_execution(&connection, AGENT, "one", 650).unwrap(), None);
+    }
+
+    #[test]
+    fn historical_lease_renewals_and_extensions_are_episode_and_time_fenced() {
+        let store = Store::open_memory("source").unwrap();
+        let first = event(&store, STEP, "work.claimed", 0, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600,
+        }));
+        event(&store, STEP, "work.renewed", 300, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":900,
+        }));
+        event(&store, STEP, "work.extended", 800, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":1200,
+        }));
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            tx.execute("INSERT INTO local_work_lease_renewals
+                (subject,attempt,lease_owner,lease_incarnation,lease_expires_at_unix_ms,updated_at_unix_ms)
+                VALUES(?1,1,?2,'one','1500','1100')", params![STEP, AGENT]).unwrap();
+            tx.commit().unwrap();
+        }
+        let connection = store.readers.get();
+        assert_eq!(execution_lease_at(&connection, &first.id, 200).unwrap(), Some(600));
+        assert_eq!(execution_lease_at(&connection, &first.id, 700).unwrap(), Some(900));
+        assert_eq!(execution_lease_at(&connection, &first.id, 1000).unwrap(), Some(1200));
+        assert_eq!(execution_lease_at(&connection, &first.id, 1300).unwrap(), Some(1500));
+        for at in [700, 1000, 1300] {
+            assert_eq!(response_execution(&connection, AGENT, "one", at).unwrap(),
+                Some((first.id.clone(), STEP.into())));
+        }
+        assert_eq!(response_execution(&connection, AGENT, "one", 1500).unwrap(), None);
+        drop(connection);
+        store.connection.write().execute("UPDATE local_work_lease_renewals SET attempt=2", []).unwrap();
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 1300).unwrap(), None,
+            "a different attempt's quiet renewal cannot extend the earlier claim");
+    }
+
+    #[test]
+    fn a_claim_without_lease_evidence_does_not_prove_response_ownership() {
+        let store = Store::open_memory("source").unwrap();
+        event(&store, STEP, "work.claimed", 100,
+            json!({"attempt":1,"claimant":AGENT,"claim_incarnation":"one"}));
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 150).unwrap(), None);
+    }
+
+    #[test]
+    fn overlapping_step_claims_are_unknown_not_latest_wins() {
+        let store = Store::open_memory("source").unwrap();
+        let first = claim(&store, 1, "one", 100);
+        event(&store, "step-run/example/generation/review", "work.claimed", 110,
+            json!({"attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600110}));
+        let connection = store.readers.get();
+        assert_eq!(response_execution(&connection, AGENT, "one", 105).unwrap(),
+            Some((first.id.clone(), STEP.into())));
+        assert_eq!(response_execution(&connection, AGENT, "one", 120).unwrap(), None);
+        drop(connection);
+        event(&store, "step-run/example/generation/review", "work.released", 130, json!({"attempt":1}));
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 140).unwrap(),
+            Some((first.id, STEP.into())));
+    }
+
+    #[test]
+    fn exact_claim_and_message_receipts_join_without_inherited_launch_guesses() {
+        let store = Store::open_memory("source").unwrap();
+        let first = claim(&store, 1, "one", 100);
+        let receipt = |key: &str, operation: &str, attempt: u32| json!({
+            "invocation_id":format!("invocation/{operation}"),"operation_id":operation,
+            "agent":AGENT,"phase":"observed","incarnation":"one","event_key":key,
+            "owner_step":STEP,"owner_attempt":attempt,
+        });
+        event(&store, AGENT, "harness.invocation", 101, receipt(&first.id, "turn-first", 1));
+        event(&store, AGENT, "harness.invocation", 102, receipt("message/wake", "turn-first", 1));
+        let connection = store.readers.get();
+        let bound = response_invocation(&connection, AGENT, "one", Some(&first.id)).unwrap().unwrap();
+        assert_eq!(bound.invocation_id, "invocation/turn-first");
+        assert_eq!(bound.owner_attempt, Some(1));
+        assert_eq!(response_invocation(&connection, AGENT, "one", Some("message/wake")).unwrap()
+            .unwrap().invocation_id, bound.invocation_id);
+        assert!(response_invocation(&connection, AGENT, "other", Some(&first.id)).unwrap().is_none());
+        assert!(response_invocation(&connection, AGENT, "one", Some("missing")).unwrap().is_none());
+        drop(connection);
+        assert_eq!(store.step_executions(STEP).unwrap()[0].invocation_id.as_deref(),
+            Some("invocation/turn-first"));
+        event(&store, AGENT, "harness.invocation", 103, receipt(&first.id, "turn-conflict", 1));
+        assert!(response_invocation(&store.readers.get(), AGENT, "one", Some(&first.id)).unwrap().is_none());
+    }
+
+    #[test]
+    fn launch_join_requires_unique_exact_verified_incarnation() {
+        let store = Store::open_memory("source").unwrap();
+        for (operation, incarnation) in [("launch", Some("one")), ("unverified", None)] {
+            event(&store, AGENT, "harness.invocation", 100, json!({
+                "invocation_id":format!("invocation/{operation}"),"operation_id":operation,
+                "agent":AGENT,"phase":"observed","incarnation":incarnation,
+            }));
+        }
+        assert_eq!(response_invocation(&store.readers.get(), AGENT, "one", None).unwrap()
+            .unwrap().invocation_id, "invocation/launch");
+        assert!(response_invocation(&store.readers.get(), AGENT, "", None).unwrap().is_none());
+        assert!(response_invocation(&store.readers.get(), AGENT, "other", None).unwrap().is_none());
+        event(&store, AGENT, "harness.invocation", 110, json!({
+            "invocation_id":"invocation/conflict","operation_id":"conflict",
+            "agent":AGENT,"phase":"observed","incarnation":"one",
+        }));
+        assert!(response_invocation(&store.readers.get(), AGENT, "one", None).unwrap().is_none());
+    }
     #[test]
     fn retries_and_reclaims_keep_distinct_invocations_even_without_usage() {
         let store = Store::open_memory("source").unwrap();

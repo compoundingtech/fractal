@@ -243,6 +243,8 @@ pub mod accounts;
 pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
+pub mod invocation_receipts;
+pub mod turn_invocations;
 pub mod roster_admission;
 
 pub mod adhoc_work;
@@ -10022,25 +10024,14 @@ pub fn insert_local_observation_tx(
             .and_then(|body| body.get("semantics"))
             .and_then(Value::as_str)
             == Some("response")
-        // A terminal response may carry identity/timing but no accounting observations.
-        // Keep that timeline evidence without reserving a spend receipt or inventing a
-        // zero-token, zero-cost response from missing counters.
-        && input.fields.get("body").is_some_and(|usage| {
+    {
+        // Identity-only responses retain their joins without becoming zero-cost spend.
+        let has_accounting = input.fields.get("body").is_some_and(|usage| {
             ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "total_tokens"]
-                .iter()
-                .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                .iter().any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
                 || usage.get("cost").and_then(Value::as_f64)
                     .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
-        })
-    {
-        let desired: Option<(Option<String>, Option<String>, Option<String>)> = transaction
-            .query_row(
-                "SELECT owner_run, owner_generation, owner_step FROM desired WHERE subject=?1",
-                [&input.subject],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
+        });
         let incarnation = input
             .fields
             .get("incarnation_id")
@@ -10054,19 +10045,6 @@ pub fn insert_local_observation_tx(
             .get("observed_at_unix_ms")
             .and_then(Value::as_u64)
             .map_or(observed_at, |at| (at as u128).min(observed_at));
-        let active_step: Option<(String, String, String)> = transaction
-            .query_row(
-                "SELECT subject, 'mission-run/' || run_id, 'run-generation/' || generation_id
-                 FROM step_runs WHERE lease_owner=?1 AND lease_incarnation=?2
-                   AND CAST(lease_expires_at_unix_ms AS INTEGER)>?3
-                   AND COALESCE(CAST(activated_at_unix_ms AS INTEGER), 0)<=?3
-                   AND status IN ('claimed', 'working', 'submitted')
-                 ORDER BY updated_at_unix_ms DESC LIMIT 1",
-                params![input.subject, incarnation, responded_at as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
         let execution = step_executions::response_execution(transaction, &input.subject, incarnation, responded_at)
             .map_err(internal)?;
         let execution_owner: Option<(String, String)> = if let Some((_, step)) = &execution {
@@ -10075,23 +10053,16 @@ pub fn insert_local_observation_tx(
                 [step], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional().map_err(internal)?
         } else { None };
-        let owner_run = if execution.is_some() {
-            execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("")
-        } else {
-            active_step.as_ref().map(|item| item.1.as_str())
-                .or_else(|| desired.as_ref().and_then(|item| item.0.as_deref())).unwrap_or("")
-        };
-        let owner_step = execution.as_ref().map(|item| item.1.as_str()).or_else(|| active_step
-            .as_ref()
-            .map(|item| item.0.as_str()))
-            .or_else(|| desired.as_ref().and_then(|item| item.2.as_deref()))
-            .unwrap_or("");
-        let owner_generation = if execution.is_some() {
-            execution_owner.as_ref().map(|item| item.1.as_str())
-        } else {
-            active_step.as_ref().map(|item| item.2.as_str())
-                .or_else(|| desired.as_ref().and_then(|item| item.1.as_deref()))
-        };
+        let invocation = step_executions::response_invocation(transaction, &input.subject, incarnation,
+            execution.as_ref().map(|item| item.0.as_str())).map_err(internal)?;
+        let owner_attempt: Option<u32> = if let Some((id, _)) = &execution {
+            transaction.query_row("SELECT json_extract(body,'$.fields.attempt') FROM claims WHERE id=?1",
+                [id], |row| row.get(0)).optional().map_err(internal)?.flatten()
+        } else { None };
+        // Launch lineage identifies the process, not whichever work it later performed.
+        let owner_run = execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("");
+        let owner_step = execution.as_ref().map(|item| item.1.as_str()).unwrap_or("");
+        let owner_generation = execution_owner.as_ref().map(|item| item.1.as_str());
         let usage = &input.fields["body"];
         let model = usage
             .get("model")
@@ -10147,10 +10118,13 @@ pub fn insert_local_observation_tx(
             "generation_id": owner_generation,
             "step_id": if owner_step.is_empty() { None } else { Some(owner_step) },
             "execution_id": execution.as_ref().map(|item| item.0.as_str()),
+            "invocation_id": invocation.as_ref().map(|receipt| receipt.invocation_id.as_str()),
+            "attempt": owner_attempt,
         });
         body["fields"]["host"] = Value::String(origin.to_owned());
         // What st charged this response, so the OpenTelemetry history carries the same cost
         // the graph's totals do.
+        if has_accounting {
         body["fields"]["spend"] = json!({
             "cost_microusd": cost_microusd,
             "basis": if reported_cost.is_some() {
@@ -10162,13 +10136,14 @@ pub fn insert_local_observation_tx(
             },
             "pricing": crate::pricing::PRICING_REVISION,
         });
+        }
         let source_id = input
             .fields
             .get("source_id")
             .and_then(Value::as_str)
             .or_else(|| input.fields.get("entry_id").and_then(Value::as_str))
             .unwrap_or("");
-        let new_response = responded_at
+        let new_response = has_accounting && responded_at
             >= observed_at.saturating_sub(USAGE_RESPONSE_HORIZON_MS)
             && transaction
                 .execute(
@@ -12055,6 +12030,7 @@ fn replicated_work_validation_fields<'a>(
         body,
         record.accepted_at_unix_ms,
     )?;
+    invocation_receipts::record_diagnostic_tx(transaction, origin, &record)?;
     Ok(record)
 }
 
@@ -12075,6 +12051,9 @@ pub fn append_receipt_claim_tx(
         step_executions::snapshot_claim(transaction, actor, &mut body)?;
     }
     smallclaims::store::idempotency::attach(&mut body, key)?;
+    let turn = if kind == "work.claimed" {
+        turn_invocations::bind_claim_tx(transaction, origin, subject, actor, &mut body)?
+    } else { None };
     let record = append_claim_tx(
         transaction,
         origin,
@@ -12086,6 +12065,10 @@ pub fn append_receipt_claim_tx(
         forced_batch,
     )?;
     register_operation_tx(transaction, &record)?;
+    if let Some(turn) = turn {
+        turn_invocations::record_claim_tx(transaction, origin, &record, turn)?;
+    }
+    turn_invocations::record_terminal_tx(transaction, origin, &record)?;
     Ok(record)
 }
 

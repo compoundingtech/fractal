@@ -2074,16 +2074,20 @@ enum UsageBy {
     Agent,
     Mission,
     Step,
+    Attempt,
+    Invocation,
     Model,
     Account,
     Host,
 }
 
 impl UsageBy {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Agent,
         Self::Mission,
         Self::Step,
+        Self::Attempt,
+        Self::Invocation,
         Self::Model,
         Self::Account,
         Self::Host,
@@ -2095,6 +2099,8 @@ impl UsageBy {
             Self::Agent => "agent",
             Self::Mission => "mission_run",
             Self::Step => "step",
+            Self::Attempt => "attempt",
+            Self::Invocation => "invocation_id",
             Self::Model => "model",
             Self::Account => "account",
             Self::Host => "host",
@@ -2104,6 +2110,7 @@ impl UsageBy {
     fn label(self) -> &'static str {
         match self {
             Self::Mission => "mission",
+            Self::Invocation => "invocation",
             other => other.field(),
         }
     }
@@ -11777,10 +11784,13 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     for by in groups {
         let mut totals = BTreeMap::<String, Vec<&Value>>::new();
         for row in rows {
-            let label = row[by.field()]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown");
+            let attempt_label = match (by, row["step"].as_str(), row["attempt"].as_u64()) {
+                (UsageBy::Attempt, Some(step), Some(attempt)) if !step.is_empty() =>
+                    Some(format!("{step} attempt {attempt}")),
+                _ => None,
+            };
+            let label = attempt_label.as_deref().or_else(|| row[by.field()].as_str())
+                .filter(|value| !value.is_empty()).unwrap_or("unknown");
             let label = match (by, declared.get(label)) {
                 (UsageBy::Account, Some(name)) => format!("{name} ({label})"),
                 _ => label.to_owned(),
@@ -19443,7 +19453,8 @@ fn admission_diagnostic(
         subject: subject.into(),
         kind: "harness.diagnostic".into(),
         actor: Some(subject.into()),
-        fields: BTreeMap::from([
+        fields: {
+            let mut fields = BTreeMap::from([
             (
                 "severity".into(),
                 json!(if failure.driver == Driver::Omp {
@@ -19463,7 +19474,16 @@ fn admission_diagnostic(
             ("code".into(), json!("harness-admission-failed")),
             ("reason".into(), json!(reason)),
             ("incarnation_id".into(), json!(incarnation)),
-        ]),
+            ]);
+            fields.insert("driver".into(), json!(failure.driver.as_str()));
+            if let Some(version) = &failure.producer_version {
+                fields.insert("producer_version".into(), json!(version));
+            }
+            if let Ok(invocation) = std::env::var(fractal_schema::invocation::ENV) {
+                fields.insert("invocation_id".into(), json!(invocation));
+            }
+            fields
+        },
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some(format!(

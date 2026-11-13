@@ -2462,11 +2462,24 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
         tx.commit().unwrap();
         record
     };
+    let bind_execution = |claim: &ClaimRecord, operation: &str, incarnation: &str, attempt: u32| {
+        let receipt = serde_json::from_value(json!({
+            "invocation_id":format!("invocation/{operation}"),"operation_id":operation,
+            "agent":agent,"phase":"observed","incarnation":incarnation,"event_key":claim.id,
+            "owner_step":step,"owner_attempt":attempt,
+        })).unwrap();
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        fractal_store::store::invocation_receipts::append_receipt_tx(&tx, store.origin(), &receipt).unwrap();
+        tx.commit().unwrap();
+    };
     let first = event("work.claimed", at,
         json!({"attempt":1,"claimant":agent,"claim_incarnation":"old","claim_expires_at_unix_ms":at+600_000}));
+    bind_execution(&first, "turn-old", "old", 1);
     event("work.failed", at + 200, json!({"attempt":1}));
     let second = event("work.claimed", at + 300,
         json!({"attempt":2,"claimant":agent,"claim_incarnation":"new","claim_expires_at_unix_ms":at+600_300}));
+    bind_execution(&second, "turn-new", "new", 2);
     let respond = |entry: &str, source: &str, incarnation: &str, time: u128, body: Value| {
         let mut input = timeline_observation(agent, incarnation, entry);
         input.fields.insert("entry_type".into(), json!("usage"));
@@ -2482,6 +2495,8 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
         "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100});
     let old = respond("old-a", "old-response", "old", at + 100, old_usage.clone());
     assert_eq!(old.fields["execution_id"], first.id);
+    assert_eq!(old.fields["invocation_id"], "invocation/turn-old");
+    assert_eq!(old.fields["attempt"], 1);
     assert_eq!(old.fields["cost_microusd"], 6_000);
     let duplicate = respond("old-b", "old-response", "old", at + 100, old_usage);
     assert_eq!(duplicate.fields["total_tokens"], 1100, "native source dedup is shared");
@@ -2491,6 +2506,8 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
     let new = respond("new-a", "new-response", "new", at + 400,
         json!({"semantics":"response","model":"unknown-local","input_tokens":7,"total_tokens":7}));
     assert_eq!(new.fields["execution_id"], second.id);
+    assert_eq!(new.fields["invocation_id"], "invocation/turn-new");
+    assert_eq!(new.fields["attempt"], 2);
     assert_eq!(new.fields["unpriced_tokens"], 7, "unknown pricing is not free");
     let executions = store.step_executions(step).unwrap();
     assert_eq!(executions.len(), 2);
@@ -2499,6 +2516,17 @@ fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
     assert_eq!(executions[1].usage.as_ref().unwrap().total_tokens, 7);
     assert_eq!(executions[0].status.as_deref(), Some("failed"));
     assert_eq!(executions[1].fallback, None);
+    assert_eq!(executions[0].invocation_id.as_deref(), Some("invocation/turn-old"));
+    assert_eq!(executions[1].invocation_id.as_deref(), Some("invocation/turn-new"));
+    let mut identity_only = timeline_observation(agent, "new", "identity-only");
+    identity_only.fields.insert("entry_type".into(), json!("usage"));
+    identity_only.fields.insert("body".into(), json!({"semantics":"response","model":"unknown-local"}));
+    let (identity_only, _) = store.append_claim_outcome(&identity_only).unwrap();
+    assert_eq!(identity_only.body["fields"]["attribution"]["invocation_id"], "invocation/turn-new");
+    assert_eq!(identity_only.body["fields"]["attribution"]["attempt"], 2);
+    assert!(identity_only.body["fields"].get("spend").is_none());
+    assert_eq!(store.step_executions(step).unwrap()[1].usage.as_ref().unwrap().total_tokens, 7,
+        "identity-only evidence does not reserve a spend receipt");
 }
 
 #[test]

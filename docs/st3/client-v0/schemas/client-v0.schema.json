@@ -1896,6 +1896,9 @@
         "agent": { "$ref": "#/$defs/Id" },
         "mission_run": { "$ref": "#/$defs/Id" },
         "step": { "$ref": "#/$defs/Id" },
+        "execution_id": { "type": "string", "description": "Immutable work.claimed accounting key, when known." },
+        "invocation_id": { "type": "string", "description": "Exact durable launch/turn receipt identity. Absent means unknown." },
+        "attempt": { "type": "integer", "minimum": 0 },
         "model": { "type": "string" },
         "account": { "type": "string" },
         "account_ref": { "type": "string", "description": "The declared account this row's spend is read against, when one claims its label. Absent on older servers." },
@@ -2277,6 +2280,7 @@
       "type": "object",
       "required": ["id", "step_subject", "attempt", "agent", "incarnation_id", "declared_model", "observed_models", "fallback", "started_at_unix_ms", "ended_at_unix_ms", "duration_ms", "status", "trace_id", "exit_evidence", "usage"],
       "properties": {
+        "invocation_id": { "type": ["string", "null"], "description": "Exact durable launch/turn receipt identity. Absent or null means unknown." },
         "id": { "type": "string", "description": "Durable work.claimed claim ID; invocation identity, not the logical attempt." },
         "step_subject": { "type": "string" },
         "attempt": { "type": "integer", "minimum": 1 },
@@ -3722,7 +3726,7 @@
         "cost_components": {"$ref": "#/$defs/TimelineResponseCostComponents"},
         "currency": {"type": "string"},
         "provider_quota": {"$ref": "#/$defs/TimelineProviderQuota"},
-        "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}}},
+        "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}, "execution_id": {"type": ["string", "null"]}, "invocation_id": {"type": ["string", "null"]}, "attempt": {"type": ["integer", "null"], "minimum": 0}}},
         "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}
       },
       "allOf": [
