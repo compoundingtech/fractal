@@ -2,75 +2,58 @@ import AttentionCore
 import Charts
 import SwiftUI
 
-/// What was left of an objective or budget, one bar per step of the last 24 hours. A bar's
-/// height is the step's lowest reading; a spent step (0) has no height, so it is marked with a
-/// cross; an unmeasured step is a grey stub, never a zero. The nearly-spent zone is a dashed
-/// rule in the full chart and a shaded band in the mini one, where a 2 pt rule would vanish.
-/// Hover shows the step's reading and time.
+/// What was left of an objective or budget, one bar per step of the last 24 hours, with hour and
+/// percent axes. A bar's height is the step's lowest reading. Steps without a bar carry a mark on
+/// the baseline that differs in shape, not only color: a spent step (0) a red cross, an
+/// unmeasured step a grey ring, never a zero or a bar. A key under the chart names the marks
+/// that appear. The nearly-spent zone is a dashed rule. Hover shows the step's reading and time.
 struct SloHistogram: View {
-  enum Size {
-    /// A sparkline beside a row's value: no axes.
-    case mini
-    /// Under a disclosed row or in a grid cell: hour and percent axes.
-    case full
-
-    var height: CGFloat {
-      switch self {
-      case .mini: 22
-      case .full: 84
-      }
-    }
-
-    /// An unmeasured step's height in percent: tall enough to tell from a spent step.
-    var stub: Double {
-      switch self {
-      case .mini: 25
-      case .full: 4
-      }
-    }
-  }
-
   let history: SloHistory
   let about: String
-  let size: Size
   @State private var hovered: SloHistory.Bucket?
 
   var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      chart
+      HistogramKey(levels: Set(history.buckets.map { BucketLevel($0.remainingPercent) }))
+    }
+  }
+
+  private var chart: some View {
     Chart {
-      if size == .mini {
-        RectangleMark(
-          xStart: .value("Hour", history.since), xEnd: .value("Hour", history.until),
-          yStart: .value("Left", 0), yEnd: .value("Left", SloTone.nearlySpentPercent)
-        )
-        .foregroundStyle(Color.gray.opacity(0.18))
-        .accessibilityLabel("Nearly spent below \(Int(SloTone.nearlySpentPercent)) percent")
-      }
       ForEach(history.buckets) { bucket in
         let level = BucketLevel(bucket.remainingPercent)
-        BarMark(
-          x: .value("Hour", bucket.start, unit: .hour),
-          yStart: .value("Left", 0),
-          yEnd: .value("Left", level == .unmeasured ? size.stub : max(bucket.remainingPercent ?? 0, 0)),
-          width: .ratio(0.72)
-        )
-        .foregroundStyle(level.color.opacity(hovered.map { $0.id == bucket.id } ?? true ? 1 : 0.45))
-        .accessibilityLabel(Self.hour(bucket.start))
-        .accessibilityValue(level.describe(bucket.remainingPercent))
-        if level == .spent {
+        let emphasis = hovered.map { $0.id == bucket.id } ?? true ? 1.0 : 0.45
+        if level == .unmeasured {
           PointMark(x: .value("Hour", bucket.start, unit: .hour), y: .value("Left", 0))
-            .symbol(.cross)
-            .symbolSize(size == .mini ? 20 : 22)
-            .foregroundStyle(.red)
-            .accessibilityHidden(true)
+            .symbol { BaselineRing() }
+            .opacity(emphasis)
+            .accessibilityLabel(Self.hour(bucket.start))
+            .accessibilityValue(level.describe(bucket.remainingPercent))
+        } else {
+          BarMark(
+            x: .value("Hour", bucket.start, unit: .hour),
+            yStart: .value("Left", 0),
+            yEnd: .value("Left", max(bucket.remainingPercent ?? 0, 0)),
+            width: .ratio(0.72)
+          )
+          .foregroundStyle(level.color.opacity(emphasis))
+          .accessibilityLabel(Self.hour(bucket.start))
+          .accessibilityValue(level.describe(bucket.remainingPercent))
+          if level == .spent {
+            PointMark(x: .value("Hour", bucket.start, unit: .hour), y: .value("Left", 0))
+              .symbol(.cross)
+              .symbolSize(22)
+              .foregroundStyle(.red)
+              .accessibilityHidden(true)
+          }
         }
       }
-      if size == .full {
-        RuleMark(y: .value("Nearly spent", SloTone.nearlySpentPercent))
-          .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-          .foregroundStyle(Color.gray)
-          .accessibilityLabel("Nearly spent below \(Int(SloTone.nearlySpentPercent)) percent")
-      }
-      if let hovered, size == .full {
+      RuleMark(y: .value("Nearly spent", SloTone.nearlySpentPercent))
+        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+        .foregroundStyle(Color.gray)
+        .accessibilityLabel("Nearly spent below \(Int(SloTone.nearlySpentPercent)) percent")
+      if let hovered {
         RuleMark(x: .value("Hour", hovered.start, unit: .hour))
           .foregroundStyle(.tertiary)
           .annotation(position: .top, spacing: 2, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
@@ -81,20 +64,16 @@ struct SloHistogram: View {
     .chartYScale(domain: 0...100)
     .chartXScale(domain: history.since...history.until)
     .chartXAxis {
-      if size == .full {
-        // Quarter marks inside the period, so no label hangs past the plot's edges.
-        AxisMarks(values: (1...3).map { history.since.addingTimeInterval(history.until.timeIntervalSince(history.since) * Double($0) / 4) }) { _ in
-          AxisGridLine()
-          AxisValueLabel(format: .dateTime.hour())
-        }
+      // Quarter marks inside the period, so no label hangs past the plot's edges.
+      AxisMarks(values: (1...3).map { history.since.addingTimeInterval(history.until.timeIntervalSince(history.since) * Double($0) / 4) }) { _ in
+        AxisGridLine()
+        AxisValueLabel(format: .dateTime.hour())
       }
     }
     .chartYAxis {
-      if size == .full {
-        AxisMarks(position: .trailing, values: [0, 50, 100]) { value in
-          AxisGridLine()
-          AxisValueLabel { Text("\(value.as(Int.self) ?? 0)%") }
-        }
+      AxisMarks(position: .trailing, values: [0, 50, 100]) { value in
+        AxisGridLine()
+        AxisValueLabel { Text("\(value.as(Int.self) ?? 0)%") }
       }
     }
     .chartOverlay { proxy in
@@ -113,8 +92,7 @@ struct SloHistogram: View {
           }
       }
     }
-    .frame(height: size.height)
-    .help(size == .mini ? hovered.map(BucketTip.text) ?? "\(about): what was left, last 24 hours" : "")
+    .frame(height: 84)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("\(about), what was left over the last 24 hours")
   }
@@ -122,9 +100,47 @@ struct SloHistogram: View {
   static func hour(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated).hour().minute()) }
 }
 
+/// An unmeasured step on the baseline: an outlined ring, unlike a spent step's cross or any bar.
+private struct BaselineRing: View {
+  var body: some View {
+    // Explicit grey: `.secondary` inside Charts resolves to the accent color.
+    Circle().strokeBorder(Color.gray, lineWidth: 1.25).frame(width: 7, height: 7)
+  }
+}
+
+/// Names the baseline marks the chart shows, so their shapes need no color to read.
+private struct HistogramKey: View {
+  let levels: Set<BucketLevel>
+
+  var body: some View {
+    if levels.contains(.spent) || levels.contains(.unmeasured) {
+      HStack(spacing: 12) {
+        if levels.contains(.spent) {
+          Label {
+            Text("spent")
+          } icon: {
+            Image(systemName: "xmark").foregroundStyle(.red)
+          }
+        }
+        if levels.contains(.unmeasured) {
+          Label {
+            Text("not measured")
+          } icon: {
+            BaselineRing()
+          }
+        }
+      }
+      .labelStyle(.titleAndIcon)
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .accessibilityHidden(true)
+    }
+  }
+}
+
 /// A step's state. Color follows it, and so does a second cue: spent steps carry a cross,
-/// unmeasured ones are grey stubs, nearly spent ones sit in the nearly-spent zone.
-enum BucketLevel: Equatable {
+/// unmeasured ones a ring instead of a bar, nearly spent ones sit below the nearly-spent rule.
+enum BucketLevel: Hashable {
   case healthy, nearlySpent, spent, unmeasured
 
   init(_ remaining: Double?) {
@@ -174,9 +190,5 @@ private struct BucketTip: View {
 
   static func when(_ bucket: SloHistory.Bucket) -> String {
     "\(RelativeTime.relative(bucket.start, now: .now)) · \(SloHistogram.hour(bucket.start))–\(bucket.end.formatted(date: .omitted, time: .shortened))"
-  }
-
-  static func text(_ bucket: SloHistory.Bucket) -> String {
-    "\(BucketLevel(bucket.remainingPercent).describe(bucket.remainingPercent)), \(when(bucket))"
   }
 }

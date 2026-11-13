@@ -223,33 +223,28 @@ The panel's views live in the `TrayViews` target and read only `AttentionCore`.
 answering, quiet, read-only, degraded, unconfigured; speech: speaking, in a
 call, muted) for the design Storybook in `design/`, from the Nix-built gallery
 (`nix run ./flakes/attention-tray#gallery -- <dir> …`). Every manifest records
-the source rev. It needs a Mac with a login session and has three outputs:
+the source rev. It needs a Mac with a login session and has two outputs:
 
-- `devenv tasks run attention-tray:gallery`: the shipped design in every
-  scenario, light and dark, as `@2x` PNGs plus `manifest.json`, via the same
-  `NSHostingView` + `cacheDisplay` path as snapshot mode. Window-server
-  materials (the menu-bar window's Liquid Glass) are not in these renders; the
-  Storybook labels them "no materials". The notification scenarios render
-  its content model (`SpeechNoticeView`: text fields and actions), not macOS
-  notification chrome, which only Notification Center draws. Committed.
-- `devenv tasks run attention-tray:gallery-explore`: every combination of the
-  open design variants (`TrayDesign`: L layout, A ask row, H header, S objective
-  history; each L2 page) in the busy, quiet and degraded scenarios, flat, into
-  `renders/explore/` for the Exploration story. Gitignored.
+- `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
+  as `@2x` PNGs, and the status item in every state, plus `manifest.json`,
+  via the same `NSHostingView` + `cacheDisplay` path as snapshot mode.
+  Window-server materials (the menu-bar window's Liquid Glass) are not in
+  these renders; the Storybook labels them "no materials". The notification
+  scenarios render its content model (`SpeechNoticeView`: text fields and
+  actions), not macOS notification chrome, which only Notification Center
+  draws. Committed.
 - `devenv tasks run attention-tray:gallery-capture`: real captures. The gallery
   runs the actual `MenuBarExtra`, opens it under its status item and captures
   the region with ScreenCaptureKit over a fixed backdrop, other apps' menu-bar
-  items masked: the shipped design in every scenario, one variant change at a
-  time in the busy scenario (`--all`: every combination), and each menu-bar
-  variant (M) in every status state, into `renders/capture/` plus
-  `capture.json`, committed when a run produces them (until then the Storybook
-  shows the fallbacks). Captures show windows on the real screen, so they
-  run only with the person's consent (`ATTENTION_TRAY_CAPTURE_CONSENT=1`,
-  `--consent`), wait until the Mac has had no input for ten minutes
-  (`--away <seconds>`), abort and write nothing on any input, and need Screen
-  Recording for the terminal they run from (System Settings › Privacy &
-  Security › Screen & System Audio Recording). `--only <text>` redoes the
-  captures whose file name contains it.
+  items masked: every scenario, and the status item in every state, into
+  `renders/capture/` plus `capture.json`, committed when a run produces them
+  (until then the Storybook shows the fallbacks). Captures show windows on the
+  real screen, so they run only with the person's consent
+  (`ATTENTION_TRAY_CAPTURE_CONSENT=1`, `--consent`), wait until the Mac has had
+  no input for ten minutes (`--away <seconds>`), abort and write nothing on any
+  input, and need Screen Recording for the terminal they run from (System
+  Settings › Privacy & Security › Screen & System Audio Recording).
+  `--only <text>` redoes the captures whose file name contains it.
 
 ## mbp2025 rollout: root agent and Johannes only
 

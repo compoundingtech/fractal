@@ -5,6 +5,7 @@ import {
   regenerateCommand,
   resolvePanel,
   scenarioById,
+  v2History,
   type Appearance,
   type ImageSource,
   type ResolvedImage,
@@ -16,6 +17,13 @@ const placeholderSize = { width: 400, height: 320 }
 const sourceLabel: Record<ImageSource, string> = {
   capture: 'Real capture · window server, Liquid Glass',
   fallback: 'Fallback · cacheDisplay, no materials, controls drawn inactive',
+  history: 'V2 history · cacheDisplay, frozen',
+}
+
+const sourceRev: Record<ImageSource, string | null | undefined> = {
+  capture: captureManifest?.trayRev,
+  fallback: manifest?.trayRev,
+  history: v2History?.trayRev,
 }
 
 /** Props of {@link RenderFigure}. */
@@ -29,12 +37,12 @@ export interface RenderFigureProps {
 
 /**
  * One generated image at point size on the window background of its appearance, captioned with
- * its title, appearance and source (real capture or flat fallback). A missing image shows a
- * labelled placeholder of the same footprint with the command that regenerates it.
+ * its title, appearance and source (real capture, flat fallback or frozen V2). A missing image
+ * shows a labelled placeholder of the same footprint with the command that regenerates it.
  */
 export const RenderFigure = ({ image, title, appearance, missing }: RenderFigureProps) => {
   const size = image ?? placeholderSize
-  const rev = image?.source === 'capture' ? captureManifest?.trayRev : manifest?.trayRev
+  const rev = sourceRev[image?.source ?? 'fallback']
   return (
     <figure className="at-panel" data-appearance={appearance} data-source={image?.source}>
       {image?.url === undefined ? (
@@ -81,25 +89,20 @@ export interface RenderedPanelProps {
   readonly scenario: string
   /** Forced appearance; by default the Storybook appearance (macOS unless overridden). */
   readonly appearance?: Appearance
-  /** Design combination (`L1-A2-H3-S1`); the current design by default. */
-  readonly panel?: string
-  /** Page of the segmented layout. */
-  readonly page?: string | null
   /** Caption title; the scenario title by default. */
   readonly title?: string
 }
 
 /** The best image of a panel: the real capture when there is one, else the flat render. */
-export const RenderedPanel = ({ scenario, appearance, panel, page, title }: RenderedPanelProps) => {
+export const RenderedPanel = ({ scenario, appearance, title }: RenderedPanelProps) => {
   const storyAppearance = useAppearance()
   const resolvedAppearance = appearance ?? storyAppearance
-  const image = resolvePanel({ panel, page, scenario, appearance: resolvedAppearance })
   return (
     <RenderFigure
-      image={image}
+      image={resolvePanel({ scenario, appearance: resolvedAppearance })}
       title={title ?? scenarioById(scenario)?.title ?? scenario}
       appearance={resolvedAppearance}
-      missing={[panel, page, scenario, resolvedAppearance].filter(Boolean).join('-')}
+      missing={`${scenario}-${resolvedAppearance}`}
     />
   )
 }

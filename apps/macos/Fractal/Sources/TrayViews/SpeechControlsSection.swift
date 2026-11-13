@@ -10,10 +10,7 @@ struct SpeechControlsSection: View {
 
   var body: some View {
     let now = Date.now
-    PanelSection(
-      title: "Speech", aside: SpeechText.summary(speech, now: now),
-      startsOpen: speech.current != nil || !speech.queue.isEmpty || speech.call.inCall
-    ) {
+    PanelSection(title: "Speech", aside: SpeechText.summary(speech, now: now)) {
       if let current = speech.current { NowSpeaking(record: current, speech: speech) }
       ForEach(speech.queue) { record in QueuedRow(record: record, speech: speech) }
       if speech.call.inCall { CallRow(speech: speech) }

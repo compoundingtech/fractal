@@ -141,91 +141,46 @@ html[data-appearance='dark'] body {
   color: #d97706;
 }
 
+.at-source[data-source='history'] {
+  color: #8e8e93;
+}
+
 .at-stack {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
 }
 
-.at-controls {
+/* One V2 option: its id, description and images; the picked one is outlined. */
+.at-option {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  max-width: 980px;
-  padding: 14px 16px;
+  gap: 6px;
+  max-width: 460px;
+  padding: 10px;
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: rgb(127 127 127 / 10%);
 }
 
-.at-picker-label {
-  margin-bottom: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  opacity: 0.7;
+.at-option[data-picked='true'] {
+  border-color: #0a84ff;
 }
 
-.at-picker-row {
+.at-option-heading {
   display: flex;
   align-items: center;
-  gap: 12px;
-}
-
-.at-segmented {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 8px;
-  background: rgb(127 127 127 / 18%);
-}
-
-.at-segmented button {
-  position: relative;
-  min-width: 44px;
-  padding: 3px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.at-segmented button[aria-pressed='true'] {
-  background: rgb(255 255 255 / 90%);
-  color: #111;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
-}
-
-.at-segmented button:focus-visible {
-  outline: 2px solid #0a84ff;
-  outline-offset: 1px;
-}
-
-.at-current-dot {
-  position: absolute;
-  top: 3px;
-  right: 4px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #0a84ff;
-}
-
-.at-review-pick {
-  margin-left: 3px;
-  font-size: 10px;
-  color: #b8860b;
-}
-
-.at-picker-description {
-  font-size: 12px;
-  opacity: 0.8;
-}
-
-.at-compare,
-.at-selection {
+  gap: 8px;
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.at-pick {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #0a84ff;
+  color: #fff;
+  font-size: 11px;
 }
 
 .at-checklist {

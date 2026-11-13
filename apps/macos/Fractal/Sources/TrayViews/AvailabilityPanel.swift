@@ -7,9 +7,7 @@ struct AvailabilitySection: View {
   let model: AttentionModel
 
   var body: some View {
-    PanelSection(
-      title: "Availability", aside: model.availability.value.map { Self.summary($0.availability) }, startsOpen: false
-    ) {
+    PanelSection(title: "Availability", aside: model.availability.value.map { Self.summary($0.availability) }) {
       SectionFailure(state: model.availability.state)
       if let snapshot = model.availability.value {
         AxisRows(availability: snapshot.availability, model: model)
@@ -21,7 +19,7 @@ struct AvailabilitySection: View {
       if let availability = model.availability.value?.availability { PresenceFooter(availability: availability) }
     }
     if let snapshot = model.availability.value {
-      PanelSection(title: "Note for Agents", aside: snapshot.note == nil ? "none" : "set", startsOpen: false) {
+      PanelSection(title: "Note for Agents", aside: snapshot.note == nil ? "none" : "set") {
         NoteRow(note: snapshot.note, model: model)
       }
     }

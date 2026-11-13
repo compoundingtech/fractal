@@ -17,26 +17,29 @@ Appearance menu forces Light or Dark.
 
 ## Stories
 
+- `AttentionTray/V3`: the shipped design. `Locked` lists Johannes' picks (L1 A3 H3 S2 M3) and the
+  decisions carried from V2 (K1–K12), then the status item in every state and every scenario;
+  `LightAndDark` puts the busy inbox side by side.
 - `AttentionTray/Panel`: the shipped design per scenario, plus `AllStates` (light and dark).
-- `AttentionTray/MenuBar`: the status item per variant (M1–M3) and state.
-- `AttentionTray/V2`: `Exploration` (the locked decisions K1–K12, then pick L/A/H/S/M by ID and a
-  scenario; a dot marks the shipped option, ★ the HIG review's pick) and `Current`.
+- `AttentionTray/MenuBar`: the status item per state, plus `AllStates` (light and dark).
+- `AttentionTray/V2`: history. `Exploration` shows the V2 options per dimension (L, A, H, S, M) as
+  frozen renders, the pick marked; the variant code that drew them is gone.
 - `AttentionTray/Guidelines`: the HIG/WWDC sources the design follows, first-party benchmarks and a
   pass/partial/fail checklist for the shipped design.
 
 ## Renders
 
-`renders/` holds three generated sets, each with its manifest:
+`renders/` holds three sets, each with its manifest:
 
-| Set                      | Files                                                           | Committed | Regenerate (on a Mac)                                                                                    |
-| ------------------------ | --------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
-| Fallback, shipped design | `<scenario>-<appearance>.png`, `menubar-*.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                |
-| Real captures            | `capture/*.png`, `capture.json`                                 | when run  | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
-| Exploration              | `explore/*.png`, `explore.json`                                 | no        | `devenv tasks run attention-tray:gallery-explore`                                                        |
+| Set           | Files                                                                              | Committed | Regenerate (on a Mac)                                                                                    |
+| ------------- | ---------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| Fallback      | `<scenario>-<appearance>.png`, `menubar-<state>-<appearance>.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                |
+| Real captures | `capture/*.png`, `capture.json`                                                    | when run  | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
+| V2 history    | `v2/*.png`, `v2/v2.json`                                                           | yes       | never: frozen from the V2 variant code                                                                   |
 
 Real captures are committed when a consented capture run produces them; without them every story
-shows the flat fallback. A render missing from a manifest or from disk shows a labelled placeholder instead of failing the
-build; without `explore/` the Exploration story says how to generate it.
+shows the flat fallback. A render missing from a manifest or from disk shows a labelled placeholder
+instead of failing the build.
 
 ## Run
 

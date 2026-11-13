@@ -115,14 +115,18 @@ private struct Content {
     (0..<SloHistoryRequest.steps).map { start + (end - start) * Double($0) / Double(SloHistoryRequest.steps - 1) }
   }
 
-  /// The urgent-asks objective holds, then misses the last four hours; the error budget burns
-  /// down to 8%; flakes were never measured; merge latency has a gap of two unmeasured hours.
+  /// The urgent-asks objective holds with two unmeasured hours, then misses the last four; the
+  /// error budget burns down to 8%; flakes were never measured; merge latency has a gap of two
+  /// unmeasured hours.
   var strainedHistories: [String: [Double?]] {
+    var answered = Array(steps(90, 60).prefix(20)) + [0, 0, 0, 0]
+    answered[6] = nil
+    answered[7] = nil
     var latency = steps(70, 55)
     latency[9] = nil
     latency[10] = nil
     return [
-      "asks-answered": Array(steps(90, 60).prefix(20)) + [0, 0, 0, 0],
+      "asks-answered": answered,
       "fractal/merge-latency/p95": latency,
       "ci-green": steps(98, 96),
       "error-budget": steps(100, 8),
@@ -247,9 +251,6 @@ let scenarios: [Scenario] = [
     AttentionModel(adapter: nil)
   },
 ]
-
-/// The scenarios the Exploration story compares variants in.
-let exploreScenarioIDs = ["busy", "quiet", "degraded"]
 
 /// Menu-bar status item states; the panel stays closed while these are captured.
 @MainActor private func menuBarModel(

@@ -3,13 +3,13 @@ import SwiftUI
 
 // MARK: - Asks
 
-/// The open asks as one grouped section; `AskRow` follows the design's row variant.
+/// The open asks as one grouped section of disclosure rows.
 struct AsksSection: View {
   let model: AttentionModel
 
   var body: some View {
     let asks = model.asks
-    PanelSection(title: "Asks", aside: asks.isEmpty ? "none" : "\(asks.count)", startsOpen: !asks.isEmpty) {
+    PanelSection(title: "Asks", aside: asks.isEmpty ? "none" : "\(asks.count)") {
       SectionFailure(state: model.attention.state)
       if !model.canAnswer, model.attention.value != nil, asks.contains(where: { $0.role == .ask(.native) }) {
         Label(
@@ -44,18 +44,17 @@ struct AsksSection: View {
   }
 }
 
-/// One ask. All variants share the answer state, the draft and the send path; they differ in
-/// how much shows before the person reaches for it. Every control is in the view hierarchy from
-/// the start (nothing waits for a hover), so the keyboard and VoiceOver reach all of them.
+/// One ask: a compact row whose disclosure opens the detail and the inline answer. The first ask
+/// starts open, and so does any ask the person has started answering. Every control inside is in
+/// the view hierarchy from the start (nothing waits for a hover), so the keyboard and VoiceOver
+/// reach all of them.
 private struct AskRow: View {
   let record: AttentionRecord
   let model: AttentionModel
   let isFirst: Bool
   /// This ask's recommended answer is the panel's one prominent button.
   let leads: Bool
-  @Environment(\.trayDesign) private var design
   @State private var expanded: Bool?
-  @State private var composing = false
   @FocusState private var editing: Bool
 
   private var choices: [AnswerChoice] { AnswerChoice.choices(for: record) }
@@ -65,15 +64,11 @@ private struct AskRow: View {
   private var words: String { draft.words }
   private var selected: String? { draft.selected }
   /// The person has started answering: never hide what they typed or picked.
-  private var inProgress: Bool { editing || composing || !draft.isEmpty || state != nil }
+  private var inProgress: Bool { editing || !draft.isEmpty || state != nil }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      switch design.askRow {
-      case .a1: compact
-      case .a2: inline
-      case .a3: disclosure
-      }
+      disclosure
       if let state { WriteStatusView(state: state, write: .answer).padding(.leading, AskSymbol.inset) }
       // While speaking, the Read Aloud control itself says so and stops it.
       if let speech = model.speech?.status[record.id], speech != .speaking {
@@ -88,40 +83,13 @@ private struct AskRow: View {
         model.focusedInput = nil
       }
     }
-    // A row removed while its field has focus (a chip, page or section switch, or the card
-    // leaving) never reports the blur.
+    // A row removed while its field has focus (a chip switch, or the card leaving) never
+    // reports the blur.
     .onDisappear {
       if model.focusedInput == record.id { model.focusedInput = nil }
     }
   }
 
-  // A2: everything inline.
-  private var inline: some View {
-    HStack(alignment: .firstTextBaseline, spacing: AskSymbol.spacing) {
-      AskSymbol(record: record)
-      VStack(alignment: .leading, spacing: 6) {
-        AskText(record: record, expanded: true)
-        if !committed { controls(.inline) }
-      }
-    }
-  }
-
-  // A1: one compact row with an Answer pop-up menu.
-  private var compact: some View {
-    HStack(alignment: .firstTextBaseline, spacing: AskSymbol.spacing) {
-      AskSymbol(record: record)
-      VStack(alignment: .leading, spacing: 6) {
-        HStack(alignment: .firstTextBaseline) {
-          AskText(record: record, expanded: false)
-          Spacer(minLength: 8)
-          if !committed { controls(.menu) }
-        }
-        if !committed && (composing || !draft.isEmpty) { wordsField }
-      }
-    }
-  }
-
-  // A3: compact until disclosed; the first ask starts open.
   private var disclosure: some View {
     let open = Binding(get: { expanded ?? (isFirst || inProgress) }, set: { expanded = $0 })
     return DisclosureGroup(isExpanded: open) {
@@ -129,34 +97,30 @@ private struct AskRow: View {
         if !record.detail.isEmpty, record.detail != record.title {
           Text(record.detail).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
         }
-        if !committed { controls(.inline) }
+        if !committed { controls }
       }
       .padding(.leading, AskSymbol.inset)
       .padding(.top, 2)
     } label: {
       HStack(alignment: .firstTextBaseline, spacing: AskSymbol.spacing) {
         AskSymbol(record: record)
-        AskText(record: record, expanded: false, showsDetail: false)
+        AskText(record: record)
       }
     }
     .disclosureGroupStyle(.trailingChevron)
   }
 
-  private enum Presentation { case inline, menu }
-
   private var answersHere: Bool { record.role == .ask(.native) && model.canAnswer }
 
-  @ViewBuilder private func controls(_ presentation: Presentation) -> some View {
-    if presentation == .menu {
-      answerMenu
-    } else if answersHere {
+  @ViewBuilder private var controls: some View {
+    if answersHere {
       inlineAnswer
     } else {
       HStack(spacing: 12) {
         Link(destination: record.url) { Label("Answer in Fractal", systemImage: "arrow.up.forward.app") }
           .help(record.url.absoluteString)
         Spacer(minLength: 8)
-        ReadAloudButton(record: record, model: model, compact: true)
+        ReadAloudButton(record: record, model: model)
       }
       .buttonStyle(.borderless)
       .controlSize(.small)
@@ -177,7 +141,7 @@ private struct AskRow: View {
     }
     if choices.contains(where: { $0.words != .none }) { wordsField }
     HStack(spacing: 12) {
-      ReadAloudButton(record: record, model: model, compact: true)
+      ReadAloudButton(record: record, model: model)
       Spacer(minLength: 8)
       Link(destination: record.url) { Label("Open in Fractal", systemImage: "arrow.up.forward") }
         .help(record.url.absoluteString)
@@ -185,42 +149,6 @@ private struct AskRow: View {
     .buttonStyle(.borderless)
     .controlSize(.small)
     .font(.callout)
-  }
-
-  /// A1: every answer in one pop-up menu; an ask answered in Fractal gets the same menu with
-  /// only Read Aloud and the link.
-  private var answerMenu: some View {
-    Menu("Answer") {
-      if answersHere {
-        ForEach(choices.filter(\.isOption)) { choice in
-          Button(choice.recommended ? "\(choice.label) (Recommended)" : choice.label) { pick(choice) }
-            .disabled(sending)
-        }
-        if choices.contains(where: { $0.words != .none }) {
-          Button("Answer in Your Own Words…") {
-            composing = true
-            editing = true
-          }
-        }
-        if let nothing = choices.first(where: { $0.kind == .nothing }) {
-          Divider()
-          Button(nothing.label) { send(nothing) }.disabled(sending || !words.isEmpty)
-        }
-        Divider()
-      }
-      if let speech = model.speech {
-        if speech.status[record.id] == .speaking {
-          Button("Stop Speaking") { speech.skip(id: record.id) }
-        } else {
-          Button("Read Aloud") { model.speakAloud(record) }
-        }
-      }
-      Link(answersHere ? "Open in Fractal" : "Answer in Fractal", destination: record.url)
-    }
-    .menuStyle(.button)
-    .controlSize(.small)
-    .fixedSize()
-    .help("Answer this ask")
   }
 
   /// Only the leading ask's recommended answer is prominent, and only while nothing is being
@@ -359,25 +287,16 @@ private struct AskSymbol: View {
   }
 }
 
-/// Title, detail and the asker/age/deadline line.
+/// The disclosure label: title and the asker/age/deadline line (the detail opens below).
 private struct AskText: View {
   let record: AttentionRecord
-  let expanded: Bool
-  var showsDetail = true
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(record.title)
         .fontWeight(.medium)
-        .lineLimit(expanded ? nil : 2)
+        .lineLimit(2)
         .fixedSize(horizontal: false, vertical: true)
-      if showsDetail, !record.detail.isEmpty, record.detail != record.title {
-        Text(record.detail)
-          .font(.callout)
-          .foregroundStyle(.secondary)
-          .lineLimit(expanded ? 12 : 1)
-          .textSelection(.enabled)
-      }
       RecordMeta(record: record)
     }
   }
