@@ -20,6 +20,35 @@ use super::{
     text, theme, thread,
 };
 
+const DRAFT_COLLISION: &str = "This item has different saved drafts. Both drafts are kept. Combine saved drafts to edit both together; nothing will be sent.";
+const DRAFT_LOCKED_COLLISION: &str = "Both saved drafts are kept. Settle the original thread delivery before combining them; its request cannot be rewritten.";
+const DRAFT_COMBINED: &str = "Both saved drafts were combined for editing. Nothing has been sent.";
+
+fn start_draft_text<'a>(
+    texts: &'a HashMap<String, String>,
+    key: &str,
+    item: &str,
+    incoming: Option<&'a str>,
+) -> Result<&'a str, &'static str> {
+    let canonical = texts
+        .get(key)
+        .map(String::as_str)
+        .filter(|text| !text.is_empty());
+    let legacy = texts
+        .get(&format!("chat:{item}"))
+        .map(String::as_str)
+        .filter(|text| !text.is_empty());
+    let selected = incoming.or(canonical).or(legacy).unwrap_or("");
+    if canonical
+        .into_iter()
+        .chain(legacy)
+        .any(|saved| saved != selected)
+    {
+        return Err(DRAFT_COLLISION);
+    }
+    Ok(selected)
+}
+
 #[derive(Clone)]
 struct Origin {
     context: ThreadInterest,
@@ -342,7 +371,8 @@ pub(super) struct Threads {
     histories: BTreeMap<String, History>,
     earlier: Vec<Earlier>,
     failures: BTreeMap<ThreadInterest, String>,
-    open: BTreeMap<String, String>,
+    open: BTreeMap<String, BTreeSet<String>>,
+    selected: BTreeMap<String, String>,
     start_slot: Option<(ThreadInterest, String)>,
     folded_inbox_details: BTreeSet<String>,
     focused: Option<(String, Input)>,
@@ -429,12 +459,32 @@ impl Threads {
             return false;
         };
         let key = input.key();
-        if !texts.contains_key(&key)
-            && let Some(old) = texts.remove(&format!("chat:{item}"))
-        {
-            texts.insert(key.clone(), old);
-        }
-        texts.entry(key.clone()).or_default();
+        let selected = start_draft_text(texts, &key, item, None).and_then(|selected| {
+            if self.drafts.get(&key).and_then(|draft| draft.delivery.as_ref()).is_some_and(|delivery| {
+                matches!(&delivery.write.mutation, Mutation::Start(start) if start.content != selected)
+            }) {
+                return Err(DRAFT_COLLISION);
+            }
+            Ok(selected)
+        });
+        let selected = match selected {
+            Ok(selected) => selected.to_owned(),
+            Err(message) => {
+                let message = if self.drafts.get(&key).is_some_and(Draft::locked) {
+                    DRAFT_LOCKED_COLLISION
+                } else {
+                    message
+                };
+                if let Some(context) = self.start_origin(item).map(|origin| origin.context.clone())
+                {
+                    self.failures.insert(context, message.into());
+                }
+                return false;
+            }
+        };
+        self.clear_draft_collision(item);
+        texts.remove(&format!("chat:{item}"));
+        texts.insert(key.clone(), selected);
         self.drafts.entry(key).or_default();
         self.focused = Some((host.into(), input));
         true
@@ -471,12 +521,7 @@ impl Threads {
             episode: episode.clone(),
         };
         let key = input.key();
-        let old = texts
-            .get(&key)
-            .or_else(|| texts.get(&format!("chat:{item}")));
-        if old.is_some_and(|old| !old.is_empty() && old != text) {
-            return Err("This item already has a different thread draft. Finish it before sending this feedback".into());
-        }
+        start_draft_text(texts, &key, item, Some(text))?;
         let empty = Draft::default();
         let draft = self.drafts.get(&key).unwrap_or(&empty);
         if let Some(delivery) = &draft.delivery {
@@ -496,13 +541,73 @@ impl Threads {
         let write = self.prepare_write(host, &input, text, draft)?;
         // Preparation has validated the current origin, recipient and immutable retry. From
         // here there are no refusal paths: caller feedback is released only after retention.
-        if !texts.contains_key(&key) {
-            texts.remove(&format!("chat:{item}"));
-        }
+        texts.remove(&format!("chat:{item}"));
         texts.insert(key, text.into());
         self.focused = Some((host.into(), input.clone()));
         self.retain_and_queue(&input, write);
+        self.clear_draft_collision(item);
         Ok(())
+    }
+
+    fn clear_draft_collision(&mut self, item: &str) {
+        if let Some(context) = self.start_origin(item).map(|origin| origin.context.clone())
+            && self.failures.get(&context).is_some_and(|message| {
+                matches!(
+                    message.as_str(),
+                    DRAFT_COLLISION | DRAFT_LOCKED_COLLISION | DRAFT_COMBINED
+                )
+            })
+        {
+            self.failures.remove(&context);
+        }
+    }
+
+    fn can_combine_saved_drafts(&self, item: &str, texts: &HashMap<String, String>) -> bool {
+        let Some(input) = self.start_input(item) else {
+            return false;
+        };
+        let key = input.key();
+        self.available
+            && self.access.start
+            && !self
+                .drafts
+                .get(&key)
+                .is_some_and(|draft| draft.delivery.is_some())
+            && matches!((texts.get(&key), texts.get(&format!("chat:{item}"))), (Some(canonical), Some(legacy)) if !canonical.is_empty() && !legacy.is_empty() && canonical != legacy)
+    }
+
+    fn combine_saved_drafts(
+        &mut self,
+        host: &str,
+        item: &str,
+        texts: &mut HashMap<String, String>,
+    ) {
+        let Some(input) = self.start_input(item) else {
+            return;
+        };
+        let key = input.key();
+        if !self.can_combine_saved_drafts(item, texts) {
+            if self.drafts.get(&key).is_some_and(Draft::locked)
+                && let Some(context) = self.start_origin(item).map(|origin| origin.context.clone())
+            {
+                self.failures.insert(context, DRAFT_LOCKED_COLLISION.into());
+            }
+            return;
+        }
+        let combined = format!(
+            "{}\n\n--- Earlier saved draft ---\n\n{}",
+            texts[&key],
+            texts[&format!("chat:{item}")]
+        );
+        // Retain both raw texts in the editable destination before deleting the duplicate
+        // legacy slot. Combining is local recovery, never a request or an implicit send.
+        texts.insert(key.clone(), combined);
+        texts.remove(&format!("chat:{item}"));
+        self.drafts.entry(key).or_default();
+        self.focused = Some((host.into(), input));
+        if let Some(context) = self.start_origin(item).map(|origin| origin.context.clone()) {
+            self.failures.insert(context, DRAFT_COMBINED.into());
+        }
     }
 
     fn start_origin(&self, item: &str) -> Option<&Origin> {
@@ -550,8 +655,23 @@ impl Threads {
         }
         let id = match pane {
             Pane::Thread(id) => id,
-            Pane::Home(Some(id)) if id.starts_with("thread/") => id,
-            _ => self.open.get(&pane.key())?,
+            Pane::Home(Some(id))
+                if id.starts_with("thread/")
+                    && !self.folded_inbox_details.contains(&pane.key()) =>
+            {
+                id
+            }
+            _ => {
+                let id = self.selected.get(&pane.key())?;
+                if !self
+                    .open
+                    .get(&pane.key())
+                    .is_some_and(|expanded| expanded.contains(id))
+                {
+                    return None;
+                }
+                id
+            }
         };
         let summary = self.summary(id)?;
         if key.code == KeyCode::Char('R') || key.code == KeyCode::Char('r') {
@@ -681,9 +801,11 @@ impl Threads {
             if !self.folded_inbox_details.contains(&pane.key()) {
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
-        } else if let Some(id) = self.open.get(&pane.key()) {
-            out.push(ThreadInterest::Summary(id.clone()));
-            out.push(ThreadInterest::Timeline(id.clone()));
+        } else if let Some(expanded) = self.open.get(&pane.key()) {
+            for id in expanded {
+                out.push(ThreadInterest::Summary(id.clone()));
+                out.push(ThreadInterest::Timeline(id.clone()));
+            }
         }
         out
     }
@@ -976,7 +1098,9 @@ impl Threads {
                     &mut doc,
                     &host,
                     id,
-                    self.open.get(&host) == Some(id),
+                    self.open
+                        .get(&host)
+                        .is_some_and(|expanded| expanded.contains(id)),
                     false,
                     width,
                     cursor,
@@ -986,6 +1110,17 @@ impl Threads {
             }
             if let Some(message) = self.failures.get(&context) {
                 doc.wrap(&[text::run(message, theme::dim())], width);
+                if message == DRAFT_COLLISION
+                    && let Pane::Home(Some(item)) = pane
+                    && self.can_combine_saved_drafts(item, texts)
+                {
+                    doc.buttons(&[(
+                        "",
+                        "Combine saved drafts",
+                        Hit::Thread(host.clone(), thread::Tap::CombineSavedDrafts(item.clone())),
+                        theme::SAPPHIRE,
+                    )]);
+                }
             }
             if let Some(Input::Start { item, .. }) = start.as_ref()
                 && drafting.is_none()
@@ -1020,14 +1155,16 @@ impl Threads {
         let reply_editor_visible = panel_open && self.access.reply;
         let rename_editor_visible =
             self.focused.as_ref() == Some(&(host.into(), Input::Rename(id.into())));
-        if open && (summary.is_none() || !self.histories.contains_key(id)) {
-            let reason = self
-                .failures
-                .get(&timeline)
-                .map(String::as_str)
-                .unwrap_or("Loading thread…");
-            doc.wrap(&[text::run(reason, theme::dim())], width);
-            if standalone || summary.is_none() {
+        if open {
+            let missing = summary.is_none() || !self.histories.contains_key(id);
+            if let Some(reason) = self.failures.get(&timeline) {
+                // A paused live window keeps its cached body/draft, but must not pretend
+                // those rows are current or remain an unexplained loading placeholder.
+                doc.wrap(&[text::run(reason, theme::dim())], width);
+            } else if missing {
+                doc.wrap(&[text::run("Loading thread…", theme::dim())], width);
+            }
+            if missing && (standalone || summary.is_none()) {
                 self.panel_feedback(doc, host, id, false, false, width);
                 return;
             }
@@ -1077,6 +1214,7 @@ impl Threads {
                 pending_reply: draft
                     .and_then(|draft| draft.delivery.as_ref())
                     .is_some_and(|delivery| delivery.pending),
+                hotkeys: self.hotkeys_for(host, id),
                 can_rename: self.access.rename,
                 can_close: self.access.close,
                 can_reopen: self.access.reopen,
@@ -1234,22 +1372,63 @@ impl Threads {
         if !self.available {
             return None;
         }
+        let selected = match &tap {
+            thread::Tap::Compose(id)
+            | thread::Tap::Rename(id)
+            | thread::Tap::Send(id)
+            | thread::Tap::Close(id)
+            | thread::Tap::Reopen(id)
+            | thread::Tap::OpenTab(id)
+            | thread::Tap::Earlier(id)
+            | thread::Tap::LeaveComposer(id)
+            | thread::Tap::MarkVisibleRead(id) => Some(id.clone()),
+            thread::Tap::Reply { thread, .. } => Some(thread.clone()),
+            thread::Tap::Retry(key) => self
+                .pending_actions
+                .values()
+                .chain(
+                    self.drafts
+                        .values()
+                        .filter_map(|draft| draft.delivery.as_ref()),
+                )
+                .find(|delivery| delivery.write.key == *key)
+                .map(|delivery| delivery.write.id.clone()),
+            _ => None,
+        };
+        if let Some(id) = selected {
+            self.selected.insert(host.into(), id);
+        }
         match tap {
             thread::Tap::Toggle(id) => {
                 if host.starts_with("home:thread/") {
                     if !self.folded_inbox_details.remove(host) {
                         self.folded_inbox_details.insert(host.into());
-                        self.focused = None;
+                        self.blur_thread(host, &id);
+                        if self.selected.get(host) == Some(&id) {
+                            self.selected.remove(host);
+                        }
                     } else if self.access.reply && self.summary(&id).is_some() {
                         self.focused = Some((host.into(), Input::Reply(id)));
                     }
                     return None;
                 }
-                if self.open.get(host) == Some(&id) {
-                    self.open.remove(host);
-                    self.focused = None;
+                if self
+                    .open
+                    .get(host)
+                    .is_some_and(|expanded| expanded.contains(&id))
+                {
+                    let expanded = self.open.get_mut(host).unwrap();
+                    expanded.remove(&id);
+                    if expanded.is_empty() {
+                        self.open.remove(host);
+                    }
+                    self.blur_thread(host, &id);
+                    if self.selected.get(host) == Some(&id) {
+                        self.selected.remove(host);
+                    }
                 } else {
-                    self.open.insert(host.into(), id.clone());
+                    self.open.entry(host.into()).or_default().insert(id.clone());
+                    self.selected.insert(host.into(), id.clone());
                     if self.access.reply && self.summary(&id).is_some() {
                         self.focused = Some((host.into(), Input::Reply(id)));
                     }
@@ -1281,6 +1460,7 @@ impl Threads {
                     }
                 }
             }
+            thread::Tap::CombineSavedDrafts(item) => self.combine_saved_drafts(host, &item, texts),
             thread::Tap::Rename(id) => {
                 if !self.access.rename {
                     return None;
@@ -1310,6 +1490,28 @@ impl Threads {
             thread::Tap::MessageHeader(_) | thread::Tap::MarkVisibleRead(_) => {}
         }
         None
+    }
+
+    fn blur_thread(&mut self, host: &str, id: &str) {
+        if self.focused.as_ref().is_some_and(|(place, mode)| {
+            place == host
+                && matches!(mode, Input::Reply(target) | Input::Rename(target) if target == id)
+        }) {
+            self.focused = None;
+        }
+    }
+
+    fn hotkeys_for(&self, host: &str, id: &str) -> bool {
+        !self
+            .focused
+            .as_ref()
+            .is_some_and(|(place, _)| place == host)
+            && (host == format!("thread:{id}")
+                || host == format!("home:{id}") && !self.folded_inbox_details.contains(host)
+                || self
+                    .selected
+                    .get(host)
+                    .is_some_and(|selected| selected == id))
     }
 
     fn retry(&mut self, key: &str) {
@@ -1352,7 +1554,11 @@ impl Threads {
                 width,
             );
             doc.buttons(&[(
-                "R",
+                if self.hotkeys_for(host, &delivery.write.id) {
+                    "R"
+                } else {
+                    ""
+                },
                 &format!("Retry {}", delivery.write.label()),
                 Hit::Thread(host.into(), thread::Tap::Retry(delivery.write.key.clone())),
                 theme::ACCENT,
@@ -1419,9 +1625,9 @@ impl Threads {
             if key.code == KeyCode::Char('t')
                 && key.modifiers.is_empty()
                 && let Pane::Home(Some(item)) = pane
-                && let Some(input) = self.start_input(item)
+                && self.start_input(item).is_some()
             {
-                self.activate(&host, input, texts);
+                self.begin(&host, item, texts);
                 return true;
             }
             if let Pane::Thread(id) = pane
@@ -1654,6 +1860,9 @@ impl Threads {
         {
             self.retained_origins.insert(item.clone(), origin.clone());
         }
+        if let Input::Start { item, .. } = input {
+            self.clear_draft_collision(item);
+        }
         self.writes.push(write);
     }
 
@@ -1727,6 +1936,7 @@ impl Threads {
                 seen_message_ids,
             }),
         };
+        self.selected.insert(host.into(), id.clone());
         self.pending_actions
             .insert(id, Delivery::new(write.clone()));
         self.writes.push(write);
@@ -1896,7 +2106,11 @@ impl Threads {
                     },
                     write.id.clone(),
                 ));
-                self.open.insert(write.host.clone(), write.id.clone());
+                self.open
+                    .entry(write.host.clone())
+                    .or_default()
+                    .insert(write.id.clone());
+                self.selected.insert(write.host.clone(), write.id.clone());
                 self.focused = self
                     .access
                     .reply

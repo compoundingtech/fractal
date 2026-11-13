@@ -9,6 +9,7 @@ use super::{composer, doc::DocExt, text, theme};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tap {
     Start(String),
+    CombineSavedDrafts(String),
     MessageHeader(String),
     Earlier(String),
     Toggle(String),
@@ -72,6 +73,7 @@ pub struct State<'a> {
     pub can_mark_read: bool,
     pub can_reply: bool,
     pub pending_reply: bool,
+    pub hotkeys: bool,
     pub can_rename: bool,
     pub can_close: bool,
     pub can_reopen: bool,
@@ -366,11 +368,16 @@ pub fn panel(
     };
     let mut actions = Vec::new();
     if summary.closed && state.can_reopen || !summary.closed && state.can_close {
-        actions.push(("Z", label, lifecycle, theme::OVERLAY1));
+        actions.push((
+            if state.hotkeys { "Z" } else { "" },
+            label,
+            lifecycle,
+            theme::OVERLAY1,
+        ));
     }
     if state.can_rename {
         actions.push((
-            "N",
+            if state.hotkeys { "N" } else { "" },
             "Rename",
             Tap::Rename(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -378,7 +385,7 @@ pub fn panel(
     }
     if !state.standalone {
         actions.push((
-            "P",
+            if state.hotkeys { "P" } else { "" },
             "Open in tab",
             Tap::OpenTab(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -386,7 +393,7 @@ pub fn panel(
     }
     if summary.unread && state.can_mark_read {
         actions.push((
-            "V",
+            if state.hotkeys { "V" } else { "" },
             "Mark visible replies read",
             Tap::MarkVisibleRead(summary.id.to_owned()),
             theme::OVERLAY1,
@@ -426,6 +433,7 @@ mod tests {
 
     fn editable<'a>() -> State<'a> {
         State {
+            hotkeys: true,
             can_reply: true,
             can_rename: true,
             can_close: true,

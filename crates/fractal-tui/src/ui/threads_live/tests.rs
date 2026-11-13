@@ -804,7 +804,11 @@ fn a_pending_reply_without_loaded_history_keeps_fallback_status_and_retry() {
     threads.submit(&tab.key(), Input::Reply(id.into()), &texts);
     let original = threads.writes().pop().unwrap();
     threads.histories.remove(id);
-    threads.open.insert(agent.key(), id.into());
+    threads
+        .open
+        .entry(agent.key())
+        .or_default()
+        .insert(id.into());
     threads
         .lists
         .insert(ThreadInterest::Agent("agent/atlas".into()), vec![id.into()]);
@@ -1157,15 +1161,18 @@ fn metadata_receipts_require_an_immutable_claim_id_not_an_observed_cas_revision(
         value.as_object_mut().unwrap().extend(metadata);
         serde_json::from_value::<fractal_client::ActionResult>(value).unwrap()
     };
-    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([
-        ("metadata_revision".into(), serde_json::json!("old-shape")),
-    ]))));
-    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([
-        ("metadata_claim_id".into(), serde_json::json!("")),
-    ]))));
-    assert!(write.matches_receipt(&result(serde_json::Map::from_iter([
-        ("metadata_claim_id".into(), serde_json::json!("claim/closed")),
-    ]))));
+    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([(
+        "metadata_revision".into(),
+        serde_json::json!("old-shape")
+    ),]))));
+    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([(
+        "metadata_claim_id".into(),
+        serde_json::json!("")
+    ),]))));
+    assert!(write.matches_receipt(&result(serde_json::Map::from_iter([(
+        "metadata_claim_id".into(),
+        serde_json::json!("claim/closed")
+    ),]))));
 }
 
 #[test]
@@ -1285,6 +1292,277 @@ fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_origin
 }
 
 #[test]
+fn starting_adopts_compatible_legacy_drafts_and_reports_conflicts_without_losing_either() {
+    let item = "attention/feedback";
+    let pane = Pane::Home(Some(item.into()));
+    let input = Input::Start {
+        item: item.into(),
+        episode: "claim/feedback".into(),
+    };
+    let context = ThreadInterest::Inbox {
+        source: "agent/example".into(),
+        episode: "claim/feedback".into(),
+    };
+    for (canonical, legacy, selected) in [
+        (Some(""), "Recovered legacy draft", "Recovered legacy draft"),
+        (None, "Recovered legacy draft", "Recovered legacy draft"),
+        (Some("Same draft"), "Same draft", "Same draft"),
+        (Some("Canonical draft"), "", "Canonical draft"),
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        threads.origins.insert(
+            item.into(),
+            Origin {
+                context: context.clone(),
+                agent: "agent/atlas".into(),
+                title: "Review".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        let mut texts = HashMap::from([(format!("chat:{item}"), legacy.into())]);
+        if let Some(canonical) = canonical {
+            texts.insert(input.key(), canonical.into());
+        }
+        assert!(threads.begin(&pane.key(), item, &mut texts));
+        assert_eq!(texts[&input.key()], selected);
+        assert!(!texts.contains_key(&format!("chat:{item}")));
+        assert!(
+            threads.writes().is_empty(),
+            "draft adoption alone never sends"
+        );
+    }
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: context.clone(),
+            agent: "agent/atlas".into(),
+            title: "Review".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    threads.lists.insert(context.clone(), Vec::new());
+    let mut texts = HashMap::from([
+        (input.key(), "Canonical draft".into()),
+        (format!("chat:{item}"), "Different legacy draft".into()),
+    ]);
+    let before = texts.clone();
+    threads.tap(&pane.key(), thread::Tap::Start(item.into()), &mut texts);
+    assert_eq!(texts, before);
+    assert!(threads.focused.is_none());
+    assert!(threads.writes().is_empty());
+    assert_eq!(threads.failures[&context], DRAFT_COLLISION);
+    let doc = threads.mount(
+        &pane,
+        120,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    let rendered = doc
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Both drafts are kept"), "{rendered}");
+    let combine = doc
+        .targets
+        .iter()
+        .find_map(|target| match &target.hit {
+            Hit::Thread(host, tap @ thread::Tap::CombineSavedDrafts(_)) => {
+                Some((host.clone(), tap.clone()))
+            }
+            _ => None,
+        })
+        .expect("the collision exposes a reachable normal native action");
+    threads.tap(&combine.0, combine.1, &mut texts);
+    assert_eq!(
+        texts[&input.key()],
+        "Canonical draft\n\n--- Earlier saved draft ---\n\nDifferent legacy draft"
+    );
+    assert!(!texts.contains_key(&format!("chat:{item}")));
+    assert!(
+        matches!(&threads.focused, Some((host, mode)) if host == &pane.key() && mode == &input)
+    );
+    assert_eq!(threads.failures[&context], DRAFT_COMBINED);
+    assert!(
+        threads.writes().is_empty(),
+        "combining is local editing, never Send"
+    );
+    let combined = texts.clone();
+    assert!(
+        threads
+            .start_with_text(&pane.key(), item, "Different revision feedback", &mut texts)
+            .is_err()
+    );
+    assert_eq!(
+        texts, combined,
+        "a refused feedback handoff cannot overwrite combined saved text"
+    );
+    assert!(threads.writes().is_empty());
+    assert!(threads.paste(&pane, "Editable: ", &edit::Cursor::default(), &mut texts));
+}
+
+#[test]
+fn locked_start_requests_never_offer_or_apply_saved_draft_combination() {
+    let item = "attention/feedback";
+    let pane = Pane::Home(Some(item.into()));
+    let input = Input::Start {
+        item: item.into(),
+        episode: "claim/feedback".into(),
+    };
+    let context = ThreadInterest::Inbox {
+        source: "agent/example".into(),
+        episode: "claim/feedback".into(),
+    };
+    for unknown in [false, true] {
+        let mut threads = observed_threads(ThreadState::Open);
+        threads.origins.insert(
+            item.into(),
+            Origin {
+                context: context.clone(),
+                agent: "agent/atlas".into(),
+                title: "Review".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        threads.lists.insert(context.clone(), Vec::new());
+        let mut texts = HashMap::new();
+        threads
+            .start_with_text(&pane.key(), item, "Original delivery", &mut texts)
+            .unwrap();
+        let original = threads.writes().pop().unwrap();
+        if unknown {
+            threads.complete(
+                Receipt {
+                    write: original.clone(),
+                    confirmation: Confirmation::Failed(ClientError::Transport(
+                        "lost receipt".into(),
+                    )),
+                },
+                &mut texts,
+            );
+        }
+        texts.insert(format!("chat:{item}"), "Different saved text".into());
+        let before = texts.clone();
+        threads.key(
+            &pane,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &edit::Cursor::default(),
+            &mut texts,
+        );
+        threads.tap(&pane.key(), thread::Tap::Start(item.into()), &mut texts);
+        let doc = threads.mount(
+            &pane,
+            120,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            &texts,
+        );
+        assert!(!doc.targets.iter().any(|target| matches!(
+            &target.hit,
+            Hit::Thread(_, thread::Tap::CombineSavedDrafts(_))
+        )));
+        threads.tap(
+            &pane.key(),
+            thread::Tap::CombineSavedDrafts(item.into()),
+            &mut texts,
+        );
+        assert_eq!(texts, before);
+        let retained = &threads.drafts[&input.key()]
+            .delivery
+            .as_ref()
+            .unwrap()
+            .write;
+        assert_eq!(retained.key, original.key);
+        assert_eq!(retained.fence, original.fence);
+        assert!(
+            matches!(&retained.mutation, Mutation::Start(start) if start.content == "Original delivery")
+        );
+        assert_eq!(threads.failures[&context], DRAFT_LOCKED_COLLISION);
+        assert!(threads.writes().is_empty());
+    }
+}
+
+#[test]
+fn feedback_preflights_both_saved_drafts_and_only_adopts_after_a_request_is_retained() {
+    let item = "attention/feedback";
+    let input = Input::Start {
+        item: item.into(),
+        episode: "claim/feedback".into(),
+    };
+    for (canonical, legacy, refusal) in [
+        ("", "Different legacy", "collision"),
+        ("Feedback", "Different legacy", "collision"),
+        ("Different canonical", "Feedback", "collision"),
+        ("", "Feedback", "too-long"),
+        ("Feedback", "Feedback", "busy"),
+        ("", "Feedback", "none"),
+        ("Feedback", "Feedback", "none"),
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        threads.origins.insert(
+            item.into(),
+            Origin {
+                context: ThreadInterest::Inbox {
+                    source: "agent/example".into(),
+                    episode: "claim/feedback".into(),
+                },
+                agent: "agent/atlas".into(),
+                title: "Review".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        let mut texts = HashMap::from([
+            (input.key(), canonical.into()),
+            (format!("chat:{item}"), legacy.into()),
+            ("revision:original".into(), "Feedback".into()),
+        ]);
+        if refusal == "busy" {
+            threads
+                .start_with_text("home:attention/feedback", item, "Feedback", &mut texts)
+                .unwrap();
+            threads.writes();
+            texts.insert(format!("chat:{item}"), legacy.into());
+        }
+        let feedback = if refusal == "too-long" {
+            "x".repeat(fractal_client::device::INLINE_MAX_BYTES + 1)
+        } else {
+            "Feedback".into()
+        };
+        let before = texts.clone();
+        let focused = threads.focused.clone();
+        let result =
+            threads.start_with_text("home:attention/feedback", item, &feedback, &mut texts);
+        if refusal == "none" {
+            result.unwrap();
+            assert_eq!(texts[&input.key()], "Feedback");
+            assert!(!texts.contains_key(&format!("chat:{item}")));
+            let write = threads.writes().pop().unwrap();
+            assert_eq!(
+                threads.drafts[&input.key()]
+                    .delivery
+                    .as_ref()
+                    .unwrap()
+                    .write
+                    .key,
+                write.key
+            );
+        } else {
+            let error = result.unwrap_err();
+            if refusal == "collision" {
+                assert_eq!(error, DRAFT_COLLISION);
+            }
+            assert_eq!(texts, before, "{refusal}");
+            assert!(threads.focused == focused);
+            assert!(threads.writes().is_empty());
+        }
+        assert_eq!(texts["revision:original"], "Feedback");
+    }
+}
+
+#[test]
 fn feedback_adopts_only_an_empty_or_identical_original_thread_draft() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/feedback";
@@ -1355,6 +1633,352 @@ fn internal_error_without_not_applied_answer_keeps_the_original_action() {
 }
 
 #[test]
+fn embedded_thread_disclosures_are_independent_in_agent_mission_and_inbox_hosts() {
+    for pane in [
+        Pane::Agent(Some("agent/atlas".into())),
+        Pane::Mission(Some("mission/example".into())),
+        Pane::Home(Some("attention/notice".into())),
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        let first = "thread/worker";
+        let second = "thread/sibling";
+        let origin = ThreadInterest::Inbox {
+            source: "agent/example".into(),
+            episode: "claim/notice".into(),
+        };
+        threads.origins.insert(
+            "attention/notice".into(),
+            Origin {
+                context: origin,
+                agent: "agent/atlas".into(),
+                title: "Notice".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        let context = threads.context(&pane).unwrap();
+        threads.window(
+            context,
+            snapshot(),
+            true,
+            ThreadCollectionRows::Summaries(vec![
+                summary(),
+                ThreadSummary {
+                    id: second.into(),
+                    title: "Sibling thread".into(),
+                    ..summary()
+                },
+            ]),
+            vec![],
+            vec![first.into(), second.into()],
+            false,
+        );
+        for (id, content) in [
+            (first, "First thread body"),
+            (second, "Sibling thread body"),
+        ] {
+            let event = serde_json::from_value(serde_json::json!({
+                "kind":"message", "id":format!("message/{id}"), "actor_id":"agent/atlas",
+                "accepted_at_unix_ms":1000,"content":content,"thread_quote_id":null,
+            }))
+            .unwrap();
+            threads.histories.insert(
+                id.into(),
+                History {
+                    head: vec![event],
+                    ..History::default()
+                },
+            );
+        }
+        let mut texts = HashMap::new();
+        threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+        threads.tap(&pane.key(), thread::Tap::Toggle(second.into()), &mut texts);
+        threads.paste(&pane, "Sibling draft", &edit::Cursor::default(), &mut texts);
+        let rendered = |threads: &Threads, texts: &HashMap<String, String>| {
+            threads
+                .mount(
+                    &pane,
+                    100,
+                    &edit::Cursor::default(),
+                    &super::super::demo::test_world(),
+                    texts,
+                )
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let both = rendered(&threads, &texts);
+        assert!(
+            both.contains("First thread body") && both.contains("Sibling thread body"),
+            "{both}"
+        );
+        let interests = threads.interests(&pane);
+        for id in [first, second] {
+            assert!(interests.contains(&ThreadInterest::Summary(id.into())));
+            assert!(interests.contains(&ThreadInterest::Timeline(id.into())));
+        }
+        threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+        let after = rendered(&threads, &texts);
+        assert!(
+            !after.contains("First thread body") && after.contains("Sibling thread body"),
+            "{after}"
+        );
+        assert!(after.contains("Sibling draft"));
+        assert!(
+            matches!(&threads.focused, Some((host, Input::Reply(id))) if host == &pane.key() && id == second)
+        );
+        assert_eq!(texts[&Input::Reply(second.into()).key()], "Sibling draft");
+        let interests = threads.interests(&pane);
+        assert!(!interests.contains(&ThreadInterest::Summary(first.into())));
+        assert!(!interests.contains(&ThreadInterest::Timeline(first.into())));
+        assert!(interests.contains(&ThreadInterest::Summary(second.into())));
+        assert!(interests.contains(&ThreadInterest::Timeline(second.into())));
+        threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+        let restored = rendered(&threads, &texts);
+        assert!(restored.contains("First thread body") && restored.contains("Sibling thread body"));
+        assert_eq!(texts[&Input::Reply(second.into()).key()], "Sibling draft");
+        threads.tap(
+            &pane.key(),
+            thread::Tap::LeaveComposer(first.into()),
+            &mut texts,
+        );
+        assert!(
+            matches!(threads.shortcut(&pane, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)), Some(thread::Tap::Close(id)) if id == first),
+            "leaving a composer retains its exact selected thread for shortcuts"
+        );
+    }
+}
+
+#[test]
+fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_resumes_them() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Thread("thread/worker".into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+        &mut texts,
+    );
+    threads.paste(
+        &pane,
+        "Keep this local draft",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    let timeline = ThreadInterest::Timeline("thread/worker".into());
+    threads.failure(
+        timeline.clone(),
+        "Live thread updates paused: shared live-window budget; resumes automatically".into(),
+        false,
+    );
+    let render = |threads: &Threads| {
+        threads
+            .mount(
+                &pane,
+                100,
+                &edit::Cursor::default(),
+                &super::super::demo::test_world(),
+                &texts,
+            )
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let paused = render(&threads);
+    assert!(paused.contains("Live thread updates paused"));
+    assert!(paused.contains("Keep this local draft"));
+    assert!(!paused.contains("Loading thread"));
+    threads.window(
+        timeline,
+        snapshot(),
+        true,
+        ThreadCollectionRows::Timeline(vec![]),
+        vec![],
+        vec![],
+        false,
+    );
+    let resumed = render(&threads);
+    assert!(!resumed.contains("Live thread updates paused"));
+    assert!(resumed.contains("Keep this local draft"));
+}
+
+#[test]
+fn expanded_threads_keep_one_honest_keyboard_context_after_escape_and_independent_collapse() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Agent(Some("agent/atlas".into()));
+    let first = "thread/worker";
+    let second = "thread/sibling";
+    threads.window(
+        ThreadInterest::Agent("agent/atlas".into()),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![
+            summary(),
+            ThreadSummary {
+                id: second.into(),
+                title: "Sibling".into(),
+                ..summary()
+            },
+        ]),
+        vec![],
+        vec![first.into(), second.into()],
+        false,
+    );
+    threads.histories.insert(second.into(), History::default());
+    let mut texts = HashMap::new();
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    threads.tap(&pane.key(), thread::Tap::Toggle(second.into()), &mut texts);
+    threads.paste(&pane, "Sibling draft", &edit::Cursor::default(), &mut texts);
+    assert!(threads.key(
+        &pane,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &edit::Cursor::default(),
+        &mut texts
+    ));
+    let close = || KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+    assert!(
+        matches!(threads.shortcut(&pane, close()), Some(thread::Tap::Close(id)) if id == second)
+    );
+    let doc = threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    for id in [first, second] {
+        let target = doc.targets.iter().find(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Close(found)) if found == id)).unwrap();
+        assert_eq!(
+            doc.lines[target.line].to_string().contains(" Z "),
+            id == second,
+            "only the selected panel advertises its keyboard shortcut"
+        );
+    }
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    assert!(
+        matches!(threads.shortcut(&pane, close()), Some(thread::Tap::Close(id)) if id == second)
+    );
+    let action = threads.shortcut(&pane, close()).unwrap();
+    threads.tap(&pane.key(), action, &mut texts);
+    assert_eq!(threads.writes().pop().unwrap().id, second);
+    assert_eq!(texts[&Input::Reply(second.into()).key()], "Sibling draft");
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    threads.tap(&pane.key(), thread::Tap::Compose(second.into()), &mut texts);
+    threads.key(
+        &pane,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.tap(&pane.key(), thread::Tap::Toggle(second.into()), &mut texts);
+    assert!(threads.open[&pane.key()].contains(first));
+    assert!(!threads.selected.contains_key(&pane.key()));
+    assert!(
+        threads.shortcut(&pane, close()).is_none(),
+        "collapsing the selected container cannot silently target its sibling"
+    );
+    assert!(threads.writes().is_empty());
+}
+
+#[test]
+fn accepting_a_new_inbox_thread_keeps_the_existing_expanded_thread_and_its_draft() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Home(Some("attention/notice".into()));
+    let item = "attention/notice";
+    let first = "thread/worker";
+    let context = ThreadInterest::Inbox {
+        source: "agent/example".into(),
+        episode: "claim/notice".into(),
+    };
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: context.clone(),
+            agent: "agent/atlas".into(),
+            title: "Notice".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    threads.lists.insert(context, vec![first.into()]);
+    let mut texts = HashMap::new();
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    threads.paste(
+        &pane,
+        "Keep the existing draft",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.begin(&pane.key(), item, &mut texts);
+    let start_input = threads.start_input(item).unwrap();
+    threads.paste(
+        &pane,
+        "First message in new thread",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    assert!(
+        matches!(&threads.focused, Some((host, input)) if host == &pane.key() && input == &start_input),
+        "collapsing a sibling must not blur the separate Start draft"
+    );
+    assert_eq!(texts[&start_input.key()], "First message in new thread");
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    threads.begin(&pane.key(), item, &mut texts);
+    threads.submit(&pane.key(), start_input, &texts);
+    let write = threads.writes().pop().unwrap();
+    let new_id = write.id.clone();
+    threads.complete(
+        Receipt {
+            write,
+            confirmation: Confirmation::Applied(Some(Envelope {
+                value: ThreadSummary {
+                    id: new_id.clone(),
+                    title: "Notice".into(),
+                    ..summary()
+                },
+                snapshot: snapshot(),
+                request_id: "request/new".into(),
+                api_version: fractal_client::API_VERSION.into(),
+            })),
+        },
+        &mut texts,
+    );
+    threads.histories.insert(new_id.clone(), History::default());
+    assert!(threads.open[&pane.key()].contains(first));
+    assert!(threads.open[&pane.key()].contains(&new_id));
+    assert_eq!(
+        texts[&Input::Reply(first.into()).key()],
+        "Keep the existing draft"
+    );
+    let interests = threads.interests(&pane);
+    for id in [first, &new_id] {
+        assert!(interests.contains(&ThreadInterest::Summary(id.into())));
+        assert!(interests.contains(&ThreadInterest::Timeline(id.into())));
+    }
+    let doc = threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    let rendered = doc
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("▾ Worker test") && rendered.contains("▾ Notice"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Keep the existing draft"));
+}
+
+#[test]
 fn inbox_summary_timeline_and_lists_all_remain_requested() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/notice";
@@ -1371,7 +1995,11 @@ fn inbox_summary_timeline_and_lists_all_remain_requested() {
             snapshot: snapshot().id,
         },
     );
-    threads.open.insert(pane.key(), "thread/worker".into());
+    threads
+        .open
+        .entry(pane.key())
+        .or_default()
+        .insert("thread/worker".into());
     let interests = threads.interests(&pane);
     assert_eq!(interests.len(), 4);
     assert!(interests.contains(&ThreadInterest::RecentlyClosed));

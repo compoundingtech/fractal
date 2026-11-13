@@ -159,7 +159,7 @@ impl<H: Clone> DocExt<H> for SharedDoc<H> {
                 spans.push(Span::raw("  "));
                 column += 2;
             }
-            let key_text = format!(" {key} ");
+            let key_text = if key.is_empty() { String::new() } else { format!(" {key} ") };
             let label_text = format!(" {label} ");
             let width = (text::width(&key_text) + text::width(&label_text)) as u16;
             spans.push(Span::styled(
@@ -188,7 +188,7 @@ impl<H: Clone> DocExt<H> for SharedDoc<H> {
         let mut start = 0;
         let mut used = 0;
         for (index, (key, label, _, _)) in buttons.iter().enumerate() {
-            let button_width = text::width(key) + text::width(label) + 4;
+            let button_width = text::width(label) + 2 + if key.is_empty() { 0 } else { text::width(key) + 2 };
             if index > start && used + 2 + button_width > width {
                 self.buttons(&buttons[start..index]);
                 start = index;
@@ -289,6 +289,15 @@ mod tests {
                 .map(|target| &target.hit),
             Some(&Hit::Key('a'))
         );
+    }
+
+    #[test]
+    fn keyless_buttons_keep_their_exact_mouse_target_without_advertising_a_shortcut() {
+        let mut doc = Doc::new();
+        doc.buttons_fit(&[("", "Close thread", Hit::Key('z'), theme::ACCENT)], 14);
+        assert_eq!(doc.lines[0].to_string(), " Close thread ");
+        assert_eq!(doc.targets[0].width, 14);
+        assert_eq!(doc.targets[0].hit, Hit::Key('z'));
     }
 
     #[test]
