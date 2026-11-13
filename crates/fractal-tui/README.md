@@ -71,6 +71,18 @@ A document that cannot be shown says why (not found, not synced yet, the host di
 text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
 page is `fractal_ui_model::documents`, the model the phone and web read.
 
+**Availability**, in `Ctrl+K`, opens a tab with the person's own availability: the status
+(available or away), whether they set it, it follows their devices' presence, or no device has
+reported for 24 hours (then it reads available and agents ask as usual), and until when; their
+presence (present, idle, locked or unreported); which asks may interrupt them (all, urgent only,
+none) and until when; whether the deadline clock holds routine asks' or every ask's deadline,
+since and until when; and their directive note with its expiry. Times are in local time. A word
+a newer daemon sends that the terminal UI does not know shows as `unknown`, with a line saying an
+update shows it. No stream carries availability, so the
+tab reads `availability.list` and `notes.list` when it opens, when the terminal regains focus,
+after a reconnect and on `r`, and never on a timer. A pairing without the scope, or a daemon
+without the routes, says so in the tab.
+
 Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
 or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
 Mission, Inbox and other tabs have no prefix. One attention suffix follows the title:
