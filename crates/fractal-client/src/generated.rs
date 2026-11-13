@@ -601,6 +601,13 @@ pub struct Attention {
     /// The ask's answer that applies at its deadline; absent, it times out without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_answer: Option<AskDefaultAnswer>,
+    /// When the row's person first saw it on any of their clients (`attention.seen`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_at: Option<String>,
+    /// Until when the row's person put it off (`attention.snooze`); the row stays open and its
+    /// deadline does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<String>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -3678,6 +3685,12 @@ pub enum ActionType {
     ReadPositionAdvance,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
+    #[serde(rename = "attention.seen")]
+    AttentionSeen,
+    #[serde(rename = "attention.snooze")]
+    AttentionSnooze,
+    #[serde(rename = "attention.dismiss")]
+    AttentionDismiss,
     #[serde(rename = "review.approve")]
     ReviewApprove,
     #[serde(rename = "review.reject")]
@@ -3942,6 +3955,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn attention_dismiss(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionDismiss,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn attention_resolve(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -3951,6 +3978,34 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::AttentionResolve,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn attention_seen(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionSeen,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn attention_snooze(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionSnooze,
             idempotency_key,
             fence,
             &parameters,
@@ -5102,6 +5157,9 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    /// `attention.seen` and `attention.snooze`: the row's controls after the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_control: Option<AttentionControlState>,
     /// `read-position.advance`: the stored position after the forward-only merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_position_at: Option<String>,
@@ -5664,6 +5722,11 @@ pub struct AssistantAttentionItem {
     pub revision: String,
     pub episode: String,
     pub waiting_since: String,
+    /// The person's own controls, read-only for assistants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -6033,6 +6096,32 @@ pub struct ReadPositionPage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated: Option<ReplicatedNotice>,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionSeenParameters {
+    pub attention_id: String,
+}
+
+/// `until` null brings the row back now; it is always sent.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionSnoozeParameters {
+    pub attention_id: String,
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionDismissParameters {
+    pub attention_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionControlState {
+    pub attention_id: String,
+    pub seen_at: Option<String>,
+    pub snoozed_until: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ReadPositionAdvanceParameters {
     pub owner: String,

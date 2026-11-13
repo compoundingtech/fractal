@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v24.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -154,6 +154,23 @@ fn the_corpus_generates_valid_read_position_inputs() {
     }).unwrap();
     assert_eq!(actual, expected);
     assert_eq!(actual.len(), 1);
+}
+
+#[test]
+fn the_corpus_generates_valid_attention_control_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in fractal_schema::attention_controls::KINDS {
+        let input = world.claim_of(&corpus()[kind], 0).unwrap();
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        world.nodes[0].store.append_claim(&input).unwrap();
+    }
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let rows = (0..4).map(|row| format!("attention/{row:032x}")).collect::<Vec<_>>();
+    let keys = rows.iter().map(|row| (PERSON, row.as_str())).collect::<Vec<_>>();
+    let expected = world.nodes[0].store.attention_controls(&keys).unwrap();
+    assert!(!expected.is_empty());
+    assert_eq!(world.oracle.attention_controls(&keys).unwrap(), expected);
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1073,6 +1090,27 @@ impl World {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(self.fresh("read")),
+            });
+        }
+        if fractal_schema::attention_controls::KINDS.contains(&spec.kind.as_str()) {
+            // The person's own control over one of a few rows, as the action records it.
+            let row = format!("attention/{:032x}", self.rng.below(4));
+            let mut fields = BTreeMap::from([
+                ("attention_id".into(), json!(row)),
+                ("source".into(), json!(format!("host/{}", self.nodes[index].name))),
+            ]);
+            if spec.kind == fractal_schema::attention_controls::SNOOZED_KIND {
+                let until = (!self.rng.chance(25)).then(|| self.now() + DAY_MS);
+                fields.insert("until_unix_ms".into(), json!(until));
+            }
+            return Some(ClaimInput {
+                subject: PERSON.into(),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("attention-control")),
             });
         }
         if spec.kind == fractal_schema::source_map::KIND {
@@ -2213,7 +2251,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v24.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
         }))
         .unwrap(),
     )

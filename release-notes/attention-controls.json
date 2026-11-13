@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Person-only attention controls: attention.seen, attention.snooze and attention.dismiss on /v1/client/actions; attention rows carry seen_at and snoozed_until.",
+  "replay": { "status": "changed", "detail": "New person.attention-seen and person.attention-snoozed claims project into a rebuildable person_attention_controls table: earliest seen and newest snooze per (person, attention id) by canonical claim key, order-free across append, replication, replay and repair. A free-text ask now accepts the person's own dismiss answer (type feedback, outcome dismissed)." },
+  "schema": { "status": "changed", "detail": "Two claim kinds on person/NAME (CapabilityHolder, person-only on local and replicated admission), the person_attention_controls table, and convergence corpus claims-v25. Client schema adds the three actions, their parameters, ActionResult.attention_control, and optional seen_at/snoozed_until on Attention and AssistantAttentionItem." },
+  "rules": { "status": "changed", "detail": "Only the subject person writes the new kinds, through the actions only. Agents and assistant grants are refused. Dismiss resolves an ask with outcome dismissed through the existing person response path; updates are read; other kinds refuse with attention-dismiss-unsupported. A snooze never moves a deadline." },
+  "compatibility": { "status": "changed", "detail": "Upgrade daemons before clients: older daemons refuse the actions as unknown and do not admit the new kinds. Older Rust SDK builds decode AssistantAttentionItem with deny_unknown_fields and must upgrade with the daemon; the MCP adapter passes rows through untyped." },
+  "downtime": { "status": "none", "detail": "The projection builds once on open from existing claims (none before this release)." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "changed", "detail": "Revert the release; claims written stay in the log as unknown kinds on older builds and are harmless to them." }
+}

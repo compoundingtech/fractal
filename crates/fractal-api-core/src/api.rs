@@ -5105,7 +5105,29 @@ fn client_attention_resources_from_items(
         }
         resources.push(resource);
     }
+    apply_attention_controls(store, &mut resources)?;
     Ok(resources)
+}
+
+/// Each row's person's own controls, read in the fold's snapshot: when they first saw it and
+/// until when they put it off, or null. A control claim folds the list again like any other
+/// claim attention reads, so watchers see it.
+fn apply_attention_controls(store: &Store, resources: &mut [Value]) -> anyhow::Result<()> {
+    let keys = resources
+        .iter()
+        .filter_map(|row| Some((row["person_id"].as_str()?, row["id"].as_str()?)))
+        .collect::<Vec<_>>();
+    let controls = store.attention_controls(&keys)?;
+    let time = |at: Option<u128>| at.map_or(Value::Null, |at| json!(client_timestamp(at)));
+    for row in resources {
+        let found = match (row["person_id"].as_str(), row["id"].as_str()) {
+            (Some(person), Some(id)) => controls.get(&(person.to_owned(), id.to_owned())).copied().unwrap_or_default(),
+            _ => Default::default(),
+        };
+        row["seen_at"] = time(found.seen_at_ms);
+        row["snoozed_until"] = time(found.snoozed_until_ms);
+    }
+    Ok(())
 }
 
 /// The attention row shapes a client negotiated (`x-st3-features`): each newer kind has its
