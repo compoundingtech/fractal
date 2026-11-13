@@ -83,28 +83,27 @@ never an assistant principal. The candidate refuses service-profile issuance
 and authentication, including the counterexample `assistant/chatgpt` plus
 `profile=service`; the closed assistant pairing grammar cannot issue that shape.
 
-The old binary ignores the profile field, but refuses plugin service grants
-through its exact `assistant/chatgpt` principal check and refuses non-assistant
-scopes through its closed assistant scope set. Replicated grants additionally
-fail its authoritative-origin check. The ignored fleet tests exercise both
-issuer-origin roles and a candidate → old → candidate restart on the same database,
-with retained GRANTED/POLICY claims and live, expired, and revoked assistant
-controls. Fixtures are signed offline by the candidate store using the stopped
-node's own origin and existing node/principal keys: the public claims API refuses
-these authority kinds, and the old binary cannot issue service grants. A candidate-only
-test exercises the same offline seeding, restart, replication, and refusal path.
-The rollback fixture also characterizes owner inspection: the old
-binary labels a plugin service record as an assistant grant even though its
-credential cannot authenticate.
+The deployed baseline understands service profiles and requires plugin service
+principals. It refuses the offline-seeded `assistant/chatgpt` service-profile
+counterexample with `forbidden` / `invalid service principal`. Plugin service
+credentials cannot enter the assistant proposal route, and a service record with
+assistant scopes is also refused. Replicated grants additionally fail the
+authoritative-origin check. The ignored fleet tests exercise both issuer-origin
+roles and a candidate → baseline → candidate restart on the same database, with
+retained GRANTED/POLICY claims and live, expired, and revoked assistant controls.
+Fixtures are signed offline by the candidate store using the stopped node's own
+origin and existing node/principal keys: the public claims API refuses these
+authority kinds, and production service issuance remains disabled.
+A candidate-only test exercises the same offline seeding and refusal path.
 
-This is only a service-credential refusal boundary, **not a general rollback
-guarantee**. With an authoritative-origin grant written offline using that node's
-signing keys, the old binary can authenticate the deliberately seeded
-`assistant/chatgpt` + service-profile counterexample when it has assistant scopes.
-This fixture is not issuable through the supported pairing API and is not a
-demonstrated remote authorization bypass. Unknown-field retention or a successful owner inspect
-is not evidence of safe authorization. Any future service issuance must retain
-the plugin-principal invariant and revisit compatibility before enabling it.
+The rollback fixture also checks owner inspection: the baseline's legacy
+`assistant-grant` response kind preserves the actual plugin principal and service
+scopes instead of projecting an assistant identity. A live assistant owner-read
+control must still succeed. Neither a successful owner inspection nor this
+assistant-route refusal evidence establishes general rollback support or disabled
+service authentication on every historical binary. Any future service issuance
+must retain the plugin-principal invariant and revisit compatibility before
+enabling it.
 
 
 ### Additive claims and unknown-field retention
