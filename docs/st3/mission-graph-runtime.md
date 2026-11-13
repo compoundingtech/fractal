@@ -437,7 +437,27 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
 
 `title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
-`fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
+`fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. The replacement does not receive the predecessor's session-start handoff, held-work summary or unread-mail summary. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
+
+Context retention remains the default: standing workers can intentionally carry knowledge between ordinary steps. A fresh harness session alone does **not** make a standing worker independent: its identity, mailbox and accessible documents are unchanged. For an independent agent turn, declare a separate run-owned agent with a subject such as `agent/${ST_MISSION_RUN}/worker`, select that exact subject, and set `fresh-context` on the step. Do not reuse the author seat or explicitly select an existing native session in the agent's launch settings. The run-owned identity has its own mailbox and handoff namespace; the fresh reset prevents native conversation continuation and automatic predecessor handoff injection.
+
+```kdl
+mission "independent-turn" state="ready" {
+  goal "Produce an independent result from the supplied inputs."
+  agent "agent/${ST_MISSION_RUN}/worker" {
+    workspace "${ST_WORKSPACE}"
+    harness "omp" {}
+    one-shot
+  }
+  step "work" {
+    assigned-to "agent/${ST_MISSION_RUN}/worker"
+    fresh-context
+    goal "Use the declared inputs, not another agent's conversation."
+  }
+}
+```
+
+`one-shot` retires the agent when its process exits; it is not a context-isolation policy by itself. Each child run created by a program worker turn gets the same run-owned identity and fresh-context behavior when its worker mission declares this pattern. This isolates automatic conversation/mailbox inheritance, not workspace files, shared documents, or messages deliberately addressed to the new agent.
 
 `keep-open` is a bare node. It marks a step that only holds its run open while the mission's observers watch, such as an intake or a retirement step: the step is not work. A mission whose only running steps are agentless keep-open steps reads as watching. Mission rows carry it on each step as `keep_open`. For revisions published before the flag existed, steps named `keep-watch`, `retire`, `steward-intake`, `standing`, `keep-open` or `*-retirement` still count.
 

@@ -287,6 +287,7 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     let completed = json!({
         "run": child.as_str(),
         "status": "completed",
+        "executions": [],
         "products": {
             (format!("resource/{child}/published")): {"kind": "custom.st3.program-test", "head": "h1"},
         },
