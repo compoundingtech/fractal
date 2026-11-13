@@ -69,7 +69,7 @@ test('overrides name their source, start and end', () => {
   const note = { person: 'person/ada', author: 'person/ada', revision: 'r', text: 'Only the release matters today', time: at(12, 9), expires_at: at(13, 9) };
   assert.deepEqual(titles(availabilityRows(set, note, now)), [
     'Away | Set by you · until 18:00',
-    'Interruptions: urgent only | Only asks due within an hour reach you · until tomorrow 09:00',
+    'Interruptions: urgent only | Only asks with priority critical reach you · until tomorrow 09:00',
     'Deadline clock: routine asks held | Urgent asks keep running; held time is added to the rest · since 13:00 · until 16:00',
     'Only the release matters today | Note for agents · until tomorrow 09:00',
   ]);
