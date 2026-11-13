@@ -22,8 +22,18 @@ export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
     const first = await step(ctx, 'first', async () => ({ attempt: ctx.attempt }))
     if (ctx.payload.mode === 'retry-failure') return { _tag: 'Failure', error: { _tag: 'Broken' } }
+    if (ctx.payload.mode === 'idle') await new Promise(() => {})
     if (ctx.payload.mode === 'credential') {
       await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
+    }
+    if (ctx.payload.mode === 'blocked-worker') {
+      const fs = await import('node:fs')
+      const waited = await step(ctx, 'native-worker', async () => {
+        fs.writeFileSync(ctx.payload.pids, fs.readlinkSync('/proc/thread-self'))
+        fs.readFileSync(ctx.payload.gate)
+        return 'opened'
+      })
+      return { _tag: 'Success', value: { first, waited } }
     }
     if (ctx.payload.mode === 'busy') for (;;) {}
     const waited = await step(ctx, 'wait', async () => {
@@ -32,6 +42,17 @@ export default {
       return out.stdout.trim()
     })
     return { _tag: 'Success', value: { first, waited } }
+  },
+}
+"#;
+
+#[cfg(target_os = "linux")]
+const REPLACEMENT_BUNDLE: &str = r#"
+export default {
+  [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    ctx.started('replacement')
+    await ctx.record({ key: 'replacement', status: 'completed', value: true, ms: 0 })
+    return { _tag: 'Success', value: true }
   },
 }
 "#;
@@ -73,13 +94,23 @@ mission "program-test" state="ready" {{
         "program-test-definition",
     );
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
-    let engine = ProgramEngine::new(store.clone(), Arc::new(|_: &str| {}), dir.path().join("programs"), liveness);
+    let incremental = reconciler.incremental.clone();
+    let notify = reconciler.notify.clone();
+    let event_notify = reconciler.event_notify.clone();
+    let engine = ProgramEngine::new(store.clone(), Arc::new(move |subject: &str| {
+        incremental.touch(subject);
+        signal_changed(&notify, &event_notify);
+    }), dir.path().join("programs"), liveness);
     assert!(reconciler.program_engine.set(engine.clone()).is_ok());
     Fixture { store, reconciler, engine, dir }
 }
 
 impl Fixture {
     fn start(&self, name: &str, mode: &str) -> Started {
+        self.start_mission("program-test", name, mode)
+    }
+
+    fn start_mission(&self, mission: &str, name: &str, mode: &str) -> Started {
         let pids = self.dir.path().join(format!("{name}.pids"));
         let gate = self.dir.path().join(format!("{name}.gate"));
         let inputs = BTreeMap::from([
@@ -90,7 +121,7 @@ impl Fixture {
         let run = self
             .store
             .create_mission_run(&MissionRunRequest {
-                mission: "program-test".into(),
+                mission: mission.into(),
                 revision: None,
                 workspace: self.dir.path().display().to_string(),
                 requester: None,
@@ -101,6 +132,42 @@ impl Fixture {
             .unwrap();
         let step = run.steps.iter().find(|step| step.step == "program").unwrap().subject.clone();
         Started { run: run.subject, step, pids, gate }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn publish(&self, mission: &str, bundle: &str, definition: &str) {
+        let path = self.dir.path().join(format!("{definition}.mjs"));
+        std::fs::write(&path, bundle).unwrap();
+        let hash = self.store.put_blob(bundle.as_bytes()).unwrap();
+        apply_source(&self.store, &format!(r#"version 2
+mission "{mission}" state="ready" {{
+  goal "Run the published program."
+  concurrent-runs max=4
+  input "mode" kind="text"
+  input "pids" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, path.display()), definition);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn blocked_worker(&self, name: &str) -> (Started, std::fs::File, std::path::PathBuf) {
+        use std::os::unix::ffi::OsStrExt as _;
+        let gate_path = self.dir.path().join(format!("{name}.gate"));
+        let path = std::ffi::CString::new(gate_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the NUL-terminated path lives through mkfifo and names this test's directory.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let gate = std::fs::OpenOptions::new().read(true).write(true).open(&gate_path).unwrap();
+        let started = self.start(name, "blocked-worker");
+        let thread_path = || std::fs::read_to_string(&started.pids).ok()
+            .filter(|thread| !thread.trim().is_empty())
+            .map(|thread| std::path::PathBuf::from("/proc").join(thread.trim()));
+        self.until("the real worker blocks in its native FIFO read", || {
+            thread_path().and_then(|path| std::fs::read_to_string(path.join("stat")).ok())
+                .is_some_and(|stat| stat.rsplit_once(") ").is_some_and(|(_, fields)| fields.starts_with('S')))
+        });
+        let task = thread_path().unwrap();
+        (started, gate, task)
     }
 
     /// Run passes until `done` holds; the engine itself works off the reconciler thread.
@@ -231,6 +298,99 @@ fn a_step_that_leaves_its_attempt_stops_its_program_and_effects_at_once() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn supersession_cancellation_acknowledges_the_actual_worker_exit() {
+    let fixture = fixture(Liveness::default());
+    let (started, gate, task) = fixture.blocked_worker("blocked-worker");
+    fixture.store.request_mission_run_cancellation(&started.run, "stop the native worker").unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    // This later program's journal roundtrip proves the shared host processed
+    // cancellation without blocking other programs on the terminating worker.
+    let probe = fixture.start("worker-exit-probe", "retry-failure");
+    fixture.until("the shared host handles the later program", || {
+        fixture.journal(&probe.step).iter().any(|(key, status)| key == "first" && status == "completed")
+    });
+    assert!(
+        !fixture.engine.fence_left_effects(&fixture.store.mission_run(&started.run).unwrap().unwrap()).unwrap() || !task.exists(),
+        "cancellation acknowledgement must not fence an executing worker thread",
+    );
+    drop(gate);
+    fixture.without_passes("the worker exits and cancellation is acknowledged", || {
+        fixture.engine.fence_left_effects(&fixture.store.mission_run(&started.run).unwrap().unwrap()).unwrap() && !task.exists()
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn liveness_termination_fences_publication_until_the_native_worker_exits() {
+    let fixture = fixture(Liveness { worker_deadline: Duration::from_millis(1_000), ..Liveness::default() });
+    let (old, gate, task) = fixture.blocked_worker("liveness-worker");
+    // Observe the host fault without evaluating the run: publication must encounter
+    // a still-active source whose worker has already entered asynchronous termination.
+    fixture.without_passes("the native worker misses its liveness deadline", || {
+        fixture.engine.host_fault(&old.step, 1).is_some() && fixture.status(&old.step) == "failed"
+    });
+    assert!(task.exists(), "liveness reporting must not wait for native I/O to exit");
+    assert_eq!(fixture.store.mission_run(&old.run).unwrap().unwrap().phase, "normal");
+    let host = fixture.engine.host_pid();
+    let journal = fixture.journal(&old.step);
+    fixture.publish("program-test", REPLACEMENT_BUNDLE, "liveness-publication");
+    let source = fixture.store.mission_run(&old.run).unwrap().unwrap();
+    let replacement = fixture.store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    fixture.until("the superseded source is terminal", || {
+        fixture.store.mission_run(&old.run).unwrap().unwrap().phase == "terminal"
+    });
+    // With a terminal predecessor the only remaining barrier is actual worker exit.
+    fixture.reconciler.evaluate_mission_run_ids(vec![replacement.id.clone()]).unwrap();
+    assert_eq!(fixture.store.mission_run(&replacement.id).unwrap().unwrap().phase, "supersession-waiting");
+    assert!(fixture.journal(&replacement.steps[0].subject).is_empty());
+    assert!(task.exists(), "the native worker is still blocked, not merely awaiting an acknowledgement");
+    // A later journal roundtrip demonstrates that termination did not block the host.
+    let probe = fixture.start("liveness-probe", "idle");
+    fixture.until("the shared host completes a later program", || fixture.status(&probe.step) == "completed");
+    assert_eq!(fixture.engine.host_pid(), host);
+    assert_eq!(fixture.store.mission_run(&replacement.id).unwrap().unwrap().phase, "supersession-waiting");
+    assert!(fixture.journal(&replacement.steps[0].subject).is_empty());
+    drop(gate);
+    fixture.without_passes("the liveness-terminated native worker exits", || !task.exists());
+    fixture.until("the replacement completes after native worker exit", || {
+        fixture.status(&replacement.steps[0].subject) == "completed"
+    });
+    assert!(fixture.journal(&replacement.steps[0].subject).contains(&("replacement".into(), "completed".into())));
+    assert_eq!(fixture.journal(&old.step), journal, "the terminated worker cannot publish a late result");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unrelated_native_worker_cancellation_does_not_fence_another_missions_publication() {
+    let fixture = fixture(Liveness::default());
+    let (blocked, gate, task) = fixture.blocked_worker("unrelated-native-worker");
+    fixture.store.request_mission_run_cancellation(&blocked.run, "stop the unrelated native worker").unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    fixture.publish("unrelated-program", BUNDLE, "unrelated-definition");
+    let old = fixture.start_mission("unrelated-program", "quiescent-worker", "idle");
+    // This roundtrip is after A's cancel on the shared pipe. B owns no process
+    // group and still answers pings; only A has native I/O preventing exit.
+    fixture.until("the unrelated program journals its first step", || {
+        fixture.journal(&old.step).contains(&("first".into(), "completed".into()))
+    });
+    assert!(task.exists());
+    let host = fixture.engine.host_pid();
+    fixture.publish("unrelated-program", REPLACEMENT_BUNDLE, "unrelated-publication");
+    let source = fixture.store.mission_run(&old.run).unwrap().unwrap();
+    let replacement = fixture.store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    fixture.until("the unrelated replacement is admitted and completes", || {
+        fixture.status(&replacement.steps[0].subject) == "completed"
+    });
+    assert!(task.exists(), "mission A must still be awaiting native worker exit while B advances");
+    assert_eq!(fixture.engine.host_pid(), host);
+    assert!(fixture.journal(&replacement.steps[0].subject).contains(&("replacement".into(), "completed".into())));
+    assert!(!fixture.journal(&blocked.step).contains(&("native-worker".into(), "completed".into())));
+    drop(gate);
+    fixture.without_passes("the unrelated native worker exits", || !task.exists());
+}
+
 #[test]
 fn an_unresponsive_worker_fails_only_its_own_step() {
     let fixture = fixture(Liveness { worker_deadline: Duration::from_millis(1_000), ..Liveness::default() });
@@ -319,8 +479,53 @@ mission "program-test" state="ready" {{
     let original = fixture.store.retry_mission_run(&source.run, &crate::model::MissionRunRetryRequest {
         same_revision: true, idempotency_key: "retry-original-program".into(), ..options
     }).unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    assert!(fixture.store.mission_run(&original.id).unwrap().unwrap().superseded_by.is_none(),
+        "an explicit same-revision retry admitted after publication must not be superseded");
     fixture.until("same revision retries the original failure", || fixture.status(&original.steps[0].subject) == "failed");
     assert_eq!(original.revision, failed.revision);
     assert!(fixture.journal(&original.steps[0].subject).contains(&("first".into(), "completed".into())));
+    assert!(fixture.store.mission_run(&original.id).unwrap().unwrap().superseded_by.is_none());
     assert_eq!(fixture.store.mission_run(&source.run).unwrap().unwrap().generation, failed.generation);
+}
+
+#[test]
+fn publication_restarts_a_mid_journal_program_fresh_and_stops_old_effect_groups() {
+    let fixture = fixture(Liveness::default());
+    let old = fixture.start("superseded", "wait");
+    fixture.until("the old effect starts", || pids(&old.pids).is_some());
+    let old_pids = pids(&old.pids).unwrap();
+    let journal = fixture.journal(&old.step);
+    assert!(journal.contains(&("first".into(), "completed".into())));
+    let fixed = BUNDLE.replace("({ attempt: ctx.attempt })", "({ fresh: true, attempt: ctx.attempt })");
+    let bundle = fixture.dir.path().join("published.mjs");
+    std::fs::write(&bundle, &fixed).unwrap();
+    let hash = fixture.store.put_blob(fixed.as_bytes()).unwrap();
+    apply_source(&fixture.store, &format!(r#"version 2
+mission "program-test" state="ready" {{
+  goal "Run the corrected program from its top."
+  concurrent-runs max=4
+  input "mode" kind="text"
+  input "pids" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, bundle.display()), "superseding-program");
+    let source = fixture.store.mission_run(&old.run).unwrap().unwrap();
+    let replacement = fixture.store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    assert_eq!(replacement.phase, "supersession-waiting");
+    let step = replacement.steps[0].subject.clone();
+    assert!(fixture.journal(&step).is_empty());
+    // Even evaluation in reverse order cannot dispatch the replacement early.
+    fixture.reconciler.evaluate_mission_run_ids(vec![replacement.id.clone()]).unwrap();
+    assert!(fixture.journal(&step).is_empty());
+    fixture.until("the replacement journals first", || fixture.journal(&step).contains(&("first".into(), "completed".into())));
+    fixture.without_passes("old effects are reaped", || old_pids.iter().all(|pid| !alive(*pid)));
+    assert_eq!(fixture.store.mission_run(&old.run).unwrap().unwrap().phase, "terminal");
+    assert_eq!(fixture.journal(&old.step), journal, "the retired program wrote no later journal result");
+    let first = fixture.store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .find(|claim| claim.body["fields"]["key"] == "first" && claim.body["fields"]["status"] == "completed").unwrap();
+    assert_eq!(first.body["fields"]["value"]["fresh"], true, "the old journal was not replayed");
+    std::fs::write(&old.gate, "").unwrap();
+    fixture.until("the fresh program completes", || fixture.status(&step) == "completed");
+    assert_eq!(fixture.store.mission_run(&replacement.id).unwrap().unwrap().inputs, source.inputs);
 }

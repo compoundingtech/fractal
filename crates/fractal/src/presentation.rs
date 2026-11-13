@@ -120,6 +120,15 @@ pub(crate) fn render_mission_run(
     for retry in &selected.retried_by {
         let _ = writeln!(output, "RETRIED BY {retry}");
     }
+    if let Some(source) = &selected.supersedes {
+        let _ = writeln!(output, "SUPERSEDES {source}");
+    }
+    if let Some(replacement) = &selected.superseded_by {
+        let _ = writeln!(output, "SUPERSEDED BY {replacement}");
+    }
+    if let Some(reason) = &selected.supersession_fault {
+        let _ = writeln!(output, "{} {reason}", style.status_value("blocked", "SUPERSESSION FAULT"));
+    }
     let _ = writeln!(
         output,
         "STATE     {} · {}",
@@ -1760,6 +1769,9 @@ mod tests {
             parent_step_run: parent.map(str::to_owned),
             retry_of: None,
             retried_by: Vec::new(),
+            supersedes: None,
+            superseded_by: None,
+            supersession_fault: None,
             workspace: "/workspace".into(),
             requester: "person/tester".into(),
             inputs: BTreeMap::from([(
@@ -1806,6 +1818,22 @@ mod tests {
         let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
         assert!(!rendered.contains("RETRY OF"));
         assert!(!rendered.contains("RETRIED BY"));
+    }
+
+    #[test]
+    fn mission_show_displays_supersession_links_and_admission_fault() {
+        let mut selected = run("mission-run/demo/current", None, Vec::new());
+        selected.supersedes = Some("mission-run/demo/previous".into());
+        selected.superseded_by = Some("mission-run/demo/replacement".into());
+        selected.supersession_fault = Some("revision old -> new: input branch changed kind from Text to Resource".into());
+        let rendered = render_mission_run_page(&selected, &[], OutputStyle::plain(), 3_000);
+        assert!(rendered.contains("SUPERSEDES mission-run/demo/previous"));
+        assert!(rendered.contains("SUPERSEDED BY mission-run/demo/replacement"));
+        assert!(rendered.contains("SUPERSESSION FAULT revision old -> new: input branch changed kind from Text to Resource"));
+        let plain = run("mission-run/demo/ordinary", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("SUPERSED"));
+        assert!(!rendered.contains("SUPERSESSION FAULT"));
     }
 
     fn terminal(subject: &str, status: &str) -> SubjectStatus {
