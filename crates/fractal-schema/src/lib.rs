@@ -11,6 +11,7 @@ pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
 pub mod notice;
+pub mod threads;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
@@ -82,9 +83,9 @@ mod canonical_agent_actor_tests {
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h436c7affad49 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
-SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+SQLite compatibility uses the shared storage version reported above. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
 ```sql
 CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
@@ -779,6 +780,19 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        if replicated
+            && kind == "message.sent"
+            && spec.fields.contains_key(threads::MESSAGE_READER_VERSION_FIELD)
+            && threads::MESSAGE_RELATION_FIELDS.iter().any(|name| fields.contains_key(*name))
+            && (fields.get(threads::MESSAGE_READER_VERSION_FIELD).and_then(Value::as_u64)
+                != Some(threads::MESSAGE_READER_VERSION)
+                || fields.get("thread_id").and_then(Value::as_str).is_none())
+        {
+            return Err(error(
+                "invalid-thread-reader-version",
+                "replicated thread messages require the current signed reader marker",
+            ));
+        }
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
@@ -1155,6 +1169,7 @@ fn build_registry() -> Registry {
             false,
         ),
         ("message", "message/ID", "A Small Talk message.", true),
+        ("thread", "thread/ID", "A durable person and agent discussion.", false),
         (
             "observer",
             "observer/RUN/LOCAL_ID",
@@ -2685,6 +2700,42 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SystemOnly,
             Cardinality::Once,
             Some("messages"),
+            true,
+            &[],
+        ),
+        (
+            "thread.created",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &["thread"],
+        ),
+        (
+            "thread.title-set",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "thread.state-set",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "thread.ask-linked",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
             true,
             &[],
         ),
@@ -4431,6 +4482,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("assistant_grant_id", string()),
             ("assistant_owner", reference()),
             ("assistant_session_actor", string()),
+            ("thread_id", reference_to(&["thread"])),
+            ("thread_quote_id", reference_to(&["message"])),
+            ("thread_origin_ask", reference_to(&["step-run"])),
+            ("thread_origin_source", reference()),
+            ("thread_origin_episode", string()),
+            (threads::MESSAGE_READER_VERSION_FIELD, integer()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),
@@ -4450,6 +4507,31 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("status", required_enum(&["expired"])),
             ("reason", required_enum(&["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"])),
         ],
+        "thread.created" => &[
+            ("person", required_reference_to(&["person"])),
+            ("agent", required_reference_to(&["agent"])),
+            ("title", required_string()),
+            ("origin_ask", reference_to(&["step-run"])),
+            ("origin_ask_episode", string()),
+            ("origin_source", reference()),
+            ("origin_episode", string()),
+            ("mission", reference_to(&["mission"])),
+            ("first_message", reference_to(&["message"])),
+        ],
+        "thread.title-set" => &[
+            ("title", required_string()),
+            ("previous_title", required_string()),
+            ("title_revision", required_string()),
+        ],
+        "thread.ask-linked" => &[
+            ("thread_id", required_reference_to(&["thread"])),
+            ("ask", required_reference_to(&["step-run"])),
+            ("ask_episode", required_string()),
+            ("decision_predecessor", reference_to(&["step-run"])),
+            ("decision_predecessor_episode", string()),
+            ("decision_reason", string()),
+        ],
+        "thread.state-set" => &[("state", required_enum(&["open", "closed"]))],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),

@@ -1,3 +1,5 @@
+import { ThreadViewport } from '../threadViewport';
+import { ThreadGroup } from './Threads';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -88,6 +90,7 @@ export function MissionsScreen() {
 // One mission: what finished, what is happening, what is next, and who holds each step.
 export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const { data, status, actions, caps, client } = useStore();
+  const threadViewport = useRef<ScrollView>(null);
   useMissionsOnFocus();
   const listed = data.missions.find(mission => mission.id === route.params.id);
   const [detail, setDetail] = useState<Mission | null>(null);
@@ -117,7 +120,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const waiting = homeRows(data.attention.filter(item => item.mission_id === mission.id), caps?.session_actor);
   return <Screen>
     <Banners />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView ref={threadViewport} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {missionLabel(mission)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>
@@ -136,6 +139,9 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />)}
       </> : null}
+      <ThreadViewport viewport={threadViewport}>
+        <ThreadGroup context={{ mission_id: mission.id }} openThread={id => navigation.navigate('Thread', { id })} />
+      </ThreadViewport>
       <SectionHeader title="steps" count={steps.length} />
       {steps.map(({ shown, step }) => {
         const style = stepStyle(shown?.word);

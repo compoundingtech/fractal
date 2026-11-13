@@ -1,3 +1,4 @@
+import type { ThreadSource } from '../threads/threadSource.ts'
 /**
  * The one seam between wf features and where their data comes from.
  *
@@ -360,6 +361,7 @@ export interface DataSource {
   /** Native operations are optional in fixture adapters, never fabricated locally. */
   readonly contentSearch?: ContentSearchPort
   readonly attachments?: AttachmentPort
+  readonly threads?: ThreadSource
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads
   /** Visible Details uses shared native getter facts; no private harness decoding. */

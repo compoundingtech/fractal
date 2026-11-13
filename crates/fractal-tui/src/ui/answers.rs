@@ -327,23 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn request_composer_and_send_ignore_an_inactive_chat() {
+    fn request_composer_and_send_preserve_a_saved_thread_draft() {
         let mut ui = note_request(None, false);
-        ui.chat = Some(super::super::ChatState {
-            item: "attention/first".into(),
-            to: "agent/example/asker".into(),
-            to_name: "Asker".into(),
-            editing: false,
-        });
+        let thread_draft = "chat:attention/first";
+        ui.conversation_state.drafts.insert(thread_draft.into(), "Unsent thread message".into());
         ui.click(Hit::Answer(0));
         ui.click(Hit::Composer);
         assert!(ui.editing);
-        assert!(!ui.chat.as_ref().unwrap().editing);
+        assert_eq!(ui.conversation_state.drafts[thread_draft], "Unsent thread message");
         press(&mut ui, KeyCode::Char('N'));
         ui.click(Hit::Enter);
         assert!(matches!(&ui.effects[..], [Effect::Attention {
             answer: Some(answer), reason: Some(text), ..
         }] if answer == "yes" && text == "N"));
+        assert_eq!(ui.conversation_state.drafts[thread_draft], "Unsent thread message");
     }
 
     #[test]

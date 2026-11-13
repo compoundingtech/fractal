@@ -43,7 +43,7 @@ fn send_to(state: &AppState, to: &str, key: &str, content: &str) -> Result<Messa
 }
 
 async fn read_body(state: &AppState, subject: &str) -> Value {
-    let Json(value) = message_bodies::body(State(state.clone()), AxumPath(subject.into()))
+    let Json(value) = message_bodies::body(State(state.clone()), AxumPath(subject.into()), None)
         .await
         .unwrap();
     assert_eq!(value["message"], subject);
@@ -54,6 +54,84 @@ async fn full_text(state: &AppState, subject: &str) -> String {
     let value = read_body(state, subject).await;
     assert_eq!(value["complete"], true);
     value["text"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn exact_thread_message_http_reads_require_the_participant_or_bound_recipient() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+    use crate::store::thread_metadata::{Edit, PersonAuthority, apply};
+
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let person = "person/alex";
+    let agent = "agent/worker";
+    let thread = "thread/private-body";
+    let message = "message/private-body";
+    let secret = "the exact thread body";
+    state.store.configure_thread_write_rollout([]);
+    apply(&state.store, person, thread, "create-private-body", Edit::Create {
+        agent, title: "Body test",
+    }).unwrap();
+    crate::store::thread_delivery::append_reply(
+        &state.store,
+        &ClaimInput {
+            subject: message.into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: serde_json::from_value(json!({
+                "from": person, "to": agent, "content": secret, "status": "sent", "thread_id": thread,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("send-private-body".into()),
+        },
+        PersonAuthority::TrustedLocal,
+        None,
+    ).unwrap();
+    let ordinary = send(&state, "ordinary-body", "ordinary mail remains available").unwrap().message.subject;
+    let app = router(state);
+    let read = |route: String, identity: Option<&str>, bound: Option<&str>| {
+        let app = app.clone();
+        let mut request = axum::http::Request::get(route);
+        if let Some(identity) = identity {
+            request = request.header(client_v0::LOCAL_PERSON_HEADER, identity);
+        }
+        if let Some(bound) = bound {
+            request = request.extension(BoundAgent(bound.into()));
+        }
+        async move {
+            let response = app.oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+    };
+    let route = format!("/v1/client/message-bodies/{message}");
+    let (status, body) = read(route.clone(), Some(person), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(secret));
+    for (identity, bound) in [
+        (Some("person/blair"), None), (Some(agent), None), (None, Some("agent/foreign")),
+    ] {
+        let (status, body) = read(route.clone(), identity, bound).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(!body.contains(secret));
+    }
+    for prefix in ["/v1/messages/body", "/v1/messages/read"] {
+        let route = format!("{prefix}/{message}");
+        for bound in [None, Some("agent/foreign")] {
+            let (status, body) = read(route.clone(), None, bound).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert!(!body.contains(secret));
+        }
+        let (status, body) = read(route, None, Some(agent)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains(secret));
+        assert_eq!(read(format!("{prefix}/{ordinary}"), None, None).await.0, StatusCode::OK);
+    }
+    let references = "/v1/client/document-references?subject=message%2Fprivate-body";
+    assert_eq!(read(references.into(), Some(person), None).await.0, StatusCode::OK);
+    assert_eq!(read(references.into(), Some("person/blair"), None).await.0, StatusCode::NOT_FOUND);
+    let (status, body) = read(format!("/v1/client/message-bodies/{ordinary}"), Some("person/blair"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("ordinary mail remains available"));
 }
 
 #[tokio::test]

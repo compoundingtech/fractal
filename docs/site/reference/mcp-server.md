@@ -164,6 +164,18 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
 | `fractal_slo_list` | `read.assistant.slo` | Read | Page every objective and budget row: target, current measurement, window, remaining budget, status and forecast. Continue with `value.page.next_cursor`. |
 | `fractal_slo_history` | `read.assistant.slo` | Read | Chart what was left of one row (`id` from `fractal_slo_list`) across a period of at most 7 days, in 1 to 1000 steps. |
+| `fractal_threads_list` | `read.assistant.conversation` | Read | List threads for one selected conversation. |
+| `fractal_thread_get` | `read.assistant.conversation` | Read | Read one thread's title, lifecycle state and revisions. |
+| `fractal_thread_timeline` | `read.assistant.conversation` | Read | Page messages and accepted rename, close and reopen events for a thread. Use a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
+
+These thread tools are available through the `fractal-mcp` stdio server. Use the agent
+and current session IDs returned by conversation discovery for all three.
+The same revocable `read.assistant.conversation` grant authorizes these reads;
+thread discovery does not create a new grant. Exact thread reads also verify the
+selected conversation and owner before exposing metadata or messages. Private
+thread messages remain unavailable through generic conversation content handles.
+These tools do not start, reply to, rename, close or reopen threads, and do not
+support thread attachments.
 
 The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 

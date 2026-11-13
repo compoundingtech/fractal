@@ -344,3 +344,12 @@ one more cut trims seed 2 on every modern node. So the kind changes which writer
 waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
 the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
 authority (#6210).
+
+Thread metadata uses `typed_thread_metadata_converges_after_replication_and_restart`
+rather than adding typed-only inputs to the frozen generic corpora. The test creates
+and renames a thread on different members, closes it, exchanges the real operation
+claims, restarts both members, and checks owner visibility and receipt recovery.
+Ask-link admission and replication have dedicated thread store coverage. Keep main's
+v25 corpus and measured `NEVER_TRIMS` unchanged; optional thread message fields do
+not justify rewriting frozen snapshots or importing the older thread-only v17
+snapshot. Generated current-registry snapshots remain verification artifacts.

@@ -18,6 +18,7 @@ import { lightTheme, systemColors, theme, type Theme } from './theme';
 import { useScheme } from './ui';
 import { AgentsScreen, HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
+import { ThreadScreen } from './screens/Threads';
 import { FleetScreen, PairScreen } from './screens/Fleet';
 import { UsageDetailScreen, UsageScreen } from './screens/Usage';
 import { AttentionScreen, NowScreen } from './screens/Now';
@@ -97,6 +98,7 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Document" component={DocumentScreen} options={{ title: 'Document' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ ...schemeOptions, title: 'Conversation' }} />
+    <Stack.Screen name="Thread" component={ThreadScreen} options={{ ...schemeOptions, title: 'Thread' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
     <Stack.Screen name="Mission" component={MissionScreen} options={{ title: 'Mission' }} />
     <Stack.Screen name="Attention" component={AttentionScreen} options={{ ...systemOptions, title: 'Alert' }} />

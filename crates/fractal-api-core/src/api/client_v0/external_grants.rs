@@ -12,6 +12,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("conversation-detail", "read.assistant.conversation"),
     ("conversation-timeline", "read.assistant.conversation"),
     ("conversation-search", "read.assistant.conversation"),
+    ("threads", "read.assistant.conversation"),
+    ("thread-detail", "read.assistant.conversation"),
+    ("thread-timeline", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
     ("slo", "read.assistant.slo"), ("slo-history", "read.assistant.slo"),
 ];
@@ -308,7 +311,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         // An assistant grant is not a device pairing: it never registers push tokens.
         pairing_issued_here: false,
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false, model_drift_attention:false,
-        assistant_write: None,
+        assistant_write: None, bound_agent: None, pairing_completion: None,
         conversation_blocks:false, conversation_delivery_links:false, conversation_message_participants:false, messages_paging:false, assistant_content_handles:false, local_peer:false, peer_process:None, scopes })
 }
 
@@ -325,6 +328,11 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
     let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
     let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
         else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
+    if matches!(projection, Some("threads" | "thread-detail" | "thread-timeline"))
+        && session.authority_actor != MCP_PRINCIPAL
+    {
+        return Err(forbidden("this thread projection requires an assistant/mcp grant"));
+    }
     if request.method() != axum::http::Method::GET || !session.allows(scope)
         || request.headers().contains_key(axum::http::header::UPGRADE) {
         return Err(forbidden("assistant read requires its exact scope"));

@@ -395,3 +395,19 @@ describe('RM1 workspace source states', () => {
     expect(retry(sidebar())).toBeUndefined()
   })
 })
+
+it('isolates opened workspace panes when a fixture gets a fresh registry', async () => {
+  window.history.replaceState(null, '', '/w/agent/example?open=doc%2Ffixture-discussion%3Adetail')
+  await mount()
+  const views = () => host.querySelector('[aria-label="Workspace views"]')!
+  expect(views().textContent).toContain('Fixture-discussion')
+
+  await act(async () => root.unmount())
+  registry.dispose()
+  registry = AtomRegistry.make()
+  root = createRoot(host)
+  window.history.replaceState(null, '', '/w/agent/example')
+  await mount()
+  expect(host.querySelector('[data-testid="live-agent-workspace"]')).not.toBeNull()
+  expect(views()?.textContent ?? '').not.toContain('Fixture-discussion')
+})

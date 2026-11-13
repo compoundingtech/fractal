@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
+            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v5.discussion-availability",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -125,6 +125,16 @@ impl View for Family {
             connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h810468890407 owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_record_{action} AFTER {action} ON replica_records BEGIN
               INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies
               WHERE dependency IN (SELECT subject FROM claims WHERE id IN ({references})) ON CONFLICT DO NOTHING; END;"))?;
+        }
+        // A discussion recipient can become unavailable before an envelope has an admitted
+        // claim_id. Follow its subject hint as well as the existing admitted-claim edges.
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            let hints = match action {
+                "INSERT" => "NEW.subject_hint",
+                "DELETE" => "OLD.subject_hint",
+                _ => "OLD.subject_hint,NEW.subject_hint",
+            };
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-heb39719bc8fc owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_inbox_lifecycle_{action} AFTER {action} ON replica_records BEGIN INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies WHERE dependency IN ({hints}) ON CONFLICT DO NOTHING; END;"))?;
         }
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hcd371697cf7d owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_batch_update AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
           INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies
@@ -208,6 +218,17 @@ fn dependency(tx: &Transaction<'_>, family: &str, source: &str, key: &str) -> Re
     Ok(())
 }
 
+fn discussion_dependencies(tx: &Transaction<'_>, family: &str, item: &AttentionItemView) -> Result<()> {
+    if let Some(agent) = item.conversation.as_deref() {
+        dependency(tx, family, &item.subject, agent)?;
+        let identity: Option<String> = tx.query_row("SELECT identity FROM identity_names WHERE name=?1", [agent], |row| row.get(0)).optional()?;
+        if let Some(identity) = identity {
+            dependency(tx, family, &item.subject, &identity)?;
+        }
+    }
+    Ok(())
+}
+
 fn custom_row(
     tx: &Transaction<'_>,
     source: &str,
@@ -227,8 +248,11 @@ fn custom_row(
     };
     let source: Value = serde_json::from_str(&text)?;
     let at = at.parse().unwrap_or(0);
-    let item = custom::attention_item(&source, at)?;
+    let mut item = custom::attention_item(&source, at)?;
+    item.conversation = inbox::responsible_agent_at(tx, &item)?;
     let mut row = resource(&item)?;
+    inbox::annotate_resource_at(tx, &item, &mut row)?;
+    discussion_dependencies(tx, if item.kind.starts_with("custom.") { "custom" } else { "person" }, &item)?;
     row["source_kind"] = json!("custom");
     row["revision"] = source["revision"].clone();
     row["custom_form"] = source["attention"]["reply"].clone();
@@ -267,6 +291,12 @@ fn person_row(
                 }
             }
         }
+        if ask.actor.as_deref() == Some("daemon/runtime") && person_work::is_update(ask)
+            && let Some(about) = ask.body["fields"]["request"]["about"].as_str()
+        {
+            // Canonical source corrections must also refresh the notice's conversation link.
+            dependency(tx, "person", source, about)?;
+        }
         for field in ["owner_run", "origin_step"] {
             if let Some(key) = ask.body["fields"][field].as_str() {
                 dependency(tx, "person", source, key)?;
@@ -276,13 +306,16 @@ fn person_row(
             }
         }
     }
-    let Some(item) = attention_snapshot::person_attention_item(tx, source, u128::MAX)? else {
+    let Some(mut item) = attention_snapshot::person_attention_item(tx, source, u128::MAX)? else {
         return Ok(None);
     };
+    item.conversation = inbox::responsible_agent_at(tx, &item)?;
     let eligible = ask.as_ref().map_or(item.requested_at_unix_ms, |a| {
         item.requested_at_unix_ms.max(a.accepted_at_unix_ms)
     });
     let mut row = resource(&item)?;
+    inbox::annotate_resource_at(tx, &item, &mut row)?;
+    discussion_dependencies(tx, if item.kind.starts_with("custom.") { "custom" } else { "person" }, &item)?;
     row["action_parameters"] =
         json!({"work.done":{"target_id":item.subject,"episode":item.episode}});
     if let Some(ask) = &ask

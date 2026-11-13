@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep retained unadmitted records from displacing a valid pairing challenge.",
+  "replay": {"status": "none", "detail": "Existing claims and operation receipts retain their interpretation."},
+  "schema": {"status": "none", "detail": "Completion uses the existing client operation receipt and writer transaction."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Pairing selects an admitted challenge before canonical ordering and atomically consumes it once. Retained unadmitted begin or completion records cannot shadow a valid challenge."},
+  "downtime": {"status": "none", "detail": "The correction applies when the daemon accepts a pairing completion."},
+  "manual": {"status": "none", "detail": "Existing device pairing steps remain valid."},
+  "recovery": {"status": "none", "detail": "Retry completion with the current pairing challenge or request a new challenge after expiry."}
+}

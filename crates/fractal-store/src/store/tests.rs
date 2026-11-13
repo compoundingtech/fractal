@@ -10453,6 +10453,10 @@ fn login_attention_skips_healthy_seats_and_retains_legacy_and_runtime_fences() {
     );
     assert!(reads.contains("kind:harness.observed"));
     assert!(reads.contains("kind:harness.diagnostic"));
+    for seat in ["agent/node.native", "agent/node.legacy", "agent/node.screen"] {
+        assert!(reads.contains(seat), "login attention must track {seat}");
+        assert!(reads.contains(&format!("actor:{seat}")), "actor-only recovery must invalidate login attention for {seat}");
+    }
     for name in ["native", "legacy"] {
         append(
             name,
@@ -13235,4 +13239,279 @@ fn an_older_member_sees_control_diagnostics_as_before_and_still_sends_every_code
         .unwrap();
     sync(&older, &current);
     assert_eq!(current.claim_by_id(&sent.id).unwrap().unwrap().body, sent.body);
+}
+
+#[test]
+fn thread_metadata_uses_existing_fences_and_replica_operation_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thread-destination.db");
+    let left = Store::open_memory("left").unwrap();
+    let right = Store::open(&path, "right").unwrap();
+    right.project_replication_backlog().unwrap();
+    let subject = "thread/review";
+    let actor = "person/example";
+    let create = ClaimInput {
+        subject: subject.into(),
+        kind: "thread.created".into(),
+        actor: Some(actor.into()),
+        fields: BTreeMap::from([
+            ("person".into(), json!(actor)),
+            ("agent".into(), json!("agent/example")),
+            ("title".into(), json!("Review")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: Some(None),
+        idempotency_key: Some("thread-create".into()),
+    };
+    assert!(left.append_client_claim(&create).is_err());
+    let created = left.append_claim(&create).unwrap();
+    right.import_replication("left", &left.export_replication(0).unwrap()).unwrap();
+
+    let edit = |kind: &str, field: &str, value: &str, key: &str| ClaimInput {
+        subject: subject.into(),
+        kind: kind.into(),
+        actor: Some(actor.into()),
+        fields: BTreeMap::from([(field.into(), json!(value))]),
+        evidence: Vec::new(),
+        expected_subject: Some(Some(created.id.clone())),
+        idempotency_key: Some(key.into()),
+    };
+    let close = edit("thread.state-set", "state", "closed", "thread-close");
+    let mut rename = edit("thread.title-set", "title", "Worker review", "thread-title");
+    rename.fields.insert("previous_title".into(), json!("Review"));
+    rename.fields.insert("title_revision".into(), json!(created.id));
+    let closed = left.append_claim(&close).unwrap();
+    assert_eq!(left.append_claim(&rename).unwrap_err().code, "stale-subject");
+    let renamed = right.append_claim(&rename).unwrap();
+    assert!(right.newest_claim_for_subject_kind(subject, "thread.state-set").unwrap().is_none());
+
+    right.import_replication("left", &left.export_replication(0).unwrap()).unwrap();
+    left.import_replication("right", &right.export_replication(0).unwrap()).unwrap();
+    assert_eq!(right.append_claim(&close).unwrap().id, closed.id);
+    assert_eq!(left.append_claim(&rename).unwrap().id, renamed.id);
+    drop(right);
+
+    let right = Store::open(&path, "right").unwrap();
+    right.project_replication_backlog().unwrap();
+    assert_eq!(right.newest_claim_for_subject_kind(subject, "thread.state-set").unwrap().unwrap().id, closed.id);
+    assert_eq!(right.newest_claim_for_subject_kind(subject, "thread.title-set").unwrap().unwrap().id, renamed.id);
+}
+
+#[test]
+fn typed_thread_edits_keep_timeline_provenance_and_check_receipt_authority() {
+    use thread_metadata::{Edit, apply};
+
+    let store = Store::open_memory("thread-owner-fixture").unwrap();
+    let owner = "person/example";
+    let other = "person/other";
+    let thread = "thread/approval";
+    let (created, _) = apply(
+        &store, owner, thread, "create",
+        Edit::Create { agent: "agent/example", title: "Review" },
+    ).unwrap();
+    let created_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
+    let (closed, _) = apply(&store, owner, thread, "close", close()).unwrap();
+    assert_eq!(closed.actor.as_deref(), Some(owner));
+    assert!(closed.accepted_at_unix_ms > 0);
+    assert_eq!(closed.body["fields"]["state"], "closed");
+    assert_eq!(
+        apply(&store, other, thread, "close", close()).unwrap_err().code,
+        "thread-unavailable",
+    );
+    let (retry, appended) = apply(&store, owner, thread, "close", close()).unwrap();
+    assert!(!appended);
+    assert_eq!(retry.id, closed.id);
+    assert_eq!(retry.operation_id, closed.operation_id);
+    assert_eq!(retry.accepted_at_unix_ms, closed.accepted_at_unix_ms);
+    let closed_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
+    let (reopened, _) = apply(
+        &store, owner, thread, "reopen", Edit::Reopen { revision: &closed_revision },
+    ).unwrap();
+    assert_eq!(reopened.body["fields"]["state"], "open");
+    let reopened_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
+    let (renamed, _) = apply(
+        &store, owner, thread, "rename",
+        Edit::Rename {
+            title: "Worker review", title_revision: &created.id, revision: &reopened_revision,
+        },
+    ).unwrap();
+    assert_eq!(renamed.body["fields"]["title"], "Worker review");
+    assert_eq!(
+        thread_metadata::Event::from_claim(renamed.clone()).unwrap().change,
+        thread_metadata::Change::Renamed { previous_title: "Review".into(), title: "Worker review".into() },
+    );
+    assert_eq!(
+        apply(
+            &store, owner, thread, "new-rename",
+            Edit::Rename {
+                title: "Stale", title_revision: &created.id, revision: &thread_metadata::summary(&store, owner, thread).unwrap().revision,
+            },
+        ).unwrap_err().code,
+        "stale-thread-title",
+    );
+    assert_eq!(store.claims_for(thread, None).unwrap().len(), 4);
+}
+
+#[test]
+fn thread_lifecycle_projection_selects_the_same_receipt_across_members() {
+    use thread_metadata::{Change, Edit, Event, apply, latest_lifecycle_event};
+
+    let left = Store::open_memory("thread-left").unwrap();
+    let right = Store::open_memory("thread-right").unwrap();
+    let owner = "person/example";
+    let thread = "thread/approval";
+    let (_created, _) = apply(
+        &left, owner, thread, "create",
+        Edit::Create { agent: "agent/example", title: "Review" },
+    ).unwrap();
+    right.import_replication("thread-left", &left.export_replication(0).unwrap()).unwrap();
+    assert!(latest_lifecycle_event(&right, thread).unwrap().is_none());
+    let created_revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
+    let (left_close, _) = apply(&left, owner, thread, "close", close()).unwrap();
+    let (right_close, _) = apply(&right, owner, thread, "close", close()).unwrap();
+    assert_ne!(left_close.id, right_close.id);
+    right.import_replication("thread-left", &left.export_replication(0).unwrap()).unwrap();
+    left.import_replication("thread-right", &right.export_replication(0).unwrap()).unwrap();
+    let canonical = if left_close.id < right_close.id { left_close } else { right_close };
+    let closed = Event::from_claim(canonical).unwrap();
+    assert_eq!(closed.change, Change::Closed);
+    assert_eq!(latest_lifecycle_event(&left, thread).unwrap().as_ref(), Some(&closed));
+    assert_eq!(latest_lifecycle_event(&right, thread).unwrap().as_ref(), Some(&closed));
+    let revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
+    let (reopen, _) = apply(
+        &left, owner, thread, "reopen", Edit::Reopen { revision: &revision },
+    ).unwrap();
+    right.import_replication("thread-left", &left.export_replication(0).unwrap()).unwrap();
+    let reopened = Event::from_claim(reopen).unwrap();
+    assert_eq!(reopened.change, Change::Reopened);
+    assert_eq!(latest_lifecycle_event(&right, thread).unwrap(), Some(reopened));
+}
+
+#[test]
+fn thread_mixed_timeline_preserves_the_selected_lifecycle_conflict() {
+    use thread_metadata::{Edit, apply, history, mixed_timeline};
+
+    let left = Store::open_memory("thread-mixed-left").unwrap();
+    let right = Store::open_memory("thread-mixed-right").unwrap();
+    let owner = "person/example";
+    let thread = "thread/review";
+    let (created, _) = apply(
+        &left, owner, thread, "create-mixed",
+        Edit::Create { agent: "agent/example", title: "Review" },
+    ).unwrap();
+    right.import_replication(left.origin(), &left.export_replication(0).unwrap()).unwrap();
+    let created_revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
+    for (store, title) in [(&left, "Left title"), (&right, "Right title")] {
+        apply(store, owner, thread, "same-rename-key", Edit::Rename {
+            title, title_revision: &created.id, revision: &created_revision,
+        }).unwrap();
+    }
+    left.import_replication(right.origin(), &right.export_replication(0).unwrap()).unwrap();
+    assert_eq!(history(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
+    assert_eq!(mixed_timeline(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
+    assert_eq!(
+        mixed_timeline(&left, "person/blair", thread, None, 20).err().unwrap().code,
+        "thread-unavailable",
+    );
+}
+
+#[test]
+fn thread_pairing_revocation_precedes_receipt_recovery() {
+    use thread_metadata::{Edit, PersonAuthority, apply, apply_as};
+
+    let store = Store::open_memory("thread-paired").unwrap();
+        store.configure_thread_write_rollout([]);
+    let person = "person/example";
+    let actor = "person/example/session/paired";
+    let thread = "thread/approval";
+    let grant = "custom/client/pairing-thread-fixture";
+    let (_created, _) = apply(
+        &store, person, thread, "create",
+        Edit::Create { agent: "agent/example", title: "Review" },
+    ).unwrap();
+    let paired = store.append_client_operation_claim(&ClaimInput {
+        subject: grant.into(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some(person.into()),
+        fields: BTreeMap::from([
+            ("person_id".into(), json!(person)),
+            ("session_actor".into(), json!(actor)),
+            ("device_id".into(), json!("device/paired-example")),
+            ("credential_hash".into(), json!("test-not-a-secret")),
+            ("expires_at_unix_ms".into(), json!(now_ms() as u64 + 60_000)),
+            ("scopes".into(), json!(["control.messages"])),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(store.client_operation_is_trusted(&paired).unwrap());
+    let created_revision = thread_metadata::summary(&store, person, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
+    let authority = || PersonAuthority::Paired { grant, completion: &paired.id, actor };
+    let (_, appended) = apply_as(&store, person, thread, "close", close(), authority()).unwrap();
+    assert!(appended);
+    assert!(!apply_as(&store, person, thread, "close", close(), authority()).unwrap().1);
+    store.append_client_operation_claim(&ClaimInput {
+        subject: grant.into(),
+        kind: "custom.client.pairing-revoked".into(),
+        actor: Some(person.into()),
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(store.pairing_completion_is_revoked(&paired).unwrap());
+    assert_eq!(
+        apply_as(&store, person, thread, "close", close(), authority()).unwrap_err().code,
+        "thread-authority-expired",
+    );
+    assert_eq!(store.claims_for(thread, Some("thread.state-set")).unwrap().len(), 1);
+}
+
+#[test]
+fn thread_list_paginates_only_the_exact_owner_and_agent_conversation() {
+    use thread_metadata::{Edit, apply, list_conversation};
+
+    let store = Store::open_memory("thread-list").unwrap();
+    for (person, agent, thread) in [
+        ("person/avery", "agent/reviewer", "thread/first"),
+        ("person/avery", "agent/reviewer", "thread/second"),
+        ("person/avery", "agent/other", "thread/other-agent"),
+        ("person/robin", "agent/reviewer", "thread/other-owner"),
+    ] {
+        apply(&store, person, thread, thread, Edit::Create { agent, title: thread }).unwrap();
+    }
+    let first = list_conversation(&store, "person/avery", "agent/reviewer", None, 1).unwrap();
+    assert_eq!(first.items[0].id, "thread/first");
+    let cursor = first.next_cursor.as_deref();
+    assert!(cursor.is_some());
+    let second = list_conversation(&store, "person/avery", "agent/reviewer", cursor, 1).unwrap();
+    assert_eq!(second.items[0].id, "thread/second");
+    assert!(second.next_cursor.is_none());
+    for (person, agent) in [("person/avery", "agent/other"), ("person/robin", "agent/reviewer")] {
+        assert_eq!(
+            list_conversation(&store, person, agent, cursor, 1).err().unwrap().code,
+            "invalid-thread-cursor",
+        );
+    }
+}
+
+#[test]
+fn thread_creation_conflict_does_not_disclose_an_unestablished_owner() {
+    use thread_metadata::{Edit, apply, summary};
+    let left = Store::open_memory("thread-conflict-left").unwrap();
+    let right = Store::open_memory("thread-conflict-right").unwrap();
+    let thread = "thread/conflicted";
+    for (store, person) in [(&left, "person/avery"), (&right, "person/robin")] {
+        apply(store, person, thread, "same-create", Edit::Create {
+            agent: "agent/reviewer", title: "Review",
+        }).unwrap();
+    }
+    left.import_replication("thread-conflict-right", &right.export_replication(0).unwrap()).unwrap();
+    for person in ["person/avery", "person/robin", "person/other"] {
+        assert_eq!(summary(&left, person, thread).err().unwrap().code, "thread-unavailable");
+    }
 }

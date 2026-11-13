@@ -1701,6 +1701,7 @@ mod tests {
     #[test]
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
+        browser_pairing_login: None,
         quota_source: None,
         usage_limits: None,
         host_envelope_file: None,
@@ -1709,6 +1710,7 @@ mod tests {
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
         worker_ingress_generation_check: None,
+        thread_writes: false,
         seat_priority: None,
         unlaned_seat: None,
         seat_admission: None,

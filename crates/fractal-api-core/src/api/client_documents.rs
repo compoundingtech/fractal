@@ -156,9 +156,13 @@ pub(super) async fn document_references(
     let mut references = Vec::new();
     let mut complete = true;
     if subject.starts_with("message/") {
-        let lookup = state.clone();
+        let lookup = state.store.clone();
         let wanted = subject.clone();
-        let message = blocking_store(move || lookup.store.message(&wanted))
+        let person = records::client_message_person(&session).map(str::to_owned);
+        let bound = session.bound_agent.clone();
+        let message = blocking_store(move || records::exact_message(
+            &lookup, &wanted, person.as_deref(), bound.as_deref(),
+        ))
             .await?
             .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
         let actor = session.authority_actor.as_str();

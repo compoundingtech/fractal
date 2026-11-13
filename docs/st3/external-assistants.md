@@ -362,8 +362,16 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
 | `conversation-detail` | `agent_id`, `max_response_bytes` | Current conversation identity and a bounded timeline preview |
 | `conversation-timeline` | `agent_id`, optional `session_id`, `cursor`, `limit`, `max_response_bytes` | Allowlisted timeline items, bounded text snippets and exact content read ranges |
+| `threads` | `agent_id`, `session_id`, optional `cursor`, `limit`, `max_response_bytes` | List threads for one selected conversation. |
+| `thread-detail` | `agent_id`, `session_id`, `thread_id`, optional `max_response_bytes` | Read one thread's title, lifecycle state and revisions. |
+| `thread-timeline` | `agent_id`, `session_id`, `thread_id`, optional `cursor`, `limit`, `max_response_bytes` | Page thread messages and accepted rename, close and reopen events, newest first. A quoted message references its exact parent through `thread_quote_id`. Follow `next_cursor` for older entries or pass a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
 | `conversation-search` | `text`, optional `agent_id`, `cursor`, `limit`, `max_response_bytes` | Safe-text search hits with bounded snippets and current conversation identities |
 | `terminal-content` | `agent_id`, `terminal_id`, `incarnation_id`, `screen_revision`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-terminal-content"` |
+
+Thread projections require `assistant/mcp` with the existing `read.assistant.conversation` scope.
+Choose the agent and its current session from conversation discovery. Threads belong to the
+configured person and that agent across runtime sessions. Each continuation is bound to
+the selected session and grant policy.
 
 Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgReadAuthorization { payload, signature }`. The closed payload contains `issuer`, `identity: "chatgpt"`, `assistant_id: "assistant/chatgpt"`, `grant_id`, `policy_revision`, `key_id`, `approval_id`, `execution_id`, `projection` (the route suffix), `parameters` (every decoded query parameter, cursor and range included), `max_response_bytes`, `request_digest`, `expires_at_unix_ms`, and `nonce`. `signature` is unpadded base64url Ed25519 over the UTF-8 bytes `st3.scg-read.v1\n` followed by the canonical JSON payload: recursively sorted object keys, compact, integers only. `request_digest` is lowercase hexadecimal SHA-256 of canonical `{"method":"GET","path":<exact path>,"parameters":<decoded map>}`. st consumes the nonce atomically before returning private bytes; a replayed, expired, mismatched, or attestor-unverifiable proof is denied and discloses nothing. Generated clients never sign, retry, or widen the budget: they send exactly one request and reject a proof whose projection, parameters, or budget differ from the call.
 

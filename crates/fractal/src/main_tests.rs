@@ -1707,7 +1707,8 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
 
 #[test]
 fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
-    let message = fractal_daemon::model::MessageView {
+    let mut message = fractal_daemon::model::MessageView {
+        delivery_thread: None,
         subject: "message/0123456789abcdef".into(),
         from: "agent/run-1/wake.claude".into(),
         to: "agent/run-1/wake.omp-2".into(),
@@ -1737,11 +1738,20 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         )
     );
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
+    message.from = "person/operator".into();
+    message.delivery_thread = Some("thread/topic".into());
+    let threaded = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    assert_eq!(threaded["meta"]["threadId"], "thread/topic");
+    let content = threaded["content"].as_str().unwrap();
+    assert!(content.contains("fractal conversations reply-in-thread 'thread/topic' --quote 'message/0123456789abcdef'"));
+    assert!(content.contains(&fractal_drivers::ding::fractal_body_sha256("FACT QUARTZ")));
+    assert!(!content.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
 }
 
 #[test]
 fn native_push_preserves_delivery_notices_and_person_signatures() {
     let mut view = MessageView {
+        delivery_thread: None,
         subject: "message/notice".into(),
         from: "agent/example/writer".into(),
         to: "agent/example/reader".into(),
@@ -1752,6 +1762,7 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         tags: vec![
             fractal_daemon::silent::SILENT_TAG.into(),
             "dictated".into(),
+            "st3-delivery-thread:thread/forged".into(),
             format!("{}12", fractal_daemon::silent::REMAINING_PREFIX),
         ],
         attachments: vec![],
@@ -1769,6 +1780,11 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
     assert!(rendered.contains("12 older silent held; st conversations ls"));
     assert!(rendered.contains("dictated by voice"));
     assert_eq!(queued.body, "body");
+    let prefix = fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG;
+    assert!(!queued.tags.iter().any(|tag| tag.starts_with(prefix)));
+    view.delivery_thread = Some("thread/admitted".into());
+    assert!(native_queued_message(&view, "body".into(), &[]).tags
+        .iter().any(|tag| tag == &format!("{prefix}thread/admitted")));
     view.from = "person/operator".into();
     let queued = native_queued_message(&view, "body".into(), &[]);
     assert!(!queued.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG));
@@ -2260,6 +2276,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
         fractal_drivers::push_mailbox::register(&agent_dir);
         let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
         let mut view = MessageView {
+            delivery_thread: None,
             subject: "message/legacy".into(),
             from: "person/eval".into(),
             to: "agent/eval.worker".into(),
@@ -6354,6 +6371,7 @@ fn a_derived_message_key_names_one_message_in_one_hour() {
 #[test]
 fn message_replies_route_to_the_other_participant() {
     let original = MessageView {
+        delivery_thread: None,
         subject: "message/original".into(),
         from: "agent/h".into(),
         to: "agent/s".into(),

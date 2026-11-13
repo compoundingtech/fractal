@@ -440,6 +440,28 @@ pub(super) async fn run_message(
             };
             print_message_receipt(&receipt, json_output)
         }
+        MessageCommand::ReplyInThread { thread, quote, body, idempotency_key } => {
+            let actor = fractal_drivers::contracts::env("ST_AGENT")
+                .filter(|actor| actor.starts_with("agent/"))
+                .context("a topic-thread reply needs a bound agent seat")?;
+            let body = read_message_body(Some(body), None, std::io::stdin().lock())?;
+            let key = idempotency_key.unwrap_or_else(|| {
+                let input = json!([&actor, &thread, &quote, &body, message_key_hour()]);
+                format!("agent-thread-reply:{}", hex::encode(Sha256::digest(input.to_string())))
+            });
+            let receipt = submit_thread_action(
+                endpoint, &actor, "thread.reply", &key,
+                json!({"target_id": thread, "content": body, "thread_quote_id": quote}),
+            ).await.with_context(|| format!("thread reply key: {key}"))?;
+            if json_output {
+                print_value(&receipt, true)
+            } else {
+                let message = receipt["affected_ids"][1].as_str()
+                    .context("the daemon did not return the accepted thread message ID")?;
+                println!("{message}");
+                Ok(())
+            }
+        }
         MessageCommand::Wait(args) => {
             let actor = message_list_identity(args.actor, fractal_drivers::contracts::env("ST_AGENT"))?;
             reject_foreign_agent_actor(&actor)?;

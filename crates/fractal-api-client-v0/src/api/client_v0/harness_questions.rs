@@ -144,7 +144,7 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     let _guard = gate.lock_owned().await;
     let mut provenance = request.fence.clone();
     provenance.subject_revisions.clear();
-    validate_fence(state, &provenance)?;
+    validate_fence(state, &provenance, session)?;
     let digest = action_request_digest(request)?;
     let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
     retained_action_receipt(state, session, request, &digest, &actor_key)?;
@@ -168,7 +168,7 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     if request.fence.subject_revisions.get(&id) != Some(&question.revision) {
         return Err(stale("the question content revision fence is stale"));
     }
-    validate_fence(state, &request.fence)?;
+    validate_fence(state, &request.fence, session)?;
     if question.resolution.is_some() { return Ok(result(state, request, &question, "already_resolved", &digest)); }
     let sink = state.harness_question_sink.as_ref().ok_or_else(|| unavailable(HarnessQuestionAdapterError::Missing))?;
     let sink = Arc::clone(sink);
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(public["resolution"]["answers"]["q0"]["timed_out"], true);
         assert!(public["resolution"].get("receipt").is_none());
         assert_eq!(public["revision"], question.revision);
-        validate_fence(&state, &request.fence).unwrap();
+        validate_fence(&state, &request.fence, &session).unwrap();
     }
     #[tokio::test]
     async fn stale_revision_and_incarnation_refuse_before_settlement() {

@@ -19,7 +19,7 @@ type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise
  * beside `allow` (or a plan beside `approve`), a screen prompt's own answers, or a question's options, one question at
  * a time and sent together. Anything else is answered in the seat's terminal, and an answer there still wins.
  */
-export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef }: {
+export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef, context }: {
   readonly alert: Native.Attention
   readonly onAnswer?: Answer
   readonly now?: number
@@ -29,6 +29,8 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
   readonly maxBlockSize?: number
   readonly onBegin?: (alert: Native.Attention) => void
   readonly focusRef?: React.Ref<HTMLElement>
+  /** The surface showing this alert, prefixed to its landmark name. */
+  readonly context?: string
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const prompt = promptAnswers(alert)
@@ -79,7 +81,7 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
   return <DecisionCard
     key={`${asked.id}\u0000${asked.revision}\u0000${step}`}
     density={density}
-    label={alert.title}
+    label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
     heading={heading}

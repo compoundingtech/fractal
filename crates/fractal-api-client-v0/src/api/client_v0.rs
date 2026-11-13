@@ -42,6 +42,8 @@ pub mod assistant;
 pub mod browser_pairing;
 #[cfg(test)]
 mod browser_pairing_tests;
+#[cfg(test)]
+mod thread_fence_tests;
 pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
@@ -62,6 +64,7 @@ mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
 pub mod summary;
+mod threads;
 mod agents_publication_frames;
 mod agents_publication_stream;
 #[cfg(test)]
@@ -106,6 +109,9 @@ mod stream_timeline_tests;
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
     app
         .route("/v1/client/arrangements", get(arrangements::list))
+        .route("/v1/client/threads", get(threads::list))
+        .route("/v1/client/threads/{id}", get(threads::detail))
+        .route("/v1/client/threads/{id}/timeline", get(threads::timeline))
         .route(
             "/v1/client/arrangements/{person_name}/{uuid}",
             get(arrangements::get),
@@ -243,6 +249,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/threads", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/slo", get(assistant::read_projection))
         .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
@@ -570,6 +579,7 @@ async fn collection_items_with_windows(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships"
             | "read-positions" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+            | "threads" | "thread-timeline"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -582,15 +592,16 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
-        return Err(validation(
-            "subject filters are supported for arrangements and ordered memberships only",
-        ));
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "threads" | "thread-timeline") {
+        return Err(validation("this collection does not accept a subject filter"));
     }
     if request.collection == "ordered-memberships" && request.subject.is_none() {
         return Err(validation("ordered memberships require an arrangement subject"));
     }
     validate_agent_selector(&request.collection, request.agent.as_deref())?;
+    if request.attention_thread_hints && request.collection != "attention" {
+        return Err(validation("thread hints are supported for attention only"));
+    }
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
         return Err(validation("collection limit must be 1 through 200"));
@@ -601,11 +612,12 @@ async fn collection_items_with_windows(
     if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions") && request.actor.is_some() {
         return Err(validation("arrangements and read positions select an explicit person, not an actor"));
     }
+    let thread_window = threads::stream_selection(request)?;
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
     let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions")
-        || (windows.is_some() && session.transport != "unix")
+        || (windows.is_some() && !session.is_unpaired_unix())
     {
         Some(if state.store.readers.has_request_reader() {
             revalidate_session(state, session)?
@@ -654,7 +666,7 @@ async fn collection_items_with_windows(
     if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
         return Err(forbidden("device inventory requires an explicitly authenticated person"));
     }
-    let prepared = windows.as_ref().and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h5d92b2a013b1 owner=fractal_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
+    let prepared = windows.as_ref().filter(|_| thread_window.is_none()).and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h5d92b2a013b1 owner=fractal_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
     let state = state.clone();
     let session = session.clone();
     let request = request.clone();
@@ -690,6 +702,7 @@ async fn collection_items_with_windows(
         let status = status.clone();
         let collection = collection.clone();
         let person = person.clone();
+        let thread_window = thread_window.clone();
         let prepared = prepared.clone();
         let windows = windows.clone();
         let worker_store = state.store.clone();
@@ -709,7 +722,7 @@ async fn collection_items_with_windows(
                 let now = client_now_ms();
                 // Recheck paired grants, including expiry and changed scopes, before any reuse.
                 let (current, person) = match (|| {
-                    let current = if session.transport == "unix" {
+                    let current = if session.is_unpaired_unix() {
                         session.clone()
                     } else {
                         revalidate_session(&state, &session)?
@@ -731,6 +744,11 @@ async fn collection_items_with_windows(
                     Ok(current) => current,
                     Err(error) => return Ok(Err(error)),
                 };
+                if let Some(thread_window) = &thread_window {
+                    let read = threads::stream_rows(&store, &session, &current, thread_window, limit)
+                        .map(|(items, more)| Some((client_snapshot_at(&state, index), items, more, None)));
+                    return Ok(read);
+                }
                 // An exact agent selector reads its own selected projection: one card folds
                 // in the caller's snapshot, so it neither waits for nor reads the fleet roster.
                 let mut published = None;
@@ -1059,6 +1077,9 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
+                if collection == "attention" && request.attention_thread_hints {
+                    overlay_attention_thread_unread(&store, &current, &mut items)?;
+                }
                 if collection == "agents" {
                     // The window's shared rows are in hand; each reader's live overlay runs
                     // beside the others instead of behind them.
@@ -1108,6 +1129,25 @@ async fn collection_items_with_windows(
     Ok((snapshot, items, has_more, owner_revision))
 }
 
+/// Overlay only the visible owner window. Shared attention rows remain undecorated.
+fn overlay_attention_thread_unread(
+    store: &Store,
+    session: &ClientSession,
+    items: &mut [Value],
+) -> anyhow::Result<()> {
+    let Ok(person) = thread_access::read_person(session) else { return Ok(()) };
+    let (positions, asks): (Vec<_>, Vec<_>) = items.iter().enumerate().filter_map(|(position, item)| {
+        if item["kind"] != "attention" || item["person_id"] != person {
+            return None;
+        }
+        Some((position, (item["source_id"].as_str()?, item["episode"].as_str()?)))
+    }).unzip();
+    for position in crate::store::thread_metadata::unread_inbox_positions(store, person, &asks)? {
+        items[positions[position]]["thread_unread"] = json!(true);
+    }
+    Ok(())
+}
+
 /// Membership and display order come from the existing shallow page refs. The next
 /// reference proves `has_more` without folding an invisible card.
 fn client_agent_window_cards(store: &Store, index: u64, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
@@ -1146,6 +1186,8 @@ fn collection_window_label(collection: &str) -> &'static str {
         "devices" => "stream collection/devices",
         "sessions" => "stream collection/sessions",
         "terminals" => "stream collection/terminals",
+        "threads" => "stream collection/threads",
+        "thread-timeline" => "stream collection/thread-timeline",
         _ => "stream collection/invalid",
     }
 }
@@ -2481,7 +2523,10 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 let followed = |s: &CollectionSubscription| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && !state.store.collection_view_published(&s.request.collection);
-                if !subscriptions.values().any(followed) {
+                let follows_thread_hints = |s: &CollectionSubscription| s.ivm.is_none()
+                    && s.request.collection == "attention" && s.request.attention_thread_hints
+                    && thread_access::read_person(&session).is_ok();
+                if !subscriptions.values().any(|s| followed(s) || follows_thread_hints(s)) {
                     weighed = index;
                     continue;
                 }
@@ -2496,12 +2541,15 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     };
                     match revisions {
                         Ok(revisions) => {
-                            affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)
-                                && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions))
-                                .map(|(id, _)| id.clone()));
+                            let hints_changed = collection_windows::Windows::changed(
+                                collection_windows::ATTENTION_THREAD_HINTS, &window_revisions, &revisions,
+                            );
+                            affected.extend(subscriptions.iter().filter(|(_, s)| (
+                                followed(s) && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions)
+                            ) || (hints_changed && follows_thread_hints(s))).map(|(id, _)| id.clone()));
                             window_revisions = revisions;
                         }
-                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)).map(|(id, _)| id.clone())),
+                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) || follows_thread_hints(s)).map(|(id, _)| id.clone())),
                     }
                     weighed = index;
                 } else if index > weighed {
@@ -2510,7 +2558,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
                     let read_positions_changed = subscriptions.values().any(|s| s.request.collection == "read-positions") && state.store.read_positions_changed(weighed, index).unwrap_or(true);
-                    affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
+                    let hints_changed = subscriptions.values().any(follows_thread_hints)
+                        && crate::store::thread_metadata::attention_unread_changed(&state.store, weighed, index).unwrap_or(true);
+                    affected.extend(subscriptions.iter().filter(|(_, s)| (hints_changed && follows_thread_hints(s)) || followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
@@ -2623,7 +2673,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // Grace periods, leases and queue deadlines pass without a claim, and so does a
                 // paired grant's expiry. Stable rows remain reusable; authority and local
                 // overlays are rechecked on reads.
-                let paired = session.transport != "unix";
+                let paired = !session.is_unpaired_unix();
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
                     && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
                     .map(|(id, _)| id.clone()));
@@ -3035,17 +3085,7 @@ pub async fn publication_definition(
     Ok((Extension(result.0), Json(value)))
 }
 
-const LIMITED_PAIRING_SCOPES: &[&str] = &[
-    "read.projections",
-    "write.client-diagnostics",
-    "read.glasses",
-    "control.glasses",
-    "read.arrangements",
-    "control.arrangements",
-    "terminal.read",
-    "control.attention",
-    "control.launches",
-];
+use crate::pairing::LIMITED_PAIRING_SCOPES;
 
 fn session_claim_actor(session: &ClientSession) -> String {
     if session.authority_actor.starts_with("person/")
@@ -5125,6 +5165,9 @@ fn conversation_read_now_unbounded(
             {
                 continue;
             }
+            if records::private_thread_claim(&claim) {
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("session_id").and_then(Value::as_str)
                 .is_none_or(|message_session| message_session == session_id) {
@@ -6004,19 +6047,10 @@ pub async fn pairing_complete(
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
     let subject = format!("custom/client/pairing-{id}");
-    let begun = state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .find(|claim| {
-            claim
-                .body
-                .pointer("/fields/pairing_id")
-                .and_then(Value::as_str)
-                == Some(pairing_id.as_str())
-        })
+    let begun = state.store.newest_admitted_client_operation(
+        &subject, "custom.client.pairing-begun",
+    ).map_err(ApiError::internal)?
+        .filter(|claim| claim.body["fields"]["pairing_id"] == pairing_id)
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
     if begun.body["fields"]["browser_request"] == true
         && (browser_pairing::approval(&state, &begun)? != "approved"
@@ -6036,12 +6070,8 @@ pub async fn pairing_complete(
     if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
         return Err(forbidden("the pairing challenge requires a new pairing"));
     }
-    let used = !state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .is_empty();
+    let used = state.store.newest_admitted_pairing_completion(&subject, client_now_ms())
+        .map_err(ApiError::internal)?.is_some();
     let restart = pairing_verifier::restart;
     let expires = begun
         .body
@@ -6198,15 +6228,15 @@ pub async fn pairing_complete(
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
-    let completed = state.store.append_client_operation_claim(&ClaimInput {
+    let completed = state.store.complete_client_pairing(&ClaimInput {
         subject: begun.subject.clone(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
         fields,
         evidence: vec![begun.id.clone()],
-        expected_subject: Some(Some(begun.id.clone())),
+        expected_subject: None,
         idempotency_key: None,
-    });
+    }, &begun.id);
     if let Err(error) = completed {
         if error.code == "stale-subject" {
             return Err(forbidden(
@@ -7883,7 +7913,7 @@ fn terminal_keys_unfenced(request: &ActionRequest) -> bool {
         )
 }
 
-fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
+fn validate_snapshot_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
     let parsed = fence
         .snapshot_id
         .strip_prefix("snapshot/")
@@ -7902,8 +7932,15 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
             "the client snapshot belongs to another host or a future store position",
         ));
     }
+    Ok(())
+}
+
+fn validate_fence(state: &AppState, fence: &Fence, session: &ClientSession) -> Result<(), ApiError> {
+    validate_snapshot_fence(state, fence)?;
     for (subject, revision) in &fence.subject_revisions {
-        let current = if subject.starts_with("attention/") {
+        let current = if fractal_schema::threads::is_reserved_subject(subject) {
+            Some(threads::metadata_fence_revision(state, session, subject)?)
+        } else if subject.starts_with("attention/") {
             client_attention_resources(&state.store, None, false)
                 .map_err(ApiError::internal)?
                 .into_iter()
@@ -9634,6 +9671,18 @@ async fn action_inner(
     if request.action_type == "harness.answer" {
         return harness_questions::answer(&state, &session, &request).await;
     }
+    if matches!(request.action_type.as_str(), "thread.rename" | "thread.close" | "thread.reopen") {
+        return threads::lifecycle_action(state, session, request).await;
+    }
+    if matches!(request.action_type.as_str(), "thread.start" | "thread.reply") {
+        return threads::message_action(state, session, request).await;
+    }
+    if request.action_type == "thread.read" {
+        return threads::read_action(state, session, request).await;
+    }
+    if request.action_type == "thread.link-ask" {
+        return threads::link_ask_action(state, session, request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -9650,6 +9699,15 @@ async fn action_inner(
         state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_process.as_ref())
             .map_err(|error| validation(error.to_string()))?;
     }
+    // Receipt recovery must not bypass current access to extra private thread fences.
+    // Compare versions later; an exact retry may legitimately carry an older observed version.
+    if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
+        for subject in request.fence.subject_revisions.keys()
+            .filter(|subject| fractal_schema::threads::is_reserved_subject(subject))
+        {
+            threads::metadata_fence_revision(&state, &session, subject)?;
+        }
+    }
     let request_digest = action_request_digest(&request)?;
     let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
     let (receipt_subject, receipt) =
@@ -9658,7 +9716,7 @@ async fn action_inner(
         if request.action_type == "private-notes.write" {
             // Never replay a private fence from the graph or bypass current
             // ownership checks and owner-local exact-request recovery.
-            validate_fence(&state, &request.fence)?;
+            validate_fence(&state, &request.fence, &session)?;
             return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
         }
         let mut result = receipt
@@ -9691,7 +9749,7 @@ async fn action_inner(
         let live =
             remote_terminal_live_session(&state, &terminal_subject(&terminal_id), incarnation)?;
         if live.owner_host_id != client_host_id(&state.node) {
-            validate_fence(&state, &request.fence)?;
+            validate_fence(&state, &request.fence, &session)?;
             let relay = state
                 .client_relay
                 .as_ref()
@@ -9787,13 +9845,15 @@ async fn action_inner(
     let mut checked_fence = request.fence.clone();
     if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
-        // are checked in the writer transaction. Attention episodes and external filesystem
-        // sessions retain projected preflight checks (external state is outside SQLite).
+        // are checked in the writer transaction. Thread fences additionally require owner,
+        // read-scope and current-session authorization before reaching that atomic recheck.
+        // Attention and external filesystem sessions retain projected preflight checks.
         checked_fence.subject_revisions.retain(|subject, _| {
             subject.starts_with("attention/") || subject.starts_with("session/external-")
+                || fractal_schema::threads::is_reserved_subject(subject)
         });
     }
-    let fence_result = validate_fence(&state, &checked_fence);
+    let fence_result = validate_fence(&state, &checked_fence, &session);
     if let Err(error) = fence_result {
         if request.action_type == "terminal.attach" {
             reconciled_attachment =
@@ -13617,13 +13677,30 @@ mission "differential" state="ready" {
         let begun: Value = serde_json::from_slice(&bytes).unwrap();
         let challenge = &begun["value"];
         let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
-        let response = app.oneshot(Request::builder()
+        let subject = format!("custom/client/pairing-{id}");
+        for kind in ["custom.client.pairing-begun", "custom.client.pairing-completed"] {
+            state.store.graph.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some("person/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "pairing_id": challenge["pairing_id"], "person_id": "person/ada",
+                    "code_hash": "unadmitted-retained-code", "scopes": [],
+                    "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let complete = || app.clone().oneshot(Request::builder()
             .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
             .header("Content-Type", "application/json")
             .body(Body::from(json!({
                 "api_version": CLIENT_API_VERSION, "code": challenge["code"],
                 "device_public_key": "test-device-public-key-with-at-least-32-characters"
-            }).to_string())).unwrap()).await.unwrap();
+            }).to_string())).unwrap());
+        let (first, second) = tokio::join!(complete(), complete());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(usize::from(first.status() == StatusCode::OK) + usize::from(second.status() == StatusCode::OK), 1);
+        let response = if first.status() == StatusCode::OK { first } else { second };
         let status = response.status();
         let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
         let completed: Value = serde_json::from_slice(&bytes).unwrap();
@@ -16697,7 +16774,7 @@ subscription "watch/source" {
     fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let cap = crate::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
         let now = cap - 60_000;
         let claim = state.store.append_claim(&ClaimInput {
             subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
@@ -16712,7 +16789,7 @@ subscription "watch/source" {
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
         state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
             completion_id:claim.id.clone(),
-            record_hash:fractal_store::pairing::record_hash(
+            record_hash:crate::pairing::record_hash(
                 &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
             ).unwrap(),
             until_unix_ms:(cap + 60_000) as u64,
@@ -20749,11 +20826,240 @@ mission "example/zero-run" state="ready" {
         ];
         let snapshot = new_client_snapshot(&state);
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap().items;
         native.reverse();
         assert_eq!(named(&native), expected, "native: {native:?}");
         let (_, stored) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
         assert_eq!(named(stored["items"].as_array().unwrap()), expected, "stored: {stored}");
+    }
+
+    #[tokio::test]
+    async fn private_thread_messages_stay_out_of_the_shared_agent_conversation() {
+        use crate::store::{thread_delivery, thread_metadata::{self, Edit, PersonAuthority}};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "thread-conversation-privacy");
+        let agent = "agent/privacy";
+        let person = "person/alex";
+        let other = "person/blair";
+        let incarnation = "private-conversation-one";
+        let session_id = managed_session_id(agent, incarnation);
+        state.store.configure_thread_write_rollout([]);
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"privacy\" { workspace \"/tmp\"; command \"true\"; }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-private-test-agent").unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject: agent.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("privacy-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+
+        let app = crate::api::router(state.clone());
+        let get = |actor: &str, uri: &str, negotiated: bool| {
+            let mut request = Request::builder().uri(uri).header(LOCAL_PERSON_HEADER, actor);
+            if negotiated {
+                request = request.header("x-st3-features", "conversation-blocks.v1");
+            }
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let timeline = "/v1/client/sessions/agent%2Fprivacy/timeline?limit=40";
+        let changes = "/v1/client/conversations/agent%2Fprivacy/changes";
+        let mut cursors = Vec::new();
+        for actor in [person, other] {
+            let (status, initial) = get(actor, changes, true).await;
+            assert_eq!(status, StatusCode::OK, "{initial}");
+            cursors.push((actor, initial["value"]["next_cursor"].as_str().unwrap().to_owned()));
+        }
+        let before_message = new_client_snapshot(&state);
+        let thread = "thread/private-case";
+        thread_metadata::apply(&state.store, person, thread, "create", Edit::Create {
+            agent, title: "Private question",
+        }).unwrap();
+        let hidden = "Private thread marker 47e2d";
+        let message = "message/private-case";
+        thread_delivery::append_reply(
+            &state.store,
+            &ClaimInput {
+                subject: message.into(),
+                kind: "message.sent".into(),
+                actor: Some(person.into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!(person)),
+                    ("to".into(), json!(agent)),
+                    ("content".into(), json!(hidden)),
+                    ("status".into(), json!("sent")),
+                    ("thread_id".into(), json!(thread)),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some("private-case-message".into()),
+            },
+            PersonAuthority::TrustedLocal,
+            None,
+        ).unwrap();
+        let ordinary = "Ordinary conversation control 390f";
+        state.store.append_claim(&ClaimInput {
+            subject: "message/ordinary-control".into(),
+            kind: "message.sent".into(),
+            actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(agent)),
+                ("content".into(), json!(ordinary)),
+                ("status".into(), json!("sent")),
+                ("session_id".into(), json!(session_id)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+
+        for (actor, cursor) in cursors {
+            for negotiated in [false, true] {
+                let (status, page) = get(actor, timeline, negotiated).await;
+                assert_eq!(status, StatusCode::OK, "{page}");
+                assert!(page.to_string().contains(ordinary), "{page}");
+                assert!(!page.to_string().contains(hidden), "{page}");
+                assert!(!page.to_string().contains(message), "{page}");
+                let (status, delta) = get(actor, &format!("{changes}?after={cursor}"), negotiated).await;
+                assert_eq!(status, StatusCode::OK, "{delta}");
+                assert!(delta.to_string().contains(ordinary), "{delta}");
+                assert!(!delta.to_string().contains(hidden), "{delta}");
+                assert!(!delta.to_string().contains(message), "{delta}");
+            }
+        }
+
+        let (_, own) = get(person, "/v1/client/threads/private-case/timeline", true).await;
+        assert!(own.to_string().contains(hidden), "{own}");
+        let (status, foreign) = get(other, "/v1/client/threads/private-case/timeline", true).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{foreign}");
+        assert!(!foreign.to_string().contains(hidden));
+
+        // A canonical Codex delivery echo must also disappear before native paging. Keep
+        // an unrelated user turn even when its text resembles the private message.
+        let echo_id = fractal_drivers::codex_app_server::stable_client_user_message_id(agent, "paging-test", message);
+        let path = root.path().join("private-echo.jsonl");
+        std::fs::write(&path, format!("{}{}", codex_line(hidden, "user", Some(&echo_id), 1),
+            codex_line("Ordinary terminal control", "user", None, 2))).unwrap();
+        let source = page_test_source(&path, &session_id);
+        let snapshot = new_client_snapshot(&state);
+        let viewer = ClientSession::local(Some(other)).unwrap();
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
+        for snapshot in [&before_message, &snapshot] {
+            let (Json(native), _, _) = native_slice_page_at_generation(
+                &state, snapshot, &viewer, &session_id,
+                &ClientListQuery { limit: Some(40), ..Default::default() },
+                &source, managed.as_ref(),
+            ).unwrap();
+            assert!(native.to_string().contains("Ordinary terminal control"), "{native}");
+            assert!(!native.to_string().contains(hidden), "{native}");
+
+            let opencode = |subject: &str| fractal_drivers::opencode_session::stable_message_id(
+                "privacy", "ses_privacy", subject,
+            );
+            let native = |id: &str, sequence: u64, text: &str, correlation: Value| json!({
+                "id":id,"sequence":sequence,"revision":1,"timestamp":"2099-01-01T00:00:00Z",
+                "role":"user","type":"content","final":true,"body":{"text":text},
+                "_delivery_correlation":correlation,
+            });
+            let items = vec![
+                native("native/omp-private", 1, hidden, json!({"kind":"topic-message","id":message})),
+                native("native/opencode-private", 2, hidden,
+                    json!({"kind":"opencode","id":opencode(message),"thread_id":"ses_privacy"})),
+                native("native/omp-ordinary", 3, "Ordinary Pi echo",
+                    json!({"kind":"topic-message","id":"message/ordinary-control"})),
+                native("native/opencode-ordinary", 4, "Ordinary OpenCode echo",
+                    json!({"kind":"opencode","id":opencode("message/ordinary-control"),"thread_id":"ses_privacy"})),
+            ];
+            let Json(native) = native_timeline_page(
+                &state, snapshot, &viewer, &session_id,
+                &ClientListQuery { limit: Some(40), ..Default::default() },
+                items, managed.as_ref(),
+            ).unwrap();
+            assert!(!native.to_string().contains(hidden), "{native}");
+            assert!(native.to_string().contains("Ordinary Pi echo"), "{native}");
+            assert!(native.to_string().contains("Ordinary OpenCode echo"), "{native}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_native_session_cannot_be_read_through_an_external_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = test_state_named(root.path(), "external-alias-boundary");
+        let home = root.path().join("home");
+        let folder = home.join(".codex/sessions/2026/10/02");
+        std::fs::create_dir_all(&folder).unwrap();
+        for (id, content) in [("bound-native", "Bound transcript"), ("independent-native", "Independent transcript")] {
+            std::fs::write(folder.join(format!("{id}.jsonl")), format!("{}\n{}",
+                json!({"type":"session_meta", "timestamp":"2026-10-02T10:00:00Z", "payload":{"id":id, "cwd":"/tmp"}}),
+                codex_line(content, "user", None, 1),
+            )).unwrap();
+        }
+        state.native_session_home = Some(home.clone());
+        let sessions = crate::external_sessions::discover_fresh(Some(&home), true).unwrap().sessions;
+        let alias = |native_id: &str| sessions.iter().find(|session| session.native_id == native_id).unwrap().id.clone();
+        let bound = alias("bound-native");
+        let independent = alias("independent-native");
+        let app = crate::api::router(state.clone());
+        let get = |route: String| {
+            let request = Request::builder()
+                .uri(route)
+                .header(LOCAL_PERSON_HEADER, "person/other")
+                .header("x-st3-features", "conversation-blocks.v1")
+                .body(Body::empty()).unwrap();
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+        let timeline = |session: &str| format!("/v1/client/sessions/{}/timeline", session.replace('/', "%2F"));
+        let source = sessions.iter().find(|session| session.id == bound).unwrap();
+        let item = crate::external_sessions::normalized_timeline(source).unwrap()
+            .into_iter().find(|item| item["type"] == "content").unwrap();
+        let reference = conversation_blocks::reference(
+            source, &conversation_blocks::basis(source).unwrap(), &bound, &item, "/body",
+        );
+        let chunk = format!("/v1/client/conversations/{}/content/{reference}/chunk",
+            bound.trim_start_matches("session/"));
+        let (status, before) = get(timeline(&bound)).await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert!(before.contains("Bound transcript"), "{before}");
+        let (status, before_chunk) = get(chunk.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{before_chunk}");
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/bound".into(),
+            kind: "harness.session-file".into(),
+            actor: Some("agent/bound".into()),
+            fields: BTreeMap::from([
+                ("agent".into(), json!("agent/bound")),
+                ("session_id".into(), json!("bound-native")),
+                ("harness".into(), json!("codex")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let (status, denied) = get(timeline(&bound)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert!(!denied.contains("Bound transcript"), "{denied}");
+        let (status, denied_chunk) = get(chunk).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied_chunk}");
+        let (status, allowed) = get(timeline(&independent)).await;
+        assert_eq!(status, StatusCode::OK, "{allowed}");
+        assert!(allowed.contains("Independent transcript"), "{allowed}");
     }
 
     #[test]
@@ -20808,7 +21114,7 @@ mission "example/zero-run" state="ready" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap().items;
         assert_eq!(native[0]["sequence"], messages[1]["sequence"]);
         assert_eq!(native[0]["timestamp"], messages[1]["timestamp"]);
         let expected = vec![messages[0].clone(), native[1].clone(),
@@ -23971,7 +24277,7 @@ mission "example/zero-run" state="ready" {
             })
             .unwrap();
         assert!(
-            validate_fence(&state, &fence).is_ok(),
+            validate_fence(&state, &fence, &session).is_ok(),
             "unrelated writes do not invalidate declaration mutations"
         );
         let mut attach_fence = fence.clone();
@@ -24051,19 +24357,19 @@ mission "example/zero-run" state="ready" {
         }
         let mut foreign = fence.clone();
         foreign.snapshot_id = foreign.snapshot_id.replacen(&state.node, "another-host", 1);
-        assert!(validate_fence(&state, &foreign).is_err());
+        assert!(validate_fence(&state, &foreign, &session).is_err());
         let mut future = fence.clone();
         future.snapshot_id = format!(
             "snapshot/{}/{}/digest",
             state.node,
             state.store.index().unwrap() + 1
         );
-        assert!(validate_fence(&state, &future).is_err());
+        assert!(validate_fence(&state, &future, &session).is_err());
         let mut revision = fence.clone();
         revision
             .subject_revisions
             .insert("agent/unrelated".into(), "old-revision".into());
-        assert!(validate_fence(&state, &revision).is_err());
+        assert!(validate_fence(&state, &revision, &session).is_err());
         observe("replacement-incarnation");
         let error = action(
             State(state.clone()),
@@ -24819,6 +25125,8 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,

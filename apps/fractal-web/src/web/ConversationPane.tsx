@@ -13,6 +13,7 @@ import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
+import { LiveAgentThreads } from '../threads/LiveThreads.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
@@ -63,6 +64,7 @@ const ConversationThreadPane = ({
   agentName,
   onOpenTool,
   onOpenDocument,
+  onOpenThread,
   ux,
   visible = true,
   interest: shellInterest,
@@ -75,6 +77,7 @@ const ConversationThreadPane = ({
   readonly onOpenTool: (call: WorkLogCall) => void
   /** Opens a `doc/…` named in the conversation; stable, so the memoized transcript keeps still. */
   readonly onOpenDocument?: (ref: string) => void
+  readonly onOpenThread?: ((ref: string) => void) | undefined
   readonly ux?: UxTelemetry
   /** A retained hidden pane keeps its DOM but releases visible follow demand (setVisible false). */
   readonly visible?: boolean
@@ -151,11 +154,11 @@ const ConversationThreadPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} onOpenThread={onOpenThread} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible, readOnly }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, onOpenThread, feed, state, stale, ux, visible, readOnly }: {
   readonly stale: boolean
   readonly ux?: UxTelemetry
   readonly visible: boolean
@@ -164,6 +167,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   readonly agentName: string
   readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpenDocument?: (ref: string) => void
+  readonly onOpenThread?: ((ref: string) => void) | undefined
   readonly feed: Feed<ConversationPage>
   readonly state: ConversationTranscriptState
 }) {
@@ -268,6 +272,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
+    {!readOnly && visible ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return

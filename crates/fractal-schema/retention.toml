@@ -227,6 +227,10 @@
 "terminal.input.requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.launch-geometry" = { class = "current", pending = "no reader audit yet" }
+"thread.ask-linked" = { class = "durable" }
+"thread.created" = { class = "durable" }
+"thread.state-set" = { class = "durable" }
+"thread.title-set" = { class = "durable" }
 "transport.observed" = { class = "current" }
 "vcs.item.state" = { class = "current", pending = "the idle hold reads a thread's state history; no rule until the queue-exit read takes only events" }
 "work.claimed" = { class = "durable" }

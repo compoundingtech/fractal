@@ -325,18 +325,8 @@ pub struct Drafts<'a> {
     pub noted_answers: Vec<String>,
     /// Why the last answer to this request was not sent; stays until the next attempt.
     pub answer_error: Option<&'a str>,
-    /// "Chat about this": who it goes to, the draft, and the thread so far.
-    pub chat: Option<Chat<'a>>,
     /// A prompt's form: its mark, whether it has the keys, and a question's choices.
     pub form: super::alerts::FormState<'a>,
-}
-
-pub struct Chat<'a> {
-    pub to: String,
-    pub text: &'a str,
-    pub cursor: usize,
-    pub editing: bool,
-    pub thread: Vec<Line<'static>>,
 }
 
 /// A clickable reference to a graph subject; clicking it opens a popover.
@@ -1681,58 +1671,9 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         }
     }
     card.blank();
-    // Every item: talk to whoever can act on it, or go to what it is about.
-    if let Some(chat) = &drafts.chat {
-        card.section(&format!("chat with {} about this", chat.to), None, inner);
-        if chat.thread.is_empty() {
-            card.wrap(
-                &[run(
-                    format!(
-                        "{} gets this item as context: its title, mission and question.",
-                        chat.to
-                    ),
-                    theme::dim(),
-                )],
-                inner,
-            );
-        } else {
-            card.lines(chat.thread.iter().cloned());
-        }
-        card.blank();
-        let box_drafts = Drafts {
-            text: Some(chat.text),
-            cursor: chat.cursor,
-            editing: chat.editing,
-            answering: None,
-            note_answer: None,
-            noted_answers: Vec::new(),
-            answer_error: None,
-            confirm: None,
-            chat: None,
-            form: Default::default(),
-        };
-        let first_target = card.targets.len();
-        text_box(
-            &mut card,
-            &format!("message {}", chat.to),
-            &box_drafts,
-            "",
-            inner,
-        );
-        card.buttons(&[
-            ("enter", "Send", Hit::Enter, theme::ACCENT),
-            ("esc", "Close chat", Hit::Escape, theme::OVERLAY1),
-        ]);
-        // The chat's box and Send are its own: a click on them never reaches a request's note.
-        for target in &mut card.targets[first_target..] {
-            target.hit = match target.hit {
-                Hit::Composer => Hit::ChatComposer,
-                Hit::Enter => Hit::ChatEnter,
-                ref other => other.clone(),
-            };
-        }
-    } else if !drafts.editing && drafts.confirm.is_none() {
-        let mut buttons = vec![("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)];
+    // Thread controls are composed below the item by the shared thread component.
+    if !drafts.editing && drafts.confirm.is_none() {
+        let mut buttons = Vec::new();
         if item.mission.is_some() || item.agent.is_some() {
             buttons.push((
                 "g",
@@ -1745,7 +1686,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 theme::OVERLAY1,
             ));
         }
-        card.buttons(&buttons);
+        if !buttons.is_empty() { card.buttons(&buttons); }
     }
     card.blank();
     let title = format!("{} · waiting {}", item.kind.word(), item.age);
@@ -3689,7 +3630,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(),
+            form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3718,7 +3659,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(),
+            form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -4303,7 +4244,6 @@ mod request_notes {
             note_answer: case.note.map(Into::into),
             noted_answers: case.noted.iter().map(|id| (*id).to_owned()).collect(),
             answer_error: case.error,
-            chat: None,
             form: Default::default(),
         };
         let mut card = Doc::new();

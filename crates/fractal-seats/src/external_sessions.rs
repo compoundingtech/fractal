@@ -2193,6 +2193,15 @@ fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
         let message = serde_json::from_slice::<Value>(&encoded).unwrap_or(Value::Null);
         let message_digest = native_message_digest(&id_bytes, created, &message);
         let native_role = message.get("role").and_then(Value::as_str);
+        let correlation = if native_role == Some("user") {
+            std::str::from_utf8(&id_bytes).ok()
+                .filter(|id| fractal_drivers::opencode_session::is_stable_message_id(id))
+                .map(|id| {
+                json!({"kind":"opencode", "id":id, "thread_id":session.native_id})
+            })
+        } else {
+            None
+        };
         let role = match native_role {
             Some("user" | "assistant" | "system" | "tool" | "toolResult" | "tool_result")
             | None => normalized_role(native_role),
@@ -2210,6 +2219,9 @@ fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
             sequence: entry_sequence,
             timestamp: at.clone(),
         })?;
+        if let Some(correlation) = &correlation {
+            record["_delivery_correlation"] = correlation.clone();
+        }
         additions.push(record);
         extend_bounded_opencode_timeline(
             &mut items,
@@ -2226,7 +2238,10 @@ fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
             let row_bytes = sqlite_row_bytes(row, &[1, 2])?;
             if row_bytes > MAX_TIMELINE_BYTES as usize {
                 generation.update(format!("oversized-part:{row_bytes}").as_bytes());
-                let notice = oversized_sqlite_row(&mut sequence, &at, "part", row_bytes)?;
+                let mut notice = oversized_sqlite_row(&mut sequence, &at, "part", row_bytes)?;
+                if let Some(correlation) = &correlation {
+                    notice["_delivery_correlation"] = correlation.clone();
+                }
                 extend_bounded_opencode_timeline(
                     &mut items,
                     &mut serialized_bytes,
@@ -2262,6 +2277,9 @@ fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
             })?;
             for item in &mut additions {
                 item["_source"] = locator.clone();
+                if let Some(correlation) = &correlation {
+                    item["_delivery_correlation"] = correlation.clone();
+                }
             }
             extend_bounded_opencode_timeline(
                 &mut items,
@@ -3691,9 +3709,13 @@ mod tests {
                  );",
             )
             .unwrap();
+        let delivery_id = fractal_drivers::opencode_session::stable_message_id(
+            "worker", "ses_native", "message/thread-send",
+        );
         for (message_id, created, role) in [
             ("msg_tools", 1_700_000_000_000_i64, "assistant"),
-            ("msg_after", 1_700_000_001_000_i64, "user"),
+            (delivery_id.as_str(), 1_700_000_001_000_i64, "user"),
+            ("msg_ordinary", 1_700_000_002_000_i64, "user"),
         ] {
             connection
                 .execute(
@@ -3738,7 +3760,7 @@ mod tests {
                 "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     "part_after",
-                    "msg_after",
+                    delivery_id.as_str(),
                     "ses_native",
                     1_700_000_001_001_i64,
                     1_700_000_001_001_i64,
@@ -3763,7 +3785,7 @@ mod tests {
         };
         let timeline = normalized_timeline(&external).unwrap();
 
-        assert_eq!(timeline.len(), 35);
+        assert_eq!(timeline.len(), 36);
         assert!(timeline.windows(2).all(|pair| {
             pair[0]["sequence"].as_u64().unwrap() < pair[1]["sequence"].as_u64().unwrap()
         }));
@@ -3777,13 +3799,20 @@ mod tests {
         );
         let following_message = timeline
             .iter()
-            .find(|item| item["body"]["message_id"] == "msg_after")
+            .find(|item| item["body"]["message_id"] == delivery_id)
             .unwrap();
         let final_tool_result = timeline
             .iter()
             .find(|item| item["body"]["call_id"] == "call_15" && item["type"] == "tool_result")
             .unwrap();
         assert!(following_message["sequence"].as_u64() > final_tool_result["sequence"].as_u64());
+        let expected = json!({"kind":"opencode","id":delivery_id,"thread_id":"ses_native"});
+        assert_eq!(following_message["_delivery_correlation"], expected);
+        let following_part = timeline.iter().find(|item| item["body"]["text"] == "after tools").unwrap();
+        assert_eq!(following_part["_delivery_correlation"], expected);
+        assert!(final_tool_result.get("_delivery_correlation").is_none());
+        let ordinary = timeline.iter().find(|item| item["body"]["message_id"] == "msg_ordinary").unwrap();
+        assert!(ordinary.get("_delivery_correlation").is_none());
     }
 
     #[test]

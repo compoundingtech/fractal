@@ -10,6 +10,7 @@ mod alerts;
 mod answers;
 mod attach;
 mod clickable;
+mod composer;
 mod content;
 mod context;
 #[cfg(test)]
@@ -60,6 +61,8 @@ pub mod requests;
 pub mod screens;
 pub mod text;
 pub mod theme;
+pub mod thread;
+mod threads_live;
 mod objectives;
 mod triage;
 mod usage;
@@ -89,6 +92,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
+    widgets::Widget,
 };
 use screens::{Drafts, Item, ListState, Listing};
 use fractal_conversation_ui::pane::order;
@@ -141,6 +145,14 @@ impl FramePane {
     }
 }
 
+struct ThreadBodyRow {
+    host: String,
+    thread: String,
+    message: String,
+    rect: Rect,
+    layer: usize,
+}
+
 #[derive(Default)]
 struct FrameInfo {
     area: Rect,
@@ -168,10 +180,23 @@ struct FrameInfo {
     /// Glasses: where Home was drawn over the glass, while it is open.
     home: Option<Rect>,
     read_messages: HashSet<String>,
+    thread_body: Vec<ThreadBodyRow>,
     /// The first palette row drawn.
     palette_top: usize,
     /// Glasses: where the right-click menu was drawn, while it is open.
     menu: Option<Rect>,
+}
+
+impl FrameInfo {
+    fn visible_thread_messages(&self, host: &str, thread: &str) -> HashSet<String> {
+        self.thread_body.iter().filter_map(|row| {
+            if row.host != host || row.thread != thread { return None; }
+            let visible = (row.rect.x..row.rect.right()).any(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
+                contains(*cover, x, row.rect.y)
+            }));
+            visible.then(|| row.message.clone())
+        }).collect()
+    }
 }
 
 /// The palette remains reachable from a focused terminal. Other space shortcuts
@@ -268,12 +293,6 @@ pub enum Effect {
     RevokeDevice {
         id: String,
     },
-    /// "Chat about this": a new message to `to`, titled after the item, with its context.
-    Discuss {
-        to: String,
-        title: String,
-        text: String,
-    },
     /// Keep a glass in st, or delete it there.
     SaveGlass(glass::GlassWrite),
     /// Change only the sidebar registers explicitly selected by the person.
@@ -367,15 +386,6 @@ struct Find {
     jump: Cell<bool>,
 }
 
-/// An open "chat about this" on a Home item.
-#[derive(Clone, Debug)]
-struct ChatState {
-    item: String,
-    to: String,
-    to_name: String,
-    editing: bool,
-}
-
 /// How long an agent's tab stays in front before its terminal attaches (unless this device
 /// opens agents on their conversation): flicking through tabs attaches nothing.
 const ATTACH_DWELL: Duration = Duration::from_millis(300);
@@ -430,6 +440,7 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    threads: threads_live::Threads,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -471,7 +482,6 @@ pub struct Ui {
     /// stayed in front for a moment, so passing through tabs attaches nothing.
     attach_when: Option<(String, Instant)>,
     popover: Option<String>,
-    chat: Option<ChatState>,
     /// st's conversation search for the palette: the query asked and what came back.
     pub(crate) said: Option<(String, Result<fractal_client::ConversationSearch, String>)>,
     /// The named answer chosen on the focused structured request, before Enter sends it.
@@ -877,6 +887,7 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            threads: threads_live::Threads::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -899,7 +910,6 @@ impl Ui {
             terminal_fallback: true,
             attach_when: None,
             popover: None,
-            chat: None,
             parked: Vec::new(),
             context: None,
             said: None,
@@ -1607,6 +1617,8 @@ impl Ui {
             return;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let pane = self.main_pane();
+        if !self.palette_open() && self.threads.paste(&pane, &text, &self.cursor, &mut self.conversation_state.drafts) { return; }
         let first = text.lines().next().unwrap_or("").to_owned();
         if let Some(find) = self.find.as_mut() {
             edit::insert(&mut find.query, &self.cursor, "find", &first);
@@ -1626,16 +1638,6 @@ impl Ui {
                 &format!("mission:{focus}"),
                 &text,
             );
-            return;
-        }
-        if let Some(chat) = self.chat.clone().filter(|chat| chat.editing) {
-            let input = format!("chat:{}", chat.item);
-            let draft = self
-                .conversation_state
-                .drafts
-                .entry(input.clone())
-                .or_default();
-            edit::insert(draft, &self.cursor, &input, &text);
             return;
         }
         // A paste over an agent's conversation starts a message to it.
@@ -1811,7 +1813,12 @@ impl Ui {
 
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
-            0 => screens::home_list(&self.world, &self.snoozed, &self.closed),
+            0 => {
+                let mut list = screens::home_list(&self.world, &self.snoozed, &self.closed);
+                self.threads.mark_inbox_unread(&mut list);
+                self.threads.recently_closed(&mut list);
+                list
+            },
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
             1 => screens::agents_list(&self.world, self.spinner(), width),
             2 if self.tree => screens::missions_tree(&self.world, self.spinner(), self.system),
@@ -2483,45 +2490,7 @@ impl Ui {
             })
     }
 
-    fn drafts_for(&self, key: &str, width: usize) -> Drafts<'_> {
-        let chat_key = format!("chat:{key}");
-        let chat = self.chat.as_ref().filter(|chat| chat.item == key).map(|chat| {
-            let title = self
-                .world
-                .attention
-                .items()
-                .iter()
-                .find(|item| item.id == key)
-                .map(|item| format!("About: {}", item.title))
-                .unwrap_or_default();
-            let thread = match self.world.conversations.get(&chat.to) {
-                Some(Load::Ready(entries)) => {
-                    let about = entries
-                        .iter()
-                        .filter(|entry| matches!(&entry.body, Body::Mail { subject, .. } if *subject == title))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    self.cache
-                        .render(
-                            &about,
-                            width.saturating_sub(4),
-                            &self.conversation_state.expanded,
-                            self.spinner(),
-                            self.density(),
-                        )
-                        .lines
-                }
-                _ => Vec::new(),
-            };
-            let text = self.conversation_state.drafts.get(&chat_key).map(String::as_str).unwrap_or("");
-            screens::Chat {
-                to: chat.to_name.clone(),
-                text,
-                cursor: self.cursor.at(&chat_key, text),
-                editing: chat.editing,
-                thread,
-            }
-        });
+    fn drafts_for(&self, key: &str) -> Drafts<'_> {
         let draft_key = self.answer_draft_key(key);
         let text = self.conversation_state.drafts.get(&draft_key).map(String::as_str);
         Drafts {
@@ -2538,7 +2507,6 @@ impl Ui {
                         .is_some_and(|text| !text.trim().is_empty())
                 }).map(|answer| answer.id.clone()).collect()
             }).unwrap_or_default(),
-            chat,
             // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
             form: self.form_state(key),
         }
@@ -2569,12 +2537,13 @@ impl Ui {
     /// scrolls as one document keeps its scroll under the pane's own key.
     fn draw_pane(&self, buf: &mut Buffer, area: Rect, pane: &Pane) {
         let width = area.width.saturating_sub(1) as usize;
-        let doc = match pane {
+        let mut doc = match pane {
             Pane::List(tab) => return self.draw_list(buf, area, *tab),
             Pane::Agent(id) => return self.draw_agent(buf, area, id.as_deref()),
             Pane::Terminal(agent) => return self.draw_terminal(buf, area, agent),
+            Pane::Home(Some(id)) if id.starts_with("thread/") => Doc::new(),
             Pane::Home(id) => {
-                let drafts = self.drafts_for(id.as_deref().unwrap_or_default(), width);
+                let drafts = self.drafts_for(id.as_deref().unwrap_or_default());
                 let mut doc = screens::home_detail(&self.world, id.as_deref(), width, &drafts);
                 self.content.expand_requests(&mut doc, width);
                 doc
@@ -2595,7 +2564,7 @@ impl Ui {
                     id.as_deref()
                         .and_then(|id| self.mission_decision(id))
                         .map(|decision| {
-                            let drafts = self.drafts_for(&decision, width);
+                            let drafts = self.drafts_for(&decision);
                             let mut doc =
                                 screens::home_detail(&self.world, Some(&decision), width, &drafts);
                             self.content.expand_requests(&mut doc, width);
@@ -2627,8 +2596,10 @@ impl Ui {
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
+            Pane::Thread(_) => Doc::new(),
         };
-        self.pane(buf, &pane.key(), area, doc, false);
+        doc.append(self.threads.mount(pane, width, &self.cursor, &self.world, &self.conversation_state.drafts), 0);
+        self.pane(buf, &pane.key(), area, doc, matches!(pane, Pane::Thread(_)));
     }
 
     /// A document in a split of a glass, with the way back along what that split followed.
@@ -2744,7 +2715,7 @@ impl Ui {
         }
         // While finding, the find bar takes the message box's place.
         let find = self.find.as_ref().filter(|find| find.agent == agent.id);
-        let doc = match self.world.conversations.get(&agent.id) {
+        let mut doc = match self.world.conversations.get(&agent.id) {
             None | Some(Load::Loading) => {
                 let mut doc = Doc::new();
                 // A first page st keeps refusing says why while Fractal TUI tries again, rather than
@@ -2832,6 +2803,9 @@ impl Ui {
                 doc
             }
         };
+        if find.is_none() {
+            doc.append(self.threads.mount(&Pane::Agent(Some(agent.id.clone())), width, &self.cursor, &self.world, &self.conversation_state.drafts), 0);
+        }
         let key = format!("chat:{}", agent.id);
         if let Some(entry) = self.content.scroll_to.borrow_mut().remove(&agent.id)
             && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == entry)
@@ -2961,17 +2935,8 @@ impl Ui {
         let bottom = area.y + area.height;
         if composer_height > 0 && body.y + body.height + band_height < bottom {
             let y = body.y + body.height + band_height;
-            buf.set_stringn(
-                area.x,
-                y,
-                "─".repeat(area.width as usize),
-                area.width as usize,
-                theme::fg(if self.editing && self.composing(&agent.id) {
-                    theme::ACCENT
-                } else {
-                    theme::SURFACE0
-                }),
-            );
+            composer::divider(area.width as usize, self.editing && self.composing(&agent.id))
+                .render(Rect::new(area.x, y, area.width, 1), buf);
             // A working agent can be stopped from here, as with Ctrl+C.
             if self.live
                 && agent.state == AgentState::Working
@@ -3197,7 +3162,15 @@ impl Ui {
                     width: target.width.min(area.width.saturating_sub(target.column)),
                     height: 1,
                 };
-                if !matches!(target.hit, Hit::InlineImage(_)) { self.hit(rect, target.hit.clone()); }
+                match &target.hit {
+                    Hit::InlineImage(_) => {}
+                    Hit::ThreadBody { host, thread, message } => {
+                        self.frame.borrow_mut().thread_body.push(ThreadBodyRow {
+                            host: host.clone(), thread: thread.clone(), message: message.clone(), rect, layer,
+                        });
+                    }
+                    hit => self.hit(rect, hit.clone()),
+                }
             }
             if let Hit::InlineImage(key) = &target.hit
                 && target.line < top + height
@@ -3750,50 +3723,18 @@ impl Ui {
         if let Some(state) = self.voice_for(&agent.id) {
             return self.voice_lines(state, width);
         }
-        if draft.is_empty() && !editing {
-            let hint = if self.composing(&agent.id) {
-                format!("Message {} · type or click", agent.name)
-            } else {
-                format!("Message {} · click", agent.name)
-            };
-            return vec![Line::from(vec![
-                Span::styled("› ", theme::dim()),
-                Span::styled(hint, theme::dim()),
-            ])];
-        }
-        let style = if editing {
-            theme::text()
+        let hint = if self.composing(&agent.id) {
+            format!("Message {} · type or click", agent.name)
         } else {
-            theme::soft()
+            format!("Message {} · click", agent.name)
         };
-        let mut lines = Vec::new();
-        let at = editing.then(|| self.cursor.at(&agent.id, draft));
-        for (index, runs) in edit::lines(draft, at, style).into_iter().enumerate() {
-            let first = if index == 0 {
-                text::run(
-                    "› ",
-                    if editing {
-                        theme::strong(theme::ACCENT)
-                    } else {
-                        theme::dim()
-                    },
-                )
-            } else {
-                text::run("  ", theme::dim())
-            };
-            lines.extend(text::wrap(
-                &runs,
-                width.saturating_sub(1),
-                &[first],
-                &[text::run("  ", theme::dim())],
-                None,
-            ));
-        }
-        let keep = 8;
-        if lines.len() > keep {
-            lines.drain(..lines.len() - keep);
-        }
-        lines
+        composer::text(
+            width,
+            editing,
+            draft,
+            editing.then(|| self.cursor.at(&agent.id, draft)),
+            hint,
+        )
     }
 
     fn draw_help(&self, buf: &mut Buffer, area: Rect) {
@@ -4130,9 +4071,6 @@ impl Ui {
         self.answer_errors.remove(&id);
         self.answering = None;
         self.editing = true;
-        if let Some(chat) = &mut self.chat {
-            chat.editing = false;
-        }
     }
 
     fn answer_key(&mut self, key: KeyEvent) -> bool {
@@ -4216,7 +4154,6 @@ impl Ui {
         }
         self.selected[self.tab()] = index.min(count - 1);
         self.editing = false;
-        self.chat = None;
         self.confirm = None;
         self.conversation_state.selection = None;
     }
@@ -4281,7 +4218,7 @@ impl Ui {
         if self.live
             && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
             && (self.editing
-                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.threads.editing_in(&self.main_pane())
                 || self.new_mission.is_some()
                 || self.find.is_some()
                 || self.palette_open())
@@ -4296,6 +4233,7 @@ impl Ui {
         }
         if event == Event::FocusLost {
             self.hover.clear();
+            self.threads.hover(None);
             self.hover.pressed.set(false);
             self.dragging = false;
             self.middle_tab = None;
@@ -4421,7 +4359,7 @@ impl Ui {
         let typing = self.editing
             || self.find.is_some()
             || self.palette_open()
-            || self.chat.as_ref().is_some_and(|chat| chat.editing)
+            || self.threads.editing_in(&self.main_pane())
             || self.new_mission.is_some();
         match key.code {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::F(_) => {
@@ -4442,6 +4380,16 @@ impl Ui {
     pub fn key(&mut self, key: KeyEvent) {
         if self.observe_recent_key(key) {
             return;
+        }
+        if self.threads.available() && key.kind != KeyEventKind::Release && !self.palette_open() && !self.help
+            && !self.terminal_focused() && !self.leader && self.popover.is_none() && self.context.is_none()
+        {
+            let pane = self.main_pane();
+            if let Some(tap) = self.threads.shortcut(&pane, key) {
+                self.click(Hit::Thread(pane.key(), tap));
+                return;
+            }
+            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) { return; }
         }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
@@ -4578,7 +4526,7 @@ impl Ui {
         // so a person who picked an option and then clicked into a box can type (Nathan,
         // 2026-10-11: "I can't type until I hit esc").
         if self.answering.is_some()
-            && (self.editing || self.chat.as_ref().is_some_and(|chat| chat.editing))
+            && (self.editing || self.threads.editing_in(&self.main_pane()))
         {
             self.answering = None;
         }
@@ -4789,26 +4737,6 @@ impl Ui {
             }
             return;
         }
-        if let Some(chat) = self.chat.clone().filter(|chat| chat.editing) {
-            let key_id = format!("chat:{}", chat.item);
-            match key.code {
-                KeyCode::Esc => {
-                    if let Some(chat) = &mut self.chat {
-                        chat.editing = false;
-                    }
-                }
-                KeyCode::Enter => self.submit_chat(),
-                _ => {
-                    let draft = self
-                        .conversation_state
-                        .drafts
-                        .entry(key_id.clone())
-                        .or_default();
-                    edit::edit(draft, &self.cursor, &key_id, key);
-                }
-            }
-            return;
-        }
         if let Some(subject) = self.popover.clone() {
             self.popover = None;
             if let Some(agent) = subject.strip_prefix("actions:") {
@@ -4954,13 +4882,7 @@ impl Ui {
                     self.open(&decision);
                 }
             }
-            KeyCode::Esc => {
-                if self.chat.is_some() {
-                    self.chat = None;
-                } else {
-                    self.conversation_state.selection = None;
-                }
-            }
+            KeyCode::Esc => self.conversation_state.selection = None,
             KeyCode::Char(character) => self.action_key(character),
             _ => {}
         }
@@ -5197,7 +5119,7 @@ impl Ui {
                         "A {word} waits on your decision, so x cannot dismiss it: answer it with the keys on its card"
                     )),
                     (_, 'g') => self.go_to_subject(),
-                    (_, 't') => self.start_chat(),
+                    (_, 't') => self.start_inbox_thread(),
                     ("message", 'l') => {
                         if let Some(id) = self.selected_id() {
                             self.snoozed.insert(id);
@@ -5559,119 +5481,14 @@ impl Ui {
         }
     }
 
-    /// Who to talk to about an item: the agent involved, or the chief of staff.
-    fn chat_target(&self, item: &Attention) -> Option<(String, String)> {
-        let agents = self.world.agents.items();
-        let named = |id: &str| {
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .map(|agent| (agent.id.clone(), agent.name.clone()))
-        };
-        item.agent.as_deref().and_then(named).or_else(|| {
-            agents
-                .iter()
-                .find(|agent| agent.id.ends_with("/cos") || agent.name == "Chief of Staff")
-                .map(|agent| (agent.id.clone(), agent.name.clone()))
-        })
-    }
-
-    fn start_chat(&mut self) {
-        let Some(item) = self.current_item().cloned() else {
-            return;
-        };
-        match self.chat_target(&item) {
-            Some((to, to_name)) => {
-                self.chat = Some(ChatState {
-                    item: item.id.clone(),
-                    to,
-                    to_name,
-                    editing: true,
-                });
-                self.answering = None;
-                self.editing = false;
-                self.confirm = None;
-            }
-            None => self.flash("Nobody to chat with about this yet"),
-        }
-    }
-
-    fn submit_chat(&mut self) {
-        let Some(chat) = self.chat.clone() else {
-            return;
-        };
-        let key = format!("chat:{}", chat.item);
-        let text = self
-            .conversation_state
-            .drafts
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            self.flash("Write something first");
+    fn start_inbox_thread(&mut self) {
+        let Some(item) = self.current_item() else { return };
+        if !self.threads.can_start(&item.id) {
+            self.flash("This item has no available thread context. Your draft is kept.");
             return;
         }
-        let Some(item) = self
-            .world
-            .attention
-            .items()
-            .iter()
-            .find(|item| item.id == chat.item)
-            .cloned()
-        else {
-            return;
-        };
-        let title = format!("About: {}", item.title);
-        self.conversation_state.drafts.remove(&key);
-        if self.live {
-            let mut context = format!("{text}\n\n---\nThis is about {} ({}", item.title, item.id);
-            if let Some(mission) = &item.mission {
-                context.push_str(&format!(", mission {mission}"));
-            }
-            context.push(')');
-            self.effects.push(Effect::Discuss {
-                to: chat.to.clone(),
-                title,
-                text: context,
-            });
-            self.flash("Sending…");
-            // Go where the reply will appear (Nathan, 2026-10-06).
-            self.open(&chat.to);
-            return;
-        }
-        let at = chrono::Local::now().format("%H:%M").to_string();
-        if let Some(Load::Ready(entries)) = self.world.conversations.get_mut(&chat.to) {
-            entries.push(Entry {
-                id: format!("about-{}", entries.len()),
-                at: at.clone(),
-                body: Body::Mail {
-                    from: "you".into(),
-                    to: chat.to_name.clone(),
-                    subject: title.clone(),
-                    body: text,
-                    delivered: false,
-                    dictated: false,
-                    signed: None,
-                    images: Vec::new(),
-                },
-            });
-            entries.push(Entry {
-                id: format!("about-{}", entries.len()),
-                at,
-                body: Body::Mail {
-                    from: chat.to_name.clone(),
-                    to: "you".into(),
-                    subject: title,
-                    body: "Good question. Here is what I know, and what I would need from you to go on. (demo reply)".into(),
-                    delivered: false,
-                    dictated: false,
-                    signed: None,
-                    images: Vec::new(),
-                },
-            });
-        }
-        self.flash("Sent · demo: nothing left this machine");
-        self.open(&chat.to);
+        let id = item.id.clone();
+        self.click(Hit::Thread(self.main_pane().key(), thread::Tap::Start(id)));
     }
 
     fn submit(&mut self) {
@@ -5733,6 +5550,27 @@ impl Ui {
                 }
                 draft.push_str(&attach::mention(&images));
             }
+        }
+        // Revision feedback is discussion of this exact Inbox item, using the same durable
+        // destination, composer draft and delivery path as Start thread.
+        if self.live && self.tab() != 1
+            && self.current_item().is_some_and(|item| matches!(&item.kind, AttentionKind::Revision { .. }))
+        {
+            let host = self.main_pane().key();
+            // Ok means the canonical draft retains these words and the shared start is queued.
+            // A collision or unavailable origin leaves this original feedback untouched.
+            match self.threads.start_with_text(&host, &id, &draft, &mut self.conversation_state.drafts) {
+                Ok(()) => {
+                    self.conversation_state.drafts.remove(&id);
+                    self.editing = false;
+                    self.answering = None;
+                    self.confirm = None;
+                    self.follow_latest();
+                    self.flash("Sending…");
+                }
+                Err(message) => self.flash(message),
+            }
+            return;
         }
         // A send leaves the box, since any letter opens it again (Nathan, 2026-10-03).
         let leave_box = self.tab() != 1 || self.composing_agent().is_some();
@@ -5805,17 +5643,6 @@ impl Ui {
                             reason: Some(draft),
                             answer: None,
                             option_notes: Vec::new(),
-                        }),
-                    Some(AttentionKind::Revision { .. }) => self
-                        .current_item()
-                        .and_then(|item| {
-                            self.chat_target(item)
-                                .map(|(to, _)| (to, item.title.clone()))
-                        })
-                        .map(|(to, title)| Effect::Discuss {
-                            to,
-                            title: format!("Changes to: {title}"),
-                            text: draft,
                         }),
                     _ => None,
                 },
@@ -6577,7 +6404,7 @@ impl Ui {
             self.prompt_keys = None;
         }
         match hit {
-            Hit::Message | Hit::Subject | Hit::Resize | Hit::SidebarResize => {}
+            Hit::Message | Hit::Subject | Hit::ThreadBody { .. } | Hit::Resize | Hit::SidebarResize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
             Hit::Home => self.open_home(),
@@ -6586,6 +6413,28 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Thread(host, thread::Tap::MarkVisibleRead(id)) => {
+                if self.confirmation_open() { return; }
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                if !self.threads.mark_visible_read(&host, id, &visible) {
+                    self.flash("No visible replies to mark read");
+                }
+            }
+            Hit::Thread(host, tap) => {
+                if matches!(&tap, thread::Tap::Start(_) | thread::Tap::Compose(_) | thread::Tap::Reply { .. }) {
+                    self.answering = None;
+                    self.editing = false;
+                    self.confirm = None;
+                }
+                if let Some(id) = self.threads.tap(&host, tap, &mut self.conversation_state.drafts) {
+                    let pane = Pane::Thread(id.clone());
+                    let key = pane.key();
+                    self.open_in_glass(pane, glass::Open::Tab);
+                    if self.threads.summary(&id).is_some_and(|row| row.state == fractal_client::ThreadState::Open) {
+                        self.threads.tap(&key, thread::Tap::Compose(id), &mut self.conversation_state.drafts);
+                    }
+                }
+            }
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -6672,27 +6521,8 @@ impl Ui {
                 }
             }
             Hit::Enter if self.new_mission.is_some() => self.create_launch(),
-            Hit::ChatEnter => {
-                self.answering = None;
-                self.editing = false;
-                if let Some(chat) = &mut self.chat {
-                    chat.editing = true;
-                }
-                self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-            }
-            Hit::ChatComposer => {
-                self.answering = None;
-                self.editing = false;
-                if let Some(chat) = &mut self.chat {
-                    chat.editing = true;
-                }
-            }
             Hit::Enter => {
                 // A visible Send belongs to this draft even after Esc or refusal restored it.
-                // Chat has a distinct send target; a stale chat must not capture this click.
-                if let Some(chat) = &mut self.chat {
-                    chat.editing = false;
-                }
                 if self.answering.is_some() && !self.editing {
                     self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 } else {
@@ -6749,9 +6579,6 @@ impl Ui {
             }
             Hit::JumpLatest => self.follow_latest(),
             Hit::Composer => {
-                if let Some(chat) = &mut self.chat {
-                    chat.editing = false;
-                }
                 if self.structured_request().is_some() {
                     if self.note_answers.contains_key(&self.attention_focus().unwrap_or_default()) {
                         self.editing = true;
@@ -7284,6 +7111,32 @@ mod tests {
         assert_eq!(ui.effects, vec![Effect::RetryConversation { target: target.clone() }]);
         assert!(!ui.stalled.contains_key(&target));
         assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+    }
+
+    #[test]
+    fn thread_read_ignores_another_mount_and_covered_body_text() {
+        let row = |host: &str, thread: &str, message: &str, y| ThreadBodyRow {
+            host: host.into(),
+            thread: thread.into(),
+            message: message.into(),
+            rect: Rect::new(4, y, 8, 1),
+            layer: 1,
+        };
+        let frame = FrameInfo {
+            covers: vec![(Rect::new(0, 0, 20, 4), 0), (Rect::new(4, 2, 8, 1), 0)],
+            thread_body: vec![
+                row("home:ask", "thread/one", "message/visible", 1),
+                row("home:ask", "thread/one", "message/covered", 2),
+                row("home:ask", "thread/two", "message/sibling", 1),
+                row("chat:agent", "thread/one", "message/other-mount", 1),
+                row("home:ask", "thread/one", "message/visible", 3),
+            ],
+            ..FrameInfo::default()
+        };
+        assert_eq!(
+            frame.visible_thread_messages("home:ask", "thread/one"),
+            HashSet::from(["message/visible".to_owned()]),
+        );
     }
 
     #[test]
@@ -7981,7 +7834,7 @@ mod tests {
         ui.show_focused();
         assert!(ui.editing, "the glasses arriving again leave the box open");
         typed(&mut ui, " on the remote member");
-        assert!(ui.chat.is_none() && ui.confirm.is_none(), "every letter went into the box");
+        assert!(ui.confirm.is_none(), "every letter went into the box");
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
             ui.effects.iter().any(|effect| matches!(
@@ -8278,15 +8131,7 @@ mod tests {
                 ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
             }
         };
-        // Chat about it, after choosing: the box takes every letter, 'x' and 'j' included.
-        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert_eq!(ui.answering, Some(0));
-        ui.click(Hit::Key('t'));
-        assert!(ui.chat.as_ref().is_some_and(|chat| chat.editing));
-        type_in(&mut ui, "xj a question");
-        let key = format!("chat:{}", "attention/pick");
-        assert_eq!(ui.conversation_state.drafts.get(&key).map(String::as_str), Some("xj a question"));
-        // Answering in words after choosing does too.
+        // An ordinary answer box still takes every letter after choosing.
         let mut ui2 = {
             let mut again = Ui::new(ui.world.clone());
             again.live = true;
@@ -9732,36 +9577,68 @@ mod tests {
     }
 
     #[test]
-    fn chat_about_this_starts_a_thread_with_the_agent_involved() {
+    fn an_unavailable_thread_keeps_legacy_drafts_without_sending_ordinary_mail() {
         let mut ui = Ui::new(demo::test_world());
         let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
         ui.select(index);
+        let key = "chat:attention/1";
+        ui.conversation_state.drafts.insert(key.into(), "Unsent question".into());
         press(&mut ui, KeyCode::Char('t'));
-        assert_eq!(ui.chat.as_ref().unwrap().to, "agent/example/atlas/builder");
-        for character in "why now?".chars() {
-            press(&mut ui, KeyCode::Char(character));
-        }
-        press(&mut ui, KeyCode::Enter);
-        // Sending goes to the agent's conversation, where the reply will appear.
-        assert_eq!(ui.tab(), 1);
-        assert_eq!(ui.selected_id().as_deref(), Some("agent/example/atlas/builder"));
-        assert!(ui.chat.is_none());
-        let screen = frame(&ui, 150, 70).join("\n");
-        assert!(screen.contains("why now?"), "{screen}");
+        assert_eq!(ui.conversation_state.drafts[key], "Unsent question");
+        assert!(ui.effects.is_empty());
+        assert_eq!(ui.tab(), 0);
+        assert!(!frame(&ui, 150, 70).join("\n").contains("Chat about this"));
     }
 
     #[test]
-    fn a_fault_with_nobody_attached_is_discussed_with_the_chief_of_staff() {
+    fn revision_feedback_stays_drafted_until_a_durable_start_can_accept_it() {
         let mut ui = Ui::new(demo::test_world());
+        ui.live = true;
+        ui.open_home();
+        let index = ui.ids().iter().position(|id| id == "attention/5").unwrap();
+        ui.select(index);
+        let key = "attention/5";
+        ui.conversation_state.drafts.insert(key.into(), "Please keep the audit step.".into());
+        ui.editing = true;
+        ui.effects.clear();
+        ui.submit();
+        assert_eq!(ui.conversation_state.drafts[key], "Please keep the audit step.");
+        assert!(ui.effects.is_empty(), "unavailable thread context must not send ordinary mail");
+        assert!(ui.editing);
+    }
+
+    #[test]
+    fn old_about_messages_remain_in_the_ordinary_conversation() {
+        let mut world = demo::test_world();
+        let agent = "agent/example/atlas/builder";
+        world.conversations.insert(agent.into(), Load::Ready(vec![Entry {
+            id: "message/old-about".into(),
+            at: "12:00".into(),
+            body: Body::Mail {
+                from: "you".into(), to: "Atlas Builder".into(),
+                subject: "About: Prior review".into(), body: "The prior discussion stays readable.".into(),
+                delivered: false, dictated: false, signed: None, images: Vec::new(),
+            },
+        }]));
+        let mut ui = Ui::new(world);
+        ui.conversation_first = Some(true);
+        ui.open(agent);
+        let screen = frame(&ui, 150, 70).join("\n");
+        assert!(screen.contains("The prior discussion stays readable."), "{screen}");
+    }
+
+    #[test]
+    fn an_unassociated_item_does_not_guess_a_chief_of_staff_recipient() {
         let mut world = demo::test_world();
         if let Load::Ready(items) = &mut world.attention {
-            for item in items.iter_mut() {
-                item.agent = None;
-            }
+            for item in items { item.agent = None; }
         }
-        ui.set_world(world);
-        let item = ui.world.attention.items()[3].clone();
-        assert_eq!(ui.chat_target(&item).unwrap().0, "agent/example/cos");
+        let mut ui = Ui::new(world);
+        let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
+        ui.select(index);
+        press(&mut ui, KeyCode::Char('t'));
+        assert!(ui.effects.is_empty());
+        assert_eq!(ui.tab(), 0);
     }
 
     #[test]

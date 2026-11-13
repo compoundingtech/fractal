@@ -2611,6 +2611,9 @@ pub struct MessageView {
     pub title: Option<String>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
+    /// Canonical topic context added only to the recipient's fenced delivery mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_thread: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

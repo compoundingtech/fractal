@@ -66,6 +66,9 @@ pub struct Config {
     /// Worker socket-generation admission. Absent observes without refusing; restart to change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
+    /// Temporary rollout opt-in after all fleet readers run the topic privacy build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thread_writes: bool,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
@@ -84,6 +87,10 @@ pub struct Config {
     /// Tailnet login admitted for browser pairing; absent disables browser pairing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_pairing_login: Option<String>,
+    /// Explicit discussion responsibility for Inbox sources without an originating agent.
+    /// No agent is guessed; initial setup and person-only approvals remain independent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_fallback_agent: Option<String>,
     /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
@@ -819,12 +826,14 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             worker_ingress_generation_check: None,
+            thread_writes: false,
             seat_priority: None,
             unlaned_seat: None,
             seat_admission: None,
             lanes: None,
             person: None,
             browser_pairing_login: None,
+            inbox_fallback_agent: None,
             pairing_legacy_allowances: Vec::new(),
             fleet_id: None,
             shared_secret_file: None,
@@ -1088,6 +1097,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(agent) = &self.inbox_fallback_agent {
+            let subject = fractal_schema::registry().validate_subject(agent)
+                .map_err(|error| anyhow::anyhow!("inbox_fallback_agent: {}", error.message))?;
+            anyhow::ensure!(subject.family == "agent", "inbox_fallback_agent must name an agent");
+        }
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
@@ -1479,6 +1493,21 @@ mod tests {
         let audit: super::Config = toml::from_str("[programs]\nauthority = \"audit\"\n").unwrap();
         assert_eq!(audit.programs.authority, RunAuthorityMode::Audit);
         assert!(toml::from_str::<super::Config>("[programs]\nauthority = \"off\"\n").is_err());
+    }
+
+    #[test]
+    fn inbox_fallback_is_explicit_and_agent_only() {
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.inbox_fallback_agent.is_none());
+        assert!(!toml::to_string(&absent).unwrap().contains("inbox_fallback_agent"));
+        let configured: super::Config = toml::from_str("inbox_fallback_agent='agent/sample/inbox'").unwrap();
+        configured.validate().unwrap();
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.inbox_fallback_agent, configured.inbox_fallback_agent);
+        for agent in ["person/ada", "daemon/runtime", "agent/", "agent/invalid recipient"] {
+            let config: super::Config = toml::from_str(&format!("inbox_fallback_agent='{agent}'")).unwrap();
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]

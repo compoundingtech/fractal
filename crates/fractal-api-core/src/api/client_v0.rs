@@ -55,8 +55,19 @@ pub mod summary;
 pub mod assistant;
 pub mod external_grants;
 pub mod related_runs;
+pub mod thread_access;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadCollectionContext {
+    pub agent_id: Option<String>,
+    pub origin_source: Option<String>,
+    pub origin_episode: Option<String>,
+    pub mission_id: Option<String>,
+    pub recently_closed: Option<bool>,
+}
 
 // A client holds one socket for all its current collection views. A subscription
 // is a bounded window; history stays on the paged HTTP endpoints. A terminal is one
@@ -72,8 +83,12 @@ pub struct CollectionSubscribe {
     #[serde(default, deserialize_with = "deserialize_agents_publication_version")]
     pub agents_publication_version: Option<u8>,
     pub person: Option<String>,
-    /// Follow one arrangement instead of the owner's bounded prefix window.
+    /// The exact subject of a window that follows one resource.
     pub subject: Option<String>,
+    /// Select exactly one owner-scoped thread context.
+    pub thread_context: Option<ThreadCollectionContext>,
+    #[serde(default)]
+    pub attention_thread_hints: bool,
     pub actor: Option<String>,
     /// Follow exactly one current agent instead of the fleet window.
     pub agent: Option<String>,
@@ -260,6 +275,10 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
         return true;
     }
     match collection {
+        "threads" | "thread-timeline" => {
+            return !(kind.starts_with("thread.") || kind.starts_with("message.")
+                || matches!(kind, "agent.renamed" | "agent.retired" | "intent.desired" | "record.repaired"));
+        }
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
         "clients" | "devices" => return !kind.starts_with("custom.client.pairing-"),
@@ -292,6 +311,8 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     matches!(kind, "daemon.diagnostic" | "transport.observed" | "workspace.observed")
         || (kind == "harness.usage" && collection != "agents")
 }
+
+pub const ATTENTION_THREAD_HINTS_CAPABILITY: &str = "collection.attention.thread-hints";
 
 /// Advertised in `/v1/client/capabilities`: an agents subscription may select one exact agent.
 /// Clients send `agent` only to a daemon that grants it; an older one ignores the selector.
@@ -476,6 +497,10 @@ pub struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub pairing_grant: Option<String>,
+    /// Exact person-pairing completion authenticated by the request bearer.
+    pub pairing_completion: Option<String>,
+    /// Seat identity bound by Unix peer provenance, never a request parameter.
+    pub bound_agent: Option<String>,
     /// Local-only push registrations belong to the member that issued this exact pairing.
     pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
@@ -506,12 +531,20 @@ impl ClientSession {
         }
     }
 
+    /// A paired bearer can arrive over Unix and still needs its grant revalidated.
+    pub fn is_unpaired_unix(&self) -> bool {
+        self.transport == "unix" && self.pairing_grant.is_none()
+    }
+
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -556,6 +589,8 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+                pairing_completion: None,
+                bound_agent: None,
                 pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
@@ -597,6 +632,8 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: actor.into(),
             pairing_grant: None,
+            pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -619,6 +656,8 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -663,6 +702,10 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"summary", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
+    capabilities.push(json!({
+        "id": ATTENTION_THREAD_HINTS_CAPABILITY, "version": 1,
+        "state": if thread_access::read_person(session).is_ok() { "granted" } else { "ungranted" },
+    }));
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"slo", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -699,6 +742,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         };
         json!({ "id": action, "version": 0, "state": state })
     }));
+    capabilities.extend(thread_access::capabilities(state, session));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"person-answer-option-notes", "version":1, "state":"granted"}));
     // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
@@ -761,7 +805,9 @@ pub fn credential_digest(credential: &str) -> String {
 pub fn administrative_get(request: &Request<Body>) -> bool {
     request.method() == axum::http::Method::GET
         && (request.uri().path().starts_with("/v1/client/assistant/grants/")
-            || request.uri().path() == "/v1/client/devices")
+            || request.uri().path() == "/v1/client/devices"
+            || request.uri().path() == "/v1/client/threads"
+            || request.uri().path().starts_with("/v1/client/threads/"))
 }
 
 pub fn authenticate(
@@ -830,6 +876,7 @@ pub fn authenticate(
             };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
+            session.bound_agent = request.extensions().get::<super::BoundAgent>().map(|bound| bound.0.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
                 || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
@@ -965,6 +1012,8 @@ pub fn paired_client_session_at(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        pairing_completion: Some(paired.id.clone()),
+        bound_agent: None,
         pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
@@ -999,7 +1048,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
         }
         return Ok(session.clone());
     }
-    if session.transport == "unix" && acting_party(session) {
+    if session.is_unpaired_unix() && acting_party(session) {
         return Ok(session.clone());
     }
     // Admission precedes canonical selection; retained records cannot displace a valid grant.
@@ -2116,7 +2165,10 @@ fn session_messages(
     crate::otel::conversation_count("st.conversation.graph_rows", messages.len());
     Ok((messages, started, ended))
     })?;
-    messages.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
+    messages.retain(|claim| {
+        records::private_thread_claim(claim)
+            || session_message_belongs(claim, owner, session_id, started, ended)
+    });
     Ok(messages)
 }
 
@@ -2305,14 +2357,21 @@ fn offset_continuation_header(
     conversation_page_header(state, session, session_id, &items, false)
 }
 
+#[derive(Debug, Default)]
+pub struct NativeSessionMessages {
+    pub items: Vec<Value>,
+    // Needed for exact native-echo suppression, never serialized as a conversation row.
+    private_ids: BTreeSet<String>,
+}
+
 pub fn native_session_messages(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
     managed: Option<&super::ManagedSessionOwner>,
-) -> Result<Vec<Value>, ApiError> {
-    let mut items = Vec::new();
+) -> Result<NativeSessionMessages, ApiError> {
+    let mut result = NativeSessionMessages::default();
     if let Some((owner, incarnation, _)) = managed {
         let messages = session_messages(
             state,
@@ -2323,6 +2382,10 @@ pub fn native_session_messages(
         )?;
         crate::otel::conversation_phase("st.conversation.header_overlay_ms", || -> Result<(), ApiError> {
         for claim in messages {
+            if records::private_thread_claim(&claim) {
+                result.private_ids.insert(claim.subject);
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             let from = fields.get("from").and_then(Value::as_str);
             let role = if from == Some(owner.as_str()) {
@@ -2334,15 +2397,15 @@ pub fn native_session_messages(
             let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
             let base = crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim)
                 .map_err(ApiError::internal)?;
-            items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim, session.conversation_message_participants)}));
-            items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
+            result.items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim, session.conversation_message_participants)}));
+            result.items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
-        items.sort_by(timeline_order);
+        result.items.sort_by(timeline_order);
             Ok(())
         })?;
     }
-    items.reverse();
-    Ok(items)
+    result.items.reverse();
+    Ok(result)
 }
 
 /// Remove only exact delivery echoes; graph rows remain the canonical projection.
@@ -2350,37 +2413,42 @@ fn suppress_native_echoes(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session_id: &str,
-    graph: &[Value],
+    graph: &NativeSessionMessages,
     items: &mut Vec<Value>,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<u64, ApiError> {
     let mut suppressed = 0;
     if let Some((owner, incarnation, _)) = managed {
-        let mut incoming = graph.iter().filter_map(|item| {
+        let mut incoming = graph.items.iter().filter_map(|item| {
             let body = &item["body"];
             (body["to"].as_str() == Some(owner.as_str())
                 && body["from"].as_str() != Some(owner.as_str()))
                 .then(|| body["message_id"].as_str()).flatten()
-        }).collect::<BTreeSet<_>>();
+        }).chain(graph.private_ids.iter().map(String::as_str)).collect::<BTreeSet<_>>();
         let future = post_snapshot_native_sends(
             state, snapshot, owner, session_id, incarnation.as_deref(), items, &incoming,
         )?;
         incoming.extend(future.iter().filter_map(|claim| {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
-            (fields["to"].as_str() == Some(owner.as_str())
-                && fields["from"].as_str() != Some(owner.as_str()))
+            (records::private_thread_claim(claim)
+                || (fields["to"].as_str() == Some(owner.as_str())
+                    && fields["from"].as_str() != Some(owner.as_str())))
                 .then_some(claim.subject.as_str())
         }));
-        let codex_ids = items.iter()
-            .filter_map(|item| item.pointer("/_delivery_correlation/thread_id").and_then(Value::as_str))
-            .collect::<BTreeSet<_>>().into_iter().map(|thread| {
-                (thread.to_owned(), incoming.iter().map(|subject| {
-                    fractal_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
-                }).collect::<BTreeSet<_>>())
-            }).collect::<BTreeMap<_, _>>();
+        let private = graph.private_ids.iter().map(String::as_str)
+            .chain(future.iter().filter(|claim| records::private_thread_claim(claim))
+                .map(|claim| claim.subject.as_str()))
+            .collect::<BTreeSet<_>>();
+        let codex_ids = provider_echo_ids(items, "codex", owner, &incoming);
+        let opencode_ids = provider_echo_ids(items, "opencode", owner, &private);
         items.retain(|item| {
-            let echo = item.get("_delivery_correlation")
-                .is_some_and(|correlation| native_echo_matches(correlation, &incoming, &codex_ids));
+            let echo = item.get("_delivery_correlation").is_some_and(|correlation| {
+                match correlation["kind"].as_str() {
+                    Some("topic-message") => correlation["id"].as_str().is_some_and(|id| private.contains(id)),
+                    Some("opencode") => native_provider_echo_matches(correlation, &opencode_ids),
+                    _ => native_echo_matches(correlation, &incoming, &codex_ids),
+                }
+            });
             if echo {
                 suppressed = suppressed.max(item["sequence"].as_u64().unwrap_or(0));
             }
@@ -2404,11 +2472,7 @@ pub fn native_timeline_page(
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Json<Value>, ApiError> {
     let order = native_timeline_order(managed);
-    let graph = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session, session_id, managed)?
-    } else {
-        Vec::new()
-    };
+    let graph = native_session_messages(state, snapshot, session, session_id, managed)?;
     suppress_native_echoes(state, snapshot, session_id, &graph, &mut items, managed)?;
     let mut keyed: Vec<_> = items.drain(..)
         .map(|item| {
@@ -2417,7 +2481,7 @@ pub fn native_timeline_page(
         })
         .collect();
     if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        keyed.extend(graph.into_iter()
+        keyed.extend(graph.items.into_iter()
             .map(|item| {
                 let key = crate::external_sessions::timeline_key(&item, 1);
                 (item, key)
@@ -2626,11 +2690,7 @@ fn native_slice_page_impl(
     } else {
         limit + 1
     };
-    let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session, session_id, managed)?
-    } else {
-        Vec::new()
-    };
+    let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
     drop(preparation);
     // Acquire after the first fold lock, then retain the same permit through refills,
     // the header read and preparation: no second try-acquire decision under load.
@@ -2696,7 +2756,7 @@ fn native_slice_page_impl(
     let (mut items, mut has_more) = crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
-    let messages = messages.into_iter().map(|item| {
+    let messages = messages.items.into_iter().map(|item| {
         let key = crate::external_sessions::timeline_key(&item, 1);
         (item, key)
     }).filter(|(_, key)| before.is_none_or(|before| key.cmp_in(before, order).is_lt()));
@@ -2769,6 +2829,9 @@ fn native_slice_page_impl(
     if let Some(header) = header {
         page_value["header"] = header;
     }
+    if managed.is_none() && session_id.starts_with("session/external-") {
+        conversation_blocks::ensure_unmanaged_source(state, source)?;
+    }
     Ok((Json(page_value), native.generation, suppressed_sequence))
 }
 
@@ -2795,7 +2858,7 @@ pub fn canonical_native_slice(
     source: &crate::external_sessions::ExternalSession,
     session: &ClientSession,
     session_id: &str,
-    graph: &[Value],
+    graph: &NativeSessionMessages,
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
@@ -2902,7 +2965,7 @@ pub fn post_snapshot_native_sends(
     incoming: &BTreeSet<&str>,
 ) -> Result<Vec<ClaimRecord>, ApiError> {
     if !items.iter().any(|item| matches!(
-        item["_delivery_correlation"]["kind"].as_str(), Some("message" | "codex")
+        item["_delivery_correlation"]["kind"].as_str(), Some("message" | "topic-message" | "codex" | "opencode")
     )) {
         return Ok(Vec::new());
     }
@@ -2915,7 +2978,12 @@ pub fn post_snapshot_native_sends(
             .map_err(ApiError::internal)?,
         None => (None, None),
     };
-    let mut future = if items.iter().any(|item| item["_delivery_correlation"]["kind"] == "codex") {
+    let has_provider_correlation = |correlation: &Value| {
+        matches!(correlation["kind"].as_str(), Some("codex" | "opencode"))
+    };
+    let mut future = if items.iter().filter_map(|item| item.get("_delivery_correlation"))
+        .any(has_provider_correlation)
+    {
         let delta = state.store.conversation_message_delta_at(
             owner, through.checked_add(1), snapshot.store_index, 256,
             Some(crate::store::messages_shard::stream_reads::StreamAfter::Arrival(snapshot.store_index)),
@@ -2923,19 +2991,19 @@ pub fn post_snapshot_native_sends(
         let subjects = incoming.iter().copied()
             .chain(delta.iter().filter_map(|claim| {
                 let fields = claim.body.get("fields").unwrap_or(&claim.body);
-                (session_message_belongs(claim, owner, session_id, started, ended)
-                    && fields["to"].as_str() == Some(owner)
-                    && fields["from"].as_str() != Some(owner))
+                (records::private_thread_claim(claim)
+                    || (session_message_belongs(claim, owner, session_id, started, ended)
+                        && fields["to"].as_str() == Some(owner)
+                        && fields["from"].as_str() != Some(owner)))
                     .then_some(claim.subject.as_str())
             })).collect::<BTreeSet<_>>();
         let unresolved = items.iter().filter_map(|item| item.get("_delivery_correlation"))
-            .filter(|correlation| correlation["kind"] == "codex")
+            .filter(|correlation| has_provider_correlation(correlation))
             .any(|correlation| {
+                let Some(kind) = correlation["kind"].as_str() else { return true };
                 let Some(thread) = correlation["thread_id"].as_str() else { return true };
                 let Some(id) = correlation["id"].as_str() else { return true };
-                !subjects.iter().any(|subject| {
-                    fractal_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject) == id
-                })
+                !subjects.iter().any(|subject| provider_delivery_id(kind, owner, thread, subject) == id)
             });
         if delta.len() == 256 && unresolved {
             return Err(ApiError {
@@ -2950,7 +3018,7 @@ pub fn post_snapshot_native_sends(
     };
     let subjects = items.iter()
         .filter_map(|item| item.get("_delivery_correlation"))
-        .filter(|correlation| correlation["kind"] == "message")
+        .filter(|correlation| matches!(correlation["kind"].as_str(), Some("message" | "topic-message")))
         .filter_map(|correlation| correlation["id"].as_str())
         .collect::<BTreeSet<_>>();
     for subject in subjects {
@@ -2964,8 +3032,40 @@ pub fn post_snapshot_native_sends(
             future.push(claim);
         }
     }
-    future.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
+    future.retain(|claim| {
+        records::private_thread_claim(claim)
+            || session_message_belongs(claim, owner, session_id, started, ended)
+    });
     Ok(future)
+}
+
+fn provider_delivery_id(kind: &str, owner: &str, session: &str, subject: &str) -> String {
+    if kind == "opencode" {
+        let identity = owner.strip_prefix("agent/").unwrap_or(owner);
+        fractal_drivers::opencode_session::stable_message_id(identity, session, subject)
+    } else {
+        fractal_drivers::codex_app_server::stable_client_user_message_id(owner, session, subject)
+    }
+}
+
+fn provider_echo_ids(
+    items: &[Value],
+    kind: &str,
+    owner: &str,
+    subjects: &BTreeSet<&str>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    items.iter().filter_map(|item| {
+        let correlation = item.get("_delivery_correlation")?;
+        (correlation["kind"] == kind).then(|| correlation["thread_id"].as_str()).flatten()
+    }).collect::<BTreeSet<_>>().into_iter().map(|session| {
+        let ids = subjects.iter().map(|subject| provider_delivery_id(kind, owner, session, subject)).collect();
+        (session.to_owned(), ids)
+    }).collect()
+}
+
+fn native_provider_echo_matches(correlation: &Value, ids: &BTreeMap<String, BTreeSet<String>>) -> bool {
+    correlation["thread_id"].as_str().and_then(|thread| ids.get(thread))
+        .is_some_and(|ids| correlation["id"].as_str().is_some_and(|id| ids.contains(id)))
 }
 
 pub fn native_echo_matches(
@@ -2975,9 +3075,7 @@ pub fn native_echo_matches(
 ) -> bool {
     match correlation["kind"].as_str() {
         Some("message") => correlation["id"].as_str().is_some_and(|id| incoming.contains(id)),
-        Some("codex") => correlation["thread_id"].as_str()
-            .and_then(|thread| codex_ids.get(thread))
-            .is_some_and(|ids| correlation["id"].as_str().is_some_and(|id| ids.contains(id))),
+        Some("codex") => native_provider_echo_matches(correlation, codex_ids),
         _ => false,
     }
 }
@@ -3604,11 +3702,14 @@ pub fn timeline_first_page_with_extent(
         .map_err(ApiError::internal)?;
         let items = match conversation {
             Some(crate::external_sessions::ExternalConversation::Readable(external)) => {
+                conversation_blocks::ensure_unmanaged_source(state, &external)?;
                 let _span = crate::profile::span("timeline/native-read");
                 if external.driver != crate::external_sessions::ExternalDriver::OpenCode {
                     return native_slice_page(state, snapshot, session, &session_id, query, &external);
                 }
-                conversation_blocks::read(&external, session, &session_id)?
+                let items = conversation_blocks::read(&external, session, &session_id)?;
+                conversation_blocks::ensure_unmanaged_source(state, &external)?;
+                items
             }
             _ if crate::subagent_sessions::child_parts(&session_id).is_some() => {
                 let child = conversation_blocks::source(state, &session_id, None)?;
@@ -3774,6 +3875,9 @@ pub fn timeline_first_page_with_extent(
         observed.is_none() || incarnation.is_none() || observed == incarnation
     };
     for claim in claims {
+        if records::private_thread_claim(&claim) {
+            continue;
+        }
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         let timestamp = client_timestamp(
             fields
@@ -4394,6 +4498,7 @@ pub async fn events(
     records.retain(|(record, _)| {
         !fractal_schema::notice::is_reserved_subject(&record.subject)
             && !fractal_schema::notice::is_reserved_kind(&record.kind)
+            && !fractal_schema::threads::is_reserved_record(&record.subject, &record.kind)
     });
     // The projection enrichment reads the store (mission attribution, snapshot ids), so it
     // takes one admitted query scope; the wait above held no reader.
@@ -4601,6 +4706,12 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if matches!(action, "thread.read" | "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
+        return Some("control.messages");
+    }
+    if action == "thread.link-ask" {
+        return Some("control.work");
+    }
     if action == "harness.answer" {
         return Some("terminal.control");
     }

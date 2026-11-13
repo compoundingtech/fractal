@@ -144,15 +144,7 @@ public actor FractalClient {
     public func deleteGlass(id: String, body: GlassDelete, idempotencyKey: String) async throws -> Envelope<Glass> { try await request("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))", query: [], method: "DELETE", body: try JSONEncoder().encode(body), idempotencyKey: idempotencyKey) }
     /// Complete revisioned roster frames. Stage chunks and apply deltas atomically in the caller.
     public func agentsPublicationStream(subscriptionID: String = "agents") -> AsyncThrowingStream<AgentsCollectionEvent, Error> {
-        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
-        components.scheme = components.scheme == "https" ? "wss" : "ws"
-        var request = URLRequest(url: components.url!)
-        request.setValue(features, forHTTPHeaderField: "x-st3-features")
-        request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol")
-        if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
-        if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
-        applyTraceContext(to: &request)
-        let task = webSocketTask(with: request)
+        let task = collectionsSocket()
         return AsyncThrowingStream { continuation in
             task.resume()
             continuation.onTermination = { @Sendable _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -167,6 +159,64 @@ public actor FractalClient {
                 } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
             }
         }
+    }
+
+    /// Follow this person's bounded thread summaries for one exact context.
+    public func threadListStream(scope: ThreadListScope, subscriptionID: String = "threads", limit: Int = 50) -> AsyncThrowingStream<ThreadCollectionFrame<ThreadSummary>, Error> {
+        let context: [String: JSONValue]
+        switch scope {
+        case .agent(let id): context = ["agent_id": .string(id)]
+        case .inbox(let source, let episode): context = ["origin_source": .string(source), "origin_episode": .string(episode)]
+        case .mission(let id): context = ["mission_id": .string(id)]
+        case .recentlyClosed: context = ["recently_closed": .bool(true)]
+        }
+        return threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "thread_context": .object(context), "limit": .number(Double(limit))])
+    }
+
+    /// Follow one thread's summary, including shared unread progress.
+    /// Requires the daemon's `thread-summary-feed` capability.
+    public func threadSummaryStream(threadID: String, subscriptionID: String = "thread-summary") -> AsyncThrowingStream<ThreadCollectionFrame<ThreadSummary>, Error> {
+        threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "subject": .string(threadID), "limit": .number(1)])
+    }
+
+    /// Follow accepted messages and lifecycle rows of exactly one thread.
+    public func threadTimelineStream(threadID: String, subscriptionID: String = "thread-timeline", limit: Int = 50) -> AsyncThrowingStream<ThreadCollectionFrame<ThreadTimelineEvent>, Error> {
+        threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("thread-timeline"), "subject": .string(threadID), "limit": .number(Double(limit))])
+    }
+
+    private func threadCollectionStream<Row: Decodable & Sendable>(_ subscribe: [String: JSONValue]) -> AsyncThrowingStream<ThreadCollectionFrame<Row>, Error> {
+        let task = collectionsSocket()
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { @Sendable _ in task.cancel(with: .normalClosure, reason: nil) }
+            task.resume()
+            Task {
+                do {
+                    let command = try JSONEncoder().encode(subscribe)
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    let decoder = JSONDecoder()
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        if let error = try? decoder.decode(ThreadCollectionStreamError.self, from: data) { throw error }
+                        continuation.yield(try decoder.decode(ThreadCollectionFrame<Row>.self, from: data))
+                    }
+                } catch {
+                    continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error)
+                    task.cancel(with: .normalClosure, reason: nil)
+                }
+            }
+        }
+    }
+
+    private func collectionsSocket() -> URLSessionWebSocketTask {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!)
+        request.setValue(features, forHTTPHeaderField: "x-st3-features")
+        request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        applyTraceContext(to: &request)
+        return webSocketTask(with: request)
     }
 
     public func glassesStream(subscriptionID: String = "glasses") -> AsyncThrowingStream<GlassCollectionFrame, Error> {
@@ -326,6 +376,21 @@ public actor FractalClient {
             if UInt64(whole.count) >= chunk.size { return whole }
         }
     }
+    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> { try await threadList(in: .agent(agentID), cursor: cursor, limit: limit) }
+    public func threadList(in scope: ThreadListScope, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {
+        var query: [URLQueryItem]
+        switch scope {
+        case .agent(let id): query = [.init(name: "agent_id", value: id)]
+        case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
+        case .mission(let id): query = [.init(name: "mission_id", value: id)]
+        case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        }
+        if let cursor { query.append(.init(name: "cursor", value: cursor)) }
+        if let limit { query.append(.init(name: "limit", value: String(limit))) }
+        return try await get("v1/client/threads", query: query)
+    }
+    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> { try await get("v1/client/threads/\(try Self.routedThreadID(id))") }
+    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
@@ -469,6 +534,12 @@ public actor FractalClient {
     public func terminalEnd(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalEnd(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalInput(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalResize(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadClose(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRead(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRename(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReopen(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadReply(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReplyParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReply(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadStart(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadStartParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadStart(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonAskParameters) async throws -> Envelope<ActionResult> { try await submit(try .workAsk(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workCancelAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonStepParameters) async throws -> Envelope<ActionResult> { try await submit(try .workCancelAsk(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workClaim(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workClaim(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -635,6 +706,14 @@ public actor FractalClient {
 
     static func pathSegment(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"))!
+    }
+
+    static func routedThreadID(_ value: String) throws -> String {
+        let opaque = value.hasPrefix("thread/") ? String(value.dropFirst("thread/".count)) : value
+        guard (1...128).contains(opaque.utf8.count),
+            opaque.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 })
+        else { throw URLError(.badURL) }
+        return opaque
     }
 
     static func routedSessionID(_ value: String) -> String {

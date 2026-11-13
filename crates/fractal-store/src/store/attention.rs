@@ -433,26 +433,7 @@ impl Store {
         {
             let connection = self.readers.get();
             for review in reviews {
-                // The gate's owner is the step whose work it reviews, a loop whose step runs
-                // it, or its run.
-                let step = if review.owner.starts_with("step-run/") {
-                    Some(review.owner.clone())
-                } else if review.owner.starts_with("loop-run/") {
-                    loop_step_tx(&connection, &review.owner)?.map(|step| step.subject)
-                } else {
-                    None
-                };
-                let conversation = attention_snapshot::conversation_agent(
-                    &connection,
-                    step.as_deref(),
-                    Some(&review.mission_run),
-                )?;
-                items.push(AttentionItemView {
-                    deadline_unix_ms: None,
-                    default_answer: None,
-                    conversation,
-                    ..attention_item_from_review(review)
-                });
+                items.push(attention_item_from_review_at(&connection, review)?);
             }
         }
 
@@ -467,34 +448,7 @@ impl Store {
                 .query_map([person], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             for id in ids {
-                let Some(session) = planning_session_view_tx(&connection, &id)? else {
-                    continue;
-                };
-                let (Some(candidate), Some(preview)) = (&session.candidate, &session.preview)
-                else {
-                    continue;
-                };
-                if preview.candidate_revision != candidate.revision
-                    || !preview.mission.blockers.is_empty()
-                {
-                    continue;
-                }
-                if let Some(run) = &session.target_mission_run {
-                    let Some(run) = mission_run_header_tx(
-                        &connection,
-                        run.strip_prefix("mission-run/").unwrap_or(run),
-                    )
-                    .optional()?
-                    else {
-                        continue;
-                    };
-                    if session.source_generation.as_deref() != Some(run.generation.as_str())
-                        || is_terminal_run_state(&run.status)
-                    {
-                        continue;
-                    }
-                }
-                items.push(attention_item_from_planning(&session, candidate, preview));
+                items.extend(planning_attention_item_at(&connection, &id)?);
             }
         }
 
@@ -509,33 +463,10 @@ impl Store {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             for id in ids {
-                let proposal = revision_proposal_view_tx(&connection, &id)?;
-                let run = mission_run_header_tx(
-                    &connection,
-                    proposal
-                        .run
-                        .strip_prefix("mission-run/")
-                        .unwrap_or(&proposal.run),
-                )
-                .optional()?;
-                let Some(run) = run else {
-                    continue;
-                };
-                if run.generation != proposal.source_generation
-                    || is_terminal_run_state(&run.status)
-                {
-                    continue;
-                }
-                for reviewer in proposal
-                    .reviewers
-                    .iter()
-                    .filter(|reviewer| !proposal.approvals.contains(*reviewer))
-                    .filter(|reviewer| person.is_none_or(|person| person == reviewer.as_str()))
-                {
-                    items.push(attention_item_from_revision(&proposal, &run, reviewer));
-                }
+                items.extend(revision_attention_items_at(&connection, &id, person)?);
             }
         }
+
         Ok(items)
     }
 
@@ -723,6 +654,7 @@ impl Store {
                     .optional()?
                     .unwrap_or_else(|| item.subject.clone());
             }
+            item.conversation = inbox::responsible_agent_at(&connection, &item)?;
             live.push(item);
         }
         let priority = |item: &AttentionItemView| match item.priority.as_str() {
@@ -949,6 +881,16 @@ impl Store {
         &self,
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
+        let candidates = self.desired_harness_login_candidates()?;
+        self.harness_login_items_at(&self.readers.get(), candidates, person)
+    }
+
+    pub(super) fn harness_login_items_at(
+        &self,
+        connection: &Connection,
+        candidates: Vec<DesiredSubject>,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
         struct Seat {
             subject: String,
             driver: String,
@@ -956,17 +898,21 @@ impl Store {
             requested_at: u128,
         }
         let mut logins: BTreeMap<(String, String, String), Vec<Seat>> = BTreeMap::new();
-        for desired in self.desired_harness_login_candidates()? {
-            if !person_work::declaration_live(&self.readers.get(), &desired.subject)? {
+        for desired in candidates {
+            if !person_work::declaration_live(connection, &desired.subject)? {
                 continue;
             }
-            let Some(harness) = self.current_harness_for_login(&desired.subject)? else {
+            // Login recovery also follows work claims authored by the seat, even when
+            // no new harness observation is published for its subject.
+            smallclaims::touched::note_read(|| desired.subject.clone());
+            smallclaims::touched::note_read(|| format!("actor:{}", desired.subject));
+            let Some(harness) = current_harness_fold_at(connection, &desired.subject, None, true, true)? else {
                 continue;
             };
             if harness.state != "needs-login" {
                 continue;
             }
-            let Some(owner) = self.agent_person(&desired.subject)? else {
+            let Some(owner) = agent_person_at(connection, &desired.subject)? else {
                 continue;
             };
             if person.is_some_and(|person| person != owner) {
@@ -983,9 +929,9 @@ impl Store {
                 .as_ref()
                 .map(|m| m.host.clone())
                 .unwrap_or_else(|| "unknown".into());
-            let login = self.seat_login(&desired, &host, &driver)?;
+            let login = self.seat_login_at(connection, &desired, &host, &driver)?;
             let (fence, episode) =
-                self.harness_login_episode_key(&desired.subject, &harness.incarnation_id)?;
+                self.harness_login_episode_key_at(connection, &desired.subject, &harness.incarnation_id)?;
             let requested_at = fence.as_ref().map_or(harness.observed_at_unix_ms, |claim| {
                 claim.accepted_at_unix_ms
             });
@@ -1276,6 +1222,77 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
         });
     }
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
+}
+
+pub(super) fn planning_attention_item_at(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<AttentionItemView>> {
+    let Some(session) = planning_session_view_tx(connection, id.strip_prefix("planning-session/").unwrap_or(id))? else {
+        return Ok(None);
+    };
+    if session.status != "review" {
+        return Ok(None);
+    }
+    let (Some(candidate), Some(preview)) = (&session.candidate, &session.preview) else {
+        return Ok(None);
+    };
+    if preview.candidate_revision != candidate.revision || !preview.mission.blockers.is_empty() {
+        return Ok(None);
+    }
+    if let Some(run) = &session.target_mission_run {
+        let Some(run) = mission_run_header_tx(connection, run.strip_prefix("mission-run/").unwrap_or(run)).optional()? else {
+            return Ok(None);
+        };
+        if session.source_generation.as_deref() != Some(run.generation.as_str()) || is_terminal_run_state(&run.status) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(attention_item_from_planning(&session, candidate, preview)))
+}
+
+pub(super) fn revision_attention_items_at(
+    connection: &Connection,
+    id: &str,
+    person: Option<&str>,
+) -> Result<Vec<AttentionItemView>> {
+    let Some(proposal) = revision_proposal_view_tx(connection, id.strip_prefix("revision-proposal/").unwrap_or(id)).optional()? else {
+        return Ok(Vec::new());
+    };
+    if proposal.status != "pending-approval" {
+        return Ok(Vec::new());
+    }
+    let Some(run) = mission_run_header_tx(connection, proposal.run.strip_prefix("mission-run/").unwrap_or(&proposal.run)).optional()? else {
+        return Ok(Vec::new());
+    };
+    if run.generation != proposal.source_generation || is_terminal_run_state(&run.status) {
+        return Ok(Vec::new());
+    }
+    Ok(proposal.reviewers.iter()
+        .filter(|reviewer| !proposal.approvals.contains(*reviewer))
+        .filter(|reviewer| person.is_none_or(|person| person == reviewer.as_str()))
+        .map(|reviewer| attention_item_from_revision(&proposal, &run, reviewer))
+        .collect())
+}
+
+pub(super) fn attention_item_from_review_at(
+    connection: &Connection,
+    review: HumanReviewView,
+) -> Result<AttentionItemView> {
+    let step = if review.owner.starts_with("step-run/") {
+        Some(review.owner.clone())
+    } else if review.owner.starts_with("loop-run/") {
+        loop_step_tx(connection, &review.owner)?.map(|step| step.subject)
+    } else {
+        None
+    };
+    let conversation = attention_snapshot::conversation_agent(
+        connection, step.as_deref(), Some(&review.mission_run),
+    )?;
+    Ok(AttentionItemView {
+        conversation,
+        ..attention_item_from_review(review)
+    })
 }
 
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {

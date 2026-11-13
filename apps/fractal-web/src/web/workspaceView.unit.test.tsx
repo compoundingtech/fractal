@@ -48,6 +48,8 @@ describe('workspace body', () => {
   })
   it('keeps the thread for the thread tab', () => {
     expect(workspaceView(undefined)).toEqual({ _tag: 'Thread' })
+    expect(workspaceView({ ref: 'thread/review-42' })).toEqual({ _tag: 'TopicThread', ref: 'thread/review-42' })
+    expect(workspaceView({ ref: 'thread/review/42' })._tag).toBe('ViewUnavailable')
   })
 })
 

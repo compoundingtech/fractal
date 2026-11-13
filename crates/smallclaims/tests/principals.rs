@@ -68,10 +68,42 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 }
 
 #[test]
-fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
-    // The landed runtime-operation migration owns 19; signature migration takes 20.
-    // Update this assertion only with the reviewed queue disposition.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+fn storage_version_follows_the_reviewed_migration_order() {
+    // Runtime operations used 19 and signatures used 20. Thread privacy adds reader floor 21.
+    // Complete serving privacy used 22; causal metadata readers require version 23.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 23);
+}
+
+#[test]
+fn versions_20_through_22_open_at_version_23_and_retain_history() {
+    for previous in [20_u32, 21, 22] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let store = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+        let original = note(&store, None, "pre-thread-reader history");
+        drop(store);
+
+        // These reader floors do not change the logical graph schema or claim format.
+        // Model each prior header, including published main's version 20.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.pragma_update(None, "user_version", previous).unwrap();
+        drop(connection);
+
+        let reopened = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+        let version: u32 = reopened
+            .readers
+            .get()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 23, "opening reader floor {previous}");
+        let retained = reopened
+            .latest_claim(&original.subject, Some(&original.kind))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.id, original.id);
+        assert_eq!(retained.body, original.body);
+        assert_eq!(retained.predecessors, original.predecessors);
+    }
 }
 
 fn key() -> Arc<MemberKey> {

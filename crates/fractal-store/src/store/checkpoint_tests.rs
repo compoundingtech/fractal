@@ -2986,3 +2986,43 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
     assert_eq!(store.latest_claim(AGENT, Some("runtime.reconcile-decision")).unwrap().unwrap().id, restart.id);
 }
 
+
+#[test]
+fn real_checkpoint_trim_preserves_thread_title_history_and_rename_receipt() {
+    use super::thread_metadata::{Change, Edit, Event, apply, summary};
+
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    store.bind_fleet("fleet/test").unwrap();
+    let person = "person/avery";
+    let subject = "thread/checkpoint";
+    let (created, _) = apply(
+        &store, person, subject, "thread/create",
+        Edit::Create { agent: "agent/alder", title: "Original" },
+    ).unwrap();
+    let created_revision = summary(&store, person, subject).unwrap().revision;
+    let rename = || Edit::Rename {
+        title: "Current", title_revision: &created.id, revision: &created_revision,
+    };
+    let (renamed, _) = apply(&store, person, subject, "thread/rename", rename()).unwrap();
+    let cut = now_ms() + 1_000;
+    let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
+    assert!(!plan.claims.is_empty(), "exercise a real checkpoint deletion");
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&tx, &checkpoint_name(cut), &plan.envelopes, &plan.claims)
+            .unwrap();
+        delete_dropped_rows_tx(&tx, &plan.envelopes, &plan.claims).unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(store.graph.claim_by_id(&created.id).unwrap().is_some());
+    let (replayed, appended) = apply(&store, person, subject, "thread/rename", rename()).unwrap();
+    assert!(!appended);
+    assert_eq!(replayed.id, renamed.id);
+    assert_eq!(
+        Event::from_claim(replayed).unwrap().change,
+        Change::Renamed { previous_title: "Original".into(), title: "Current".into() },
+    );
+    assert_eq!(summary(&store, person, subject).unwrap().title, "Current");
+}

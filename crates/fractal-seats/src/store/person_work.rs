@@ -182,6 +182,417 @@ pub mod tests {
     }
 
     #[test]
+    fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
+        use crate::store::thread_metadata::{InboxOrigin, StartFromInbox, TimelineItem, mixed_timeline, start_from_inbox};
+        use crate::store::thread_metadata::{ThreadContext, list_context};
+
+        let (store, origin_run, input) = fixture();
+        store.configure_thread_write_rollout([]);
+        let ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let message = ClaimInput {
+            subject: "message/thread-first".into(),
+            kind: "message.sent".into(),
+            actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(original.actor.as_deref().unwrap())),
+                ("content".into(), json!("Could we check worker tests first?")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: original.id.clone() };
+        let start = |thread, key, person| StartFromInbox {
+            thread, title: "Worker test", person, origin: &origin,
+            key, first_message: &message,
+        };
+        let (created, appended) = start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap();
+        assert!(appended);
+        assert_eq!(created.body["fields"]["origin_episode"], original.id);
+        assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let origin = ThreadContext::Inbox { source: &ask.subject, episode: &original.id };
+        assert_eq!(list_context(&store, person, origin, None, 20).unwrap().items[0].id, "thread/worker");
+        assert!(list_context(&store, person, ThreadContext::Inbox { source: &ask.subject, episode: "wrong" }, None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", ThreadContext::Inbox { source: &ask.subject, episode: &original.id }, None, 20).unwrap().items.is_empty());
+        let mission = store.mission_run(&origin_run.run).unwrap().unwrap().mission;
+        assert_eq!(created.body["fields"]["mission"], mission);
+        assert_eq!(list_context(&store, person, ThreadContext::Mission(&mission), None, 20).unwrap().items[0].id, "thread/worker");
+
+        let read = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        assert_eq!(read.items.len(), 1);
+        let TimelineItem::Message(first) = &read.items[0] else { panic!("expected the first message") };
+        assert_eq!(first.id, message.subject);
+        assert_eq!(first.content, "Could we check worker tests first?");
+        assert!(read.next_cursor.is_none());
+        assert!(mixed_timeline(&store, "person/other", "thread/worker", None, 1).is_err());
+        let (closed, _) = crate::store::thread_metadata::apply(
+            &store, person, "thread/worker", "close-worker",
+            crate::store::thread_metadata::Edit::Close { revision: &crate::store::thread_metadata::summary(&store, person, "thread/worker").unwrap().revision },
+        ).unwrap();
+        let agent = original.actor.as_deref().unwrap();
+        crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-reply".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Worker tests pass.",
+                    "status": "sent", "thread_id": "thread/worker", "thread_quote_id": message.subject,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("bound-thread-reply".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        ).unwrap();
+        store.connection.batched(|tx| crate::store::append_receipt_claim_tx(
+            tx, store.origin(), "message/ordinary-reply", "message.sent", Some(agent),
+            &json!({"fields":{"from":agent,"to":person,"content":"Outside the thread.",
+                "status":"sent","in_reply_to":message.subject}}),
+            &[], None, "seed-ordinary-reply",
+        )).unwrap().unwrap();
+        let first_page = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        let TimelineItem::Message(reply) = &first_page.items[0] else { panic!("expected the reply") };
+        assert_eq!(reply.thread_quote_id.as_deref(), Some(message.subject.as_str()));
+        let lifecycle = mixed_timeline(
+            &store, person, "thread/worker", first_page.next_cursor.as_deref(), 1,
+        ).unwrap();
+        let TimelineItem::Lifecycle(event) = &lifecycle.items[0] else { panic!("expected the close") };
+        assert_eq!(event.operation_id, closed.operation_id.unwrap());
+        let tail = mixed_timeline(&store, person, "thread/worker", lifecycle.next_cursor.as_deref(), 1).unwrap();
+        assert!(matches!(&tail.items[0], TimelineItem::Message(item) if item.id == message.subject));
+        assert!(tail.next_cursor.is_none());
+        let foreign_quote = crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-foreign-quote".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Unverified quote.", "status": "sent",
+                    "thread_id": "thread/worker", "thread_quote_id": "message/ordinary-reply",
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("foreign-thread-quote".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        );
+        assert_eq!(foreign_quote.unwrap_err().code, "invalid-thread-message");
+        assert!(store.claims_for("message/thread-foreign-quote", None).unwrap().is_empty());
+        let (retry, appended) = start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap();
+        assert!(!appended);
+        assert_eq!(retry.id, created.id);
+        let messages = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].batch_id, created.batch_id);
+        assert_eq!(
+            start_from_inbox(&store, start("thread/rollback", "another-start", person)).unwrap_err().code,
+            "stale-subject",
+        );
+        assert!(store.claims_for("thread/rollback", None).unwrap().is_empty());
+        assert!(store.claims_for(&ask.subject, Some("work.person-done")).unwrap().is_empty());
+        assert_eq!(request(&store.readers.get(), &ask.subject).unwrap().unwrap().id, original.id);
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+
+        let mut foreign_message = message.clone();
+        foreign_message.subject = "message/foreign-thread-first".into();
+        foreign_message.actor = Some("person/robin".into());
+        foreign_message.fields.insert("from".into(), json!("person/robin"));
+        assert_eq!(
+            start_from_inbox(&store, StartFromInbox {
+                first_message: &foreign_message,
+                ..start("thread/foreign", "foreign-start", "person/robin")
+            }).unwrap_err().code,
+            "thread-unavailable",
+        );
+        assert!(store.claims_for(&foreign_message.subject, None).unwrap().is_empty());
+
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-after-thread".into(), answer: None,
+        }, false).unwrap();
+        assert_eq!(
+            start_from_inbox(&store, start("thread/after-answer", "start-after-answer", person)).unwrap_err().code,
+            "thread-unavailable",
+        );
+        assert!(!start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap().1);
+    }
+
+    #[test]
+    fn persisted_ask_origin_remains_in_exact_inbox_history_after_resolution_and_replay() {
+        use crate::store::thread_metadata::{
+            Edit, InboxOrigin, StartFromInbox, ThreadContext, apply, list_context, start_from_inbox,
+        };
+        let (store, _, input) = fixture();
+        store.configure_thread_write_rollout([]);
+        let ask = store.ask_person(&input).unwrap();
+        let episode = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let agent = episode.actor.as_deref().unwrap();
+        // Load the persisted historical format directly, without retaining an obsolete
+        // live writer. The normal claim/operation decoder and replay own this boundary.
+        for thread in ["thread/history-a", "thread/history-b"] {
+            store.connection.batched(|tx| -> Result<()> {
+                let claim = append_claim_tx(tx, "alder", thread, "thread.created", Some(person), &json!({
+                    "fields": {"person": person, "agent": agent, "title": "Historical thread",
+                        "origin_ask": ask.subject, "origin_ask_episode": episode.id},
+                    "evidence": [episode.id],
+                    "_operation": {"id": format!("op/{thread}"), "request_digest": thread},
+                }), &[], None)?;
+                register_operation_tx(tx, &claim)?;
+                Ok(())
+            }).unwrap().unwrap();
+        }
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: episode.id.clone() };
+        let message = ClaimInput {
+            subject: "message/history-new".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)), ("to".into(), json!(agent)),
+                ("content".into(), json!("Keep the original context.")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let (created, _) = start_from_inbox(&store, StartFromInbox {
+            thread: "thread/history-c", title: "Current thread", person, origin: &origin,
+            key: "history-new", first_message: &message,
+        }).unwrap();
+        assert_eq!(created.body["fields"]["origin_source"], ask.subject);
+        assert_eq!(created.body["fields"]["origin_episode"], episode.id);
+        assert!(created.body["fields"].get("origin_ask").is_none());
+        assert!(created.body["fields"].get("origin_ask_episode").is_none());
+        let delivered = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(delivered[0].body["fields"]["thread_origin_source"], ask.subject);
+        assert!(delivered[0].body["fields"].get("thread_origin_ask").is_none());
+        let context = || ThreadContext::Inbox { source: &ask.subject, episode: &episode.id };
+        let first = list_context(&store, person, context(), None, 1).unwrap();
+        assert_eq!(first.items[0].id, "thread/history-a");
+        let cursor = first.next_cursor.unwrap();
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "resolve-history-source".into(), answer: None,
+        }, false).unwrap();
+        store.replay_replication_graph().unwrap();
+        let after = list_context(&store, person, context(), Some(&cursor), 20).unwrap();
+        assert_eq!(after.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["thread/history-b", "thread/history-c"]);
+        assert!(after.next_cursor.is_none());
+        assert!(list_context(&store, "person/robin", context(), None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", context(), Some(&cursor), 20).is_err());
+        assert!(list_context(&store, person,
+            ThreadContext::Inbox { source: &ask.subject, episode: "different-episode" },
+            Some(&cursor), 20).is_err());
+        let historical = list_context(&store, person, context(), None, 1).unwrap().items.remove(0);
+        let (_closed, _) = apply(&store, person, &historical.id, "close-history", Edit::Close {
+            revision: &historical.revision,
+        }).unwrap();
+        apply(&store, person, &historical.id, "reopen-history", Edit::Reopen { revision: &crate::store::thread_metadata::summary(&store, person, &historical.id).unwrap().revision }).unwrap();
+        assert_eq!(list_context(&store, person, context(), None, 20).unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn enrolled_device_starts_thread_with_signed_ask_origin_and_first_message() {
+        use crate::store::thread_metadata::{InboxOrigin, PersonAuthority, StartFromInbox, start_from_inbox_as};
+        use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
+
+        let (store, _, input) = fixture();
+        store.configure_thread_write_rollout([]);
+        let ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let actor = "client/paired/first-thread-fixture";
+        let grant = "custom/client/pairing-first-thread-fixture";
+        let thread = "thread/signed-start";
+        store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        let (device, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let chain = store.enroll_device_key(person, device.public(), "thread phone").unwrap();
+        let pairing = store.append_client_operation_claim(&ClaimInput {
+            subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("person_id".into(), json!(person)),
+                ("session_actor".into(), json!(actor)),
+                ("device_public_key".into(), json!(device.public())),
+                ("expires_at_unix_ms".into(), json!(now_ms() as u64 + 60_000)),
+                ("scopes".into(), json!(["control.messages"])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let message = ClaimInput {
+            subject: "message/signed-thread-first".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(original.actor.as_deref().unwrap())),
+                ("content".into(), json!("Could we check worker tests first?")),
+                ("status".into(), json!("sent")),
+                ("title".into(), json!("Worker tests")),
+                ("thread_id".into(), json!(thread)),
+                ("thread_origin_source".into(), json!(ask.subject)),
+                ("thread_origin_episode".into(), json!(original.id)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let mut signature = ClaimSignature::sign(&device, "", person, None, chain, now_ms() as u64);
+        signature.format = Some(FIELDS_FORMAT.into());
+        signature.signed_fields = message.fields.keys().filter(|field| field.as_str() != "status").cloned().collect();
+        signature.signature = device.sign(&fields_signing_bytes(
+            &message.subject, &message.kind, message.actor.as_deref(), &json!(message.fields),
+            &signature.signed_fields, &signature.signer, None, &signature.key,
+            &signature.chain, &signature.nonce, signature.signed_at_unix_ms,
+        ));
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: original.id.clone() };
+        let start = || StartFromInbox {
+            thread, title: "Worker tests", person, origin: &origin,
+            key: "start-signed-thread", first_message: &message,
+        };
+        let authority = || PersonAuthority::Paired { grant, completion: &pairing.id, actor };
+        let (created, appended) = start_from_inbox_as(&store, start(), authority(), Some(&signature)).unwrap();
+        assert!(appended);
+        assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let delivered = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].body["fields"]["thread_origin_episode"], original.id);
+        assert_eq!(delivered[0].batch_id, created.batch_id);
+        assert_eq!(start_from_inbox_as(&store, start(), authority(), Some(&signature)).unwrap().0.id, created.id);
+        use crate::store::thread_metadata::{Edit, TimelineItem, apply, mixed_timeline};
+        let agent = original.actor.as_deref().unwrap();
+        let reply = |subject: &str, from: &str, to: &str, quote: Option<&str>| {
+            let mut fields = BTreeMap::from([
+                ("from".into(), json!(from)),
+                ("to".into(), json!(to)),
+                ("content".into(), json!("The worker checks are ready.")),
+                ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
+            ]);
+            if let Some(quote) = quote {
+                fields.insert("thread_quote_id".into(), json!(quote));
+            }
+            ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some(from.into()),
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(subject.into()),
+            }
+        };
+        let quoted = reply("message/signed-thread-quote", person, agent, Some(&message.subject));
+        let mut quote_signature = ClaimSignature::sign(
+            &device, "", person, None, signature.chain.clone(), now_ms() as u64,
+        );
+        quote_signature.format = Some(FIELDS_FORMAT.into());
+        quote_signature.signed_fields = quoted.fields.keys().filter(|field| field.as_str() != "status").cloned().collect();
+        quote_signature.signature = device.sign(&fields_signing_bytes(
+            &quoted.subject, &quoted.kind, quoted.actor.as_deref(), &json!(quoted.fields),
+            &quote_signature.signed_fields, &quote_signature.signer, None, &quote_signature.key,
+            &quote_signature.chain, &quote_signature.nonce, quote_signature.signed_at_unix_ms,
+        ));
+        let (_, sent) = crate::store::thread_delivery::append_reply(
+            &store, &quoted, authority(), Some(&quote_signature),
+        ).unwrap();
+        assert!(sent);
+        let (closed, _) = apply(&store, person, thread, "close-signed-thread", Edit::Close {
+            revision: &crate::store::thread_metadata::summary(&store, person, thread).unwrap().revision,
+        }).unwrap();
+        let incoming = reply("message/signed-thread-incoming", agent, person, Some(&quoted.subject));
+        assert!(crate::store::thread_delivery::append_reply(
+            &store, &incoming, PersonAuthority::TrustedLocal, None,
+        ).unwrap().1);
+        let page = mixed_timeline(&store, person, thread, None, 4).unwrap();
+        assert!(matches!(&page.items[..], [
+            TimelineItem::Message(received), TimelineItem::Lifecycle(event),
+            TimelineItem::Message(quoted_item), TimelineItem::Message(first),
+        ] if received.id == incoming.subject && received.thread_quote_id.as_deref() == Some(quoted.subject.as_str())
+            && Some(event.operation_id.as_str()) == closed.operation_id.as_deref()
+            && quoted_item.id == quoted.subject && quoted_item.thread_quote_id.as_deref() == Some(message.subject.as_str())
+            && first.id == message.subject));
+        assert!(page.next_cursor.is_none());
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+    }
+
+    #[test]
+    fn bound_requester_links_fresh_ask_to_closed_thread_without_answering_either() {
+        use crate::store::thread_links::{AttachAsk, DecisionHistory, attach_ask};
+        use crate::store::thread_metadata::{Edit, InboxOrigin, StartFromInbox, apply, start_from_inbox};
+
+        let (store, _, mut input) = fixture();
+        store.configure_thread_write_rollout([]);
+        input.step = None;
+        let first_ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &first_ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let agent = original.actor.as_deref().unwrap();
+        let thread = "thread/linked";
+        let message = ClaimInput {
+            subject: "message/first-thread-link".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)), ("to".into(), json!(agent)),
+                ("content".into(), json!("Check worker tests.")), ("status".into(), json!("sent")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let origin = InboxOrigin { source_id: first_ask.subject.clone(), episode: original.id.clone() };
+        let (_created, _) = start_from_inbox(&store, StartFromInbox {
+            thread, title: "Worker tests", person, origin: &origin,
+            key: "start-thread-link", first_message: &message,
+        }).unwrap();
+        let (closed, _) = apply(&store, person, thread, "close-linked-thread", Edit::Close {
+            revision: &crate::store::thread_metadata::summary(&store, person, thread).unwrap().revision,
+        }).unwrap();
+        input.idempotency_key = "follow-up-request".into();
+        let fresh_ask = store.ask_person(&input).unwrap();
+        let fresh = request(&store.readers.get(), &fresh_ask.subject).unwrap().unwrap();
+        assert_ne!(fresh.id, original.id);
+        let link = || AttachAsk {
+            thread, ask: &fresh_ask.subject, episode: &fresh.id, key: "attach-ask",
+            decision: Some(DecisionHistory { predecessor: &first_ask.subject, episode: &original.id,
+                reason: "New test result" }),
+        };
+        assert_eq!(attach_ask(&store, "agent/other", link()).unwrap_err().code, "thread-unavailable");
+        let ask_revision = store.latest_claim_id(&fresh_ask.subject).unwrap();
+        let (attached, appended) = attach_ask(&store, agent, link()).unwrap();
+        assert!(appended);
+        assert_eq!(store.latest_claim_id(&fresh_ask.subject).unwrap(), ask_revision);
+        assert_eq!(attached.body["fields"]["decision_predecessor_episode"], original.id);
+        assert_eq!(attached.body["fields"]["decision_reason"], "New test result");
+        let (retry, appended) = attach_ask(&store, agent, link()).unwrap();
+        assert!(!appended);
+        assert_eq!(retry.id, attached.id);
+        assert_eq!(attach_ask(&store, agent, AttachAsk {
+            key: "attach-ask-second-key", ..link()
+        }).unwrap_err().code, "thread-ask-already-linked");
+        assert_eq!(store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+        assert!(current(&store.readers.get(), &fresh, now_ms()).unwrap());
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: fresh_ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-linked-ask".into(), answer: None,
+        }, false).unwrap();
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+        assert!(!current(&store.readers.get(), &fresh, now_ms()).unwrap());
+        assert!(!attach_ask(&store, agent, link()).unwrap().1);
+    }
+
+    #[test]
     fn rename_before_ask_replication_converges_and_receipt_survives_reopen() {
         let (source, origin, input) = fixture();
         known_rename_person(&source);
@@ -2549,6 +2960,113 @@ mission "writer-load" state="ready" {
             .map(|item| item.title.clone())
             .collect::<Vec<_>>();
         assert_eq!(updates, vec!["Cancelled: Choose a release date".to_owned()]);
+        let check = |store: &Store| {
+            let home = store.attention_items(Some("person/avery")).unwrap();
+            let update = home.iter().find(|item| item.title == "Cancelled: Choose a release date").unwrap();
+            assert_eq!(update.requester_id.as_deref(), Some("daemon/runtime"));
+            assert_eq!(update.conversation.as_deref(), Some("agent/alder.asker"));
+            assert_eq!(update.request.as_ref().unwrap()["about"], ask.subject);
+            assert!(!update.is_alert(), "a conversation link must not revive the cancelled ask");
+            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
+            let indexed = indexed.iter().find(|item| item.subject == update.subject).unwrap();
+            assert_eq!(indexed.conversation, update.conversation);
+        };
+        check(&store);
+        store.replay_replication_graph().unwrap();
+        check(&store);
+    }
+
+    #[test]
+    fn explicit_inbox_fallback_changes_current_sources_but_preserves_originating_agents() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let update = store.connection.batched(|tx| {
+            store.append_update_tx(tx, "daemon/runtime", "person/avery", "Runtime notice", "A system notice.",
+                "fallback-notice", &json!({"version": 1, "type": "update", "about": ask.subject}))
+        }).unwrap().unwrap();
+        let item = |store: &Store, subject: &str| store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == subject).unwrap();
+        assert!(item(&store, &update.subject).conversation.is_none());
+        assert_eq!(store.inbox_responsibility_check(&[item(&store, &update.subject)]).unwrap().status, "warn");
+        assert!(store.configure_inbox_fallback_agent(Some("person/avery")).is_err());
+        for recipient in ["agent/alder.fallback-a", "agent/alder.fallback-b"] {
+            store.configure_inbox_fallback_agent(Some(recipient)).unwrap();
+            let current = item(&store, &update.subject);
+            assert_eq!(current.conversation.as_deref(), Some(recipient));
+            assert_eq!(current.requester_id.as_deref(), Some("daemon/runtime"));
+            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
+            assert_eq!(indexed.iter().find(|item| item.subject == update.subject).unwrap().conversation, current.conversation);
+            assert_eq!(item(&store, &ask.subject).conversation.as_deref(), Some("agent/alder.asker"));
+            // A configured name is distinct from a declared, send-admissible agent.
+            assert_eq!(store.inbox_responsibility_check(&[current]).unwrap().status, "warn");
+        }
+        let stop = crate::graph::parse_internal_intent(r#"version 2
+stop "agent/alder.asker""#, "alder").unwrap();
+        store.apply_internal(&stop, "stop-fallback-origin").unwrap();
+        store.reconcile_person_asks().unwrap();
+        let cancelled = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.title == "Cancelled: Choose a release date").unwrap();
+        assert_eq!(cancelled.conversation.as_deref(), Some("agent/alder.asker"));
+        store.configure_inbox_fallback_agent(None).unwrap();
+        assert!(item(&store, &update.subject).conversation.is_none());
+    }
+
+    #[test]
+    fn configured_inbox_fallback_is_diagnosed_independently_of_current_items() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.subject == ask.subject).unwrap();
+        for fallback in ["agent/example/not-declared", "agent/alder.asker"] {
+            if fallback == "agent/alder.asker" {
+                let stop = crate::graph::parse_internal_intent(r#"version 2
+stop "agent/alder.asker""#, "alder").unwrap();
+                store.apply_internal(&stop, "stop-inbox-fallback").unwrap();
+            }
+            store.configure_inbox_fallback_agent(Some(fallback)).unwrap();
+            for items in [Vec::new(), vec![item.clone()]] {
+                let check = store.inbox_responsibility_check(&items).unwrap();
+                assert_eq!(check.status, "warn");
+                assert!(check.message.contains("configured fallback unavailable: true"));
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_fallback_does_not_hide_an_ordinary_person_ask() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        store.configure_inbox_fallback_agent(Some("agent/example/pending-inbox")).unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h023477cfb471 owner=fractal_seats::store::person_work TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}','unknown','agent/example/pending-inbox','agent.renamed','1')", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let items = store.attention_items(Some("person/avery")).unwrap();
+        let item = items.iter().find(|item| item.subject == ask.subject).unwrap();
+        assert_eq!(item.conversation.as_deref(), Some("agent/alder.asker"));
+        assert!(!item.actions.is_empty());
+        assert!(item.is_alert());
+        assert_eq!(store.inbox_responsibility_check(&items).unwrap().status, "warn");
+    }
+
+    #[test]
+    fn an_updates_about_link_alone_does_not_choose_its_conversation() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let asked = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        for (person, key) in [
+            ("person/avery", "unrelated-update".to_owned()),
+            ("person/robin", format!("st3-ask-ended:{}", asked.id)),
+        ] {
+            let update = store.connection.batched(|tx| {
+                store.append_update_tx(tx, "daemon/runtime", person, "A runtime update", "Some context.",
+                    &key, &json!({"version": 1, "type": "update", "about": ask.subject}))
+            }).unwrap().unwrap();
+            let items = store.attention_items(Some(person)).unwrap();
+            let item = items.iter().find(|item| item.subject == update.subject).unwrap();
+            assert_eq!(item.requester_id.as_deref(), Some("daemon/runtime"));
+            assert!(item.conversation.is_none(), "an unbound source or another person's ask must not supply a conversation");
+        }
     }
 
     /// A notice that cannot be written never undoes the cancellation: the ask still ends, and

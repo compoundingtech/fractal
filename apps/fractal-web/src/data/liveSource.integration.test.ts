@@ -1904,7 +1904,7 @@ describe('optimistic conversation sends', () => {
         gateway.transportFailure = true
         release()
         expect((yield* Effect.promise(() => sending))._tag).toBe('Refused')
-        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Failed' } })
+        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Unconfirmed' } })
         const failedPage = observed()
         expect(failedPage.change).toMatchObject({ from: expect.any(Array), index: 2 })
         // Replace/no-op frames must not shuffle the failed row past the reply.
@@ -2016,7 +2016,7 @@ describe('optimistic conversation sends', () => {
           yield* Effect.promise(() => live.source.attachments!.send(request))
           expect(live.registry.get(conversation)).toMatchObject({
             _tag: 'Observed', value: { items: [
-              { _tag: 'Text', role: 'user', text: 'hello', sendState: { _tag: 'Failed', reason: failure } },
+              { _tag: 'Text', role: 'user', text: 'hello', sendState: failure === 'failed' ? { _tag: 'Unconfirmed' } : { _tag: 'Failed', reason: failure } },
             ] },
           })
         }),

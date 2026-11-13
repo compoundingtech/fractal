@@ -390,7 +390,7 @@ fn who(actor: &fractal_client::AttentionActor) -> String {
 }
 
 /// The attention rows st puts on Now, as st presents them (`Attention.presentation`): its
-/// group, its card, who Chat about this reaches, who raised it and the step it holds. The
+/// group, its card, the responsible thread agent, who raised it and the step it holds. The
 /// client keeps no derivation of its own. A row st puts on no Now is not shown; one st places
 /// in a way this client does not know shows what st says, as an unplaced card.
 #[cfg(test)]
@@ -2593,10 +2593,9 @@ mod tests {
         );
     }
 
-    /// Chat about this reaches the agent st names: the step's claimant, else an agent working in
-    /// the mission, each with the label st gives it.
+    /// Thread responsibility uses the daemon assignment while labels and waiting context remain.
     #[test]
-    fn chat_reaches_the_claimant_or_an_agent_working_in_the_mission() {
+    fn thread_responsibility_keeps_the_daemon_assignment_labels_and_waiting_context() {
         let known = Known {
             labels: vec![("agent/example/auditor", "Auditor")],
             claimants: vec![("step-run/example/audit/1/review", "agent/example/auditor")],
@@ -2607,14 +2606,16 @@ mod tests {
         model.actor = "person/example".into();
         model.now.items.push(served_with(
             row("attention/claimed", "human-gate", serde_json::json!({"alert": true,
-                "step_run_id": "step-run/example/audit/1/review", "mission_id": "mission/example/audit"})),
+                "step_run_id": "step-run/example/audit/1/review", "mission_id": "mission/example/audit",
+                "conversation_id": "agent/example/auditor"})),
             &known,
         ));
         model.now.items.push(served_with(
             row(
                 "attention/working",
                 "human-gate",
-                serde_json::json!({"alert": true, "mission_id": "mission/example/ship"}),
+                serde_json::json!({"alert": true, "mission_id": "mission/example/ship",
+                    "conversation_id": "agent/example/builder"}),
             ),
             &known,
         ));

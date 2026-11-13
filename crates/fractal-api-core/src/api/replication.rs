@@ -31,6 +31,10 @@ pub struct ReplicationRecordsQuery {
 fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
     !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
         && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+        && !fractal_schema::threads::is_reserved_record(
+            record.subject.as_deref().unwrap_or_default(),
+            record.kind.as_deref().unwrap_or_default(),
+        )
 }
 
 #[test]
@@ -47,6 +51,22 @@ fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
     record.kind = Some("custom.attention.notice-created".into());
     assert!(!generic_replica_record_visible(&record));
     record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
+#[test]
+fn public_replication_diagnostics_hide_thread_metadata() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"thread/example", "kind":"thread.created"
+    })).unwrap();
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = None;
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = None;
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("thread/example".into());
     assert!(!generic_replica_record_visible(&record));
 }
 

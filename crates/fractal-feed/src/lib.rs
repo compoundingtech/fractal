@@ -15,6 +15,9 @@ mod inventory;
 mod terminal;
 mod read_positions;
 pub mod tree;
+mod thread_windows;
+pub use thread_windows::{ThreadAccess, ThreadInterest};
+use thread_windows::ThreadWindows;
 #[cfg(test)]
 mod read_positions_tests;
 #[cfg(test)]
@@ -186,6 +189,17 @@ pub enum Update {
     /// are out of date and must not be shown as current.
     WindowStopped(Window),
     Terminal { generation: u64, update: TerminalUpdate },
+    ThreadSupport { available: bool, access: ThreadAccess, upgrade_required: bool },
+    ThreadWindow {
+        interest: ThreadInterest,
+        snapshot: Snapshot,
+        replace: bool,
+        rows: fractal_client::ThreadCollectionRows,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    ThreadWindowFailed { interest: ThreadInterest, message: String, permanent: bool },
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
@@ -254,6 +268,7 @@ pub enum Command {
     Converse {
         targets: Vec<String>,
     },
+    Threads(Vec<ThreadInterest>),
     /// Subscribe to a followed agent's conversation again: st resolves an agent to its session
     /// when the subscription starts, so after the agent restarts into a new session the old
     /// subscription would keep showing the old one.
@@ -347,6 +362,7 @@ pub async fn run_members_with_sidebar(
     let mut member = 0;
     let mut following: Option<Following> = None;
     let mut conversing: Vec<Conversing> = Vec::new();
+    let mut threads = ThreadWindows::default();
     loop {
         // Try every paired member before waiting. Never forward a grant to another origin.
         let mut selected = None;
@@ -380,6 +396,7 @@ pub async fn run_members_with_sidebar(
                 &mut commands,
                 &mut following,
                 &mut conversing,
+                &mut threads,
                 &mut missions,
                 &mut failures,
                 &mut inventories,
@@ -432,6 +449,9 @@ pub async fn run_members_with_sidebar(
                     Some(Command::Inventories(wanted)) => inventories = wanted,
                     Some(Command::Converse { targets }) => {
                         conversing = targets.into_iter().take(MAX_CONVERSATIONS).map(Conversing::new).collect();
+                    }
+                    Some(Command::Threads(targets)) => {
+                        threads.desired = targets;
                     }
                     // Not connected: the next connection subscribes afresh anyway.
                     Some(Command::Resubscribe { .. }) => {}
@@ -539,6 +559,7 @@ async fn connected(
     commands: &mut channel::UnboundedReceiver<Command>,
     following: &mut Option<Following>,
     conversing: &mut Vec<Conversing>,
+    threads: &mut ThreadWindows,
     missions: &mut bool,
     failures: &mut usize,
     inventories: &mut Inventories,
@@ -582,6 +603,16 @@ async fn connected(
     };
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
+    let upgrade_required = [("threads-v1", 2), ("thread-summary-feed", 1)].iter().any(|(id, version)| {
+        !capabilities.value.capabilities.iter().any(|capability| {
+            capability.id == *id && capability.version >= *version
+        })
+    });
+    let threads_granted = !upgrade_required && supports("threads-v1") && supports("collections") && supports("thread-summary-feed");
+    let access = if threads_granted { thread_windows::access(&capabilities.value, client.has_message_signer()) } else { ThreadAccess::default() };
+    let attention_thread_hints = threads_granted && supports("collection.attention.thread-hints");
+    if updates.send(Update::ThreadSupport { available: threads_granted, access, upgrade_required }).is_err() { return Ended::Closed; }
+
     let inventory_granted = supports("inventory-collections") && supports("collections");
     let revisioned_agents = supports("collections.agents.revisioned.v1");
     if updates.send(Update::InventorySupport {
@@ -609,6 +640,17 @@ async fn connected(
         return Ended::Closed;
     }
     let granted = version.is_some();
+    let ordinary_slots = |missions: bool, inventories: Inventories, conversations: usize, terminal: bool| {
+        2 + usize::from(missions) + usize::from(granted) + usize::from(summary)
+            + usize::from(sidebar_person.is_some())
+            + if inventory_granted { inventories.windows().len() } else { 0 }
+            + conversations + usize::from(terminal)
+    };
+    threads.reconnect();
+    if let Err(error) = threads.reconcile(stream, updates,
+        ordinary_slots(*missions, *inventories, conversing.len(), following.is_some()), threads_granted).await {
+        return Ended::Dropped(error.human());
+    }
     for window in Window::ALL
         .into_iter()
         .filter(|window| *window != Window::Missions || *missions)
@@ -618,7 +660,11 @@ async fn connected(
         let result = if window == Window::Agents && revisioned_agents {
             stream.subscribe_agents_publication(window.id()).await
         } else {
-            stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+            if window == Window::Attention && attention_thread_hints {
+                stream.subscribe_attention(window.id(), window.limit(), true).await
+            } else {
+                stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+            }
         };
         if let Err(error) = result {
             return Ended::Dropped(error.to_string());
@@ -655,6 +701,11 @@ async fn connected(
         }
     }
     loop {
+        // Re-admit retained thread demand whenever ordinary socket slots are released.
+        if let Err(error) = threads.reconcile(stream, updates,
+            ordinary_slots(*missions, *inventories, conversing.len(), following.is_some()), threads_granted).await {
+            return Ended::Dropped(error.human());
+        }
         let retry_at = following.as_ref().and_then(|current| current.retry_at);
         let converse_at = conversing
             .iter()
@@ -787,6 +838,23 @@ async fn connected(
                     }
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
+                    CollectionEvent::ThreadWindow { id, snapshot, replace, rows, removes, order, has_more } => {
+                        let Some(window) = threads.active.iter().find(|window| window.id == id) else { continue };
+                        if updates.send(Update::ThreadWindow { interest: window.interest.clone(),
+                            snapshot, replace, rows, removes, order, has_more }).is_err() { return Ended::Closed; }
+                    }
+                    CollectionEvent::Error { id, code, message, .. } if id.starts_with("thread-window/") => {
+                        let Some(window) = threads.active.iter().find(|window| window.id == id) else { continue };
+                        let message = fractal_client::human_message(code.as_ref(), &message);
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                            permanent: true }).is_err() { return Ended::Closed; }
+                    }
+                    CollectionEvent::Resync { id, code, message, .. } if id.starts_with("thread-window/") => {
+                        let Some(window) = threads.active.iter().find(|window| window.id == id) else { continue };
+                        let message = fractal_client::human_message(code.as_ref(), message.as_deref().unwrap_or("Thread window needs a fresh snapshot"));
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                            permanent: false }).is_err() { return Ended::Closed; }
+                    }
                     CollectionEvent::Resync { id, code, message: Some(message), .. } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         if !current.failed_long(Instant::now()) { continue; }
@@ -901,6 +969,10 @@ async fn connected(
                     }
                     *missions = follow;
                     if follow {
+                        if let Err(error) = threads.reconcile(stream, updates,
+                            ordinary_slots(*missions, *inventories, conversing.len(), following.is_some()), threads_granted).await {
+                            return Ended::Dropped(error.human());
+                        }
                         if let Err(error) = stream.subscribe(Window::Missions.id(), Window::Missions.id(), Window::Missions.limit(), None, None).await {
                             return Ended::Dropped(error.to_string());
                         }
@@ -926,11 +998,16 @@ async fn connected(
                             pending_reports.cancel(window);
                             if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
                         }
+                        if let Err(error) = threads.reconcile(stream, updates,
+                            ordinary_slots(*missions, wanted, conversing.len(), following.is_some()), threads_granted).await {
+                            return Ended::Dropped(error.human());
+                        }
                         for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
                             if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
                         }
                     }
                 }
+                Some(Command::Threads(targets)) => threads.desired = targets,
                 Some(Command::Converse { targets }) => {
                     let targets = targets.into_iter().take(MAX_CONVERSATIONS).collect::<Vec<_>>();
                     // Leave what is no longer shown; keep what still is, subscribed as it is.
@@ -941,6 +1018,10 @@ async fn connected(
                         } else {
                             let _ = stream.unsubscribe(&current.id).await;
                         }
+                    }
+                    if let Err(error) = threads.reconcile(stream, updates,
+                        ordinary_slots(*missions, *inventories, targets.len(), following.is_some()), threads_granted).await {
+                        return Ended::Dropped(error.human());
                     }
                     for target in targets {
                         if kept.iter().any(|current| current.target == target) {
@@ -974,6 +1055,10 @@ async fn connected(
                                 generation, subscription: format!("{TERMINAL}/{generation}"),
                                 runtime_id, terminal_id, incarnation: None, attachment_id: None, retry_at: None, failures: 0,
                             });
+                            if let Err(error) = threads.reconcile(stream, updates,
+                                ordinary_slots(*missions, *inventories, conversing.len(), true), threads_granted).await {
+                                return Ended::Dropped(error.human());
+                            }
                             if let Err(error) = follow(client, stream, updates, following).await {
                                 return Ended::Dropped(error.to_string());
                             }
@@ -1015,6 +1100,9 @@ async fn connected(
                             agents_publication = None;
                             stream.subscribe_agents_publication(window.id()).await
                         },
+                        Window::Attention if attention_thread_hints => {
+                            stream.subscribe_attention(window.id(), window.limit(), true).await
+                        }
                         _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {

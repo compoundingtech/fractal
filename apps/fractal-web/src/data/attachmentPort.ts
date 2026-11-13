@@ -1,4 +1,4 @@
-import { ClientError, appliedAnswer, type FractalClient } from '@fractal/client'
+import { ClientError, ActionRejected, actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundAction, type FractalClient } from '@fractal/client'
 import type { ActionResult, AttachmentInput } from '@fractal/client/schema'
 import * as Native from '@fractal/client/schema/read'
 import { Effect } from 'effect'
@@ -77,9 +77,13 @@ export const gatewayAttachments = (
  * Submit one message action whose idempotency key the caller already chose. Optimistic
  * senders derive the message identity from that key, so it must be single-sourced.
  */
-export const gatewayMessageSend =
-  (client: FractalClient) =>
-  async (request: MessageSendAction): Promise<ConversationPortResult<ActionResult>> => {
+export const gatewayMessageSend = (client: FractalClient) => {
+  // The outbox owns presentation and hydration; delivery owns the captured immutable action.
+  // Retain its original transport after ambiguity, including when permission later disappears.
+  type Attempt = { retry?: BoundAction<MessageSendAction>; receipt?: ActionResult; error?: ClientError }
+  const unconfirmed = new Map<string, Attempt>()
+  return async (input: MessageSendAction): Promise<ConversationPortResult<ActionResult>> => {
+    const request = structuredClone(input)
     let schema
     try {
       schema = await Effect.runPromise(loadAttachmentSchema)
@@ -87,42 +91,75 @@ export const gatewayMessageSend =
       return conversationPortFailure(cause)
     }
     let attachments: readonly AttachmentInput[]
-    // Validate the actual generated action contract (including max four PNG/JPEG/GIF/WebP references).
     try {
       const action = Native.decodeUnknownSync(schema.ActionRequest)(request)
       if (action.type !== 'message.send') {
         return { _tag: 'Refused', reason: 'invalid', detail: 'Attachment sending requires a message.send action.' }
       }
-      // Decoding normalizes optional wire nulls; the transport takes nonnullable attachment names.
       attachments = action.parameters.attachments ?? []
     } catch (cause) {
       return { _tag: 'Refused', reason: 'invalid', detail: cause instanceof Error ? cause.message : String(cause) }
     }
+    const previous = unconfirmed.get(request.idempotency_key)
+    if (previous?.retry !== undefined && JSON.stringify({ id: previous.retry.request.id, parameters: previous.retry.request.parameters })
+      !== JSON.stringify({ id: request.id, parameters: request.parameters })) {
+      return { _tag: 'Refused', reason: 'invalid', detail: 'Retry the original message before changing this action.' }
+    }
+    const attempt = previous ?? {}
     try {
       const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)
-      if (!hasConversationCapability(capabilities, 'message.send')) {
+      if (!hasConversationCapability(capabilities, 'message.send') && previous === undefined) {
         return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted message send.' }
       }
-      const response = await client.messageSend({
-        id: request.id,
-        idempotency_key: request.idempotency_key,
-        fence: request.fence,
-        parameters: {
-          ...request.parameters,
-          tags: [...request.parameters.tags],
-          attachments: [...attachments],
-        },
-      })
-      return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(response.value) }
+      const actor = capabilities.session_actor
+      const current = async () => {
+        const response = await client.capabilities()
+        if (response.value.session_actor !== actor) throw new Error('Return to the original account to retry this message.')
+        if (!hasConversationCapability(Native.decodeUnknownSync(Native.Capabilities)(response.value), 'message.send')) throw new Error('This device is not granted message send.')
+        return response
+      }
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(request.idempotency_key)))
+      const messageId = `message/${[...digest.slice(0, 8)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`
+      const confirm = actionReceiptCheck({ kind: 'message', actionId: request.id, messageId })
+      let first = true
+      const result = previous?.retry === undefined
+        ? await sendBoundAction(actor, {
+          build: async () => {
+            if (first) { first = false; return request }
+            return { ...request, fence: { ...request.fence, snapshot_id: (await current()).snapshot.id } }
+          },
+          fence: async () => ({ ...request.fence, snapshot_id: (await current()).snapshot.id }),
+          send: async input => {
+            await confirm(async () => {
+              const response = await client.messageSend({ ...input, parameters: {
+                ...input.parameters, tags: [...input.parameters.tags], attachments: [...attachments],
+              } })
+              attempt.receipt = Native.decodeUnknownSync(schema.ActionResult)(response.value)
+              return response
+            }).catch(cause => { if (cause instanceof ClientError) attempt.error = cause; throw cause })
+          },
+          retry: false,
+          wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+        })
+        : await resendBoundAction(previous.retry)
+      if (result.how === 'unconfirmed') {
+        attempt.retry = result.request
+        unconfirmed.set(request.idempotency_key, attempt)
+        return { _tag: 'Refused', reason: 'unconfirmed', detail: attempt.error?.response.message ?? 'Fractal has not confirmed this message. Retry to check the same message.', ...(attempt.error === undefined ? {} : { error: attempt.error.response }) }
+      }
+      unconfirmed.delete(request.idempotency_key)
+      if (result.how === 'failed') {
+        if (result.error instanceof ActionRejected) return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(result.error.receipt) }
+        if (result.error instanceof ClientError && result.error.response.code === 'stale-fence') {
+          return { _tag: 'Refused', reason: 'stale-fence', detail: result.error.response.message, error: result.error.response }
+        }
+        return conversationPortFailure(result.error)
+      }
+      if (attempt.receipt === undefined) return { _tag: 'Refused', reason: 'unconfirmed', detail: 'Fractal has not confirmed this message.' }
+      return { _tag: 'Success', value: attempt.receipt }
     } catch (cause) {
-      if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
-        return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
-      }
-      // Fractal could not confirm the send in time, and it may still complete: only the identical
-      // request (same id, key and parameters) is safe to send again.
-      if (cause instanceof ClientError && appliedAnswer(cause) === 'unknown') {
-        return { _tag: 'Refused', reason: 'unconfirmed', detail: cause.response.message, error: cause.response }
-      }
+      if (previous !== undefined) return { _tag: 'Refused', reason: 'unconfirmed', detail: 'Return to the original connection to retry this message.' }
       return conversationPortFailure(cause)
     }
   }
+}

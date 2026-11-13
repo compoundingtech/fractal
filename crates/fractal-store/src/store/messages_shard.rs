@@ -680,6 +680,12 @@ fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<
             "a person's message stays a graph claim: its device signature is judged there",
         ));
     }
+    if fractal_schema::threads::MESSAGE_RELATION_FIELDS.iter().any(|field| fields.get(field).is_some()) {
+        return Err(FractalError::new(
+            "shard-kind-refused",
+            "a thread message stays a graph claim: its conversation and quote are admitted there",
+        ));
+    }
     if ASSISTANT_FIELDS.iter().any(|field| fields.get(field).is_some()) {
         return Err(FractalError::new(
             "shard-kind-refused",
@@ -700,6 +706,7 @@ pub fn classify_stream_item(claim: &ClaimRecord) -> Result<ReplicatedClaimAdmiss
 }
 
 pub(crate) fn validate_input(input: &ClaimInput) -> Result<(), FractalError> {
+    super::refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
     let fields = serde_json::to_value(&input.fields).unwrap_or(Value::Null);
     refuse_ineligible(&input.kind, input.actor.as_deref(), &fields)?;
     fractal_schema::registry()

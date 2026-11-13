@@ -99,6 +99,9 @@ pub const CONVERSATION_DETAIL: &str = "fractal_conversation_detail";
 pub const CONVERSATION_TIMELINE: &str = "fractal_conversation_timeline";
 pub const CONVERSATION_SEARCH: &str = "fractal_conversation_search";
 pub const CONVERSATION_READ: &str = "fractal_conversation_read";
+pub const THREADS_LIST: &str = "fractal_threads_list";
+pub const THREAD_TIMELINE: &str = "fractal_thread_timeline";
+pub const THREAD_GET: &str = "fractal_thread_get";
 pub const MESSAGE_SEND: &str = "fractal_message_send";
 pub const SLO_LIST: &str = "fractal_slo_list";
 pub const SLO_HISTORY: &str = "fractal_slo_history";
@@ -108,7 +111,7 @@ pub const SLO_HISTORY: &str = "fractal_slo_history";
 // advertising duplicate tools to refreshed connectors. No allocation on either path.
 fn canonical_tool_name(name: &str) -> &str {
     let Some(rest) = name.strip_prefix("st_") else { return name };
-    TOOLS.iter().find_map(|(canonical, _, _)|
+    TOOLS.iter().filter(|(canonical, _, _)| !matches!(*canonical, THREADS_LIST | THREAD_GET | THREAD_TIMELINE)).find_map(|(canonical, _, _)|
         (canonical.strip_prefix("fractal_") == Some(rest)).then_some(*canonical))
         .unwrap_or(name)
 }
@@ -127,6 +130,9 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
     (SLO_LIST, "List every Fractal objective and budget row the daemon reports. An objective row (kind objective) states a service-level target, its current measurement, the window it is measured over, and remaining_percent: how much of its error budget is left. A budget row (kind budget, with an account) states an allowance, current use, the window until it resets, and how much remains, with a forecast when one is known. status and tone say whether the row is met and how urgent it is. Rows arrive in pages that fit max_response_bytes; while value.page.next_cursor is non-null, call again with that cursor to read the next rows.", true),
     (SLO_HISTORY, "Chart what was left (remaining_percent) of one objective or budget row across a period. Copy id exactly from fractal_slo_list. since_ms and until_ms are Unix milliseconds (default: the last 24 hours, at most 7 days); steps (1 to 1000, default 120) is how many equal steps to answer in; each step holds its lowest reading and is null when nothing was read.", true),
+    (THREADS_LIST, "List threads for one exact conversation. Use the agent and current session returned by conversation discovery, and next_cursor from the previous page.", true),
+    (THREAD_TIMELINE, "Page messages and accepted rename, close and reopen events for one exact thread, newest first. Messages can include thread_quote_id. Use next_cursor for older events. If a message has next_content_cursor, call this tool with that value as cursor, the same agent, session and thread, and no limit to fetch the remaining text.", true),
+    (THREAD_GET, "Read the title and lifecycle state of one known thread under the existing conversation read grant. Use its exact thread ID. Content may be sensitive.", true),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -160,6 +166,21 @@ fn schema(name: &str) -> Value {
         ALERT_ANSWER => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
         MESSAGE_SEND => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
         ALERT_GET => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        THREADS_LIST | THREAD_GET | THREAD_TIMELINE => {
+            let mut props = json!({
+                "agent_id":{"type":"string","description":"Exact agent ID from the conversation."},
+                "session_id":{"type":"string","description":"Exact current session ID from the same conversation."},
+                "max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}
+            });
+            if name != THREADS_LIST {
+                props["thread_id"] = json!({"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$","maxLength":135});
+            }
+            if name != THREAD_GET {
+                props["cursor"] = json!({"type":"string"});
+                props["limit"] = json!({"type":"integer","minimum":1,"maximum":50});
+            }
+            props
+        },
         CONVERSATION_DETAIL => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_TIMELINE => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from fractal_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_SEARCH => json!({"text":{"type":"string"},"agent_id":{"type":"string"},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
@@ -173,6 +194,8 @@ fn schema(name: &str) -> Value {
         ALERT_ANSWER => vec!["action_id","idempotency_key","fence","alert_id","episode","option","summary"],
         MESSAGE_SEND => vec!["action_id","idempotency_key","fence","to","title","content"],
         ALERT_GET => vec!["alert_id"],
+        THREADS_LIST => vec!["agent_id","session_id"],
+        THREAD_GET | THREAD_TIMELINE => vec!["agent_id","session_id","thread_id"],
         CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
         CONVERSATION_SEARCH => vec!["text"],
         CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
@@ -223,6 +246,16 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
             || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte))) {
         return Err(json!({"code":"invalid-arguments","message":"agent_id must be an exact canonical agent identifier, not an alias."}));
     }
+    if matches!(name, THREAD_GET | THREAD_TIMELINE) {
+        let id = args["thread_id"].as_str().expect("validated thread ID string");
+        let valid = id.strip_prefix("thread/").is_some_and(|suffix| {
+            (1..=128).contains(&suffix.len())
+                && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+        if !valid {
+            return Err(json!({"code":"invalid-arguments","message":"thread_id must be an exact canonical thread identifier."}));
+        }
+    }
     if matches!(name, ALERT_ANSWER | MESSAGE_SEND) {
         let action_id = args["action_id"].as_str().expect("validated action ID string");
         if !action_id.starts_with(ACTION_ID_PREFIX) {
@@ -239,7 +272,7 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     Ok(())
 }
 fn tool_definitions(profile: Profile) -> Vec<Tool> {
-    TOOLS.iter().map(|(name,description,read)| {
+    TOOLS.iter().filter(|(name, _, _)| !matches!(*name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE) || profile == Profile::Mcp).map(|(name,description,read)| {
         let mut definition = json!({
             "name":name,"description":profile.description(name, description),"inputSchema":schema(name),
             "annotations":{"readOnlyHint":read,"destructiveHint":*name==ALERT_ANSWER,"idempotentHint":true,"openWorldHint":*name==MESSAGE_SEND}
@@ -266,6 +299,13 @@ fn output_schema(name: &str) -> Value {
             "operation_id":{"type":"string"},"status":{"type":"string"},
             "affected_ids":{"type":"array","items":{"type":"string"}},"snapshot_id":{"type":"string"}
         },"required":["kind","action_id","status"]}),
+        THREADS_LIST | THREAD_TIMELINE => json!({"type":"object","properties":{
+            "items":{"type":"array","items":{"type":"object"}},"next_cursor":{"type":["string","null"]}
+        },"required":["items","next_cursor"]}),
+        THREAD_GET => json!({"type":"object","properties":{
+            "id":{"type":"string"},"agent_id":{"type":"string"},"title":{"type":"string"},
+            "title_revision":{"type":"string"},"revision":{"type":"string"},"state":{"enum":["open","closed"]}
+        },"required":["id","agent_id","title","title_revision","revision","state"]}),
         CONVERSATION_READ => json!({"type":"object","properties":{
             "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
             "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
@@ -385,6 +425,9 @@ async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value
     result
 }
 async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut CallObservation) -> Result<Value,Value> {
+    if matches!(name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE) && adapter.profile != Profile::Mcp {
+        return Err(json!({"code":"unknown-tool"}));
+    }
     validate_arguments(name, args)?;
     let object = args.as_object().expect("validated tool object");
     let write = matches!(name,ALERT_ANSWER|MESSAGE_SEND);
@@ -394,6 +437,9 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         MISSIONS_LIST => "missions-rich",
         AGENTS_LIST => "agents-rich",
         CONVERSATIONS_LIST => "conversations",
+        THREAD_GET => "thread-detail",
+        THREAD_TIMELINE => "thread-timeline",
+        THREADS_LIST => "threads",
         CONVERSATION_DETAIL => "conversation-detail",
         CONVERSATION_TIMELINE => "conversation-timeline",
         CONVERSATION_SEARCH => "conversation-search",

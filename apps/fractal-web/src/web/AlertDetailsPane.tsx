@@ -12,15 +12,16 @@ import { AnswerAlert } from '../conversation/alerts/AnswerAlert.tsx'
 import { PromptAlert } from '../conversation/alerts/PromptAlert.tsx'
 import { useAlertAnswers } from '../conversation/alerts/useAlertAnswers.ts'
 import { useNow } from '../data/react.tsx'
+import { LiveInboxThreads } from '../threads/LiveThreads.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { alertsTabRows } from './alertsTab.ts'
 
 const isOpenableRef = (ref: string): boolean => /^(?:doc|agent|mission)\//.test(ref)
 
 /**
- * One alert as the main area's content: the same decision card at its full density. Answering advances to the next
- * alert at once, before the server replies, as the Fractal terminal UI does; a refused answer returns to the list
- * without taking the person off what they moved on to.
+ * One alert as the main area's content: the same decision card at its full density, with the threads about this exact
+ * Inbox source below it. Answering advances to the next alert at once, before the server replies, as the Fractal
+ * terminal UI does; a refused answer returns to the list without taking the person off what they moved on to.
  */
 export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBack }: {
   readonly id: string
@@ -72,9 +73,12 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
         {feed._tag === 'Waiting' ? <SystemNotice kind="loading" title="Loading alert" />
           : feed._tag === 'Unavailable' ? <SystemNotice kind="empty" title="Alerts could not be loaded" detail="Reconnect and try again" />
             : row !== undefined
-              ? row.item.attention_kind === 'harness-prompt'
-                ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} {...(onAct === undefined ? {} : { onAct })} />
+              ? <>
+                {row.item.attention_kind === 'harness-prompt'
+                  ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} context="Inbox" {...(onAnswer === undefined ? {} : { onAnswer })} />
+                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" {...(onAct === undefined ? {} : { onAct })} />}
+                <LiveInboxThreads alert={row.item} onOpenThread={onOpenRef} />
+              </>
               : <div {...stylex.props(styles.gone)}>
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined

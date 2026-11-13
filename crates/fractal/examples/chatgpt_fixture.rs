@@ -17,6 +17,7 @@ async fn delivery(
         fractal_drivers::ding::NotificationMetadata {
             attachments: &[],
             assistant: message.assistant_metadata().as_ref(),
+            delivery_thread: None,
         },
     );
     axum::Json(json!({"value":{"message":message,"rendered":rendered}}))

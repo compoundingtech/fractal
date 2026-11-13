@@ -1437,8 +1437,8 @@ export type AttentionWaiting = typeof AttentionWaiting.Type
 export type AttentionWaitingEncoded = typeof AttentionWaiting.Encoded
 
 export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
-  /** Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff. */
-  "agent": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." }),
+  /** The daemon-assigned responsible agent for a thread: its originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent when needed. No chief-of-staff or other role is inferred. null means discussion is unassigned; clients must not infer another recipient. */
+  "agent": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "The daemon-assigned responsible agent for a thread: its originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent when needed. No chief-of-staff or other role is inferred. null means discussion is unassigned; clients must not infer another recipient." }),
   /** The card; null for a row that is no card (an unread message stays in its conversation). */
   "kind": Schema.OptionFromNullOr(Schema.Literals([
   "review",
@@ -1552,7 +1552,7 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "mission_run_id": optionalKey(Id),
   "operational": optionalKey(Operational),
   "person_id": Id,
-  /** st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons. */
+  /** Fractal's presentation of this row: its Now group and card, the responsible thread agent, who raised it, and the step it holds. Clients use the daemon's assignment (docs/clients/ui-contract.md, Attention row). */
   "presentation": optionalKey(AttentionPresentation),
   "preview": Schema.OptionFromOptionalNullOr(LaunchPreview, NULL_NONE),
   "preview_token": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
@@ -1569,6 +1569,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "step_run_id": optionalKey(Id),
   "target_states": optionalKey(Schema.Array(AttentionTargetState)),
   "targets": optionalKey(Schema.Array(Id)),
+  /** True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise. */
+  "thread_unread": optionalKey(Schema.Boolean).annotate({ description: "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." }),
   "title": Schema.String,
   /** Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it. */
   "update": optionalKey(PersonUpdate),
@@ -1651,7 +1653,7 @@ export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "schemas": Schema.Array(Schema.String.check(Schema.isPattern(URI_REFERENCE, { expected: "an RFC 3986 URI reference" }))).check(Schema.isMinLength(1)),
   "sender_class": optionalKey(AssistantSenderClass),
   "session_actor": Id,
-  "transport": Schema.Literals(["unix","fabric-loopback"])
+  "transport": Schema.Literals(["unix","fabric-loopback","local-web"])
 }).annotate({ identifier: "Capabilities" }))()
 export type Capabilities = typeof Capabilities.Type
 export type CapabilitiesEncoded = typeof Capabilities.Encoded
@@ -1680,6 +1682,15 @@ export const ClientConnections = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ClientConnections" }))()
 export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
+
+export const ThreadCollectionContext = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "agent_id": AgentId, "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).annotate({ identifier: "ThreadCollectionContext" }))()
+export type ThreadCollectionContext = typeof ThreadCollectionContext.Type
+export type ThreadCollectionContextEncoded = typeof ThreadCollectionContext.Encoded
 
 /** One conversation header field: its latest value, where it came from and when. */
 export const ConversationHeaderField = /*#__PURE__*/ (() => Schema.Struct({
@@ -3191,6 +3202,69 @@ export const StreamSync = /*#__PURE__*/ (() => Schema.Union([
 export type StreamSync = typeof StreamSync.Type
 export type StreamSyncEncoded = typeof StreamSync.Encoded
 
+export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
+  /** Canonical originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent. Clients must not infer a chief-of-staff or other role as fallback. */
+  "agent_id": Id,
+  "id": Id,
+  "message_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "revision": Revision,
+  "state": Schema.Literals(["open","closed"]),
+  "title": Schema.String,
+  "title_revision": Revision,
+  "unread": optionalKey(Schema.Boolean)
+}).annotate({ identifier: "ThreadSummary" }))()
+export type ThreadSummary = typeof ThreadSummary.Type
+export type ThreadSummaryEncoded = typeof ThreadSummary.Encoded
+
+export const ThreadClosedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.closed")
+}).annotate({ identifier: "ThreadClosedEvent" }))()
+export type ThreadClosedEvent = typeof ThreadClosedEvent.Type
+export type ThreadClosedEventEncoded = typeof ThreadClosedEvent.Encoded
+
+export const ThreadMessageEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "content": Schema.String,
+  "id": Id,
+  "kind": Schema.Literal("message"),
+  "thread_quote_id": Schema.OptionFromNullOr(Id)
+}).annotate({ identifier: "ThreadMessageEvent" }))()
+export type ThreadMessageEvent = typeof ThreadMessageEvent.Type
+export type ThreadMessageEventEncoded = typeof ThreadMessageEvent.Encoded
+
+export const ThreadRenamedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.renamed"),
+  "previous_title": Schema.String,
+  "title": Schema.String
+}).annotate({ identifier: "ThreadRenamedEvent" }))()
+export type ThreadRenamedEvent = typeof ThreadRenamedEvent.Type
+export type ThreadRenamedEventEncoded = typeof ThreadRenamedEvent.Encoded
+
+export const ThreadReopenedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.reopened")
+}).annotate({ identifier: "ThreadReopenedEvent" }))()
+export type ThreadReopenedEvent = typeof ThreadReopenedEvent.Type
+export type ThreadReopenedEventEncoded = typeof ThreadReopenedEvent.Encoded
+
+export const ThreadTimelineEvent = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "id": Id, "kind": Schema.Literal("thread.renamed"), "previous_title": Schema.String, "title": Schema.String, "content": Schema.optionalKey(Schema.Never), "thread_quote_id": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "id": Id, "kind": Schema.Literal("thread.closed"), "content": Schema.optionalKey(Schema.Never), "previous_title": Schema.optionalKey(Schema.Never), "thread_quote_id": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "id": Id, "kind": Schema.Literal("thread.reopened"), "content": Schema.optionalKey(Schema.Never), "previous_title": Schema.optionalKey(Schema.Never), "thread_quote_id": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "content": Schema.String, "id": Id, "kind": Schema.Literal("message"), "thread_quote_id": Schema.OptionFromNullOr(Id), "previous_title": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "ThreadTimelineEvent" }))()
+export type ThreadTimelineEvent = typeof ThreadTimelineEvent.Type
+export type ThreadTimelineEventEncoded = typeof ThreadTimelineEvent.Encoded
+
 export const ConversationContentRef = /*#__PURE__*/ (() => Schema.Struct({
   "media_type": Schema.String,
   "reason": optionalKey(Schema.String),
@@ -3793,7 +3867,9 @@ export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
   "devices",
   "commands",
   "sessions",
-  "terminals"
+  "terminals",
+  "threads",
+  "thread-timeline"
 ]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
@@ -4710,19 +4786,23 @@ export type PairingAdvertisement = typeof PairingAdvertisement.Type
 export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
 
 export const ReadCollectionCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agents_publication_version": Schema.Literal(1), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literal("commands"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "agents_publication_version": Schema.Literal(1), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("thread-timeline"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))), "subject": Schema.String.check(Schema.isPattern(new RegExp("^thread/[A-Za-z0-9_-]{1,128}$", "u"))), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("threads"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))), "thread_context": ThreadCollectionContext, "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("threads"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))), "subject": Schema.String.check(Schema.isPattern(new RegExp("^thread/[A-Za-z0-9_-]{1,128}$", "u"))), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literal("commands"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted. */
+"attention_thread_hints": optionalKey(Schema.Boolean).annotate({ description: "Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted." }), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
-"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
-"subject": optionalKey(ArrangementId), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, "subject": ArrangementId, "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+"subject": optionalKey(ArrangementId), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, "subject": ArrangementId, "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": Schema.Literal("read-positions"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), /** The session's own person; requires the read-positions capability. */
-"person": ArrangementPerson, "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("unsubscribe"), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "collection": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) })
+"person": ArrangementPerson, "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("unsubscribe"), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "attention_thread_hints": Schema.optionalKey(Schema.Never), "collection": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "thread_context": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ReadCollectionCommand" }))()
 export type ReadCollectionCommand = typeof ReadCollectionCommand.Type
 export type ReadCollectionCommandEncoded = typeof ReadCollectionCommand.Encoded
@@ -4732,6 +4812,10 @@ export const ReadCollectionFrame = /*#__PURE__*/ (() => Schema.Union([
 "snapshot": Schema.Struct({ "created_at": Timestamp, "host_id": HostId, "id": SnapshotId, "projection_version": Schema.Literal("client-projection.v0"), "published_at": Timestamp, "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The complete projected state at one local store index and projection version." }), "base_revision": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "removes": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never), "upserts": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "base_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)), "collection": Schema.Literal("agents"), "has_more": Schema.Literal(false), "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id).check(Schema.isUnique()), "publication": AgentsPublicationMetadata, "removes": Schema.Array(Id).check(Schema.isUnique()), /** The complete projected state at one local store index and projection version. */
 "snapshot": Schema.Struct({ "created_at": Timestamp, "host_id": HostId, "id": SnapshotId, "projection_version": Schema.Literal("client-projection.v0"), "published_at": Timestamp, "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The complete projected state at one local store index and projection version." }), "upserts": Schema.Array(Agent), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("thread-timeline"), "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(ThreadTimelineEvent), "base_revision": Schema.optionalKey(Schema.Never), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "publication": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("thread-timeline"), "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(ThreadTimelineEvent), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot, "base_revision": Schema.optionalKey(Schema.Never), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "publication": Schema.optionalKey(Schema.Never), "removes": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never), "upserts": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("threads"), "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(ThreadSummary), "base_revision": Schema.optionalKey(Schema.Never), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "publication": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("threads"), "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(ThreadSummary), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot, "base_revision": Schema.optionalKey(Schema.Never), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "publication": Schema.optionalKey(Schema.Never), "removes": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "sync": Schema.optionalKey(Schema.Never), "upserts": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": ResourceCollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot, /** This host's replication, taken when this frame was built. A daemon that sends it sends it on every snapshot of the collections that carry it (attention). Absent means unknown (an older daemon), never level. */
 "sync": optionalKey(StreamSync), "base_revision": Schema.optionalKey(Schema.Never), "chunk_count": Schema.optionalKey(Schema.Never), "chunk_index": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "header": Schema.optionalKey(Schema.Never), "membership": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "older_cursor": Schema.optionalKey(Schema.Never), "publication": Schema.optionalKey(Schema.Never), "removes": Schema.optionalKey(Schema.Never), "replace": Schema.optionalKey(Schema.Never), "retryable": Schema.optionalKey(Schema.Never), "session_id": Schema.optionalKey(Schema.Never), "upserts": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": ResourceCollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, /** Present only when this host's replication changed since the last frame of this subscription (its state, or which peers are ahead), including back to level. Absent means it did not change. */
@@ -4841,6 +4925,29 @@ export const ScgReadAuthorization = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ScgReadAuthorization", description: "Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header." }))()
 export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
+
+export const ThreadListQuery = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).annotate({ identifier: "ThreadListQuery" }))()
+export type ThreadListQuery = typeof ThreadListQuery.Type
+export type ThreadListQueryEncoded = typeof ThreadListQuery.Encoded
+
+export const ThreadSummaryPage = /*#__PURE__*/ (() => Schema.Struct({
+  "items": Schema.Array(ThreadSummary),
+  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "ThreadSummaryPage" }))()
+export type ThreadSummaryPage = typeof ThreadSummaryPage.Type
+export type ThreadSummaryPageEncoded = typeof ThreadSummaryPage.Encoded
+
+export const ThreadTimelinePage = /*#__PURE__*/ (() => Schema.Struct({
+  "items": Schema.Array(ThreadTimelineEvent),
+  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "ThreadTimelinePage" }))()
+export type ThreadTimelinePage = typeof ThreadTimelinePage.Type
+export type ThreadTimelinePageEncoded = typeof ThreadTimelinePage.Encoded
 
 /** Bounded assistant conversation projection; the daemon allowlists the disclosed fields. */
 export const Value = /*#__PURE__*/ (() => Schema.Unknown.annotate({ identifier: "Value", description: "Bounded assistant conversation projection; the daemon allowlists the disclosed fields." }))()

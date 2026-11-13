@@ -3,6 +3,8 @@
 // the caller's platform key store; everything here is plain data, checked by
 // tests/deviceSigning.test.mjs against fixtures/clients/device-signing-v1.json.
 import type { DeviceSignature } from '@fractal/client';
+import { utf8Bytes } from './utf8.ts';
+export { utf8Bytes } from './utf8.ts';
 
 export const SIGNED_FIELDS = ['content', 'from', 'in_reply_to', 'session_id', 'tags', 'title', 'to'] as const;
 
@@ -41,16 +43,6 @@ export type DeviceKey = { key: string; storage: 'secure-enclave' | 'software'; p
  */
 export function canonical(value: string | number | null | string[]): string {
   return JSON.stringify(value);
-}
-
-/** A string's length in UTF-8 bytes; a lone surrogate counts as the three bytes of U+FFFD. */
-export function utf8Bytes(text: string): number {
-  let bytes = 0;
-  for (const character of text) {
-    const code = character.codePointAt(0)!;
-    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-  }
-  return bytes;
 }
 
 /** Whether the text is past what the claim keeps whole, so a device signs its preview and hash. */
@@ -99,10 +91,52 @@ export function messageSubject(idempotencyKeySha256Hex: string): string {
   return `message/${idempotencyKeySha256Hex.slice(0, 16)}`;
 }
 
+/** A thread message carries only its thread-specific references. The claim's lifecycle fields
+ * and ordinary mailbox reply link are deliberately absent from the signed field set. */
+export type ThreadMessageFields = {
+  content: string;
+  from: string;
+  thread_id: string;
+  to: string;
+} & (
+  | { title: string; thread_origin_source: string; thread_origin_episode: string; thread_quote_id?: never }
+  | { title?: never; thread_origin_source?: never; thread_origin_episode?: never; thread_quote_id?: string }
+);
+
+export async function threadMessageSubject(
+  fields: ThreadMessageFields,
+  key: string,
+  sha256: (bytes: Uint8Array) => Promise<Uint8Array>,
+): Promise<string> {
+  const utf8 = new TextEncoder();
+  const action = fields.thread_origin_source === undefined ? 'reply' : 'start';
+  const parts = ['fractal.thread-message.v1', fields.from, fields.thread_id, action, key].map(part => utf8.encode(part));
+  const input = new Uint8Array(parts.reduce((size, part) => size + 8 + part.length, 0));
+  const prefix = new DataView(input.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    prefix.setBigUint64(offset, BigInt(part.length));
+    input.set(part, offset + 8);
+    offset += 8 + part.length;
+  }
+  const hex = (bytes: Uint8Array) => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  const digest = hex(await sha256(input));
+  return messageSubject(hex(await sha256(utf8.encode(`thread-message:${digest}`))));
+}
+
+function canonicalMessageFields(fields: SignedFields | ThreadMessageFields) {
+  // Readers predating this version quarantine the signed claim during replication.
+  return 'thread_id' in fields ? { ...fields, thread_reader_version: 2 } : fields;
+}
+
+function claimFieldNames(fields: ReturnType<typeof canonicalMessageFields>): readonly string[] {
+  return 'thread_id' in fields ? Object.keys(fields).sort() : signedFieldNames(fields);
+}
+
 export type Unsigned = {
   subject: string;
   signer: string;
-  fields: SignedFields;
+  fields: SignedFields | ThreadMessageFields;
   key: string;
   chain: string[];
   nonce: string;
@@ -111,12 +145,13 @@ export type Unsigned = {
 
 /** The UTF-8 lines the device signs, joined by `\n`, with no trailing newline. */
 export function signedBytes(message: Unsigned): string {
+  const fields = canonicalMessageFields(message.fields);
   return [
     'smallclaims-claim-fields-v1',
     message.subject,
     'message.sent',
     message.signer,
-    ...signedFieldNames(message.fields).map(field => `${field}=${canonical((message.fields as Record<string, string | number | null | string[]>)[field])}`),
+    ...claimFieldNames(fields).map(field => `${field}=${canonical((fields as Record<string, string | number | null | string[]>)[field])}`),
     message.signer,
     '',
     message.key,
@@ -136,7 +171,7 @@ export function signatureParameter(message: Unsigned, signature: string): Device
     signed_at_unix_ms: message.signedAt,
     signature,
     format: 'fields-v1',
-    signed_fields: [...signedFieldNames(message.fields)],
+    signed_fields: [...claimFieldNames(canonicalMessageFields(message.fields))],
   };
 }
 

@@ -1055,7 +1055,7 @@
         "kind": { "const": "capabilities" },
         "machine_version": { "type": "string", "description": "Compile-time build identity of the responding daemon; absent on older servers." },
         "session_actor": { "$ref": "#/$defs/Id" },
-        "transport": { "enum": ["unix", "fabric-loopback"] },
+        "transport": { "enum": ["unix", "fabric-loopback", "local-web"] },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } },
         "limits": {
           "type": "object",
@@ -1174,6 +1174,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "thread_unread": { "type": "boolean", "description": "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -1190,7 +1191,7 @@
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "step_run_id": { "$ref": "#/$defs/Id" },
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
-            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
+            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "Fractal's presentation of this row: its Now group and card, the responsible thread agent, who raised it, and the step it holds. Clients use the daemon's assignment (docs/clients/ui-contract.md, Attention row)." },
             "title": { "type": "string" },
             "detail": { "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
@@ -2345,7 +2346,7 @@
           "fault",
           null
         ], "description": "The card; null for a row that is no card (an unread message stays in its conversation)." },
-        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "The daemon-assigned responsible agent for a thread: its originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent when needed. No chief-of-staff or other role is inferred. null means discussion is unassigned; clients must not infer another recipient." },
         "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
         "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." },
         "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." },
@@ -2760,6 +2761,21 @@
         "reason": { "type": ["string", "null"] }
       }
     },
+    "ThreadSummary": {"type": "object", "additionalProperties": false, "required": ["id", "agent_id", "title", "title_revision", "revision", "state"], "properties": {"id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id", "description": "Canonical originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent. Clients must not infer a chief-of-staff or other role as fallback."}, "title": {"type": "string"}, "title_revision": {"$ref": "#/$defs/Revision"}, "revision": {"$ref": "#/$defs/Revision"}, "state": {"enum": ["open", "closed"]}, "message_count": {"type": "integer", "minimum": 0}, "unread": {"type": "boolean"}}},
+    "ThreadSummaryPage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadRenamedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "previous_title", "title"], "properties": {"kind": {"const": "thread.renamed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "previous_title": {"type": "string"}, "title": {"type": "string"}}},
+    "ThreadClosedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.closed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadReopenedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.reopened"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadCollectionContext": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/AgentId"}}}, {"type": "object", "additionalProperties": false, "required": ["origin_source", "origin_episode"], "properties": {"origin_source": {"$ref": "#/$defs/Id"}, "origin_episode": {"$ref": "#/$defs/Revision"}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}}}]},
+    "ThreadListQuery": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["origin_source", "origin_episode"], "properties": {"origin_source": {"$ref": "#/$defs/Id"}, "origin_episode": {"$ref": "#/$defs/Revision"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}]},
+    "ThreadMessageEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "content", "thread_quote_id"], "properties": {"kind": {"const": "message"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "content": {"type": "string"}, "thread_quote_id": {"oneOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}}},
+    "ThreadInboxOrigin": {"type":"object","additionalProperties":false,"required":["source_id","episode"],"properties":{"source_id":{"$ref":"#/$defs/Id"},"episode":{"$ref":"#/$defs/Revision"}}},
+    "ThreadStartParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "agent_id", "origin", "title", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id", "description": "The daemon-assigned originating or assigned agent from the Inbox item, including the explicitly configured inboxFallbackAgent when needed. Clients must not infer another recipient."}, "origin":{"$ref":"#/$defs/ThreadInboxOrigin"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "thread_quote_id": {"$ref": "#/$defs/Id"}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadTimelineEvent": {"oneOf": [{"$ref": "#/$defs/ThreadRenamedEvent"}, {"$ref": "#/$defs/ThreadClosedEvent"}, {"$ref": "#/$defs/ThreadReopenedEvent"}, {"$ref": "#/$defs/ThreadMessageEvent"}]},
+    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadTargetParameters": {"type": "object", "additionalProperties": false, "required": ["target_id"], "properties": {"target_id": {"$ref": "#/$defs/Id"}}},
+    "ThreadRenameParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "title", "title_revision"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "title_revision": {"$ref": "#/$defs/Revision"}}},
     "AgentDeclaration": {
       "type": "object",
       "additionalProperties": false,
@@ -3630,6 +3646,15 @@
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
+    "ThreadReadParameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "through_message_id", "seen_message_ids"],
+      "properties": {
+        "target_id": {"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "through_message_id": {"type":["string","null"],"pattern":"^message/.+","maxLength":512},
+        "seen_message_ids": {"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","pattern":"^message/.+","maxLength":512}}
+      }
+    },
     "ActionCommon": {
       "type": "object",
       "additionalProperties": false,
@@ -3643,6 +3668,11 @@
             "arrangement.edit",
             "arrangement.membership.edit",
             "read-position.advance",
+            "thread.rename",
+            "thread.start",
+            "thread.reply",
+            "thread.close",
+            "thread.reopen",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -3652,6 +3682,7 @@
             "review.request-changes",
             "message.send",
             "message.read",
+            "thread.read",
             "message.close",
             "launch.create",
             "launch.revise",
@@ -3851,6 +3882,11 @@
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
         {"properties": {"type": {"const": "read-position.advance"}, "parameters": {"$ref": "#/$defs/ReadPositionAdvanceParameters"}}},
+        {"properties": {"type": {"const": "thread.rename"},"parameters": {"$ref": "#/$defs/ThreadRenameParameters"}}},
+        {"properties": {"type": {"const": "thread.start"}, "parameters": {"$ref": "#/$defs/ThreadStartParameters"}}},
+        {"properties": {"type": {"const": "thread.reply"}, "parameters": {"$ref": "#/$defs/ThreadReplyParameters"}}},
+        {"properties": {"type": {"const": "thread.close"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
+        {"properties": {"type": {"const": "thread.reopen"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -3883,6 +3919,7 @@
             }
           }
         },
+        { "properties": { "type": { "const": "thread.read" }, "parameters": { "$ref": "#/$defs/ThreadReadParameters" } } },
         { "properties": { "type": { "enum": ["message.read", "message.close"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -4107,7 +4144,8 @@
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" },
-        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
+        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." },
+        "metadata_claim_id": { "$ref": "#/$defs/Revision" }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
@@ -4769,7 +4807,9 @@
       "devices",
       "commands",
       "sessions",
-      "terminals"
+      "terminals",
+      "threads",
+      "thread-timeline"
     ] },
     "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
       "missions",
@@ -4840,6 +4880,9 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "thread-timeline"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "thread_context"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "thread_context": {"$ref": "#/$defs/ThreadCollectionContext"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
@@ -4851,6 +4894,7 @@
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
+            "attention_thread_hints": { "type": "boolean", "description": "Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
             "actor": { "type": ["string", "null"] },
@@ -5048,6 +5092,10 @@
       "oneOf": [
         { "$ref": "#/$defs/AgentsSnapshotChunk" },
         { "$ref": "#/$defs/AgentsChanges" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
         {
           "type": "object",
           "additionalProperties": false,

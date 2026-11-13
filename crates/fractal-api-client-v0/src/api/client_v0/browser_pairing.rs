@@ -36,14 +36,12 @@ fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(validation("invalid browser request id"));
     }
-    let begun = state.store.claims_for_subject_kind_at(&format!("custom/client/pairing-{id}"), "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?.claims.into_iter()
-        .find(|c| c.body["fields"]["browser_request"] == true && c.origin == state.store.origin())
-        .ok_or_else(|| ApiError::not_found("browser request does not exist"))?;
-    if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
-        return Err(forbidden("browser request requires a pairing operation record"));
-    }
-    Ok(begun)
+    state.store.newest_admitted_client_operation(
+        &format!("custom/client/pairing-{id}"), "custom.client.pairing-begun",
+    ).map_err(ApiError::internal)?
+        .filter(|claim| claim.body["fields"]["browser_request"] == true
+            && claim.origin == state.store.origin())
+        .ok_or_else(|| ApiError::not_found("browser request does not exist"))
 }
 fn owner(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
     if state.owning_person.as_deref() != Some(session.authority_actor.as_str())
@@ -65,18 +63,59 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     }
     let _guard = REQUESTS.lock().await;
     let now = client_now_ms();
-    let recent: i64 = state.store.readers.get().query_row(
-        "SELECT count(*) FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.publisher_grant')=?2 AND json_extract(body,'$.fields.requested_at_unix_ms')>?3",
-        rusqlite::params![state.store.origin(),session.pairing_grant,now.saturating_sub(300_000) as u64],
-        |row|row.get(0),
-    ).map_err(ApiError::internal)?;
+    // Retained records without a client-operation receipt cannot consume a device's quota.
+    let recent = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.publisher_grant')=?2 AND json_extract(body,'$.fields.requested_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let cutoff = now.saturating_sub(300_000);
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), session.pairing_grant, cutoff as u64])
+            .map_err(ApiError::internal)?;
+        let mut recent = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            if begun.origin == state.store.origin()
+                && begun.body["fields"]["browser_request"] == true
+                && begun.body["fields"]["publisher_grant"].as_str() == session.pairing_grant.as_deref()
+                && begun.body["fields"]["requested_at_unix_ms"].as_u64()
+                    .is_some_and(|requested| u128::from(requested) > cutoff)
+            {
+                recent += 1;
+                if recent == 10 { break; }
+            }
+        }
+        recent
+    };
     if recent >= 10 {
         return Err(ApiError {status:StatusCode::TOO_MANY_REQUESTS,code:"rate-limited".into(),
             message:"at most ten browser pairing requests per device in five minutes".into(),details:Box::default()});
     }
-    let pending: i64 = state.store.readers.get().query_row(
-        "SELECT count(*) FROM claims AS begun WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3 AND NOT EXISTS(SELECT 1 FROM claims AS done WHERE done.subject=begun.subject AND done.kind='custom.client.pairing-completed') AND NOT EXISTS(SELECT 1 FROM claims AS answered WHERE answered.subject=json_extract(begun.body,'$.fields.browser_ask') AND answered.kind IN ('work.person-done','work.person-cancelled'))",
-        rusqlite::params![state.store.origin(), body.tailnet_login, now as u64], |r| r.get(0)).map_err(ApiError::internal)?;
+    let pending = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), body.tailnet_login, now as u64])
+            .map_err(ApiError::internal)?;
+        let mut pending = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            if state.store.newest_admitted_pairing_completion(&subject, now)
+                .map_err(ApiError::internal)?.is_none() && approval(&state, &begun)? == "pending"
+            {
+                pending += 1;
+                if pending == 3 { break; }
+            }
+        }
+        pending
+    };
     if pending >= 3 { return Err(forbidden("at most three browser pairing requests may be pending")); }
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
@@ -194,14 +233,17 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
 pub async fn revoke_current(State(state): State<AppState>, Extension(session): Extension<ClientSession>) -> Result<Json<Value>, ApiError> {
     owner(&state, &session)?;
     let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let paired = state.store.claims_for_subject_kind_at(grant, "custom.client.pairing-completed", None, true, 1).map_err(ApiError::internal)?.claims.into_iter()
-        .next().filter(|c| field(c, "session_actor") == Some(session.actor.as_str()))
+    let paired = state.store.newest_admitted_pairing_completion(grant, client_now_ms())
+        .map_err(ApiError::internal)?
+        .filter(|claim| field(claim, "session_actor") == Some(session.actor.as_str())
+            && session.pairing_completion.as_deref() == Some(claim.id.as_str()))
         .ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let begun = state.store.claims_for_subject_kind_at(&paired.subject, "custom.client.pairing-begun", None, true, 1).map_err(ApiError::internal)?.claims.into_iter().next()
-        .ok_or_else(|| forbidden("browser request does not exist"))?;
-    if paired.origin != state.store.origin() || begun.body["fields"]["browser_request"] != true
-        || !state.store.client_operation_is_trusted(&paired).map_err(ApiError::internal)?
-        || !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
+    let id = grant.strip_prefix("custom/client/pairing-")
+        .ok_or_else(|| forbidden("a paired browser device is required"))?;
+    let begun = request(&state, id)?;
+    if paired.origin != state.store.origin()
+        || !paired.body["evidence"].as_array().is_some_and(|evidence| evidence.contains(&json!(begun.id)))
+    {
         return Err(forbidden("only this browser's issuer can revoke it"));
     }
     state.store.append_client_operation_claim(&ClaimInput { subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(), actor: Some(session.authority_actor),

@@ -63,6 +63,7 @@ fn position(connection: &Connection, id: &str, value: u64) {
 
 fn message(subject: &str, index: usize) -> MessageView {
     MessageView {
+        delivery_thread: None,
         subject: subject.into(), from: format!("agent/sender-{index}"),
         to: if index.is_multiple_of(2) { "worker".into() } else { "agent/worker".into() },
         content: format!("body-{index}"),

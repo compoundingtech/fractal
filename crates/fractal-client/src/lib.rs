@@ -570,6 +570,18 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
     }
+    /// Opt into the owner unread-thread badge after the daemon grants collection.attention.thread-hints.
+    pub async fn subscribe_attention(
+        &mut self,
+        id: &str,
+        limit: usize,
+        thread_hints: bool,
+    ) -> Result<(), ClientError> {
+        if !thread_hints {
+            return self.subscribe(id, "attention", limit, None, None).await;
+        }
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"attention", "limit":limit, "attention_thread_hints":true})).await
+    }
     /// Follow a usage report for a named period; an omitted end follows current usage.
     pub async fn subscribe_usage(
         &mut self,
@@ -632,6 +644,42 @@ impl CollectionStream {
         limit: usize,
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation, "limit":limit})).await
+    }
+    /// Follow this person's bounded thread summaries for one exact context.
+    pub async fn subscribe_thread_list(
+        &mut self,
+        id: &str,
+        scope: ThreadListScope<'_>,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        use serde_json::json;
+        let context = match scope {
+            ThreadListScope::Agent(id) => json!({"agent_id":id}),
+            ThreadListScope::Inbox { source, episode } => {
+                json!({"origin_source":source, "origin_episode":episode})
+            }
+            ThreadListScope::Mission(id) => json!({"mission_id":id}),
+            ThreadListScope::RecentlyClosed => json!({"recently_closed":true}),
+        };
+        self.send(&json!({"kind":"subscribe", "id":id, "collection":"threads", "thread_context":context, "limit":limit})).await
+    }
+    /// Follow this person's exact thread summary, including shared unread progress.
+    /// Requires the daemon's `thread-summary-feed` capability.
+    pub async fn subscribe_thread_summary(
+        &mut self,
+        id: &str,
+        thread: &str,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"threads", "subject":thread, "limit":1})).await
+    }
+    /// Follow the newest admitted rows of exactly one thread.
+    pub async fn subscribe_thread_timeline(
+        &mut self,
+        id: &str,
+        thread: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"thread-timeline", "subject":thread, "limit":limit})).await
     }
     pub async fn unsubscribe(&mut self, id: &str) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"unsubscribe", "id":id}))
@@ -753,6 +801,13 @@ fn agents_publication_command(id: &str) -> serde_json::Value {
     serde_json::json!({"kind":"subscribe", "id":id, "collection":"agents", "agents_publication_version":1})
 }
 
+/// The typed rows carried by a thread collection window.
+#[derive(Debug)]
+pub enum ThreadCollectionRows {
+    Summaries(Vec<ThreadSummary>),
+    Timeline(Vec<ThreadTimelineEvent>),
+}
+
 /// One frame from a collection socket.
 #[derive(Debug)]
 pub enum CollectionEvent {
@@ -779,6 +834,16 @@ pub enum CollectionEvent {
         has_more: bool,
         /// This host's replication, only when it changed since the subscription's last frame.
         sync: Option<StreamSync>,
+    },
+    /// An owner-scoped thread snapshot or change window, keyed by canonical row IDs.
+    ThreadWindow {
+        id: String,
+        snapshot: Snapshot,
+        replace: bool,
+        rows: ThreadCollectionRows,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
     },
     /// An `ordered-memberships` subscription's first window, and again after a resubscribe.
     /// `membership` describes the whole container, including members outside the window.
@@ -964,6 +1029,31 @@ impl CollectionEvent {
                     "unknown publication frame kind {kind:?}"
                 ))),
             };
+        }
+        let collection = frame.get("collection").and_then(serde_json::Value::as_str);
+        if matches!(collection, Some("threads" | "thread-timeline"))
+            && matches!(kind, Some("snapshot" | "changes"))
+        {
+            let replace = kind == Some("snapshot");
+            let rows_field = if replace { "items" } else { "upserts" };
+            let rows = if collection == Some("threads") {
+                ThreadCollectionRows::Summaries(field(&frame, rows_field)?)
+            } else {
+                ThreadCollectionRows::Timeline(field(&frame, rows_field)?)
+            };
+            return Ok(Self::ThreadWindow {
+                id,
+                snapshot: field(&frame, "snapshot")?,
+                replace,
+                rows,
+                removes: if replace {
+                    Vec::new()
+                } else {
+                    field(&frame, "removes")?
+                },
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+            });
         }
         let memberships = frame.get("collection").and_then(serde_json::Value::as_str)
             == Some("ordered-memberships");
@@ -2200,6 +2290,64 @@ impl Client {
         .await
     }
 
+    pub async fn thread_list(
+        &self,
+        agent_id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadSummaryPage>, ClientError> {
+        self.thread_list_in(ThreadListScope::Agent(agent_id), cursor, limit)
+            .await
+    }
+    pub async fn thread_list_in(
+        &self,
+        scope: ThreadListScope<'_>,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadSummaryPage>, ClientError> {
+        let selection = match scope {
+            ThreadListScope::Agent(id) => format!("agent_id={}", percent_encode(id)),
+            ThreadListScope::Inbox { source, episode } => format!(
+                "origin_source={}&origin_episode={}",
+                percent_encode(source),
+                percent_encode(episode)
+            ),
+            ThreadListScope::Mission(id) => format!("mission_id={}", percent_encode(id)),
+            ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+        };
+        let mut path = format!("/v1/client/threads?{selection}");
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
+    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {
+        self.get(&format!("/v1/client/threads/{}", thread_path_segment(id)?))
+            .await
+    }
+    pub async fn thread_timeline(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadTimelinePage>, ClientError> {
+        let mut path = format!("/v1/client/threads/{}/timeline", thread_path_segment(id)?);
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        self.get(&path).await
+    }
     pub async fn harness_questions(
         &self,
         cursor: Option<&str>,
@@ -3704,6 +3852,83 @@ impl Client {
         parameters: TerminalResizeParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::terminal_resize(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_close(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_close(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_read(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReadParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_read(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_rename(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadRenameParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_rename(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_reopen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_reopen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_reply(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        mut parameters: ThreadReplyParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let idempotency_key = idempotency_key.into();
+        if parameters.signature.is_none() && self.signing_device.is_some() {
+            let agent_id = self.thread_get(&parameters.target_id).await?.value.agent_id;
+            self.prepare_thread_reply(&idempotency_key, &agent_id, &mut parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        }
+        let request = ActionRequest::thread_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_start(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        mut parameters: ThreadStartParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let idempotency_key = idempotency_key.into();
+        if parameters.signature.is_none() && self.signing_device.is_some() {
+            self.prepare_thread_start(&idempotency_key, &mut parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        }
+        let request = ActionRequest::thread_start(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -5538,6 +5763,19 @@ where
     }
 }
 
+fn thread_path_segment(value: &str) -> Result<&str, ClientError> {
+    let segment = value.strip_prefix("thread/").unwrap_or(value);
+    if segment.is_empty()
+        || segment.len() > 128
+        || !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ClientError::Protocol("invalid thread identifier".into()));
+    }
+    Ok(segment)
+}
+
 fn percent_encode(value: &str) -> String {
     value
         .bytes()
@@ -5566,6 +5804,60 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thread_windows_decode_typed_metadata_and_mixed_history() {
+        use super::{CollectionEvent, ThreadCollectionRows, ThreadState, ThreadTimelineChange};
+        let snapshot = serde_json::json!({
+            "id": "snapshot/thread", "host_id": "host/test", "store_index": 4,
+            "projection_version": "1", "created_at": "2026-11-07T00:00:00Z"
+        });
+        let frame = serde_json::json!({
+            "kind":"snapshot", "id":"list", "collection":"threads", "snapshot":snapshot,
+            "items":[{"id":"thread/demo", "agent_id":"agent/demo", "title":"CI",
+                "revision":"claim/review", "title_revision":"claim/title", "state":"closed",
+                "message_count":2,"unread":true}],
+            "order":["thread/demo"], "has_more":false
+        });
+        let CollectionEvent::ThreadWindow {
+            replace,
+            rows: ThreadCollectionRows::Summaries(items),
+            ..
+        } = CollectionEvent::from_frame(frame).unwrap()
+        else {
+            panic!("expected thread summaries")
+        };
+        assert!(replace);
+        assert_eq!(items[0].state, ThreadState::Closed);
+        assert_eq!(items[0].message_count, Some(2));
+        assert_eq!(items[0].unread, Some(true));
+        let frame = serde_json::json!({
+            "kind":"changes", "id":"history", "collection":"thread-timeline", "snapshot":snapshot,
+            "upserts":[{"kind":"message", "id":"message/reply", "actor_id":"agent/demo",
+                "accepted_at_unix_ms":100, "content":"CI passed.", "thread_quote_id":"message/ask"}],
+            "removes":["message/earlier"], "order":["message/reply"], "has_more":true
+        });
+        let CollectionEvent::ThreadWindow {
+            replace,
+            rows: ThreadCollectionRows::Timeline(items),
+            removes,
+            has_more,
+            ..
+        } = CollectionEvent::from_frame(frame).unwrap()
+        else {
+            panic!("expected mixed thread timeline")
+        };
+        assert!(!replace);
+        assert!(has_more);
+        assert_eq!(removes, ["message/earlier"]);
+        assert_eq!(
+            items[0].change,
+            ThreadTimelineChange::Message {
+                content: "CI passed.".into(),
+                thread_quote_id: Some("message/ask".into())
+            }
+        );
+    }
+
     #[test]
     fn phone_documents_without_params_matches_the_schema() {
         let value = serde_json::to_value(PhoneNavigateArgs::Documents(None)).unwrap();

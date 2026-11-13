@@ -335,6 +335,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
     ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
     ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    // Thread authorization coverage lives in assistant/authorization_tests.rs:
+    // thread_detail_requires_conversation_grant_and_owner_visible_thread and
+    // thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revisions.
+    // The shared receipt-slot path is covered by
+    // assistant_caller_bound_rechecks_authorization_after_queue_backpressure.
+    ("GET /v1/client/assistant/threads", "requires a paired assistant, a grant-bound conversation/session and per-read approval, absent from the person-client cost fixture; assistant authorization tests cover scoped discovery pagination and revocation, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-detail", "requires a paired assistant and an owner-visible thread in its granted conversation/session, absent from the person-client cost fixture; assistant authorization tests cover exact ownership, grant denial and response byte budgets, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-timeline", "requires a paired assistant and grant/session/thread-bound continuation, absent from the person-client cost fixture; assistant tests cover cursor isolation, bounded content chunks and shared receipt-slot authorization under backpressure, not populated SQLite cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("GET /v1/client/assistant/slo", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded objective/budget projection"),
@@ -1019,6 +1027,9 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/lanes", "/v1/client/lanes"),
     get("GET /v1/client/lanes/{*id}", "/v1/client/lanes/{lane}"),
     get("GET /v1/client/history", "/v1/client/history"),
+    get("GET /v1/client/threads", "/v1/client/threads?agent_id={seat}"),
+    get("GET /v1/client/threads/{id}", "/v1/client/threads/{thread}"),
+    get("GET /v1/client/threads/{id}/timeline", "/v1/client/threads/{thread}/timeline"),
     get(
         "GET /v1/client/history/{*id}",
         "/v1/client/history/{history}",
@@ -3347,8 +3358,22 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
         store.append_claim(&running).unwrap();
     }
+    let (thread, _) = fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", "thread/cost", "cost-thread-create",
+        fractal_daemon::store::thread_metadata::Edit::Create {
+            agent: &subjects.seats[0], title: "Cost fixture",
+        },
+    ).unwrap();
+    let observed_revision = fractal_daemon::store::thread_metadata::summary(
+        &store, "person/bench-operator", &thread.subject,
+    ).unwrap().revision;
+    fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", &thread.subject, "cost-thread-close",
+        fractal_daemon::store::thread_metadata::Edit::Close { revision: &observed_revision },
+    ).unwrap();
     let mut fixture = fixture(&person, &client, subjects).await;
     fixture.items.insert("service_claim",service_claim);
+    fixture.items.insert("thread", thread.subject.trim_start_matches("thread/").into());
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),

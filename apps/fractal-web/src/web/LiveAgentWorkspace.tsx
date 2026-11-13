@@ -314,6 +314,8 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
 const AlertDetailsPane = React.lazy(() => import('./AlertDetailsPane.tsx').then((module) => ({ default: module.AlertDetailsPane })))
 const SidebarMissionsList = (props: React.ComponentProps<typeof SidebarMissionsListModule.SidebarMissionsList>) => <React.Suspense fallback={<SystemNotice kind="loading" title="Loading missions" />}><LazySidebarMissionsList {...props} /></React.Suspense>
 const LazySidebarMissionsList = React.lazy(() => import('../missions/SidebarMissionsList.tsx').then((module) => ({ default: module.SidebarMissionsList })))
+const emptyThreadTitles = Atom.make<ReadonlyMap<string, string>>(new Map())
+const TopicThreadPane = React.lazy(() => import('../threads/LiveThreads.tsx').then(module => ({ default: module.LiveThreadPane })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
@@ -336,6 +338,8 @@ const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
 const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
+/** Fixture registries own their opened panes; switching fixtures never reads or writes browser workspace state. */
+const fixtureWorkspacePanes = Atom.family((_ref: string) => Atom.make<readonly { readonly ref: string; readonly presentation?: 'detail' | 'overview' | 'resources' }[]>([]).pipe(Atom.keepAlive))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
 const viewportWidth = () => window.innerWidth
@@ -517,7 +521,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesAgent, setResourcesAgent] = React.useState<string>()
-  const [panes, setPanes] = useAtom(workspacePanes(current))
+  const [panes, setPanes] = useAtom((terminalSource.mode === 'fixtures' ? fixtureWorkspacePanes : workspacePanes)(current))
   const query = new URLSearchParams(location.split('?')[1])
   const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
@@ -595,6 +599,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // Stable for the memoized panes: a document named in a conversation or another document opens in a tab.
   const openLatest = React.useRef(open)
   openLatest.current = open
+  const openThread = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
   const rosterObservedAt = useAgentsLastObservedAt()
@@ -674,6 +679,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     selectLatest.current(ref)
   }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
+  const threadTitles = useAtomValue(folderSource.threads?.titles ?? emptyThreadTitles)
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
   const urlPane: OpenRequest | undefined =
@@ -691,9 +697,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         .filter(ref => ref === current || names.has(ref))
         .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
       { id: 'changes', label: 'Changes' },
-      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
+      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title) })),
     ]
-  }, [agents, phoneAgents, current, visiblePanes, byRef])
+  }, [agents, phoneAgents, current, visiblePanes, byRef, threadTitles])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
@@ -812,7 +818,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
+                          {paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title)}
                         </Aria.Button>
                       )
                     })}
@@ -845,7 +851,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={view} hidden={narrow && selectedPane === 'changes'} focusShownView={focusShownView} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={ref => select(ref, 'thread')} onFocusMission={focusMission} alertControls={{ onOpenAlert: openAlert, onOpenRef: ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else open({ ref }) }, onClose: () => navigate(current), onBack: () => showSidebarTab('alerts') }} ux={ux} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={view} hidden={narrow && selectedPane === 'changes'} focusShownView={focusShownView} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenThread={openThread} onOpenAgent={ref => select(ref, 'thread')} onFocusMission={focusMission} alertControls={{ onOpenAlert: openAlert, onOpenRef: ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else open({ ref }) }, onClose: () => navigate(current), onBack: () => showSidebarTab('alerts') }} ux={ux} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
   </NarrowLayoutContext.Provider>)
 }
@@ -892,7 +898,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenThread, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly onOpenThread?: ((ref: string) => void) | undefined; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -954,7 +960,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focus
       {retained.map(pane => {
         const shown = visible && pane.ref === current
         return <div key={pane.ref} data-wf-shown-pane={shown ? '' : undefined} {...stylex.props(styles.retainedPane, shown ? styles.shownPane : visible && pane.ref === switched.covered ? null : styles.hiddenPane)}>
-          <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />
+          <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} onOpenThread={onOpenThread} ux={ux} visible={shown} />
         </div>
       })}
       {terminal === undefined ? null : (
@@ -964,7 +970,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focus
       )}
       {view._tag === 'Missions' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
-          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
+          <MissionsPane onOpenThread={onOpenThread} {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
         </React.Suspense>
       ) : null}
       {view._tag === 'Alert' && alertControls !== undefined ? (
@@ -975,12 +981,17 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focus
       {view._tag === 'Usage' ? (
         <UsageCodeBoundary />
       ) : null}
+      {view._tag === 'TopicThread' ? (
+        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading thread" /></div>}>
+          <TopicThreadPane key={view.ref} threadId={view.ref} />
+        </React.Suspense>
+      ) : null}
       {view._tag === 'Document' && onOpenDocument !== undefined ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading document" /></div>}>
           <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
         </React.Suspense>
       ) : null}
-      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' && view._tag !== 'Alert' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' && view._tag !== 'Alert' && view._tag !== 'TopicThread' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>

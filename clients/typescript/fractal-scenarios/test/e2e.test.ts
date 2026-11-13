@@ -3,7 +3,7 @@ import { composeStory, type Args, type Meta, type StoryObj } from '@storybook/re
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  applyWindow, ClientError, FractalClient,
+  applyWindow, isResourceCollectionFrame, ClientError, FractalClient,
   type CollectionFrame, type CollectionWindow, type EnvelopeOf,
   type Page, type PageOptions, type Resource, type TimelineEntry,
 } from '@fractal/client'
@@ -147,7 +147,7 @@ const verifyReplay = async (world: World) => {
   const consume = () => {
     for (const frame of frames.slice(readFrames)) {
       const id = frame.id ?? ''
-      if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
+      if (!isResourceCollectionFrame(frame)) throw new Error('Expected a resource collection window')
       const window = applyWindow(windows.get(id), frame)
       if (window !== undefined) windows.set(id, window)
       if (frame.kind === 'conversation') conversations.set(id, applyConversation(conversations.get(id), {

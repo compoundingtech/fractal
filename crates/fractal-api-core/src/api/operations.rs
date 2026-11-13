@@ -721,6 +721,11 @@ pub async fn status(
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
+        if subject.as_deref().is_some_and(fractal_schema::threads::is_reserved_subject) {
+            return Err(anyhow::Error::new(FractalError::new(
+                "thread-unavailable", "the thread is unavailable",
+            )));
+        }
         let mut response = if query.harness_only && !query.history && let Some(subject) = subject.as_deref() {
             // The harness shortcut reads current state even when a historical cut is supplied.
             if !store.generic_status_subject_visible_at(subject, store.index()?)? {
@@ -728,7 +733,9 @@ pub async fn status(
                     "notices-unavailable", "reserved notice facts are unavailable through generic status",
                 ).with_detail("reason", "notices-unavailable")));
             }
-            store.status_harness_only(subject)?
+            let mut status = store.status_harness_only(subject)?;
+            crate::store::hide_thread_messages_from_generic_status(&mut status);
+            status
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {

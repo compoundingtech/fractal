@@ -13,6 +13,8 @@ pub trait ArrangementsStore {
     fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>>;
     fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool>;
     fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError>;
+    fn edit_arrangement_with_authority(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>,
+        authority: Option<&fractal_store::store::ClaimAdmission<'_>>) -> Result<ClaimRecord,FractalError>;
 }
 
 impl ArrangementsStore for Store {
@@ -42,6 +44,11 @@ impl ArrangementsStore for Store {
     }
 
     fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError> {
+        self.edit_arrangement_with_authority(input, expected_subjects, None)
+    }
+
+    fn edit_arrangement_with_authority(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>,
+        authority: Option<&fractal_store::store::ClaimAdmission<'_>>) -> Result<ClaimRecord,FractalError> {
         if input.kind != "arrangement.edited" { return Err(FractalError::new("invalid-arrangement-operations","edit_arrangement requires arrangement.edited")); }
         let expected_subjects = {
             let connection = self.readers.get();
@@ -67,9 +74,11 @@ impl ArrangementsStore for Store {
         if input.expected_subject.is_some() {
             let mut merging = input.clone();
             merging.expected_subject = None;
-            return append_claim_with_subject_fences(&self.graph,&merging,None,None,Some(&expected_subjects),None).map(|(claim,_)| claim);
+            return append_claim_with_commit_context(&self.graph,&merging,None,None,Some(&expected_subjects),None,
+                fractal_store::store::ClaimCommitContext { authority, ..Default::default() }).map(|(claim,_)| claim);
         }
-        append_claim_with_subject_fences(&self.graph,input,None,None,Some(&expected_subjects),None).map(|(claim,_)| claim)
+        append_claim_with_commit_context(&self.graph,input,None,None,Some(&expected_subjects),None,
+            fractal_store::store::ClaimCommitContext { authority, ..Default::default() }).map(|(claim,_)| claim)
     }
 }
 

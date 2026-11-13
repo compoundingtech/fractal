@@ -168,6 +168,22 @@ pub(super) async fn run_work(
                 .await?;
             print_value(&result, json_output)
         }
+        WorkCommand::LinkThread(args) => {
+            reject_foreign_agent_actor(&args.actor)?;
+            let digest = hex::encode(Sha256::digest(serde_json::to_vec(&(&args.ask, &args.episode))?));
+            let response = submit_thread_action(
+                endpoint,
+                &args.actor,
+                "thread.link-ask",
+                &format!("work-link-thread:{digest}"),
+                json!({
+                    "target_id": args.thread,
+                    "ask_id": args.ask,
+                    "ask_episode": args.episode,
+                }),
+            ).await?;
+            print_value(&response, json_output)
+        }
         WorkCommand::Update(args) => {
             reject_foreign_agent_actor(&args.actor)?;
             let mut update = serde_json::json!({"version": 1, "type": "update", "about": args.about});

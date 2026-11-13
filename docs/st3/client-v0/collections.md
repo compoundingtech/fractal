@@ -53,6 +53,14 @@ plus `terminal` and `conversation` (below). The optional `actor` filter applies 
 is required: agents explicitly select a fleet person's collection, never an inferred
 owner. Each read checks `read.arrangements` and the selected person's access.
 
+When the daemon grants `collection.attention.thread-hints`, a person may send
+`attention_thread_hints: true` on an attention subscription. An existing person-step
+row then includes `thread_unread: true` when an owned thread opened from or linked to
+that exact ask episode has an unread incoming reply. The field is absent otherwise.
+Replies, read receipts and ask links update the field through the existing collection
+without adding or reordering rows. A subscription without the option keeps its
+previous row shape.
+
 To follow one agent's current card, including usage/context, queue preview, workspace
 and current subagents, select its full ID:
 
@@ -386,7 +394,7 @@ word, list group, why the agent needs someone, and what it holds and has queued 
 lacks it shows the state Fractal reports, marked as coming from an older Fractal; clients derive nothing.
 
 The same capability says attention rows carry `presentation`: the Now group and card, who
-**Chat about this** reaches, who raised it, and the step it holds (see
+a thread reaches, who raised it, and the step it holds (see
 [the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
 it; every attention route copies it from the published list, and a row the list has not
 published yet has none until it does.

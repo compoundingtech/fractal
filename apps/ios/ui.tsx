@@ -117,10 +117,13 @@ export function Button({ label, onPress, disabled = false, color = theme.accent,
 /** A text input. Prose (messages, titles, requests) gets iOS's autocorrect and spell check;
  *  a field for an identifier (a URL, a code, a path) turns them off. */
 export function Field(props: TextInputProps & { ref?: Ref<TextInput> }) {
-  const { palette } = useTextAppearance();
+  const { system, colors, palette } = useTextAppearance();
   const keyHandler = useRef(props.onKeyPress); keyHandler.current = props.onKeyPress;
   const onKeyPress = useCallback<NonNullable<TextInputProps['onKeyPress']>>(event => { quality.key(); keyHandler.current?.(event); }, []);
-  return <TextInput placeholderTextColor={palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 }, props.multiline && styles.fieldMultiline, props.style]} />;
+  const fieldColors = system
+    ? { color: colors.text, backgroundColor: colors.grouped, borderColor: colors.separator }
+    : { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 };
+  return <TextInput placeholderTextColor={system ? colors.secondary : palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, fieldColors, props.multiline && styles.fieldMultiline, props.style]} />;
 }
 
 /** A banner under the header: a problem to read, tap to dismiss when it can be. */

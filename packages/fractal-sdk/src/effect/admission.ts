@@ -4,8 +4,8 @@
  * Pure bookkeeping, no I/O. Host policy supplies visibility and eviction priorities.
  * Without a policy every follow remains visible and admission refuses rather than evicts.
  *
- * Slots live in one pool by default. With `conversationSlots` set, conversation follows own a
- * dedicated lane of that size and every other follow (windows, terminals) owns the rest, so
+ * Slots live in one pool by default. With `conversationSlots` set, agent conversations and topic threads
+ * own a dedicated lane of that size, and other windows and terminals own the rest, so
  * neither side can starve the other. Within a lane:
  *
  * - Opening below the lane cap admits.
@@ -21,7 +21,7 @@ export type AdmissionResult<K> =
   | { readonly _tag: 'Admitted'; readonly evict: K | undefined }
   | { readonly _tag: 'Full' }
 
-/** Which slot lane a follow admits into; only conversation follows get a dedicated budget. */
+/** Which slot lane a follow admits into. */
 export type FollowLane = 'conversation' | 'shared'
 
 /** Host-owned eviction policy. Undefined priority makes a follow ineligible for eviction. */

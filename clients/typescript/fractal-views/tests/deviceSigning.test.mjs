@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { base64url, INLINE_MAX_BYTES, isLongMessage, longPreview, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, utf8Bytes } from '@fractal/views/deviceSigning';
+import { base64url, INLINE_MAX_BYTES, isLongMessage, longPreview, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, threadMessageSubject, utf8Bytes } from '@fractal/views/deviceSigning';
 
 // The shared vectors every client checks (docs/st3/device-signing.md).
 const vectors = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/device-signing-v1.json', import.meta.url), 'utf8'));
@@ -82,3 +82,27 @@ assert.equal(longPreview(`${'a'.repeat(1016)}\ufeff\ufeff€`), `${'a'.repeat(10
 // A long message cannot be signed without the hash of its text.
 assert.throws(() => signedMessageFields({ from: 'person/avery', in_reply_to: null, session_id: null, tags: [], title: null, to: 'agent/alder' }, 'a'.repeat(9000)), /hash/);
 assert.throws(() => signedMessageFields({ from: 'person/avery', in_reply_to: null, session_id: null, tags: [], title: null, to: 'agent/alder' }, 'a'.repeat(9000), 'nothex'), /hash/);
+
+// These subjects follow the daemon's length-prefixed thread message key. Start and reply
+// deliberately use separate signing domains, even for the same thread and action key.
+const baseThreadFields = { content: 'Check the test.', from: 'person/operator', thread_id: 'thread/fixture', to: 'agent/example' };
+const startFields = { ...baseThreadFields, title: 'Worker test', thread_origin_source: 'step-run/one', thread_origin_episode: 'episode/one' };
+const replyFields = { ...baseThreadFields, thread_quote_id: 'message/original' };
+const threadHash = async bytes => new Uint8Array(createHash('sha256').update(bytes).digest());
+for (const [fields, expectedSubject, expectedNames] of [
+  [startFields, 'message/c07e68f7def32fe2', ['content', 'from', 'thread_id', 'thread_origin_episode', 'thread_origin_source', 'thread_reader_version', 'title', 'to']],
+  [replyFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_quote_id', 'thread_reader_version', 'to']],
+  [baseThreadFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_reader_version', 'to']],
+]) {
+  const subject = await threadMessageSubject(fields, 'action/ios-1', threadHash);
+  assert.equal(subject, expectedSubject);
+  const message = { subject, signer: fields.from, fields, key, chain: [], nonce: 'fixture', signedAt: 123 };
+  assert.deepEqual(signatureParameter(message, 'signature').signed_fields, expectedNames);
+  assert.deepEqual(signedBytes(message).split('\n').slice(4, 4 + expectedNames.length),
+    expectedNames.map(name => `${name}=${JSON.stringify({ ...fields, thread_reader_version: 2 }[name])}`));
+  assert.doesNotMatch(signedBytes(message), /in_reply_to/);
+}
+
+// Same person, subject, and idempotency key as the daemon's paired-device reply proof.
+assert.equal(await threadMessageSubject(replyFields, 'paired-thread-reply', threadHash), 'message/d9326ca6e95bc27c');
+assert.equal(await threadMessageSubject({ ...replyFields, from: 'person/other' }, 'paired-thread-reply', threadHash), 'message/af6cdee514f6adcb');

@@ -4,9 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
-import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
+import { resendBoundAction, sendBoundAction, type BoundAction, type DeliveryOutcome } from '../../clients/typescript/fractal-client';
+import { actionReceiptCheck } from '../../clients/typescript/fractal-client';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type ThreadSummary, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, threadMessageSubject, type ThreadMessageFields, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
 import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing, type PairingAdvertisement } from './pairingProof';
@@ -51,7 +52,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** The exact request and its original member's transport; never rebound on failover. */
-export type MessageRequest = BoundMessage<Parameters<FractalClient['messageSend']>[0]>;
+export type MessageRequest = BoundAction<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -84,12 +85,16 @@ export function errorText(error: unknown): string {
   return plainError(error);
 }
 
-/** `parameters` for message.send `id`, signed with this phone's key when it has an enrolled one. */
-async function signMessage<P extends { to: string; content: string; session_id?: string; tags?: string[] }>(id: string, parameters: P, profileKey = PROFILE_KEY): Promise<P> {
+async function readPhoneSigning(profileKey: string): Promise<PhoneSigning | undefined> {
   // A member paired on its own signs with its own key; only this device's own profile has an older separate entry.
   const profile = await SecureStore.getItemAsync(profileKey);
   const stored = profile || profileKey !== PROFILE_KEY ? null : await SecureStore.getItemAsync(SIGNING_KEY);
-  const signing: PhoneSigning | undefined = profile ? (JSON.parse(profile) as PhoneProfile).signing : stored ? JSON.parse(stored) : undefined;
+  return profile ? (JSON.parse(profile) as PhoneProfile).signing : stored ? JSON.parse(stored) : undefined;
+}
+
+/** `parameters` for message.send `id`, signed with this phone's key when it has an enrolled one. */
+async function signMessage<P extends { to: string; content: string; session_id?: string; tags?: string[] }>(id: string, parameters: P, profileKey = PROFILE_KEY): Promise<P> {
+  const signing = await readPhoneSigning(profileKey);
   if (!signing) return parameters;
   const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, id, { encoding: Crypto.CryptoEncoding.HEX });
   const message: Unsigned = {
@@ -113,8 +118,39 @@ function currentAgent(agent: { operational?: { layer?: string } }) { return agen
 function items<K extends Resource['kind']>(page: { items: Resource[] }, kind: K): Extract<Resource, { kind: K }>[] {
   return page.items.filter((item): item is Extract<Resource, { kind: K }> => item.kind === kind);
 }
+async function signThreadMessage(key: string, signing: PhoneSigning, fields: ThreadMessageFields) {
+  const message: Unsigned = {
+    subject: await threadMessageSubject(fields, key, async bytes =>
+      new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes)))),
+    signer: signing.person,
+    fields,
+    key: signing.key,
+    chain: signing.chain,
+    nonce: base64url(Crypto.getRandomBytes(16)),
+    signedAt: Date.now(),
+  };
+  const signature = signatureParameter(message, await signWithDeviceKey(signedBytes(message), signing.handle));
+  return { signature, messageId: message.subject };
+}
+
+export type ThreadStartOrigin = { agentId: string; sourceId: string; episode: string };
+export function threadDraftKey(thread: string): string {
+  return `thread-draft/${thread}`;
+}
+export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>): string {
+  return JSON.stringify([origin.sourceId, origin.episode]);
+}
+export function threadEditScope(thread: string): string { return `edit/${thread}`; }
+export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
+type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation };
+type ThreadEdit = { kind: 'rename'; title: string } | { kind: 'close' | 'reopen' };
+export type ThreadEditResult =
+  | { how: 'sent' }
+  | { how: 'failed'; error: string }
+  | { how: 'unconfirmed'; retry: () => Promise<ThreadEditResult> };
+
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
-function sentAs(outcome: SendOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
+function sentAs(outcome: DeliveryOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
 
 /** Where a measurement was served from: the route it ran over and, for fabric, the path once measured. */
 function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown'): Context {
@@ -316,6 +352,18 @@ function useAppStore(proof?: FabricProfile) {
   });
   const push = pushRef.current;
   const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
+  const threadUpgradeRequired = capsClient.current === client && !!caps && ['threads-v1', 'thread-summary-feed'].some(id =>
+    !caps.capabilities.some(capability => capability.id === id && capability.version >= (id === 'threads-v1' ? 2 : 1)));
+  const threadClient = capsClient.current === client && ['threads-v1', 'thread-summary-feed'].every(id => caps?.capabilities.some(capability =>
+    capability.id === id && capability.version >= (id === 'threads-v1' ? 2 : 1) && capability.state === 'granted')) ? client : null;
+  const threadActions = new Set(caps?.capabilities.filter(capability =>
+    capability.state === 'granted' && capability.id.startsWith('thread.')).map(capability => capability.id));
+  const [threadRefresh, setThreadRefresh] = useState(0);
+  const [threadDeliveryRevision, setThreadDeliveryRevision] = useState(0);
+  const deliveriesByClient = useRef(new WeakMap<FractalClient, Map<string, ThreadDelivery>>());
+  const threadDeliveries = useMemo(() => threadClient && new Map(deliveriesByClient.current.get(threadClient)), [threadClient, threadDeliveryRevision]);
+  const threadConnection = useRef(threadClient);
+  threadConnection.current = threadClient;
   const pushIssuer = selected.route.kind === 'fabric' && fabricMember && !fabricMember.device ? memberProfileKey(fabricMember) : PROFILE_KEY;
   const pushIssuers = useMemo(() => {
     const remotes = new Map<string, PushRemote | undefined>();
@@ -626,6 +674,9 @@ function useAppStore(proof?: FabricProfile) {
 
   const inventoryGranted = caps === null ? undefined : caps.capabilities.some(capability => capability.id === 'inventory-collections' && capability.version >= 1 && capability.state === 'granted');
   useEffect(() => { feed?.setInventoryGranted(inventoryGranted === true); }, [feed, inventoryGranted]);
+  const attentionThreadHints = capsClient.current === client && caps?.capabilities.some(capability =>
+    capability.id === 'collection.attention.thread-hints' && capability.version >= 1 && capability.state === 'granted') === true;
+  useEffect(() => { if (client && feed?.belongsTo(client)) feed.setAttentionThreadHints(attentionThreadHints); }, [client, feed, attentionThreadHints]);
 
   // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
@@ -886,7 +937,150 @@ function useAppStore(proof?: FabricProfile) {
     ].map(write => write.catch(() => {})));
     setFabricMemberList(list);
   }
+  type ThreadRequest = { id: string; idempotency_key: string; fence: Awaited<ReturnType<typeof fence>> };
+  type PreparedThreadAction = {
+    send: (request: ThreadRequest) => ReturnType<FractalClient['threadReply']>;
+    messageId?: string;
+    readMessageIds?: readonly string[];
+  };
+  async function submitThreadAction(
+    targetId: string,
+    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read',
+    revisions: Record<string, string>,
+    prepare: (client: FractalClient, key: string) => Promise<PreparedThreadAction>,
+  ): Promise<ThreadEditResult> {
+    if (!threadClient || !threadActions.has(`thread.${kind}`) || status !== 'online' || (proof && !proof.ready)) {
+      return { how: 'failed', error: 'This connection cannot perform that thread action.' };
+    }
+    const member = selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url;
+    const originalFabric = selected.route.kind === 'fabric' ? carrier.snapshot : null;
+    const ensureOriginalConnection = () => {
+      if (threadConnection.current !== threadClient || (originalFabric && carrier.snapshot !== originalFabric)) {
+        throw new Error('The original thread connection is no longer available.');
+      }
+    };
+    const id = actionId();
+    const readFence = async () => { ensureOriginalConnection(); return fence(revisions); };
+    // Build signed fields once. Every retry retains the same key, signature and nonce.
+    let submit: ((request: ThreadRequest) => Promise<void>) | undefined;
+    const finish = (result: DeliveryOutcome<BoundAction<ThreadRequest>>): ThreadEditResult => {
+      if (result.how === 'unconfirmed') {
+        return { how: 'unconfirmed', retry: async () => finish(await resendBoundAction(result.request)) };
+      }
+      if (result.how === 'sent' || (result.error instanceof ClientError && result.error.status === 409)) {
+        setThreadRefresh(previous => previous + 1);
+      }
+      return result.how === 'sent' ? result : { how: 'failed', error: errorText(result.error) };
+    };
+    return finish(await sendBoundAction(member, {
+      build: async () => {
+        ensureOriginalConnection();
+        if (!submit) {
+          const prepared = await prepare(threadClient, id);
+          const confirm = actionReceiptCheck(prepared.readMessageIds
+            ? { kind: 'read', actionId: id, readMessageIds: prepared.readMessageIds }
+            : prepared.messageId ? { kind: 'message', actionId: id, targetId, messageId: prepared.messageId } : { kind: 'metadata', actionId: id, targetId });
+          submit = async request => { await confirm(() => prepared.send(request)); };
+        }
+        return { id, idempotency_key: id, fence: await readFence() };
+      },
+      fence: readFence,
+      send: request => {
+        ensureOriginalConnection();
+        if (!submit) throw new Error('The thread request is unavailable.');
+        return submit(request);
+      },
+      wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    }));
+  }
+
+  async function trackThreadDelivery(scope: string, target: string, send: () => Promise<ThreadEditResult>, onSent?: () => void, start?: ThreadStartPresentation): Promise<ThreadEditResult> {
+    if (!threadClient) return { how: 'failed', error: 'This connection cannot send thread messages.' };
+    let deliveries = deliveriesByClient.current.get(threadClient);
+    if (!deliveries) {
+      deliveries = new Map();
+      deliveriesByClient.current.set(threadClient, deliveries);
+    }
+    const active = deliveries;
+    if (active.has(scope)) return { how: 'failed', error: 'Resolve the earlier send before starting another.' };
+    const run = async (operation: () => Promise<ThreadEditResult>): Promise<ThreadEditResult> => {
+      active.set(scope, { target, start });
+      setThreadDeliveryRevision(previous => previous + 1);
+      let result: ThreadEditResult;
+      try { result = await operation(); }
+      catch (error) { result = { how: 'failed', error: errorText(error) }; }
+      if (result.how === 'unconfirmed') {
+        const original = result.retry;
+        const retry = () => active.get(scope)?.retry === retry ? run(original) : Promise.resolve(result);
+        active.set(scope, { target, retry, start });
+        result = { how: 'unconfirmed', retry };
+      } else {
+        if (result.how === 'sent') onSent?.();
+        active.delete(scope);
+      }
+      setThreadDeliveryRevision(previous => previous + 1);
+      return result;
+    };
+    return run(send);
+  }
+
   const actions = {
+    editThread(thread: ThreadSummary, edit: ThreadEdit): Promise<ThreadEditResult> {
+      const parameters = { target_id: thread.id };
+      return trackThreadDelivery(threadEditScope(thread.id), thread.id, () => submitThreadAction(thread.id, edit.kind, { [thread.id]: thread.revision }, async member => ({ send: request => {
+        if (edit.kind === 'rename') {
+          return member.threadRename({ ...request, parameters: { ...parameters, title: edit.title, title_revision: thread.title_revision } });
+        }
+        return edit.kind === 'close'
+          ? member.threadClose({ ...request, parameters })
+          : member.threadReopen({ ...request, parameters });
+      } })));
+    },
+    markThreadRead(thread: ThreadSummary, visibleIds: readonly string[]): Promise<ThreadEditResult> {
+      const [through] = visibleIds;
+      if (!through) return Promise.resolve({ how: 'failed', error: 'There are no visible replies to mark read.' });
+      const seen = [...visibleIds];
+      return submitThreadAction(thread.id, 'read', {}, async member => ({
+        readMessageIds: seen,
+        send: request => member.threadRead({
+          ...request, parameters: { target_id: thread.id, through_message_id: through, seen_message_ids: seen },
+        }),
+      }));
+    },
+    startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
+      const signingProfile = signingKeyRef.current;
+      return trackThreadDelivery(threadStartScope(origin), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
+        const signing = await readPhoneSigning(signingProfile);
+        if (!signing) throw new Error('Pair this phone again to sign thread messages.');
+        const { signature, messageId } = await signThreadMessage(key, signing, {
+          content, from: signing.person, to: origin.agentId, thread_id: thread, title,
+          thread_origin_source: origin.sourceId, thread_origin_episode: origin.episode,
+        });
+        return { messageId, send: request => member.threadStart({ ...request, parameters: {
+          target_id: thread, agent_id: origin.agentId, origin: { source_id: origin.sourceId, episode: origin.episode },
+          title, content, signature,
+        } }) };
+      }), undefined, { origin: { ...origin }, title });
+    },
+    replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
+      const signingProfile = signingKeyRef.current;
+      const draftOwner = draftsOwner.current;
+      const draftKey = threadDraftKey(thread.id);
+      const sentDraft = draftCache.current.get(draftKey);
+      return trackThreadDelivery(thread.id, thread.id, () => submitThreadAction(thread.id, 'reply', {}, async (member, key) => {
+        const signing = await readPhoneSigning(signingProfile);
+        if (!signing) throw new Error('Pair this phone again to sign thread messages.');
+        const quote = quoteId ? { thread_quote_id: quoteId } : {};
+        const { signature, messageId } = await signThreadMessage(key, signing, {
+          content, from: signing.person, to: thread.agent_id, thread_id: thread.id, ...quote,
+        });
+        return { messageId, send: request => member.threadReply({ ...request, parameters: { target_id: thread.id, content, ...quote, signature } }) };
+      }), () => {
+        if (draftsOwner.current !== draftOwner || draftCache.current.get(draftKey) !== sentDraft) return;
+        draftCache.current.delete(draftKey);
+        if (!proof) void localDrafts.save(draftOwner, draftCache.current);
+      });
+    },
     async saveUrl() {
       if (proof) { setError('Close the fabric proof to change the saved gateway.'); return; }
       const normalized = normalizeGatewayUrl(urlDraft);
@@ -1150,7 +1344,7 @@ function useAppStore(proof?: FabricProfile) {
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
       // each try after Fractal said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
+      const outcome = await sendBoundAction(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
         build: async () => {
           const id = actionId();
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
@@ -1158,7 +1352,11 @@ function useAppStore(proof?: FabricProfile) {
           return { id, idempotency_key: id, fence: await fences(), parameters };
         },
         fence: async () => { originalAvailable(); return fence(); },
-        send: request => { originalAvailable(); return client.messageSend(request); },
+        send: async request => {
+          originalAvailable();
+          const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, request.idempotency_key, { encoding: Crypto.CryptoEncoding.HEX });
+          await actionReceiptCheck({ kind: 'message', actionId: request.id, messageId: messageSubject(digest) })(() => client.messageSend(request));
+        },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
@@ -1169,7 +1367,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** Retry only through the transport captured by the original send. Fabric listeners are per-dial. */
     async resend(request: MessageRequest): Promise<Sent> {
-      return sentAs(await resendBoundMessage(request));
+      return sentAs(await resendBoundAction(request));
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
@@ -1299,9 +1497,9 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
-    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,

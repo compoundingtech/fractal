@@ -476,7 +476,7 @@ public struct UsageSummary: Codable, Sendable {
     public let cost: Double?; public let currency: String?; public let incarnationCount: Int; public let aggregation: String; public let context: UsageContext?
     enum CodingKeys: String, CodingKey { case totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", cost, currency, incarnationCount = "incarnation_count", aggregation, context }
 }
-public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let alert: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", targets, targetStates = "target_states", actions, operational } }
+public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let alert, threadUnread: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, threadUnread = "thread_unread", conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", targets, targetStates = "target_states", actions, operational } }
 /// st's presentation of an attention row; words are fixtures/clients/words.json ids.
 public struct AttentionPresentation: Codable, Sendable { public let tier, kind: String?; public let agent: AttentionActor?; public let raisedBy: AttentionActor?; public let waiting: AttentionWaiting?; public let revision: AttentionRevision?; public let launch: AttentionLaunch?; public let prompt: AttentionPrompt?; enum CodingKeys: String, CodingKey { case tier, kind, agent, raisedBy = "raised_by", waiting, revision, launch, prompt } }
 public struct AttentionRevision: Codable, Sendable { public let fromRevision, toRevision, reason: String; public let lines: [AttentionRevisionLine]; public let truncated: Bool; enum CodingKeys: String, CodingKey { case fromRevision = "from_revision", toRevision = "to_revision", reason, lines, truncated } }
@@ -1276,6 +1276,12 @@ public struct ActionRequest: Codable, Sendable {
     public static func terminalEnd(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .terminalEnd, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) throws -> Self { try .init(id: id, type: .terminalInput, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) throws -> Self { try .init(id: id, type: .terminalResize, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadClose, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) throws -> Self { try .init(id: id, type: .threadRead, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) throws -> Self { try .init(id: id, type: .threadRename, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadReopen, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadReply(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReplyParameters) throws -> Self { try .init(id: id, type: .threadReply, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadStart(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadStartParameters) throws -> Self { try .init(id: id, type: .threadStart, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonAskParameters) throws -> Self { try .init(id: id, type: .workAsk, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workCancelAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonStepParameters) throws -> Self { try .init(id: id, type: .workCancelAsk, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workClaim(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workClaim, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1336,6 +1342,25 @@ public struct PersonAnswer: Codable, Sendable {
     }
 }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
+public struct ThreadReadParameters: Codable, Sendable {
+    public let targetID: String
+    public let throughMessageID: String?
+    public let seenMessageIDs: [String]
+    public init(targetID: String, throughMessageID: String?, seenMessageIDs: [String]) {
+        self.targetID = targetID
+        self.throughMessageID = throughMessageID
+        self.seenMessageIDs = seenMessageIDs
+    }
+    enum CodingKeys: String, CodingKey {
+        case targetID = "target_id", throughMessageID = "through_message_id", seenMessageIDs = "seen_message_ids"
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(targetID, forKey: .targetID)
+        try values.encode(throughMessageID, forKey: .throughMessageID)
+        try values.encode(seenMessageIDs, forKey: .seenMessageIDs)
+    }
+}
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
 public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public var expectRevision: String?; public init(agent: String, reason: String, successor: String? = nil, expectRevision: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor; self.expectRevision = expectRevision }; enum CodingKeys: String, CodingKey { case agent, reason, successor; case expectRevision = "expect_revision" } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
@@ -1379,7 +1404,97 @@ public enum TerminalInputMode: String, Codable, Sendable { case line, raw, key }
 public struct TerminalInputParameters: Codable, Sendable { public var terminalID: String; public var mode: TerminalInputMode; public var value: String; public init(terminalID: String, mode: TerminalInputMode, value: String) { self.terminalID = terminalID; self.mode = mode; self.value = value }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", mode, value } }
 public struct TerminalResizeParameters: Codable, Sendable { public var terminalID: String; public var rows: UInt16; public var columns: UInt16; public init(terminalID: String, rows: UInt16, columns: UInt16) { self.terminalID = terminalID; self.rows = rows; self.columns = columns }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", rows, columns } }
 public struct TerminalAttachment: Codable, Sendable { public let attachmentID: String; public let terminalID: String; public let runtimeIncarnation: String; public let ownerHostID: String; public let streamURL: String; public let streamCapability: String?; public let state: String; public let expiresAt: String; public let reusable: Bool?; public let ttlS: UInt64?; public let retryHint: String?; enum CodingKeys: String, CodingKey { case attachmentID = "attachment_id", terminalID = "terminal_id", runtimeIncarnation = "runtime_incarnation", ownerHostID = "owner_host_id", streamURL = "stream_url", streamCapability = "stream_capability", state, expiresAt = "expires_at", reusable, ttlS = "ttl_s", retryHint = "retry_hint" } }
-public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; public let harnessAnswer: HarnessAnswerResult?; public let membershipRevision: String?; public let readPositionAt: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision", harnessAnswer = "harness_answer", membershipRevision = "membership_revision", readPositionAt = "read_position_at" } }
+public enum ThreadState: String, Codable, Sendable { case open, closed }
+public struct ThreadSummary: Codable, Sendable {
+    public let id, agentID, title, titleRevision, revision: String
+    public let state: ThreadState
+    public let messageCount: UInt64?
+    public let unread: Bool?
+    enum CodingKeys: String, CodingKey { case id, agentID = "agent_id", title, titleRevision = "title_revision", revision, state, messageCount = "message_count", unread }
+}
+public struct ThreadSummaryPage: Codable, Sendable {
+    public let items: [ThreadSummary]
+    public let nextCursor: String?
+    enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" }
+}
+public struct ThreadTimelineEvent: Codable, Sendable {
+    public enum Kind: String, Codable, Sendable {
+        case message, renamed = "thread.renamed", closed = "thread.closed", reopened = "thread.reopened"
+    }
+    public let kind: Kind
+    public let id, actorID: String
+    public let acceptedAtUnixMS: UInt64
+    public let previousTitle, title, content, threadQuoteID: String?
+    enum CodingKeys: String, CodingKey {
+        case kind, id, actorID = "actor_id", acceptedAtUnixMS = "accepted_at_unix_ms", previousTitle = "previous_title", title, content, threadQuoteID = "thread_quote_id"
+    }
+}
+public struct ThreadTimelinePage: Codable, Sendable {
+    public let items: [ThreadTimelineEvent]
+    public let nextCursor: String?
+    enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" }
+}
+/// A bounded thread window. Snapshot rows replace the window and changes apply by canonical ID.
+public struct ThreadCollectionFrame<Row: Decodable & Sendable>: Decodable, Sendable {
+    public enum Kind: String, Decodable, Sendable { case snapshot, changes }
+    public let kind: Kind
+    public let id: String
+    public let snapshot: Snapshot
+    public let items, upserts: [Row]?
+    public let removes: [String]?
+    public let order: [String]
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case kind, id, snapshot, items, upserts, removes, order, hasMore = "has_more" }
+}
+public struct ThreadCollectionStreamError: Decodable, Error, Sendable {
+    public let message: String
+    public let code: String?
+    public let retryable: Bool?
+}
+public enum ThreadListScope: Sendable {
+    case agent(String), inbox(source: String, episode: String), mission(String), recentlyClosed
+}
+public struct ThreadStartOrigin: Codable, Sendable {
+    public let sourceID, episode: String
+    public init(sourceID: String, episode: String) { self.sourceID = sourceID; self.episode = episode }
+    enum CodingKeys: String, CodingKey { case sourceID = "source_id", episode }
+}
+public struct ThreadStartParameters: Codable, Sendable {
+    public let targetID, agentID, title, content: String
+    public let origin: ThreadStartOrigin
+    public let signature: DeviceSignature?
+    public init(targetID: String, agentID: String, origin: ThreadStartOrigin, title: String, content: String, signature: DeviceSignature? = nil) {
+        self.targetID = targetID; self.agentID = agentID; self.origin = origin
+        self.title = title; self.content = content; self.signature = signature
+    }
+    enum CodingKeys: String, CodingKey {
+        case targetID = "target_id", agentID = "agent_id", origin, title, content, signature
+    }
+}
+public struct ThreadReplyParameters: Codable, Sendable {
+    public let targetID, content: String
+    public let threadQuoteID: String?
+    public let signature: DeviceSignature?
+    public init(targetID: String, content: String, threadQuoteID: String? = nil, signature: DeviceSignature? = nil) {
+        self.targetID = targetID; self.content = content; self.threadQuoteID = threadQuoteID; self.signature = signature
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", content, threadQuoteID = "thread_quote_id", signature }
+}
+public struct ThreadTargetParameters: Codable, Sendable {
+    public let targetID: String
+    public init(targetID: String) { self.targetID = targetID }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id" }
+}
+public struct ThreadRenameParameters: Codable, Sendable {
+    public let targetID, title, titleRevision: String
+    public init(targetID: String, title: String, titleRevision: String) {
+        self.targetID = targetID
+        self.title = title
+        self.titleRevision = titleRevision
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", title, titleRevision = "title_revision" }
+}
+public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; public let harnessAnswer: HarnessAnswerResult?; public let membershipRevision: String?; public let readPositionAt: String?; public let metadataClaimID: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision", harnessAnswer = "harness_answer", membershipRevision = "membership_revision", readPositionAt = "read_position_at", metadataClaimID = "metadata_claim_id" } }
 
 public typealias ClientDiagnosticUuid = String
 public typealias ClientDiagnosticMilliseconds = UInt64

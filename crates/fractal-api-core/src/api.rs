@@ -507,7 +507,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "thread-unavailable" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -5033,6 +5033,7 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
+        crate::store::inbox::annotate_resource_at(&store.readers.get(), &item, &mut resource)?;
         // An ask resolves by itself at its deadline, with its default answer if it has one.
         if let Some(deadline) = item.deadline_unix_ms {
             resource["deadline_at"] = json!(client_timestamp(deadline));
@@ -8495,7 +8496,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10552,6 +10553,7 @@ fn doctor_report_within(
                 .map_err(ApiError::internal)?,
         );
         checks.push(stale_attention_check(&attention, attention_now));
+        checks.push(state.store.inbox_responsibility_check(&attention).map_err(ApiError::internal)?);
         Ok(checks)
     });
     let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));
@@ -11690,6 +11692,7 @@ fn check_device_signature(
     from: &str,
     fields: &BTreeMap<String, Value>,
     expected: &[&str],
+    allow_historical_repeat: bool,
 ) -> Result<(), ApiError> {
     use smallclaims::principal::{FIELDS_FORMAT, Judged, KeyGrant};
     let mut signed = signature.signed_fields.clone();
@@ -11718,19 +11721,21 @@ fn check_device_signature(
             ),
         ));
     }
-    let now = client_now_ms();
-    if u128::from(signature.signed_at_unix_ms).abs_diff(now) > DEVICE_SIGNATURE_WINDOW_MS {
-        return Err(device_signature_error(
-            "device-signature-stale",
-            "the device signed this message more than 15 minutes from this daemon's clock; check the device's time",
-        ));
-    }
     // A retry of the same send gets its first answer; any other claim may not reuse the nonce.
     let repeat = state
         .store
         .latest_claim(subject, Some("message.sent"))
         .map_err(ApiError::internal)?
         .is_some();
+    let now = client_now_ms();
+    if !(allow_historical_repeat && repeat)
+        && u128::from(signature.signed_at_unix_ms).abs_diff(now) > DEVICE_SIGNATURE_WINDOW_MS
+    {
+        return Err(device_signature_error(
+            "device-signature-stale",
+            "the device signed this message more than 15 minutes from this daemon's clock; check the device's time",
+        ));
+    }
     if !repeat
         && state
             .store
@@ -11773,6 +11778,76 @@ fn check_device_signature(
         ));
     }
     Ok(())
+}
+
+/// A plain inline message prepared for a typed thread transaction. The action supplies
+/// the authenticated sender; caller-supplied fields cannot select an actor.
+pub enum ThreadMessageOrigin<'a> {
+    Inbox(&'a str, &'a str),
+}
+
+pub struct ThreadMessageDraft<'a> {
+    pub key: &'a str,
+    pub thread: &'a str,
+    pub from: &'a str,
+    pub to: &'a str,
+    pub content: &'a str,
+    pub title: Option<&'a str>,
+    pub quote: Option<&'a str>,
+    pub origin: Option<ThreadMessageOrigin<'a>>,
+}
+
+pub fn prepare_inline_thread_message(
+    state: &AppState,
+    draft: ThreadMessageDraft<'_>,
+    signature: Option<&smallclaims::principal::ClaimSignature>,
+) -> Result<ClaimInput, ApiError> {
+    if draft.content.trim().is_empty() || draft.content.len() > message_body::INLINE_MAX_BYTES
+        || draft.content.starts_with("doc/")
+    {
+        return Err(ApiError::bad(FractalError::new("invalid-thread-message", "thread messages require nonempty inline text")));
+    }
+    let action = if draft.origin.is_some() { "start" } else { "reply" };
+    let mut digest = Sha256::new();
+    for part in ["fractal.thread-message.v1", draft.from, draft.thread, action, draft.key] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let key = format!("thread-message:{}", hex::encode(digest.finalize()));
+    let subject = format!("message/{}", &hex::encode(Sha256::digest(key.as_bytes()))[..16]);
+    let mut fields = BTreeMap::from([
+        ("from".into(), json!(draft.from)),
+        ("to".into(), json!(draft.to)),
+        ("content".into(), json!(draft.content)),
+        ("thread_id".into(), json!(draft.thread)),
+        (
+            fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+            json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+        ),
+    ]);
+    if let Some(title) = draft.title { fields.insert("title".into(), json!(title)); }
+    if let Some(quote) = draft.quote { fields.insert("thread_quote_id".into(), json!(quote)); }
+    if let Some(origin) = draft.origin {
+        let (field, source, episode) = match origin {
+            ThreadMessageOrigin::Inbox(source, episode) => ("thread_origin_source", source, episode),
+        };
+        fields.insert(field.into(), json!(source));
+        fields.insert("thread_origin_episode".into(), json!(episode));
+    }
+    if let Some(signature) = signature {
+        let expected: Vec<_> = fields.keys().map(String::as_str).collect();
+        let request = MessageSendRequest {
+            idempotency_key: key.clone(), from: draft.from.into(), to: draft.to.into(),
+            content: draft.content.into(), title: draft.title.map(str::to_owned),
+            in_reply_to: None, tags: vec![], attachments: vec![],
+        };
+        check_device_signature(state, signature, &request, &subject, draft.from, &fields, &expected, true)?;
+    }
+    fields.insert("status".into(), json!("sent"));
+    Ok(ClaimInput {
+        subject, kind: "message.sent".into(), actor: Some(draft.from.into()),
+        fields, evidence: vec![], expected_subject: None, idempotency_key: Some(key),
+    })
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11866,6 +11941,14 @@ pub fn accept_message_receipt_with_upload_owner(
     } else {
         (receipt_recipient(&state.store, &requested_from)?.1, recipient_identity.clone())
     };
+    if request.tags.iter().any(|tag| {
+        tag.starts_with(fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG)
+    }) {
+        return Err(ApiError::bad(FractalError::new(
+            "reserved-message-tag",
+            "topic delivery tags are generated from admitted thread messages",
+        )));
+    }
     if !from.starts_with("daemon/")
         && request
             .tags
@@ -12044,7 +12127,7 @@ pub fn accept_message_receipt_with_upload_owner(
             signed.insert("body_bytes".into(), json!(body.size));
             expected = SIGNED_LONG_MESSAGE_FIELDS;
         }
-        check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
+        check_device_signature(state, signature, &request, &subject, &from, &signed, expected, false)?;
     }
     let staged = if body.is_some() {
         message_body::bodies(&state.state_dir)
@@ -12126,6 +12209,7 @@ pub fn accept_message_receipt_with_upload_owner(
         recipient_identity,
         kind: Some(kind.into()),
         message: MessageView {
+            delivery_thread: None,
             subject,
             from,
             to,
@@ -12305,6 +12389,14 @@ struct EventPage {
     messages_frontier: Option<u64>,
 }
 
+fn generic_event_visible(event: &EventRecord) -> bool {
+    !fractal_schema::notice::is_reserved_subject(&event.subject)
+        && !fractal_schema::notice::is_reserved_kind(&event.kind)
+        && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
+        && !(event.kind == "message.sent"
+            && fractal_schema::threads::message_has_relation(&event.body))
+}
+
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
     let limit = query.limit.unwrap_or(200);
     if !(1..=200).contains(&limit) {
@@ -12342,10 +12434,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             // Events retain their bounded last-inspected cursor contract, even when hidden.
-            items.retain(|event| {
-                !fractal_schema::notice::is_reserved_subject(&event.subject)
-                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
-            });
+            items.retain(generic_event_visible);
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -12358,10 +12447,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
-                    .filter(|event| {
-                        !fractal_schema::notice::is_reserved_subject(&event.subject)
-                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
-                    })
+                    .filter(|event| generic_event_visible(event))
                     .cloned()
                     .collect()
             });

@@ -428,6 +428,70 @@ async fn person_cli_probe_server() {
 }
 
 #[tokio::test]
+async fn legacy_mail_poll_delivers_thread_content_only_to_the_bound_recipient() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests_shared::state(root.path());
+    let agent = "agent/eval.worker";
+    let person = "person/operator";
+    let thread = "thread/polling-driver";
+    state.store.configure_thread_write_rollout([]);
+    crate::store::mailbox_tests::ready(&state.store, "thread-poll");
+    crate::store::thread_metadata::apply(
+        &state.store, person, thread, "create-poll-thread",
+        crate::store::thread_metadata::Edit::Create { agent, title: "Review" },
+    ).unwrap();
+    crate::store::thread_delivery::append_reply(
+        &state.store,
+        &ClaimInput {
+            subject: "message/thread-poll".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: serde_json::from_value(json!({
+                "from": person, "to": agent, "content": "Check CI.", "status": "sent",
+                "thread_id": thread,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("thread-poll-message".into()),
+        },
+        crate::store::thread_metadata::PersonAuthority::TrustedLocal, None,
+    ).unwrap();
+    let app = router(state);
+    let route = "/v1/messages/page?to=agent%2Feval.worker";
+    for (bound, native, visible, with_context) in [
+        (None, Some(agent), false, false),
+        (Some("agent/other"), Some(agent), false, false),
+        (Some(agent), None, true, false),
+        (Some(agent), Some("agent/other"), true, false),
+        (Some(agent), Some(agent), true, true),
+    ] {
+        let mut app = app.clone();
+        if let Some(bound) = bound {
+            app = app.layer(Extension(BoundAgent(bound.into())));
+        }
+        if let Some(native) = native {
+            app = app.layer(Extension(NativeDeliveryPeer {
+                agent: native.into(), transport: "app-server", pid: 20, archives_inbox: true,
+            }));
+        }
+        let (status, body) = get_request(app.clone(), route).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let message = body["items"].as_array().unwrap().iter()
+            .find(|message| message["subject"] == "message/thread-poll");
+        assert_eq!(message.is_some(), visible, "{body}");
+        if let Some(message) = message {
+            assert_eq!(message["content"], "Check CI.");
+            assert_eq!(message.get("delivery_thread").and_then(Value::as_str),
+                with_context.then_some(thread), "{body}");
+        }
+        let (status, unpaged) = get_request(app, "/v1/messages?to=agent%2Feval.worker").await;
+        assert_eq!(status, StatusCode::OK, "{unpaged}");
+        let message = unpaged.as_array().unwrap().iter()
+            .find(|message| message["subject"] == "message/thread-poll");
+        assert_eq!(message.is_some(), visible, "{unpaged}");
+        if let Some(message) = message {
+            assert!(message.get("delivery_thread").is_none(), "{unpaged}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

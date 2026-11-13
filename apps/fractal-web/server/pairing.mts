@@ -29,9 +29,16 @@ const daemonCall = (gateway: GatewayOptions, path: string, body: unknown, author
       response.once('error', reject)
       response.once('end', () => {
         const status = response.statusCode ?? 502
-        if (status === 401 || status === 403) { resolve({ status, body: undefined }); return }
-        try { resolve({ status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }) }
-        catch { reject(new TypeError('Invalid pairing response')) }
+        if (status < 200 || status >= 300) { resolve({ status, body: undefined }); return }
+        try {
+          const envelope: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (!record(envelope) || (envelope.api_version !== 'st3.client.v0' && envelope.api_version !== 'fractal.client.v0')
+            || !record(envelope.snapshot) || typeof envelope.snapshot.id !== 'string' || !Object.hasOwn(envelope, 'value')) {
+            reject(new TypeError('Invalid pairing response envelope'))
+            return
+          }
+          resolve({ status, body: envelope.value })
+        } catch { reject(new TypeError('Invalid pairing response envelope')) }
       })
     })
     upstream.once('error', reject)

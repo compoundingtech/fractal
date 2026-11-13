@@ -38,6 +38,9 @@
     { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "fractal.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 16 }
   ],
   "reads": [
+    {"id": "thread.list", "method": "GET", "path": "/v1/client/threads", "response": "ThreadSummaryPage", "scope": "read.projections", "query": {"agent_id": "one exact agent conversation", "origin_source": "exact Inbox source, paired with origin_episode", "origin_episode": "opaque source episode, paired with origin_source", "mission_id": "exact mission", "recently_closed": "true for the current person, ordered newest close first", "cursor": "optional opaque cursor scoped to the person and selector", "limit": "optional page size"}, "query_model": "ThreadListQuery"},
+    {"id": "thread.get", "method": "GET", "path": "/v1/client/threads/{id}", "response": "ThreadSummary", "scope": "read.projections"},
+    {"id": "thread.timeline", "method": "GET", "path": "/v1/client/threads/{id}/timeline", "response": "ThreadTimelinePage", "scope": "read.projections", "query": {"cursor": "optional opaque cursor", "limit": "optional page size"}},
     {"id": "harness-questions.list", "method": "GET", "path": "/v1/client/harness-questions", "response": "Page", "scope": "read.projections"},
     {"id": "harness-questions.get", "method": "GET", "path": "/v1/client/harness-questions/{id}", "response": "HarnessQuestion", "scope": "read.projections"},
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
@@ -157,6 +160,11 @@
     {"id": "glasses.delete", "method": "DELETE", "path": "/v1/client/glasses/{id}", "request": "GlassDelete", "response": "Glass", "scope": "control.glasses", "idempotency_header": "Idempotency-Key"}
   ],
   "actions": {
+    "thread.start": {"capability": "control.messages", "parameters": "ThreadStartParameters"},
+    "thread.reply": {"capability": "control.messages", "parameters": "ThreadReplyParameters"},
+    "thread.rename": {"capability": "control.messages", "parameters": "ThreadRenameParameters"},
+    "thread.close": {"capability": "control.messages", "parameters": "ThreadTargetParameters"},
+    "thread.reopen": {"capability": "control.messages", "parameters": "ThreadTargetParameters"},
     "harness.answer": {"capability": "terminal.control", "parameters": "HarnessAnswerParameters"},
     "arrangement.edit": { "capability": "control.arrangements", "parameters": "ArrangementEditParameters", "max_response_bytes": 1048576 },
     "arrangement.membership.edit": { "capability": "control.arrangements", "parameters": "ArrangementMembershipEditParameters", "max_response_bytes": 1048576 },
@@ -170,6 +178,7 @@
     "attention.resolve": { "capability": "control.attention", "parameters": "AttentionResolveParameters" },
     "message.send": { "capability": "control.messages", "parameters": "MessageSendParameters", "description": "Message kind is silent or wake (default). Silent stays unread and is offered in capped batches at the next wake. Replies default to wake independently of their parent. Person and system wake events always wake. Signed silent messages carry st3-silent in signed tags. Old daemons ignore the kind field and do not hold silent mail; upgrade all owner daemons before relying on silent delivery. Raw send/by-key receipts confirm the accepted kind; unfamiliar tags alone do not confirm holding." },
     "message.read": { "capability": "control.messages", "parameters": "TargetParameters" },
+    "thread.read": { "capability": "control.messages", "parameters": "ThreadReadParameters" },
     "message.close": { "capability": "control.messages", "parameters": "TargetParameters" },
     "launch.create": { "capability": "control.launches", "parameters": "LaunchCreateParameters" },
     "launch.revise": { "capability": "control.launches", "parameters": "LaunchReviseParameters" },

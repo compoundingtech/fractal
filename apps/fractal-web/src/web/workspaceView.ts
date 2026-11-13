@@ -10,6 +10,7 @@ export type WorkspaceView =
   | { readonly _tag: 'Missions'; readonly mission?: string }
   | { readonly _tag: 'Usage' }
   | { readonly _tag: 'Alert'; readonly id: string }
+  | { readonly _tag: 'TopicThread'; readonly ref: string }
   | { readonly _tag: 'Document'; readonly ref: `doc/${string}` }
   | { readonly _tag: 'ViewUnavailable'; readonly ref: string; readonly reason: string }
 
@@ -44,6 +45,8 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
         ? { _tag: 'Alert', id: pane.ref.slice(ALERT_PREFIX.length) }
       : pane.ref === 'monitor/quota'
         ? { _tag: 'Usage' }
+        : /^thread\/[a-zA-Z0-9_-]+$/.test(pane.ref)
+          ? { _tag: 'TopicThread', ref: pane.ref }
         : isDocumentRef(pane.ref)
           ? { _tag: 'Document', ref: pane.ref }
         : { _tag: 'ViewUnavailable', ref: pane.ref, reason: 'This web client does not render this view yet.' }
@@ -58,6 +61,7 @@ const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_
 export const paneTabLabel = (ref: string, title: string | undefined): string => {
   if (isMissionRef(ref)) return 'Missions'
   if (title !== undefined) return title
+  if (ref.startsWith('thread/')) return 'Thread'
   const label = SCREEN_LABELS[ref] ?? ref.split('/').at(-1) ?? ref
   return label.charAt(0).toUpperCase() + label.slice(1)
 }

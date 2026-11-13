@@ -4,7 +4,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
-    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ThreadListQuery, ThreadSummary, ThreadSummaryPage, ThreadTimelinePage, PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
@@ -18,6 +18,7 @@ import type {
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
+    ThreadCollectionContext, ThreadTimelineEvent,
 } from './Models.generated.ts';
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
@@ -118,7 +119,7 @@ export type TerminalStream = { close(): void };
 /** `person` applies to attention and usage, `actor` to work, `status` to agents;
  * `since_ms` and `until_ms` select the optional usage inventory period. Follow one exact agent
  * with `subscribeAgent`, which checks that the daemon advertises it. */
-export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number };
+export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number; attention_thread_hints?: boolean };
 /** Advertised in `/v1/client/capabilities` when an agents subscription may select one exact
  * agent. An older daemon ignores the selector and answers with the fleet. */
 export const EXACT_AGENT_SELECTOR_CAPABILITY = 'collection.agents.exact-selector';
@@ -148,7 +149,9 @@ export type CollectionStream = {
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
     /** Follow the person's read positions; frames are invalidations, so re-list `readPositionsList`. */
     subscribeReadPositions(id: string, person: string, limit?: number): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'read-positions'>, limit?: number, filters?: CollectionFilters): void;
+    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext } | { subject: string }): void;
+    subscribe(id: string, collection: 'thread-timeline', limit: number | undefined, filters: { subject: string }): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'read-positions' | 'threads' | 'thread-timeline'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -168,8 +171,14 @@ export type CollectionWindow<TItem extends { id: string } = Resource> = { items:
     & ([TItem] extends [OrderedMembership] ? { membership: OrderedMembershipState } : unknown);
 /** A `snapshot` or `changes` frame of an `ordered-memberships` subscription. */
 export type OrderedMembershipFrame = Extract<CollectionFrame, { collection: 'ordered-memberships' }>;
-/** Every frame except an `ordered-memberships` window's: its windows hold resources. */
-export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembershipFrame>;
+export type ThreadSummaryFrame = Extract<CollectionFrame, { collection: 'threads' }>;
+export type ThreadTimelineFrame = Extract<CollectionFrame, { collection: 'thread-timeline' }>;
+/** Collection frames whose windows hold resources. */
+export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembershipFrame | ThreadSummaryFrame | ThreadTimelineFrame>;
+export function isResourceCollectionFrame(frame: CollectionFrame): frame is ResourceCollectionFrame {
+    return (frame.kind !== 'snapshot' && frame.kind !== 'changes')
+        || (frame.collection !== 'ordered-memberships' && frame.collection !== 'threads' && frame.collection !== 'thread-timeline');
+}
 
 /** Apply one `snapshot` or `changes` frame to a window: removals and upserts first, then the
  * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to.
@@ -177,6 +186,8 @@ export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembership
  * membership `changes` frame that leaves rows, order, and `hasMore` alone still replaces the
  * window's `membership` state. */
 export function applyWindow(window: CollectionWindow<OrderedMembership> | undefined, frame: OrderedMembershipFrame): CollectionWindow<OrderedMembership> | undefined;
+export function applyWindow(window: CollectionWindow<ThreadSummary> | undefined, frame: ThreadSummaryFrame): CollectionWindow<ThreadSummary> | undefined;
+export function applyWindow(window: CollectionWindow<ThreadTimelineEvent> | undefined, frame: ThreadTimelineFrame): CollectionWindow<ThreadTimelineEvent> | undefined;
 export function applyWindow(window: CollectionWindow | undefined, frame: ResourceCollectionFrame): CollectionWindow | undefined;
 export function applyWindow(window: CollectionWindow<{ id: string }> | undefined, frame: CollectionFrame): CollectionWindow<{ id: string }> | CollectionWindow<OrderedMembership> | undefined {
     if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
@@ -234,6 +245,14 @@ function base64UrlJson(value: unknown): string {
 function routedId(id: string): string {
     if (id.startsWith('glass/')) return id.split('/').pop()!;
     return id.replace(/^(launch|session|pairing)\//, '');
+}
+
+function threadPathSegment(id: string): string {
+    const segment = id.replace(/^thread\//, '');
+    if (segment.length === 0 || segment.length > 128 || /[^a-zA-Z0-9_-]/.test(segment)) {
+        throw new TypeError('Invalid thread identifier');
+    }
+    return segment;
 }
 
 function query(options: Record<string, string | number | boolean | undefined>): string {
@@ -661,10 +680,16 @@ export class FractalClient {
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
             subscribeReadPositions: (id, person, limit = 100) => send({kind: 'subscribe', id, collection: 'read-positions', person, limit}),
-            subscribe: (id, collection, limit, filters = {}) => {
+            subscribe: (id, collection, limit, filters: CollectionFilters | { thread_context: ThreadCollectionContext } | { subject: string } = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
                 const command: Record<string, unknown> = { kind: 'subscribe', id, collection, ...(limit === undefined ? {} : { limit }), ...filters };
+                if (collection === 'threads' || collection === 'thread-timeline') {
+                    send(command);
+                    return;
+                }
+                // Only subscribeAgent may send an exact agent selector for the agents collection.
+                if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
                 delete command.agent;
                 send(command);
             },

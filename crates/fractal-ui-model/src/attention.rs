@@ -1,5 +1,5 @@
-//! An attention row's presentation: the Now group and card it shows as, who **Chat about this**
-//! reaches, who raised it, and the step it holds. st serves it on every attention row
+//! An attention row's presentation: its Now group and card, the responsible thread agent,
+//! who raised it, and the step it holds. Fractal serves it on every attention row
 //! (`Attention.presentation`), so clients read one answer instead of deriving their own
 //! (docs/clients/ui-contract.md, Attention row).
 
@@ -58,7 +58,7 @@ pub struct Presentation {
     /// The card, or `None` for a row that is no card at all (an unread message stays in its
     /// conversation).
     pub kind: Option<Kind>,
-    /// Who **Chat about this** reaches; `None` means the chief of staff.
+    /// The daemon-assigned responsible agent; `None` means discussion is unassigned.
     pub agent: Option<Who>,
     pub raised_by: Option<Who>,
     pub waiting: Option<Waiting>,
@@ -140,29 +140,16 @@ pub fn present(row: &Facts, fleet: &impl Fleet) -> Presentation {
         row.review_mode.as_deref(),
         row.update.is_some(),
     );
-    // The conversation st names, else the step's claimant, else an agent working in the
-    // mission, else the agent that asked.
-    let agent_id = row
-        .conversation_id
-        .clone()
-        .or_else(|| {
-            row.step_run_id
-                .as_deref()
-                .and_then(|step| fleet.claimant(step))
-        })
-        .or_else(|| {
-            row.mission_id
-                .as_deref()
-                .and_then(|mission| fleet.working_in(mission))
-        })
-        .or_else(|| {
-            row.requester_id
-                .clone()
-                .filter(|id| id.starts_with("agent/"))
-        });
-    // The requester st names, else the agent behind it; a gate or fault nobody filed by hand
+    // Responsibility and configured fallback are resolved by the daemon before presentation.
+    // Publisher, claimant and mission context must not invent a different recipient.
+    let agent_id = row.conversation_id.clone();
+    // Attribution can retain the agent behind a source without assigning discussion to it.
+    let source_agent = agent_id.clone()
+        .or_else(|| row.step_run_id.as_deref().and_then(|step| fleet.claimant(step)))
+        .or_else(|| row.mission_id.as_deref().and_then(|mission| fleet.working_in(mission)));
+    // The requester Fractal names, else the agent behind it; a gate or fault nobody filed by hand
     // comes from its mission.
-    let raised_by = match row.requester_id.as_deref().or(agent_id.as_deref()) {
+    let raised_by = match row.requester_id.as_deref().or(source_agent.as_deref()) {
         Some(id) if is_fractal(id) => Some(Who {
             id: id.to_owned(),
             label: "st".into(),

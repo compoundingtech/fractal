@@ -678,7 +678,7 @@ fn profiles_pin_server_identity_and_cross_profile_annotations() {
 }
 
 #[test]
-fn all_thirteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
+fn mcp_output_schemas_pin_envelopes_and_value_contracts() {
     let expected = [
         (ALERTS_LIST, Some("page"), vec!["kind","items","page"]),
         (ALERT_GET, None, vec!["id","episode","kind","title","detail","request"]),
@@ -693,6 +693,9 @@ fn all_thirteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
         (MESSAGE_SEND, Some("action-result"), vec!["kind","action_id","status"]),
         (SLO_LIST, Some("page"), vec!["kind","items","page"]),
         (SLO_HISTORY, Some("slo-history"), vec!["kind","id","since_ms","until_ms","samples","steps"]),
+        (THREADS_LIST, None, vec!["items","next_cursor"]),
+        (THREAD_TIMELINE, None, vec!["items","next_cursor"]),
+        (THREAD_GET, None, vec!["id","agent_id","title","title_revision","revision","state"]),
     ];
     let tools = tool_definitions(Profile::Mcp);
     assert_eq!(tools.len(), expected.len());
@@ -758,7 +761,7 @@ fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
 }
 
 #[tokio::test]
-async fn mcp_dispatches_all_thirteen_tools_over_only_the_existing_gateway_routes() {
+async fn mcp_dispatches_tools_over_the_paired_gateway_routes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("st3-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -781,6 +784,9 @@ async fn mcp_dispatches_all_thirteen_tools_over_only_the_existing_gateway_routes
     let adapter = Adapter { client:reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer:"test-only-mcp-credential".into(), profile:Profile::Mcp };
     let cases = [
+        (THREAD_GET,"thread-detail",json!({"agent_id":"agent/example","session_id":"session/example","thread_id":"thread/example","max_response_bytes":16384})),
+        (THREADS_LIST,"threads",json!({"agent_id":"agent/example","session_id":"session/example","limit":1})),
+        (THREAD_TIMELINE,"thread-timeline",json!({"agent_id":"agent/example","session_id":"session/example","thread_id":"thread/example","limit":1})),
         (ALERTS_LIST,"attention-rich",json!({})),
         (ALERT_GET,"attention-content",json!({"alert_id":"alert/example"})),
         (ALERT_ANSWER,"propose",json!({"action_id":"action/example-answer","idempotency_key":"example-answer-key",
@@ -818,8 +824,20 @@ async fn mcp_dispatches_all_thirteen_tools_over_only_the_existing_gateway_routes
         } else {
             assert_eq!(method, axum::http::Method::GET);
             assert!(body.is_empty());
+            if name == THREAD_GET {
+                assert_eq!(uri.query(), Some("agent_id=agent%2Fexample&max_response_bytes=16384&session_id=session%2Fexample&thread_id=thread%2Fexample"));
+            }
         }
     }
+    let chatgpt = Adapter { profile: Profile::ChatGpt, ..adapter.clone() };
+    for (adapter, name, id, code) in [
+        (&chatgpt, THREAD_GET, "thread/example", "unknown-tool"),
+        (&adapter, "st_thread_get", "thread/example", "unknown-tool"),
+        (&adapter, THREAD_GET, "thread/a/b", "invalid-arguments"),
+    ] {
+        assert_eq!(call(adapter, name, &json!({"thread_id":id})).await.unwrap_err()["code"], code);
+    }
+    assert!(received.try_recv().is_err());
     server.abort();
 }
 

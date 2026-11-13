@@ -235,7 +235,6 @@ impl Ui {
             note_answer: None,
             noted_answers: Vec::new(),
             answer_error: None,
-            chat: None,
             form: Default::default(),
         };
         let doc = screens::home_detail(&self.world, Some(subject), 120, &drafts);
@@ -665,7 +664,6 @@ mod tests {
                     note_answer: None,
                     noted_answers: Vec::new(),
                     answer_error: None,
-                    chat: None,
                     form: Default::default(),
                 },
             );

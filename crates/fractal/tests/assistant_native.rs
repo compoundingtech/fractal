@@ -438,7 +438,7 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     let ding = fractal_drivers::ding::fractal_notification_with_metadata(
         &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
         &notification.content, "test-body-digest",
-        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata), delivery_thread: None },
     );
     assert!(ding.contains(fractal_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
     assert!(ding.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
@@ -514,7 +514,7 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
     let notification = fractal_drivers::ding::fractal_notification_with_metadata(
         &projected.subject, &projected.from, &projected.to, projected.title.as_deref(),
         &projected.content, &"0".repeat(64),
-        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata), delivery_thread: None },
     );
     assert!(notification.contains("from=\"assistant/chatgpt\""));
     assert!(notification.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
@@ -755,7 +755,7 @@ async fn mcp_grant_reads_sends_and_answers_with_its_own_principal_then_revokes()
     let notification = fractal_drivers::ding::fractal_notification_with_metadata(
         &stored.subject, &stored.from, &stored.to, stored.title.as_deref(), &stored.content,
         &"0".repeat(64), fractal_drivers::ding::NotificationMetadata {
-            attachments: &[], assistant: Some(&metadata),
+            attachments: &[], assistant: Some(&metadata), delivery_thread: None,
         },
     );
     assert!(notification.contains("from=\"assistant/mcp\""));
