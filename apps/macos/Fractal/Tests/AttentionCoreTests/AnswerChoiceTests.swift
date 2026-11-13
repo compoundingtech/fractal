@@ -27,11 +27,11 @@ final class AnswerChoiceTests: XCTestCase {
 
   // MARK: Choices (web alertChoices / partitionChoices)
 
-  func testDecisionOffersRecommendedFirstThenOthersWordsOnlyForChangesAndDismiss() {
+  func testDecisionOffersRecommendedFirstThenOthersWordsOnlyForChangesAndNoDismiss() {
     let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision()))
-    XCTAssertEqual(choices.map(\.id), ["answer:ship", "answer:hold", "answer:changes", "dismiss"])
-    XCTAssertEqual(choices.map(\.words), [.none, .none, .required, .none])
-    XCTAssertEqual(choices.map(\.tone), [.primary, .danger, .secondary, .secondary])
+    XCTAssertEqual(choices.map(\.id), ["answer:ship", "answer:hold", "answer:changes"])
+    XCTAssertEqual(choices.map(\.words), [.none, .none, .required])
+    XCTAssertEqual(choices.map(\.tone), [.primary, .danger, .secondary])
     XCTAssertTrue(choices[0].recommended)
   }
 
@@ -52,21 +52,13 @@ final class AnswerChoiceTests: XCTestCase {
       WorkDoneAnswer(summary: "Fix the changelog", answerID: "changes", answerText: "Fix the changelog"))
   }
 
-  func testDismissNamesTheDismissAnswer() {
-    let request = Fixture.decision()
-    let dismiss = AnswerChoice.choices(for: Fixture.record(request: request)).last!
-    XCTAssertEqual(
-      dismiss.answer(words: "", request: request),
-      WorkDoneAnswer(summary: "Dismissed without an answer.", answerID: "dismiss"))
-  }
-
   func testCustomChoiceTakesOwnWordsAsText() {
     let request = RequestForm(
       type: "choice", question: "Which region?",
       answers: [RequestAnswer(id: "eu", label: "EU", consequence: "", outcome: nil)],
       custom: true, recommendedAnswerID: nil)
     let choices = AnswerChoice.choices(for: Fixture.record(request: request))
-    XCTAssertEqual(choices.map(\.id), ["answer:eu", "words", "dismiss"])
+    XCTAssertEqual(choices.map(\.id), ["answer:eu", "words"])
     let words = choices[1]
     XCTAssertEqual(
       words.answer(words: "us-west", request: request),

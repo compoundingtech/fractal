@@ -148,8 +148,6 @@ public enum AnswerWords {
   public static let yes = "Yes"
   public static let no = "No"
   public static let nothing = "Nothing for me to do here."
-  public static let dismissed = "Dismissed without an answer."
-  public static let dismissID = "dismiss"
 }
 
 /// One answer a card offers. Mirrors Fractal web `alertChoices.ts` for person steps.
@@ -158,7 +156,7 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
   public enum Tone: Sendable, Equatable { case primary, secondary, danger }
   public enum Kind: Sendable, Equatable {
     case named(id: String, outcome: String?)
-    case words, dismiss, nothing, yes, no
+    case words, nothing, yes, no
   }
 
   public let kind: Kind
@@ -172,22 +170,19 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
     switch kind {
     case .named(let id, _): "answer:\(id)"
     case .words: "words"
-    case .dismiss: "dismiss"
     case .nothing: "nothing"
     case .yes: "yes"
     case .no: "no"
     }
   }
 
-  /// Options are the named answers (and Yes/No); words and dismissal are shown apart.
+  /// Options are the named answers (and Yes/No); words and Nothing to do are shown apart.
   public var isOption: Bool {
     switch kind {
     case .named, .yes, .no: true
-    case .words, .dismiss, .nothing: false
+    case .words, .nothing: false
     }
   }
-
-  public var isSetAside: Bool { kind == .dismiss || kind == .nothing }
 
   /// The `work.done` this choice sends with these words, or nil when Fractal would refuse it.
   public func answer(words text: String, request: RequestForm?) -> WorkDoneAnswer? {
@@ -204,8 +199,6 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
       return PersonAnswer.typed(request, chosen: nil, words: trimmed).map {
         WorkDoneAnswer(summary: trimmed, answerID: $0.id, answerText: $0.text)
       }
-    case .dismiss:
-      return WorkDoneAnswer(summary: AnswerWords.dismissed, answerID: AnswerWords.dismissID)
     case .nothing:
       let typed = request.flatMap { PersonAnswer.typed($0, chosen: nil, words: AnswerWords.nothing) }
       return WorkDoneAnswer(summary: AnswerWords.nothing, answerID: typed?.id, answerText: typed?.text)
@@ -216,7 +209,9 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
 
   /// The answers a native ask offers, recommended option first. Mirrors web `alertChoices`
   /// + `partitionChoices`: named answers (request-changes takes words), the person's own
-  /// words where the request takes them, then Dismiss (named answers) or Nothing to do.
+  /// words where the request takes them, then Nothing to do when there are no named answers.
+  /// Web's Dismiss is not offered: it sends a `work.done` the asker reads as an answer, and
+  /// dismissal is a person attention control distinct from answering.
   public static func choices(for record: AttentionRecord) -> [AnswerChoice] {
     guard record.role == .ask(.native) else { return [] }
     guard let request = record.request else {
@@ -243,10 +238,9 @@ public struct AnswerChoice: Identifiable, Sendable, Equatable {
     if request.type == "feedback" || (request.type == "choice" && request.custom) {
       choices.append(.init(kind: .words, label: "Send", words: .required, tone: named.isEmpty ? .primary : .secondary))
     }
-    choices.append(
-      request.answers.isEmpty
-        ? .init(kind: .nothing, label: "Nothing to do", words: .none, tone: .secondary)
-        : .init(kind: .dismiss, label: "Dismiss", words: .none, tone: .secondary))
+    if request.answers.isEmpty {
+      choices.append(.init(kind: .nothing, label: "Nothing to do", words: .none, tone: .secondary))
+    }
     return choices
   }
 

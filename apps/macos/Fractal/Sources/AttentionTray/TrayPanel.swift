@@ -150,8 +150,7 @@ private struct AsksSection: View {
   let model: AttentionModel
 
   var body: some View {
-    let asks = model.asks()
-    let snoozed = model.snoozedAsks()
+    let asks = model.asks
     VStack(alignment: .leading, spacing: 8) {
       SectionTitle(title: "Asks", aside: "\(asks.count)")
       SectionFailure(state: model.attention.state)
@@ -168,13 +167,6 @@ private struct AsksSection: View {
           .foregroundStyle(.tertiary)
       } else {
         ForEach(asks) { AskCard(record: $0, model: model) }
-      }
-      if !snoozed.isEmpty {
-        DisclosureGroup("\(snoozed.count) snoozed on this Mac") {
-          ForEach(snoozed) { SnoozedRow(record: $0, model: model) }
-        }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
       }
     }
   }
@@ -246,12 +238,11 @@ private struct AskCard: View {
       .controlSize(.small)
     }
     HStack(spacing: 12) {
-      if let setAside = choices.first(where: \.isSetAside) {
-        Button(setAside.label) { send(setAside) }
+      if let nothing = choices.first(where: { $0.kind == .nothing }) {
+        Button(nothing.label) { send(nothing) }
           .disabled(sending || !words.isEmpty)
-          .help(setAside.kind == .dismiss ? "Set aside without an answer; Fractal tells the asker" : AnswerWords.nothing)
+          .help(AnswerWords.nothing)
       }
-      SnoozeMenu(record: record, model: model)
       Spacer()
       Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
     }
@@ -287,7 +278,6 @@ private struct AskCard: View {
   private var inFractalControls: some View {
     HStack(spacing: 12) {
       Link("Answer in Fractal", destination: record.url).help(record.url.absoluteString)
-      SnoozeMenu(record: record, model: model)
       Spacer()
     }
     .buttonStyle(.borderless)
@@ -317,44 +307,6 @@ private struct AskCard: View {
     let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
     let label = choice.kind == .words ? "“\(text)”" : text.isEmpty ? choice.label : "\(choice.label): “\(text)”"
     Task { await model.answer(record, with: answer, label: label) }
-  }
-}
-
-private struct SnoozeMenu: View {
-  let record: AttentionRecord
-  let model: AttentionModel
-
-  var body: some View {
-    Menu("Snooze") {
-      Button("1 hour") { model.snooze(record, until: .now.addingTimeInterval(3600)) }
-      Button("4 hours") { model.snooze(record, until: .now.addingTimeInterval(4 * 3600)) }
-      Button("Until tomorrow 9:00") { model.snooze(record, until: Self.tomorrowMorning()) }
-    }
-    .menuStyle(.borderlessButton)
-    .fixedSize()
-    .help("Hide on this Mac until then; Fractal keeps the ask open")
-  }
-
-  private static func tomorrowMorning() -> Date {
-    let calendar = Calendar.current
-    let tomorrow = calendar.date(byAdding: .day, value: 1, to: .now) ?? .now
-    return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
-  }
-}
-
-private struct SnoozedRow: View {
-  let record: AttentionRecord
-  let model: AttentionModel
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 6) {
-      Text(record.title).lineLimit(1).foregroundStyle(.primary)
-      Spacer(minLength: 4)
-      if let until = model.snoozedUntil(record) { RelativeTime(date: until, prefix: "until") }
-      Button("Show") { model.unsnooze(record) }.buttonStyle(.borderless)
-    }
-    .font(.system(size: 11))
-    .padding(.vertical, 2)
   }
 }
 
