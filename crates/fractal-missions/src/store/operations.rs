@@ -114,7 +114,7 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
         store.seed_operational_fleet();
         for collection in ["missions", "work"] {
             let first = store
-                .outcome_history(collection, 0, now_ms(), Some("failed"), None, u64::MAX, 50)
+                .outcome_history(collection, 0, now_ms(), Some("failed"), None, None, u64::MAX, 50)
                 .unwrap();
             assert_eq!(first["items"].as_array().unwrap().len(), 50);
             assert_eq!(first["has_more"], true);
@@ -126,7 +126,7 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
             );
             let before = first["next_before"].as_u64().unwrap();
             let second = store
-                .outcome_history(collection, 0, now_ms(), Some("failed"), None, before, 50)
+                .outcome_history(collection, 0, now_ms(), Some("failed"), None, None, before, 50)
                 .unwrap();
             assert!(second["items"][0]["index"].as_u64().unwrap() < before);
             let timed = store
@@ -135,6 +135,7 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
                     0,
                     now_ms(),
                     Some("timed-out"),
+                    None,
                     None,
                     u64::MAX,
                     50,
@@ -154,13 +155,14 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
                     now_ms(),
                     Some("cancelled"),
                     None,
+                    None,
                     u64::MAX,
                     50,
                 )
                 .unwrap();
             assert_eq!(cancelled["items"].as_array().unwrap().len(), 50);
             let old = store
-                .outcome_history(collection, 0, 1, None, None, u64::MAX, 50)
+                .outcome_history(collection, 0, 1, None, None, None, u64::MAX, 50)
                 .unwrap();
             assert!(old["items"].as_array().unwrap().is_empty());
         }
@@ -171,6 +173,7 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
                 now_ms(),
                 Some("failed"),
                 Some("agent/example/builder"),
+                None,
                 u64::MAX,
                 50,
             )
@@ -183,6 +186,7 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
                 now_ms(),
                 Some("failed"),
                 Some("agent/example/other"),
+                None,
                 u64::MAX,
                 50,
             )
@@ -191,12 +195,35 @@ pub use crate::store::operations_tests_shared_seats::{clock_run};
         // A retry changes the current row, while the earlier terminal transition remains.
         store.connection.lock().unwrap().execute("UPDATE step_runs SET status='ready' WHERE subject='step-run/fixture-generation-2398/build'",[]).unwrap();
         let history = store
-            .outcome_history("work", 0, now_ms(), Some("failed"), None, u64::MAX, 1)
+            .outcome_history("work", 0, now_ms(), Some("failed"), None, None, u64::MAX, 1)
             .unwrap();
         assert_eq!(
             history["items"][0]["subject"],
             "step-run/fixture-generation-2398/build"
         );
         assert_eq!(history["items"][0]["status"], "failed");
+        // The fleet fixture holds 600 failed runs of one mission: the mission filter must
+        // page all of them with the state filter, and exclude every other mission's runs.
+        let mission_first = store
+            .outcome_history("missions", 0, now_ms(), Some("failed"), None, Some("mission/example/fleet"), u64::MAX, 50)
+            .unwrap();
+        assert_eq!(mission_first["mission"], "mission/example/fleet");
+        assert_eq!(mission_first["items"].as_array().unwrap().len(), 50);
+        assert_eq!(mission_first["has_more"], true);
+        assert!(mission_first["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/example/fleet"));
+        let mut seen = mission_first["items"].as_array().unwrap().len();
+        let mut before = mission_first["next_before"].as_u64().unwrap();
+        loop {
+            let page = store
+                .outcome_history("missions", 0, now_ms(), Some("failed"), None, Some("mission/example/fleet"), before, 50)
+                .unwrap();
+            assert!(page["items"].as_array().unwrap().iter().all(|item| item["mission"] == "mission/example/fleet"));
+            seen += page["items"].as_array().unwrap().len();
+            if page["has_more"] != true {
+                break;
+            }
+            before = page["next_before"].as_u64().unwrap();
+        }
+        assert_eq!(seen, 600);
     }
 }

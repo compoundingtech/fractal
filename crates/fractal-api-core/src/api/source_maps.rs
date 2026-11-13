@@ -11,23 +11,29 @@ pub struct MapQuery {
 }
 
 /// `{subject, revision, map[, texts]}`; 404 `source-map-missing` when that revision has none.
+/// A `step-run/…` subject answers its mission at the revision its run pinned, with `step` and
+/// the step's KDL node path as `node`.
 pub async fn get(
     State(state): State<AppState>,
     Query(query): Query<MapQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let (revision, map) = state
+    let read = state
         .store
-        .source_map(&query.subject, query.revision.as_deref())
+        .source_map_read(&query.subject, query.revision.as_deref())
         .map_err(ApiError::bad)?;
-    let Some(map) = map else {
+    let Some(map) = read.map else {
         return Err(ApiError {
             status: StatusCode::NOT_FOUND,
             code: "source-map-missing".into(),
-            message: format!("no source map recorded for {}@{revision}", query.subject),
+            message: format!("no source map recorded for {}@{}", read.subject, read.revision),
             details: Box::default(),
         });
     };
-    let mut response = json!({"subject": query.subject, "revision": revision, "map": map});
+    let mut response = json!({"subject": read.subject, "revision": read.revision, "map": map});
+    if let (Some(step), Some(node)) = (read.step, read.node) {
+        response["step"] = json!(step);
+        response["node"] = json!(node);
+    }
     if query.texts {
         let mut texts = serde_json::Map::new();
         for file in map["files"].as_array().into_iter().flatten() {
