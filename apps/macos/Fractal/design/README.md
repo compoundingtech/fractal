@@ -31,11 +31,14 @@ Appearance menu forces Light or Dark.
 
 `renders/` holds three sets, each with its manifest:
 
-| Set           | Files                                                                              | Committed | Regenerate (on a Mac)                                                                                    |
-| ------------- | ---------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
-| Fallback      | `<scenario>-<appearance>.png`, `menubar-<state>-<appearance>.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                |
-| Real captures | `capture/*.png`, `capture.json`                                                    | when run  | `ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture` (unattended Mac only) |
-| V2 history    | `v2/*.png`, `v2/v2.json`                                                           | yes       | never: frozen from the V2 variant code                                                                   |
+| Set           | Files                                                                              | Committed | Regenerate (on a Mac)                                                                                              |
+| ------------- | ---------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ |
+| Fallback      | `<scenario>-<appearance>.png`, `menubar-<state>-<appearance>.png`, `manifest.json` | yes       | `devenv tasks run attention-tray:gallery`                                                                          |
+| Real captures | `capture/*.png`, `capture.json`                                                    | when run  | `devenv tasks run attention-tray:gallery-capture-vm` (headless macOS VM; `capture.json` records the guest's macOS) |
+| V2 history    | `v2/*.png`, `v2/v2.json`                                                           | yes       | never: frozen from the V2 variant code                                                                             |
+
+On this Mac's own screen instead (unattended Mac only):
+`ATTENTION_TRAY_CAPTURE_CONSENT=1 devenv tasks run attention-tray:gallery-capture`.
 
 Real captures are committed when a consented capture run produces them; without them every story
 shows the flat fallback. A render missing from a manifest or from disk shows a labelled placeholder

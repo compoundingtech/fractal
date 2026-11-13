@@ -292,7 +292,7 @@ export const menuBarStateById = (id: string): RenderScenario | undefined =>
 export const regenerateCommand = (source: ImageSource): string => {
   switch (source) {
     case 'capture':
-      return captureManifest?.command ?? 'devenv tasks run attention-tray:gallery-capture'
+      return captureManifest?.command ?? 'devenv tasks run attention-tray:gallery-capture-vm'
     case 'fallback':
       return manifest?.command ?? 'devenv tasks run attention-tray:gallery'
     case 'history':
