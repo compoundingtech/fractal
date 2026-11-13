@@ -232,6 +232,25 @@ pub fn clock_holds(newest_first: &[ClaimRecord], since: u128) -> Vec<ClockHold> 
     holds
 }
 
+/// A person's deadline-clock holds since `since`, read through `connection`: inside the
+/// caller's transaction or snapshot, so the holds agree with the asks it reads beside them.
+pub fn deadline_clock_holds_in(connection: &Connection, person: &str, since: u128) -> rusqlite::Result<Vec<ClockHold>> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| smallclaims::store::claims_in_order_query(true));
+    smallclaims::touched::note_read(|| person.to_owned());
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0ce7795286d6 owner=fractal_store::store::availability TODO=trace-statement-and-value-representation */ &QUERY)?;
+    let mut rows = statement.query(params![person, DEADLINE_CLOCK_KIND])?;
+    let mut claims = Vec::new();
+    while let Some(row) = rows.next()? {
+        let claim = claim_from_row(row)?;
+        let more = claim.accepted_at_unix_ms > since;
+        claims.push(claim);
+        if !more {
+            break;
+        }
+    }
+    Ok(clock_holds(&claims, since))
+}
+
 /// Each device's newest report, folded at `now`: `present` anywhere wins, then `idle`, then
 /// `locked`. A device whose newest report no longer counts says nothing, and older reports from
 /// it never speak for it.
@@ -400,12 +419,7 @@ impl AvailabilityStore for Store {
     }
 
     fn deadline_clock_holds(&self, person: &str, since: u128) -> Result<Vec<ClockHold>> {
-        let mut claims = Vec::new();
-        self.claims_in_order(person, DEADLINE_CLOCK_KIND, true, |claim| {
-            claims.push(claim.clone());
-            claim.accepted_at_unix_ms > since
-        })?;
-        Ok(clock_holds(&claims, since))
+        Ok(deadline_clock_holds_in(&self.readers.get(), person, since)?)
     }
 }
 

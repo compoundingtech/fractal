@@ -83,6 +83,7 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     let id = hex::encode(random);
     let display = format!("{}-{}", &id[..4], &id[4..8]);
     let ask = state.store.ask_person(&PersonAskRequest {
+        priority: None,
         person: session.authority_actor.clone(), actor: REQUESTER.into(),
         title: format!("Pair browser: {}", body.device_label),
         reason: format!("Approve only after comparing this display code with the browser you are using. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
