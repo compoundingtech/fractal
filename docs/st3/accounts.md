@@ -295,8 +295,9 @@ neither a future renewal nor a delayed ready receipt extends earlier ownership.
 `usage: null` means no response accounting evidence. A usage object carries input, output,
 cache-write (including one-hour writes), cache-read and total tokens, known `cost_microusd`,
 provider-reported cost, and `unpriced_tokens`. A nonzero unpriced count means the known cost is
-only a priced portion, never a full zero bill. `duration_ms` measures claim-to-terminal receipt;
-it stays null while the invocation has no ending evidence. Product values and worker reports
+only a priced portion, never a full zero bill. `duration_ms` measures claim to the earliest applicable
+terminal work receipt or recorded native exit; later cleanup cannot lengthen an ended invocation.
+It stays null while the invocation has no ending evidence. Product values and worker reports
 remain independent of execution metadata.
 
 ### Automatic stops

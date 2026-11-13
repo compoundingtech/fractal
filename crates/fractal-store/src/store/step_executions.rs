@@ -221,12 +221,12 @@ impl Store {
             }
             if let Some(incarnation) = &execution.incarnation_id {
                 let runtime: Option<(String, String, String)> = connection.query_row(
-                    /* sqlite-large-value: allow-for-now lv-hd667855ddda0 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
+                    /* sqlite-large-value: allow-for-now lv-h32350d549449 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
                     &canonical_sql("SELECT id, body, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='runtime.observed'
                      AND json_extract(body,'$.fields.incarnation_id')=?2
                      AND CAST(accepted_at_unix_ms AS INTEGER)>=?3
                      AND json_type(body,'$.fields.exit_evidence')='object'
-                     ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                     ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
                     params![execution.agent, incarnation, execution.started_at_unix_ms.min(i64::MAX as u128) as i64],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 ).optional()?;
@@ -234,7 +234,10 @@ impl Store {
                     execution.exit_evidence = Some(id);
                     let body: Value = serde_json::from_str(&body)?;
                     if execution.trace_id.is_none() { execution.trace_id = body["fields"]["trace_id"].as_str().map(str::to_owned); }
-                    if execution.ended_at_unix_ms.is_none() { finish(execution, at.parse()?, "exited"); }
+                    let exit_at = at.parse()?;
+                    if execution.ended_at_unix_ms.is_none_or(|ended| exit_at < ended) {
+                        finish(execution, exit_at, "exited");
+                    }
                 }
             }
         }
@@ -513,5 +516,42 @@ mod tests {
         let connection = store.readers.get();
         assert!(response_execution(&connection, AGENT, "one", 150).unwrap().is_some());
         assert_eq!(response_execution(&connection, AGENT, "one", 250).unwrap(), None);
+    }
+
+    #[test]
+    fn native_exit_bounds_duration_before_later_cleanup_and_duplicate_observations() {
+        for (kind, fields) in [
+            ("work.failed", json!({"attempt":1})),
+            ("work.released", json!({"attempt":1})),
+            ("step-run.state", json!({"attempt":1,"status":"ready"})),
+        ] {
+            let store = Store::open_memory("source").unwrap();
+            claim(&store, 1, "one", 100);
+            let exit = event(&store, AGENT, "runtime.observed", 200, json!({
+                "status":"failed","incarnation_id":"one","exit_evidence":{"exit_code":1},
+            }));
+            event(&store, STEP, kind, 700, fields);
+            event(&store, AGENT, "runtime.observed", 800, json!({
+                "status":"failed","incarnation_id":"one","exit_evidence":{"exit_code":1},
+            }));
+            let executions = store.step_executions(STEP).unwrap();
+            assert_eq!(executions[0].exit_evidence.as_deref(), Some(exit.id.as_str()));
+            assert_eq!(executions[0].ended_at_unix_ms, Some(200), "{kind}");
+            assert_eq!(executions[0].duration_ms, Some(100), "{kind}");
+        }
+    }
+
+    #[test]
+    fn later_native_exit_does_not_lengthen_a_completed_work_claim() {
+        let store = Store::open_memory("source").unwrap();
+        claim(&store, 1, "one", 100);
+        event(&store, STEP, "work.submitted", 150, json!({"attempt":1}));
+        event(&store, AGENT, "runtime.observed", 200, json!({
+            "status":"stopped","incarnation_id":"one","exit_evidence":{"exit_code":0},
+        }));
+        let executions = store.step_executions(STEP).unwrap();
+        assert_eq!(executions[0].ended_at_unix_ms, Some(150));
+        assert_eq!(executions[0].duration_ms, Some(50));
+        assert_eq!(executions[0].status.as_deref(), Some("submitted"));
     }
 }
