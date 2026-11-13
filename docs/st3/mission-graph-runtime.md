@@ -1301,6 +1301,14 @@ on `work ask` (optional `summary` and `subjects`; no question, answers or recomm
 root run, names them as requester), or a message they sent to the posting agent. Anything else
 returns `update-not-asked`.
 
+An update may also carry `speech` (`--speech TEXT`): 1 to 300 characters that a client reads
+aloud, the same field and limits as a notice's `speech`. An agent sets it only when the person
+asked to be told this outcome; an update without it is shown and not spoken. Only an update
+carries `speech`, and only an agent posts one with it: the update the daemon posts when an ask
+ends has none. A daemon that predates the field refuses to post a request carrying it
+(`invalid-person-request`) and refuses to mark a replicated one read (`unsupported-person-request`),
+so every daemon is updated before agents use `--speech`.
+
 The update is a person step in a run of its own, so no step waits on it and the poster keeps
 working. It stays on the person's home until they read it, even after the poster stops; the
 poster can withdraw it with `cancel-ask`. Opening it with `fractal alerts show` as the person (not
