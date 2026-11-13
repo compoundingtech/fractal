@@ -32,11 +32,52 @@ keeps its current build while new CLI invocations use the installed build. Follo
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
 
+### Updating the deployed-main baseline
+
+The fleet deploys exact green main commits, not release branches or stable tags.
+`.github/fleet-compat-baseline.json` names the oldest exact source still deployed,
+including a transitional non-main pin until that deployment advances.
+`linux-fleet-compat` tests the candidate against that source. Stable-release
+publication advances the messaging baseline only; it never moves a main-source
+fleet baseline.
+
+Updating a deployment pin includes updating this file in the pin's rollout plan:
+
+1. Read the deployment configuration's locked source SHA. During a staggered
+   rollout, keep the oldest still-running source until every member has advanced.
+2. Build that exact source with the existing **Fractal tag release**
+   `workflow_dispatch` inputs `purpose=compatibility`, `sha` and a distinct
+   `request_id`. This read-only mode requires a full commit SHA reachable from an
+   origin ref and records those refs in its validation log. It grants no stable
+   or edge publication authority and leaves the candidate mode's first-parent
+   main gate unchanged. This reuses the
+   normal native archive builders; compatibility CI does not compile a second
+   historical workspace on every run.
+3. Download the run's assembled `fractal-release-attempt-N` artifact. Verify
+   `SHA256SUMS`, `RELEASE.json`'s exact source, and both native archives'
+   `BUILD.json` source and target. Publish these verified archives, `SHA256SUMS`,
+   and `RELEASE.json` once as the prerelease `fleet-SHA`, with a tag pointing at
+   that exact commit. Create the draft without assets, upload the verified files,
+   then publish. Never replace a published baseline's assets. A mutable `edge`
+   URL is not a pin: the next main publication replaces its bytes.
+4. Run `scripts/compat-baseline-release repin-fleet fleet-SHA`. It checks the
+   published manifest, dereferenced tag, archive checksums and embedded metadata,
+   and writes only the fleet baseline. Commit the result with the rollout's
+   compatibility change.
+5. Require green `linux-fleet-compat` at the candidate head and retain its
+   `compat-baseline: fleet source=SHA` log line with rollout evidence. A pin
+   change is not complete without this baseline update. Keep the rollout
+   canary proof separate from the mixed-version CI proof.
+
+The public workflow does not read private deployment configuration or poll for
+pin changes. The explicit rollout step owns synchronization. The pinned archive
+remains available independently of short-lived Actions artifacts and rolling
+edge publication.
+
 ### Service-grant refusal on the pinned baseline
 
-The service downgrade fixtures target the baseline in
-`.github/fleet-compat-baseline.json` (v0.3.30, commit
-`9146398018b0835728266cf8269f0d96f02ad652`). Service credentials remain disabled
+The service downgrade fixtures target the exact source in
+`.github/fleet-compat-baseline.json`. Service credentials remain disabled
 in production. A service grant must use a `plugin/<host>/<name>` principal,
 never an assistant principal. The candidate refuses service-profile issuance
 and authentication, including the counterexample `assistant/chatgpt` plus
@@ -295,15 +336,16 @@ version. Native admission probes identify the exact installed build, and their e
 when the build identity changes. Follow [admission diagnosis](seat-deploys.md#harness-admission-at-the-next-launch)
 rather than bypassing a failed boundary without understanding it.
 
-### Rolling previous-release evidence
+### Rolling cross-build evidence
 
 Cross-build tests pin exact sources in
 [the fleet baseline](../../.github/fleet-compat-baseline.json) and
-[the messaging baseline](../../.github/messaging-compat-baseline.json). The ordinary window is
-the **previous published stable release → current candidate**, not a permanent historical
-source. Both pins record the release tag, its full source commit and native release archive
-URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
-historical messaging uses the channel source from the same release commit.
+[the messaging baseline](../../.github/messaging-compat-baseline.json).
+Fleet compatibility compares the **oldest deployed main source → current candidate**;
+messaging compares the **previous published stable release → current candidate**.
+Both pins record a release tag, its full source commit and native release archive
+URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published
+binary; historical messaging uses the native archive from its pinned stable release.
 
 CI prepares each pinned native archive once per workflow. The Ubuntu producer uses an
 `actions/cache` entry keyed by target and the pin's SHA256 across runs, then uploads the
@@ -336,13 +378,14 @@ and its digest is checked even when the extracted binary is already present.
 
 After each stable publication, release automation opens a baseline maintenance PR against
 `main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two
-archives, and advances both unheld pins. It does **not** change the already-published release
-commit: a release cannot contain its own source SHA. A human reviews and merges that PR before
+archives, and advances unheld stable pins while preserving the main-source fleet pin.
+It does not change the published release commit: a release cannot contain its own
+source SHA. A human reviews and merges that PR before
 the next stable candidate can be published. Baseline-only maintenance does not itself create
 another daily release.
 
-CI compares the pins with the actual published stable release list, excluding drafts,
-prereleases and unpublished tags. A pin more than one published stable release behind fails.
+CI compares the stable messaging pin with the actual published stable release list,
+excluding drafts, prereleases and unpublished tags. A stable pin more than one publication behind fails.
 `why` describes the rolling policy; it is not an exemption. `exception_reason` is normally
 `null`. A temporary older hold requires a nonempty explicit reason describing the compatibility
 boundary and when the hold can be removed. Automation preserves that hold; remove the reason

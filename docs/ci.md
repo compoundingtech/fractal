@@ -183,9 +183,12 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `clippy`: checks all workspace targets and the standalone conversation model,
   applies the [warning ratchet](#clippy-warning-ratchet), and runs
   `cargo run --locked -p fractal-client-codegen -- --check`.
-- `fleet-compat`: tests against the previous-release native archive pinned in
-  `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and embedded
-  source/target metadata. It does not rebuild the baseline or its PTY dependency.
+- `fleet-compat`: tests against the oldest deployed main source's native archive
+  pinned in `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and
+  embedded source/target metadata. It does not rebuild the baseline or its PTY
+  dependency. The log prints `compat-baseline: fleet source=SHA tag=fleet-SHA target=TARGET`,
+  including when the verified extracted binary is reused. See the
+  [deployment-pin update procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 - `mail-redelivery-canaries`: runs the explicit zero-retry regression selection
   used by the [daily mail canaries](#daily-mail-redelivery-canaries).
 - `conversation-model`: tests `fractal-conversation-ui` without default features
@@ -195,7 +198,7 @@ The `fleet-compat` stage also runs
 `deployed_pty_0_13_0_record_without_boot_id_binds_mailbox` through the production
 mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
 `daemonBootId` and a matching live process start token. The same test belongs to the
-normal Rust suite. The previous-release fleet test uses a stub PTY and covers
+normal Rust suite. The pinned-main fleet test uses a stub PTY and covers
 replication; the metadata fixture covers native channel admission even when the
 devShell PTY advances.
 
@@ -377,8 +380,8 @@ the default devShell supplies that `node`. See [the eval contract](../evals/frac
 
 ### Rolling compatibility baselines
 
-The fleet and messaging pins in `.github/*-compat-baseline.json` track the latest
-published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
+The fleet pin tracks the oldest deployed main source; the messaging pin tracks
+the latest published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
 `why`, `exception_reason` (`null` ordinarily), and both native archive URLs and hex SHA256
 checksums. Fleet CI downloads, verifies and extracts the published native archive instead of
 rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
@@ -390,15 +393,15 @@ historical baseline flake input.
 
 The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
 PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release
-list and excludes drafts, prereleases and unpublished tags. A baseline more than one published
-stable release behind the newest publication fails unless `exception_reason` gives an explicit
+list and excludes drafts, prereleases and unpublished tags for the stable messaging baseline.
+A stable baseline more than one published stable release behind the newest publication fails unless `exception_reason` gives an explicit
 temporary older-hold reason. An ordinary policy `why` does not waive freshness; blank reasons
 are invalid. Holds should identify the boundary and the condition for removing them.
 Failures distinguish `baseline is stale` from `release API unreachable`; the latter means
 freshness could not be determined, not that a pin needs updating. Archive downloads have a
 60-second network timeout and still fail closed.
 
-Daily and tag publication verify that the candidate's unheld pins already name the latest
+Daily and tag publication verify that the candidate's unheld stable messaging pin names the latest
 published stable release. After publication, `compat-baseline-release advance TAG` verifies
 the published `RELEASE.json` source against the dereferenced Git tag, checks archive bytes
 against `SHA256SUMS` and embedded `BUILD.json`, and opens a labelled draft baseline maintenance PR with
@@ -408,6 +411,9 @@ The upstream maintainers own review and merge of these maintenance PRs before th
 release. No auto-merge or enrollment is enabled by publication. The next release waits until
 that PR lands, except for explicitly held pins. A baseline-only maintenance delta is not a new
 daily release candidate, avoiding an endless release/repin loop.
+The source-addressed fleet pin is preserved by stable repins and publication.
+Update it with `repin-fleet fleet-SHA` as part of the deployment pin's
+[rollout procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 
 The tag publisher's token needs only `contents: write`; daily publication also needs
 `actions: read` to retrieve verified workflow artifacts. Only the separate postpublish advance
