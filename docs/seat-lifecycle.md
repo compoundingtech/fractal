@@ -146,6 +146,31 @@ Environment delivery is not proof that a provider emitted child spans.
 return the durable phase history. Join preclaim failures by invocation or
 operation ID and runtime evidence only by verified incarnation.
 
+A standing seat's work turn is distinct from its process launch. Before publishing
+a wake, native work records an `invocation/turn-<identity digest>` keyed by run,
+step, attempt, readiness epoch, agent, incarnation and preceding claim. Reminders
+reuse the identity; release/reclaim, retry and incarnation changes do not.
+Messages carry `fractal-invocation:<id>` and immutable message event bindings.
+The fenced `work.claimed` receipt retains `invocation_id`; later response joins
+can use that immutable claim instead of a mutable current lease. Same-owner
+unexpired repeated claims retain their original identity. Work completion,
+failure or release ends the exact turn, not the standing provider process.
+Verified launch lineage supplies a parent link; inherited environment never
+labels a later turn or proves fresh context.
+
+The pi/omp channel posts its final native message envelope, including tags and
+attachment notices, to `POST /v1/invocation-input` before provider delivery.
+Capture requires the authenticated exact agent, incarnation and message binding.
+The envelope is not a hidden provider prompt. Unsupported direct provider
+envelopes remain unknown; failed capture does not block real input delivery.
+
+Redacted bytes are held in protected content-addressed storage for seven days,
+independently of sampled traces. Metadata is durable; bytes are not replicated
+into claims. Private reads are restricted to the invocation agent and configured
+owning person; deletion revokes an individual reference without invalidating a
+shared content hash still retained elsewhere. Expired or unavailable content is
+not replaced with invented evidence.
+
 The graph retains claimed work and pending mail.
 
 On relaunch, Fractal tries to continue the harness's last native session: `fractal agents restart`, a
