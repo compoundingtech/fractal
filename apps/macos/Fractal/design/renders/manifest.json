@@ -4,337 +4,99 @@
   "menuBar" : [
     {
       "appearance" : "light",
-      "file" : "menubar-M1-idle-light.png",
+      "file" : "menubar-idle-light.png",
       "height" : 48,
-      "menuBar" : "M1",
       "state" : "idle",
       "width" : 80
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M1-idle-dark.png",
+      "file" : "menubar-idle-dark.png",
       "height" : 48,
-      "menuBar" : "M1",
       "state" : "idle",
       "width" : 80
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M2-idle-light.png",
+      "file" : "menubar-one-light.png",
       "height" : 48,
-      "menuBar" : "M2",
-      "state" : "idle",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-idle-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "idle",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-idle-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
-      "state" : "idle",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M3-idle-dark.png",
-      "height" : 48,
-      "menuBar" : "M3",
-      "state" : "idle",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M1-one-light.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "one",
-      "width" : 116
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M1-one-dark.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "one",
-      "width" : 116
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-one-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "one",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-one-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "one",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-one-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "one",
       "width" : 104
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M3-one-dark.png",
+      "file" : "menubar-one-dark.png",
       "height" : 48,
-      "menuBar" : "M3",
       "state" : "one",
       "width" : 104
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M1-several-light.png",
+      "file" : "menubar-several-light.png",
       "height" : 48,
-      "menuBar" : "M1",
-      "state" : "several",
-      "width" : 116
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M1-several-dark.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "several",
-      "width" : 116
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-several-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "several",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-several-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "several",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-several-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "several",
       "width" : 104
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M3-several-dark.png",
+      "file" : "menubar-several-dark.png",
       "height" : 48,
-      "menuBar" : "M3",
       "state" : "several",
       "width" : 104
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M1-many-light.png",
+      "file" : "menubar-many-light.png",
       "height" : 48,
-      "menuBar" : "M1",
-      "state" : "many",
-      "width" : 130
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M1-many-dark.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "many",
-      "width" : 130
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-many-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "many",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-many-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "many",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-many-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "many",
       "width" : 120
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M3-many-dark.png",
+      "file" : "menubar-many-dark.png",
       "height" : 48,
-      "menuBar" : "M3",
       "state" : "many",
       "width" : 120
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M1-urgent-light.png",
+      "file" : "menubar-urgent-light.png",
       "height" : 48,
-      "menuBar" : "M1",
-      "state" : "urgent",
-      "width" : 116
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M1-urgent-dark.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "urgent",
-      "width" : 116
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-urgent-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "urgent",
-      "width" : 80
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-urgent-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "urgent",
-      "width" : 80
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-urgent-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "urgent",
       "width" : 104
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M3-urgent-dark.png",
+      "file" : "menubar-urgent-dark.png",
       "height" : 48,
-      "menuBar" : "M3",
       "state" : "urgent",
       "width" : 104
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M1-offline-light.png",
+      "file" : "menubar-offline-light.png",
       "height" : 48,
-      "menuBar" : "M1",
-      "state" : "offline",
-      "width" : 104
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M1-offline-dark.png",
-      "height" : 48,
-      "menuBar" : "M1",
-      "state" : "offline",
-      "width" : 104
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-offline-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "offline",
-      "width" : 68
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-offline-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "offline",
-      "width" : 68
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-offline-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "offline",
       "width" : 92
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M3-offline-dark.png",
+      "file" : "menubar-offline-dark.png",
       "height" : 48,
-      "menuBar" : "M3",
       "state" : "offline",
       "width" : 92
     },
     {
       "appearance" : "light",
-      "file" : "menubar-M1-unconfigured-light.png",
+      "file" : "menubar-unconfigured-light.png",
       "height" : 48,
-      "menuBar" : "M1",
       "state" : "unconfigured",
       "width" : 72
     },
     {
       "appearance" : "dark",
-      "file" : "menubar-M1-unconfigured-dark.png",
+      "file" : "menubar-unconfigured-dark.png",
       "height" : 48,
-      "menuBar" : "M1",
-      "state" : "unconfigured",
-      "width" : 72
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M2-unconfigured-light.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "unconfigured",
-      "width" : 72
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M2-unconfigured-dark.png",
-      "height" : 48,
-      "menuBar" : "M2",
-      "state" : "unconfigured",
-      "width" : 72
-    },
-    {
-      "appearance" : "light",
-      "file" : "menubar-M3-unconfigured-light.png",
-      "height" : 48,
-      "menuBar" : "M3",
-      "state" : "unconfigured",
-      "width" : 72
-    },
-    {
-      "appearance" : "dark",
-      "file" : "menubar-M3-unconfigured-dark.png",
-      "height" : 48,
-      "menuBar" : "M3",
       "state" : "unconfigured",
       "width" : 72
     }
@@ -376,33 +138,32 @@
       "title" : "Not configured"
     }
   ],
-  "panel" : "L1-A2-H3-S1",
   "renders" : [
     {
       "appearance" : "light",
       "file" : "busy-light.png",
-      "height" : 2806,
+      "height" : 2802,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "busy-dark.png",
-      "height" : 2806,
+      "height" : 2802,
       "scenario" : "busy",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "answering-light.png",
-      "height" : 1280,
+      "height" : 1312,
       "scenario" : "answering",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "answering-dark.png",
-      "height" : 1280,
+      "height" : 1312,
       "scenario" : "answering",
       "width" : 800
     },
@@ -423,28 +184,28 @@
     {
       "appearance" : "light",
       "file" : "read-only-light.png",
-      "height" : 1188,
+      "height" : 1060,
       "scenario" : "read-only",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "read-only-dark.png",
-      "height" : 1188,
+      "height" : 1060,
       "scenario" : "read-only",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "degraded-light.png",
-      "height" : 2740,
+      "height" : 2736,
       "scenario" : "degraded",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "degraded-dark.png",
-      "height" : 2740,
+      "height" : 2736,
       "scenario" : "degraded",
       "width" : 800
     },
@@ -465,42 +226,42 @@
     {
       "appearance" : "light",
       "file" : "speech-speaking-light.png",
-      "height" : 1430,
+      "height" : 1304,
       "scenario" : "speech-speaking",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-speaking-dark.png",
-      "height" : 1430,
+      "height" : 1304,
       "scenario" : "speech-speaking",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "speech-in-call-light.png",
-      "height" : 1074,
+      "height" : 1098,
       "scenario" : "speech-in-call",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-in-call-dark.png",
-      "height" : 1074,
+      "height" : 1098,
       "scenario" : "speech-in-call",
       "width" : 800
     },
     {
       "appearance" : "light",
       "file" : "speech-muted-light.png",
-      "height" : 994,
+      "height" : 1018,
       "scenario" : "speech-muted",
       "width" : 800
     },
     {
       "appearance" : "dark",
       "file" : "speech-muted-dark.png",
-      "height" : 994,
+      "height" : 1018,
       "scenario" : "speech-muted",
       "width" : 800
     },
@@ -610,5 +371,5 @@
       "title" : "Answered from the notification"
     }
   ],
-  "trayRev" : "src.2470040"
+  "trayRev" : "src.c460f78"
 }
