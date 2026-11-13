@@ -365,7 +365,7 @@ mission "worker-scope" state="ready" {
         mode: None, inputs: BTreeMap::new(), idempotency_key: key.into(),
     };
     let original = engine.store.create_mission_run(&crate::model::MissionRunRequest {
-        revision: Some(first.revision.clone()), ..child_request("historical-root")
+        revision: Some(first.revision), ..child_request("historical-root")
     }).unwrap();
     let child = engine.store.create_child_mission_run(
         &child_request("historical-child"), &original, &original.steps[0].subject, None,
