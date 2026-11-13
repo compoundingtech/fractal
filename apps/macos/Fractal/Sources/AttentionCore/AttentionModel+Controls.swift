@@ -13,11 +13,18 @@ extension AttentionModel {
     return false
   }
 
-  /// The panel's window came on screen or left it; coming on screen marks the cards it holds.
+  /// The panel's window came on screen or left it. Leaving returns it to the top level, as
+  /// Control Center reopens there (drafts stay); coming on screen marks the cards it holds and
+  /// re-reads the open page, which refreshes skip while nobody sees it.
   public func setPanelVisible(_ visible: Bool) async {
     isPanelVisible = visible
-    guard visible else { return }
+    guard visible else {
+      if route != .home { route = .home }
+      backFrom = nil
+      return
+    }
     for record in rowsInPanel.values { await markSeen(record) }
+    await readOpenPage()
   }
 
   /// A card's row is in the panel (or reached a new revision there): seen if the panel is visible.
