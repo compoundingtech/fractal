@@ -105,7 +105,8 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new() });
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
             "exit": {"_tag": "Success", "value": 1}, "ms": 5, "mission": "publish", "input": {}, "for": "person/owner", "title": "Go?"})
@@ -146,7 +147,8 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new() });
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
     assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
@@ -267,6 +269,7 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
         generation, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
 }
 
@@ -293,7 +296,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None));
+        assert!(engine.end(step, attempt, generation, None, false).is_some());
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -335,6 +338,52 @@ fn daemon_failure_retains_its_worker_fence_until_exact_exit_acknowledgement() {
 }
 
 #[test]
+fn daemon_refusals_export_failed_attempt_spans() {
+    const CHILD: &str = "FRACTAL_PROGRAM_REFUSAL_TRACE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "reconcile::program::tests::daemon_refusals_export_failed_attempt_spans", "--nocapture"])
+            .env(CHILD, "1")
+            .status().unwrap();
+        assert!(status.success(), "isolated refusal trace test failed");
+        return;
+    }
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone()).build();
+    opentelemetry::global::set_tracer_provider(provider.clone());
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        for kind in ["run", "ask"] {
+            let run = scoped_run(&engine, kind);
+            let step = &run.steps[0].subject;
+            running_attempt(&engine, &run, 1, 1);
+            // Both requests have a valid key but lack their required payload.
+            engine.handle(&json!({"t": kind, "step": step, "attempt": 1, "key": "invalid", "seq": 1}), 1).unwrap();
+            assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+            assert!(!engine.lock().running.contains_key(step));
+        }
+        let run = scoped_run(&engine, "result-refusal");
+        let step = &run.steps[0].subject;
+        running_attempt(&engine, &run, 1, 1);
+        // A conflicting durable result makes the daemon refuse the success journal.
+        engine.write_journal(step, 1, &"a".repeat(64), RESULT_KEY, "completed", &json!({"value": 1}), None).unwrap();
+        engine.handle(&json!({"t": "done", "step": step, "attempt": 1,
+            "exit": {"_tag": "Success", "value": 2}}), 1).unwrap();
+        assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+        assert!(!engine.lock().running.contains_key(step));
+    }
+    provider.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let attempts = spans.iter().filter(|span| span.name == "st.program.attempt").collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 3);
+    for span in attempts {
+        assert!(matches!(span.status, opentelemetry::trace::Status::Error { .. }), "{span:?}");
+    }
+}
+
+#[test]
 fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     use std::os::unix::process::CommandExt as _;
     let dir = tempfile::tempdir().unwrap();
@@ -344,7 +393,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None));
+    assert!(engine.end(step, 1, 1, None, false).is_some());
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
