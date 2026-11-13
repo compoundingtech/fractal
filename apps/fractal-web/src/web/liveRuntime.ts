@@ -7,6 +7,7 @@ import type { DataSource } from '../data/source.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
 import { setPageFoldersClientName } from '../folders/client.ts'
 import { takeEarlyCollections } from '../data/sdk-browser/early.ts'
+import { startPresenceReports } from '../availability/presence.ts'
 import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
@@ -48,9 +49,18 @@ export const createPageRuntime = (replay?: Replay, answerPorts?: Pick<DataSource
     telemetryLayer,
     ux: () => ux,
   })
+  // Presence is the page's: reported for the person while this page lives; a replay has no person to report.
+  const stopPresence = replay === undefined && live.source.availability !== undefined ? startPresenceReports(live.source.availability.reportPresence) : undefined
   return {
     // Pairing belongs to the host that served this page; a replay has no host to pair with.
-    live: replay === undefined ? { ...live, source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) } } : {
+    live: replay === undefined ? {
+      ...live,
+      source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) },
+      dispose: () => {
+        stopPresence?.()
+        return live.dispose()
+      },
+    } : {
       ...live,
       // Example data's stubbed answers need no grant: nothing leaves the page.
       source: answerPorts === undefined ? live.source : { ...live.source, ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) },
