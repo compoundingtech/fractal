@@ -321,3 +321,17 @@ focused lineage regression validates, admits, and replicates both retry and supe
 inputs through the existing generic paths. No old-build admission or checkpoint comparison
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
+
+`claims-v25.json` adds the person-availability kinds `person.status-set`,
+`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`. Versions 1
+through 24 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
+do not hand-edit it. The simulation and audit reports select v25. Draws use the generic append
+path: only the subject person's own claims are admitted, as on every admission path. As a full
+registry snapshot, v25 also carries optional fields that reached main after v24: `gate.requested`
+gains `dispatch` and `host`, `runtime.action.requested` gains `from_stale_handoff`, and
+`runtime.observed` gains `exit_evidence`. The availability change itself also adds the optional
+`source` to `person.directive-note-set` and the optional `priority` to `work.person-asked`. These
+fields and the new kinds all shift the shared random schedule.
+With v25 every fixed seed converges; a local run leaves seed 21 untrimmed (the never-trim set in
+the test), and hosted CI characterizes the exact set (#6210).
