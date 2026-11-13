@@ -25,6 +25,15 @@ export default {
     if (ctx.payload.mode === 'credential') {
       await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
     }
+    if (ctx.payload.mode === 'blocked-worker') {
+      const fs = await import('node:fs')
+      const waited = await step(ctx, 'native-worker', async () => {
+        fs.writeFileSync(ctx.payload.pids, fs.readlinkSync('/proc/thread-self'))
+        fs.readFileSync(ctx.payload.gate)
+        return 'opened'
+      })
+      return { _tag: 'Success', value: { first, waited } }
+    }
     if (ctx.payload.mode === 'busy') for (;;) {}
     const waited = await step(ctx, 'wait', async () => {
       const script = 'sleep 1000 & echo $$ $! > "$PIDS.tmp"; mv "$PIDS.tmp" "$PIDS"; while [ ! -e "$GATE" ]; do sleep 0.05; done; echo opened'
@@ -229,6 +238,43 @@ fn a_step_that_leaves_its_attempt_stops_its_program_and_effects_at_once() {
         assert_eq!(fixture.journal(&started.step), entries(&[("first", "started"), ("first", "completed"), ("wait", "started")]));
         assert_ne!(fixture.status(&started.step), "completed");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn supersession_cancellation_acknowledges_the_actual_worker_exit() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let fixture = fixture(Liveness::default());
+    let gate_path = fixture.dir.path().join("blocked-worker.gate");
+    let path = std::ffi::CString::new(gate_path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the NUL-terminated path lives through mkfifo and names this test's directory.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let gate = std::fs::OpenOptions::new().read(true).write(true).open(&gate_path).unwrap();
+    let started = fixture.start("blocked-worker", "blocked-worker");
+    let thread_path = || std::fs::read_to_string(&started.pids).ok()
+        .filter(|thread| !thread.trim().is_empty())
+        .map(|thread| std::path::PathBuf::from("/proc").join(thread.trim()));
+    fixture.until("the real worker blocks in its native FIFO read", || {
+        thread_path().and_then(|path| std::fs::read_to_string(path.join("stat")).ok())
+            .is_some_and(|stat| stat.rsplit_once(") ").is_some_and(|(_, fields)| fields.starts_with('S')))
+    });
+    let task = thread_path().unwrap();
+    fixture.store.request_mission_run_cancellation(&started.run, "stop the native worker").unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    // This later program's journal roundtrip proves the shared host processed
+    // cancellation without blocking other programs on the terminating worker.
+    let probe = fixture.start("worker-exit-probe", "retry-failure");
+    fixture.until("the shared host handles the later program", || {
+        fixture.journal(&probe.step).iter().any(|(key, status)| key == "first" && status == "completed")
+    });
+    assert!(
+        !fixture.engine.fence_left_effects().unwrap() || !task.exists(),
+        "cancellation acknowledgement must not fence an executing worker thread",
+    );
+    drop(gate);
+    fixture.without_passes("the worker exits and cancellation is acknowledged", || {
+        fixture.engine.fence_left_effects().unwrap() && !task.exists()
+    });
 }
 
 #[test]

@@ -46,6 +46,8 @@ Repeated publications form a chain: a replacement awaits terminal cleanup of eve
 
 Program cancellation also requires the matching host-incarnation and attempt acknowledgement, or host exit, plus an effective fence on recorded effect process groups. The daemon verifies boot and process-start identity before signalling; uncertain identity or a failed fence holds admission with `supersession-effect-fence`, rather than treating a queued cancellation as completion. Runtime observations, cancellation acknowledgements, and host exit wake reconciliation; these waits do not poll or spend the replacement's execution timeout.
 
+The host's cancellation acknowledgement waits for actual worker termination, including native worker I/O, not just a call to `Worker.terminate()`. Ended attempts remain tracked until their exit promise settles; the host can continue handling other programs while that acknowledgement is pending.
+
 Every superseding step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. Unreviewed direct run revision remains a separate generation-adoption operation; approved proposal cutover uses a fresh linked run. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or revision-policy knob is introduced.
 
 

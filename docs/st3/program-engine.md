@@ -145,7 +145,7 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
-| host → daemon | `cancelled` | `step`, `attempt` | this host stopped the attempt's effect creation and fenced its effect groups; matched to the host incarnation and attempt, not another host's acknowledgement |
+| host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
@@ -183,6 +183,11 @@ and descendants must likewise be confirmed quiescent. Acknowledgements and runti
 wake reconciliation; no polling or replacement execution timeout is introduced. New program
 credentials are minted inside the run writer fence only for the current live attempt and
 after checking that it does not await automatic publication cutover.
+
+The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
+worker's exit promise, including native I/O still in progress, while continuing to serve
+other programs. An ended attempt remains addressable until exit, so a late cancellation
+cannot confuse removal from the run map with quiescence.
 
 ### 3. Declaration and authority
 
