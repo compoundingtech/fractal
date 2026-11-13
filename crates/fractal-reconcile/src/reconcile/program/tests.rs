@@ -105,7 +105,8 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new() });
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
             "exit": {"_tag": "Success", "value": 1}, "ms": 5, "mission": "publish", "input": {}, "for": "person/owner", "title": "Go?"})
@@ -146,7 +147,8 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new() });
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
     assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
@@ -267,6 +269,7 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
         generation, requests: BTreeMap::new(),
+        _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
 }
 
@@ -293,7 +296,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None));
+        assert!(engine.end(step, attempt, generation, None, false));
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -344,7 +347,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None));
+    assert!(engine.end(step, 1, 1, None, false));
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();

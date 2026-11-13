@@ -1916,6 +1916,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["step"],
         ),
         (
+            "mission.run.trace",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &["observability"],
+        ),
+        (
+            "program.attempt.trace",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["observability"],
+        ),
+        (
             "program.step",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -3524,6 +3542,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claim_incarnation", string()),
             ("claim_expires_at_unix_ms", integer()),
         ],
+        "mission.run.trace" => &[("trace", any())],
+        "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
         "program.step" => &[
             ("key", required_string()),
             ("status", required_enum(&["started", "completed", "failed"])),
@@ -3533,6 +3553,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("error", any()),
             ("ms", integer()),
             ("child", string()),
+            ("trace", any()),
         ],
         "work.person-asked" => &[
             ("run", reference()),
