@@ -430,6 +430,19 @@
       "type": "object", "additionalProperties": false, "required": ["notes"],
       "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
     },
+    "DirectiveNoteSet": {
+      "description": "Set or clear the session person's own directive note. `text` is required; null clears the note. The person always comes from the session.",
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {
+        "text": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096, "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused."}, {"type": "null"}]},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "DirectiveNoteSetResult": {
+      "description": "The person's current note after the write; null once cleared or already expired.",
+      "type": "object", "additionalProperties": false, "required": ["note"],
+      "properties": {"note": {"oneOf": [{"$ref": "#/$defs/DirectiveNote"}, {"type": "null"}]}}
+    },
     "AvailabilityStatus": {"anyOf": [{"enum": ["available", "away"]}, {"type": "string"}], "description": "A person's effective status. Readers retain future values as Unknown."},
     "AvailabilityStatusSource": {"anyOf": [{"enum": ["override", "presence", "unreported"]}, {"type": "string"}], "description": "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown."},
     "AvailabilityPresence": {"anyOf": [{"enum": ["present", "idle", "locked", "unreported"]}, {"type": "string"}], "description": "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown."},
@@ -1068,6 +1081,7 @@
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/PersonAvailabilities" },
+            { "$ref": "#/$defs/DirectiveNoteSetResult" },
             { "$ref": "#/$defs/PersonAvailability" },
             { "$ref": "#/$defs/PresenceReportResult" },
             { "$ref": "#/$defs/Capabilities" },
@@ -4576,6 +4590,7 @@
             "write.client-diagnostics",
             "write.availability",
             "write.presence",
+            "write.notes",
             "read.glasses",
             "control.glasses",
             "terminal.read",

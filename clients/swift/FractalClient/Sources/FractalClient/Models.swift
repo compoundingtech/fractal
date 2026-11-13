@@ -22,6 +22,24 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// Set or clear the session person's own note. A nil `text` clears it and is sent as `null`.
+public struct DirectiveNoteSet: Codable, Sendable, Equatable {
+    public var text: String?
+    public var expiresAt: String?
+    enum CodingKeys: String, CodingKey { case text, expiresAt = "expires_at" }
+    public init(text: String?, expiresAt: String? = nil) { self.text = text; self.expiresAt = expiresAt }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
+    }
+}
+
+/// The person's current note after a write; nil once cleared or already expired.
+public struct DirectiveNoteSetResult: Codable, Sendable, Equatable {
+    public let note: DirectiveNote?
+}
+
 /// A person's effective status. Unknown words are kept, so a newer daemon's values stay readable.
 public enum AvailabilityStatus: Codable, Sendable, Equatable {
     case available, away

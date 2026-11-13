@@ -35,8 +35,8 @@ pub(super) fn writer_source(state: &AppState, session: &client_v0::ClientSession
 /// Store refusals in the client vocabulary: bad input fails validation, a foreign writer is forbidden.
 pub(super) fn client_refusal(error: ApiError) -> ApiError {
     match error.code.as_str() {
-        "invalid-availability" | "invalid-presence" => client_v0::validation(error.message),
-        "availability-forbidden" => client_v0::forbidden(error.message),
+        "invalid-availability" | "invalid-presence" | "invalid-directive-note" => client_v0::validation(error.message),
+        "availability-forbidden" | "directive-note-forbidden" => client_v0::forbidden(error.message),
         _ => error,
     }
 }
@@ -95,8 +95,8 @@ pub async fn list(
     Ok((Extension(snapshot), Json(json!({"people": people}))))
 }
 
-/// A present `value` is required; null clears the status override.
-fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+/// A present key is required even when null: null clears the status override or the note.
+pub(super) fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
     Option::deserialize(deserializer)
 }
 

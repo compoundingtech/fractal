@@ -607,6 +607,22 @@ test('availability decodes the coarse view, the full view and a status clear', a
     assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
 });
 
+test('a note write requires text, clears with null and never names the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set(wire)).expires_at, '2026-11-16T09:00:00.000Z');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set({ text: null })).text, null);
+    for (const invalid of [{}, { text: '' }, { text: 'Approved', person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const result = Rich.decodeUnknownSync(Rich.DirectiveNoteSetResult, 'strict');
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json').value;
+    const encode = Schema.encodeSync(Rich.DirectiveNoteSetResult);
+    assert.equal(encode(result(written)).note.person, 'person/ada');
+    assert.equal(encode(result({ note: null })).note, null);
+});
+
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');

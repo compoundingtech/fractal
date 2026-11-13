@@ -222,6 +222,52 @@ async fn availability_reads_show_raw_presence_only_to_the_person() {
     assert_eq!(status, StatusCode::FORBIDDEN, "an anonymous local reader is no person or agent");
 }
 
+#[tokio::test]
+async fn a_paired_device_writes_the_persons_note_and_a_related_agent_reads_it() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::super::tests::state(root.path());
+    fractal_store::store::directive_notes::tests_shared_seats::enable(&state.store);
+    fractal_store::store::directive_notes::tests_shared_seats::declare(
+        &state.store, "version 2\nagent \"garden/helper\" { workspace \"/tmp\"; command \"true\"; }", "person/ada", "helper",
+    );
+    pair(&state, "writer", &["read.projections", "write.notes"]);
+    pair(&state, "reader", &["read.projections", "write.availability"]);
+    let app = fabric_router(state.clone());
+    let note = json!({"text": "Travelling until Monday; only ask blockers.", "expires_at": "2099-01-01T00:00:00Z"});
+
+    assert_eq!(send(&app, "PUT", "/v1/client/notes", bearer("reader"), Some(note.clone())).await.0, StatusCode::FORBIDDEN);
+    // A local agent session holds every scope, yet never writes a person's note.
+    let (status, _) = send(&router(state.clone()), "PUT", "/v1/client/notes", local("agent/garden/helper"), Some(note.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The body never names the person or the author, and `text` is always present.
+    for body in [
+        json!({"person": "person/avery", "text": "Approved"}),
+        json!({"actor": "person/ada", "text": "Approved"}),
+        json!({"expires_at": "2099-01-01T00:00:00Z"}),
+    ] {
+        let (status, _) = send(&app, "PUT", "/v1/client/notes", bearer("writer"), Some(body.clone())).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{body}: {status}");
+    }
+    for body in [json!({"text": "   "}), json!({"text": "Later", "expires_at": "2099-01-01T00:00:00+01:00"})] {
+        let (status, error) = send(&app, "PUT", "/v1/client/notes", bearer("writer"), Some(body.clone())).await;
+        assert_eq!((status, &error["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("validation-failed")), "{body}: {error}");
+    }
+    assert!(state.store.directive_notes("agent/garden/helper").unwrap().is_empty());
+
+    let (status, written) = send(&app, "PUT", "/v1/client/notes", bearer("writer"), Some(note)).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    let written = &written["value"]["note"];
+    assert_eq!((&written["person"], &written["author"]), (&json!("person/ada"), &json!("person/ada")));
+    assert_eq!(latest_source(&state, fractal_schema::directive_notes::KIND), "custom/client/writer", "the note records the pairing grant that wrote it");
+    let (status, read) = send(&router(state.clone()), "GET", "/v1/client/notes", local("agent/garden/helper"), None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["value"]["notes"], json!([written]));
+
+    let (status, cleared) = send(&app, "PUT", "/v1/client/notes", bearer("writer"), Some(json!({"text": null}))).await;
+    assert_eq!((status, &cleared["value"]["note"]), (StatusCode::OK, &Value::Null), "{cleared}");
+    assert!(state.store.directive_notes("agent/garden/helper").unwrap().is_empty());
+}
+
 /// A local harness or peer that names a person is no person: it never writes the person's
 /// availability or presence and never reads their raw presence.
 #[tokio::test]
