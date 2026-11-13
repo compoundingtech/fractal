@@ -96,11 +96,30 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     const changed = items.filter(item => previous.get(item.id) !== item.title)
     if (changed.length > 0) registry.set(titles, new Map([...previous, ...changed.map(item => [item.id, item.title] as const)]))
   }
+  // Patch existing mounted pages, including continuation pages without their own feed.
+  // The pages remain the summary cache; this set only owns their live subscriptions.
+  const summaryListeners = new Set<(id: string, summary: ThreadSummary | undefined) => void>()
+  const observeSummary = (summary: ThreadSummary) => {
+    rememberTitles([summary])
+    for (const receive of summaryListeners) receive(summary.id, summary)
+  }
+  const forgetSummary = (id: string) => {
+    const previous = registry.get(titles)
+    if (previous.has(id)) {
+      const next = new Map(previous)
+      next.delete(id)
+      registry.set(titles, next)
+    }
+    for (const receive of summaryListeners) receive(id, undefined)
+  }
   const revision = Atom.make(0)
   function reader<T>(
     read: (signal: AbortSignal) => Promise<T>,
     settings?: {
       readonly follow?: (publish: (value: T) => void, reload: () => void, stale: () => void) => () => void
+      readonly onObserved?: (value: T) => void
+      readonly onFailure?: (error: unknown) => void
+      readonly updates?: (update: (change: (value: T) => T) => void) => () => void
     },
   ): Atom.Atom<Feed<T>> {
     let previous: Feed<T> = waiting
@@ -110,9 +129,20 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       if (!demand.read) return previous = waiting
       let active = true
       let abort: AbortController | undefined
-      const publish = (value: T) => {
-        if (active) get.setSelf(previous = { _tag: 'Observed', value, freshness: 'live' })
+      const publish = (value: T, freshness: 'live' | 'stale' = 'live') => {
+        if (!active) return
+        settings?.onObserved?.(value)
+        get.setSelf(previous = { _tag: 'Observed', value, freshness })
       }
+      const stopUpdates = settings?.updates?.(change => {
+        if (!active || previous._tag !== 'Observed') return
+        const value = change(previous.value)
+        if (value === previous.value) return
+        const freshness = previous.freshness
+        // A page request started before this exact observation cannot restore its old row.
+        abort?.abort()
+        publish(value, freshness)
+      })
       const reload = () => {
         if (!active) return
         abort?.abort()
@@ -121,7 +151,12 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         void read(current.signal).then(value => {
           if (!current.signal.aborted) publish(value)
         }, error => {
-          if (!current.signal.aborted && active) get.setSelf(previous = refused(error))
+          if (!current.signal.aborted && active) {
+            // A revoked read cannot be revived by a later frame from this demand.
+            if (error instanceof ClientError && (error.status === 401 || error.status === 403)) active = false
+            settings?.onFailure?.(error)
+            get.setSelf(previous = refused(error))
+          }
         })
       }
       const stop = settings?.follow?.(value => { abort?.abort(); publish(value) }, reload, () => {
@@ -132,13 +167,13 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         active = false
         abort?.abort()
         stop?.()
+        stopUpdates?.()
       })
       return previous
     })
   }
   function followPage<Row>(
     watch: Watch<Row> | undefined,
-    onWindow?: (window: ThreadWindow<Row>) => void,
   ): ((publish: (value: { readonly items: readonly Row[]; readonly next_cursor: Option.Option<string> }) => void, reload: () => void, stale: () => void) => () => void) | undefined {
     return watch === undefined ? undefined : (publish, reload, stale) => watch(event => {
       if (event._tag !== 'Observed') {
@@ -146,7 +181,6 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         else stale()
         return
       }
-      onWindow?.(event.value)
       // The stream has no cursor. Read the first HTTP page only when it must
       // supply one, so older pages keep the daemon's exact seek token.
       if (event.value.hasMore) reload()
@@ -167,7 +201,6 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           reload()
           return
         }
-        rememberTitles([summary])
         publish({ summary, snapshotId: event.value.snapshotId })
       })
     }
@@ -176,21 +209,40 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       const summary = Native.decodeUnknownSync(Native.ThreadSummary)(value)
       if (summary.id !== threadId) throw new TypeError('Mismatched thread observation')
       signal.throwIfAborted()
-      rememberTitles([summary])
       return { summary, snapshotId: snapshot.id }
-    }, { follow })
+    }, {
+      follow,
+      onObserved: ({ summary }) => observeSummary(summary),
+      onFailure: error => {
+        if (error instanceof ClientError && (error.status === 401 || error.status === 403)) forgetSummary(threadId)
+      },
+    })
   })
   const readList = Atom.family((key: string) => {
     const query = JSON.parse(key) as ThreadListQuery
-    const follow = followPage(query.cursor === undefined ? watches?.summaries(query) : undefined, window => rememberTitles(window.items))
+    const follow = followPage(query.cursor === undefined ? watches?.summaries(query) : undefined)
     return reader(async signal => {
       const { value } = await client.threadList({ limit: 40, ...query }, { signal })
       const page = Native.decodeUnknownSync(Native.ThreadSummaryPage)(value)
       if ('agent_id' in query && page.items.some(item => item.agent_id !== query.agent_id)) throw new TypeError('Mismatched thread list')
       signal.throwIfAborted()
-      rememberTitles(page.items)
       return page
-    }, follow === undefined ? undefined : { follow })
+    }, {
+      ...(follow === undefined ? {} : { follow }),
+      onObserved: page => rememberTitles(page.items),
+      updates: update => {
+        const receive = (id: string, summary: ThreadSummary | undefined) => update(page => {
+          if (!page.items.some(item => item.id === id)) return page
+          return {
+            ...page,
+            items: summary === undefined ? page.items.filter(item => item.id !== id)
+              : page.items.map(item => item.id === id ? summary : item),
+          }
+        })
+        summaryListeners.add(receive)
+        return () => { summaryListeners.delete(receive) }
+      },
+    })
   })
   const readTimeline = Atom.family((key: string) => {
     const [threadId, cursor] = key.split('\n') as [string, string | undefined]
