@@ -12,30 +12,33 @@ export const formatInstant = (at: number, now: number, zone: HumanTimeZone = {})
   return days === 0 ? clock : days === 1 ? `tomorrow ${clock}` : days === -1 ? `yesterday ${clock}` : `${formatDate(at, now, zone)} ${clock}`
 }
 
-export const statusLabels: Readonly<Record<PersonAvailability['status'], string>> = { available: 'Available', away: 'Away' }
-export const interruptionLabels: Readonly<Record<PersonAvailability['interruptions'], string>> = {
+/** Looks a response word up in a table of the words this build knows; Fractal may send words it does not know yet. */
+const lookup = <V>(table: Readonly<Record<string, V>>, word: string): V | undefined => Object.hasOwn(table, word) ? table[word] : undefined
+/** A response word as the person reads it: its label when known, else the word itself. */
+const label = (labels: Readonly<Record<string, string>>, word: string): string => lookup(labels, word) ?? word
+
+const statusLabels: Readonly<Record<string, string>> = { available: 'Available', away: 'Away' }
+const interruptionLabels: Readonly<Record<string, string>> = {
   all: 'All asks',
   urgent: 'Urgent asks only',
   none: 'No asks',
 }
-export const deadlineClockLabels: Readonly<Record<PersonAvailability['deadline_clock'], string>> = {
+const deadlineClockLabels: Readonly<Record<string, string>> = {
   run: 'Running',
   'hold-routine': 'Held for routine asks',
   'hold-all': 'Held for every ask',
 }
-const presenceLabels: Readonly<Record<NonNullable<PersonAvailability['presence']>, string>> = {
+const presenceLabels: Readonly<Record<string, string>> = {
   present: 'present',
   idle: 'idle',
   locked: 'locked',
-  unknown: 'not reported',
+  unreported: 'not reported',
 }
-const interruptionDetails: Readonly<Record<PersonAvailability['interruptions'], string | undefined>> = {
-  all: undefined,
+const interruptionDetails: Readonly<Record<string, string>> = {
   urgent: 'Only asks with a deadline within an hour reach you.',
   none: 'No ask reaches you.',
 }
-const deadlineClockDetails: Readonly<Record<PersonAvailability['deadline_clock'], string | undefined>> = {
-  run: undefined,
+const deadlineClockDetails: Readonly<Record<string, string>> = {
   'hold-routine': 'Routine deadlines pause; urgent asks keep running.',
   'hold-all': 'Every ask’s deadline pauses.',
 }
@@ -57,22 +60,30 @@ const timed = (value: string, parts: readonly (readonly [string, string | null |
     return instant === undefined ? [] : [`${word} ${formatInstant(instant, now, zone)}`]
   })].join(' · ')
 
-/** The effective availability and note as the summary shows them; pure over a fixed `now`. */
+/**
+ * The effective availability and note as the summary shows them; pure over a fixed `now`. A word this build
+ * does not know shows as itself. With `status_source: unreported` no device reports presence, so the status is
+ * the default: available, and agents ask as usual.
+ */
 export const availabilityFacts = ({ availability: a, note }: OwnAvailability, now: number, zone: HumanTimeZone = {}): readonly AvailabilityFact[] => {
-  const observed = at(a.presence_observed_at)
-  const presence = `${presenceLabels[a.presence ?? 'unknown']}${observed === undefined ? '' : ` ${formatRelative(observed, now, zone)}`}`
+  const observed = a.presence === null || a.presence === 'unreported' ? undefined : at(a.presence_observed_at)
+  const presence = `${label(presenceLabels, a.presence ?? 'unreported')}${observed === undefined ? '' : ` ${formatRelative(observed, now, zone)}`}`
   const noteExpiry = at(note?.expires_at)
+  const unreported = a.status_source === 'unreported'
   return [
     {
       label: 'Status',
-      value: timed(statusLabels[a.status], [['until', a.status_until]], now, zone),
-      detail: a.status_source === 'override' ? `Set by you; presence is ${presence}.` : `Follows your presence: ${presence}.`,
+      value: timed(unreported ? 'Available' : label(statusLabels, a.status), [['until', a.status_until]], now, zone),
+      detail: a.status_source === 'override' ? `Set by you; presence is ${presence}.`
+        : a.status_source === 'presence' ? `Follows your presence: ${presence}.`
+          : unreported ? 'No device is reporting your presence, so agents ask as usual.'
+            : `Comes from ${a.status_source}; presence is ${presence}.`,
     },
-    { label: 'Interruptions', value: timed(interruptionLabels[a.interruptions], [['until', a.interruptions_until]], now, zone), ...detail(interruptionDetails[a.interruptions]) },
+    { label: 'Interruptions', value: timed(label(interruptionLabels, a.interruptions), [['until', a.interruptions_until]], now, zone), ...detail(lookup(interruptionDetails, a.interruptions)) },
     {
       label: 'Deadline clock',
-      value: timed(deadlineClockLabels[a.deadline_clock], [['since', a.deadline_clock_since], ['until', a.deadline_clock_until]], now, zone),
-      ...detail(deadlineClockDetails[a.deadline_clock]),
+      value: timed(label(deadlineClockLabels, a.deadline_clock), [['since', a.deadline_clock_since], ['until', a.deadline_clock_until]], now, zone),
+      ...detail(lookup(deadlineClockDetails, a.deadline_clock)),
     },
     note === undefined
       ? { label: 'Note', value: 'No note' }
