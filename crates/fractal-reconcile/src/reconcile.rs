@@ -12098,13 +12098,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     {
                         return Ok(true);
                     }
-                    // Agentless work has no worker claim to open its execution interval. Admit every
-                    // eligible agentless step automatically before materializing declarations or waiting
-                    // on gates, so its timeout and lifecycle are real instead of remaining `ready`
-                    // forever. Nested missions need the persisted parent transition before their children
-                    // can be evaluated; other agentless work can materialize in this same pass.
-                    if view.status == "ready" && view.agentless && step.spec.resource_lane.is_none()
-                        && self.store.resource_context_for_run(&run.subject)?.is_none()
+                    // Materialize first so only a step's actual lane-bound payload members defer
+                    // execution until release. Inheriting a run's lane does not turn programs,
+                    // after-run waits, or agentless gates into queued payload work.
+                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
+                    // Agentless work has no worker claim to open its execution interval. Nested
+                    // missions need the persisted parent transition before evaluating their children.
+                    if view.status == "ready" && view.agentless && !self.resource_step_has_lane(view)?
                     {
                         let reason = awaited_run(run, &step, view)?
                             .map(|after| format!("waiting for `{after}` to complete"));
@@ -12117,7 +12117,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
-                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
                     if view.status == "ready" && self.resource_step_has_lane(view)?
                         && self.resource_step_elapsed(view)?.is_some()
                     {
@@ -16513,7 +16512,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         let timeout = timeout.saturating_add(view.timeout_extension_ms);
-        if step.spec.resource_lane.is_some() || self.resource_step_has_lane(view)? {
+        if self.resource_step_has_lane(view)? {
             let Some(elapsed) = self.resource_step_elapsed(view)? else { return Ok(false); };
             if elapsed >= u128::from(timeout) { return Ok(true); }
             if let Ok(handle) = tokio::runtime::Handle::try_current() {

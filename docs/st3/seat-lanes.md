@@ -137,6 +137,9 @@ No graph claim is a permit. `admission-timeout` bounds waiting/preparation separ
 retires its exact admitted generation; natural process exit does not free room while descendants
 remain. Child runs started through a program lane inherit its native membership for their actual
 exec roots rather than reserving resources for a process-free child run.
+Only steps that own lane-bound exec payload members defer their execution interval until payload
+release. An inherited membership does not delay a program step, an after-run wait, or an agentless
+gate with no such payload: these enter `working` and consume their normal step timeout.
 
 A step's existing direct `capacity` remains an assigned agent's scoped raise, not an independent
 execution reservation. To add only executor exclusivity beside a seat, omit capacity inside the
