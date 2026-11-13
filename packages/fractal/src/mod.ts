@@ -207,7 +207,7 @@ export const HarnessMessageSchema = Schema.Struct({
   text: Text.pipe(
     Schema.refine(
       (text): text is string =>
-        text.trim().length > 0 && utf8ByteLength(text) <= 65536 && text.includes('\0') === false,
+        /\P{White_Space}/u.test(text) && utf8ByteLength(text) <= 65536 && text.includes('\0') === false,
       { message: 'message text must be nonblank, at most 65536 UTF-8 bytes and contain no NUL' },
     ),
   ),

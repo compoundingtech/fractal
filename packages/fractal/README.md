@@ -96,6 +96,8 @@ The native runtime delivers it as a one-shot first-turn message keyed by
 `(subject, id)`, not as a recurring prompt. Changing either the text or the id
 restarts the agent. Text must be nonblank, contain no NUL, and fit in 64 KiB of
 UTF-8; the nonempty id must fit in 256 UTF-8 bytes, matching native admission.
+Blankness follows Unicode `White_Space`, as in the native Rust reader:
+U+0085 alone is blank, while U+FEFF alone is not.
 All rendered strings (including node names and property keys) use KDL v2
 escaping for control characters, Unicode newlines, BOM and directional controls.
 Unpaired UTF-16 surrogates cannot represent Unicode scalars and are rejected.

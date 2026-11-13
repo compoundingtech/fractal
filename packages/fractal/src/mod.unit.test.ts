@@ -1405,6 +1405,7 @@ describe('Fractal declarations', () => {
       for (const message of [
         { text: '', id: 'startup' },
         { text: ' \n\t', id: 'startup' },
+        { text: '\u0085', id: 'startup' },
         { text: 'Start.' },
         { text: 'Start.', id: '' },
         { text: 'Start.', id: 'a'.repeat(257) },
@@ -1422,6 +1423,25 @@ describe('Fractal declarations', () => {
         if (kind === 'omp') {
           expect(() => omp(declaration.harness as never)).toThrow()
         }
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'uses native Unicode White_Space rather than JS trim for %s messages',
+    (kind) => {
+      const declaration = {
+        id: 'example/message',
+        harness: {
+          kind,
+          model: 'example-model',
+          effort: 'high' as const,
+          message: { text: '\ufeff', id: 'startup' },
+        },
+      }
+      expect(Schema.decodeUnknownSync(AgentSchema)(declaration)).toEqual(declaration)
+      expect(emit([agent(declaration)])).toContain('message "\\u{feff}" id="startup"')
+      if (kind === 'omp') {
+        expect(omp(declaration.harness).message).toEqual(declaration.harness.message)
       }
     },
   )
