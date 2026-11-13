@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Specify rich content blocks and content-bound person approvals",
+  "replay": {"status": "none", "detail": "Documentation only; no claim replay behavior changes."},
+  "schema": {"status": "none", "detail": "Draft design only; no database or executable wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digests change."},
+  "compatibility": {"status": "none", "detail": "No runtime capability is enabled. The draft specifies future gated blocks and approvals without changing current client or daemon behavior."},
+  "downtime": {"status": "none", "detail": "Documentation only; no service interruption."},
+  "manual": {"status": "none", "detail": "No installation or operator action is required by this documentation change."},
+  "recovery": {"status": "none", "detail": "No state migration or runtime recovery behavior changes."}
+}
