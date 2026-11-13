@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "A member whose capabilities do not list write.availability shows no availability section; an older app shows nothing new."
+    "detail": "A member whose capabilities do not list write.availability shows no availability section; an older app shows nothing new. A response word a later daemon adds reads as itself; a person no device has reported for a day reads as available."
   },
   "downtime": {
     "status": "none",
