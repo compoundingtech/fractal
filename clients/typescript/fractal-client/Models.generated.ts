@@ -1063,6 +1063,7 @@ export type Attention = ResourceHeader & {
   targets?: Array<Id>;
   title: string;
   update?: PersonUpdate;
+  urgent?: boolean;
   variant_id?: Id;
   what?: string;
 };

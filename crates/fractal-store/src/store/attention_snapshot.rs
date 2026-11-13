@@ -1839,7 +1839,12 @@ pub fn person_attention_item(
         deadline_unix_ms,
         default_answer,
         episode,
-        priority: "normal".into(),
+        // The priority the asker gave the ask; `normal` without one.
+        priority: ask
+            .as_ref()
+            .and_then(|ask| ask.body["fields"]["priority"].as_str())
+            .unwrap_or("normal")
+            .into(),
         kind: "person-step".into(),
         review_mode: None,
         subject: subject.to_owned(),

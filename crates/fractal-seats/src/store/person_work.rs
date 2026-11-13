@@ -365,6 +365,7 @@ mission "person-work" state="ready" {
             Ok(())
         }).unwrap().unwrap();
         let input = PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

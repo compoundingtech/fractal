@@ -1202,14 +1202,22 @@ answer is that default exactly as the person's choice of it would read (its `id`
 own outcome, such as `decline`); without one there is no answer object. No new outcome is added,
 so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
 entry as `timed_out`. A retry with the same idempotency key must name the same deadline
-(recorded as `deadline_ms` when the asker named one) and default, or it is refused with
-`idempotency-conflict`. The reconciler arms one wake for the earliest effective deadline among
+(recorded as `deadline_ms` when the asker named one), default and priority, or it is refused
+with `idempotency-conflict`. The reconciler arms one wake for the earliest effective deadline among
 the asks it resolves, so nothing polls for them.
 
-The asked person's deadline clock (`person.deadline-clock-set`) moves deadlines. An ask is
-urgent when its asker named a `deadline_ms` of at most one hour; an ask on the fleet default,
-or one that named a longer deadline, is routine. `hold-all` holds every ask and `hold-routine`
-only routine ones. An ask's effective deadline is its stored deadline plus the time a hold that
+An ask carries a priority: `critical`, `high`, `normal` or `low` (`work ask --priority`,
+`normal` when omitted). The claim records `priority` only when it is not `normal`, so naming
+`normal` is the same ask as naming none; an update has no priority, and an unknown one is refused
+with `invalid-ask-priority`. The person-step row on the person's home carries it as `priority`.
+There is one urgency rule, `fractal_schema::availability::urgent_priority`: an ask is urgent
+when its priority is `critical`, whatever its deadline. Each client-v0 attention row says so as
+`urgent`; the deadline clock reads the same rule, and clients decide interruptions (`urgent`
+admits only urgent rows) and speech from that field alone.
+
+The asked person's deadline clock (`person.deadline-clock-set`) moves deadlines. `hold-all`
+holds every ask and `hold-routine` every ask that is not urgent. An ask's effective deadline is
+its stored deadline plus the time a hold that
 applies to it was in force since it was asked: a hold `until` a time counts until then, and one
 the person ends with `run` counts until that claim. While an open hold with no end applies,
 the ask has no deadline: nothing resolves it, the reconciler arms no wake for it, and the

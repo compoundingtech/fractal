@@ -4539,6 +4539,11 @@ struct WorkAskArgs {
     /// ask resolves as timed out, with no answer.
     #[arg(long = "default", value_name = "ANSWER", requires = "request")]
     default_answer: Option<String>,
+    /// How pressing the ask is. Only `critical` is urgent: keep it for an answer that is
+    /// time-sensitive or guards an irreversible step. An urgent ask keeps its deadline running
+    /// while the person holds routine asks and may interrupt them.
+    #[arg(long, value_parser = ["critical", "high", "normal", "low"], default_value = "normal")]
+    priority: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,

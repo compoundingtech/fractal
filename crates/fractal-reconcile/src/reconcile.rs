@@ -51560,6 +51560,7 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
