@@ -80,8 +80,15 @@ since and until when; and their directive note with its expiry. Times are in loc
 a newer daemon sends that the terminal UI does not know shows as `unknown`, with a line saying an
 update shows it. No stream carries availability, so the
 tab reads `availability.list` and `notes.list` when it opens, when the terminal regains focus,
-after a reconnect and on `r`, and never on a timer. A pairing without the scope, or a daemon
-without the routes, says so in the tab.
+after a reconnect and on `r`, and never on a timer.
+
+In the tab, `s`, `i` and `d` choose the status, interruptions or deadline clock, then a digit
+its value (`0` returns it to the default: status from presence, all asks, a running clock), then
+how long it holds: `1` 30 minutes, `2` an hour, `3` two hours, `4` until tomorrow 09:00 local
+time, or Enter until it is changed again. `Esc` puts the choice away. Each change goes through
+`availability.set` one at a time, and the tab shows what Fractal answered. Only a person's own
+session may change it: a pairing without the scope, an agent's session, or a daemon without the
+routes is told so in the tab, and nothing changes.
 
 Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
 or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
