@@ -263,7 +263,7 @@ fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpe
     Ok(mission)
 }
 
-pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
+pub type StepStateRow = (String, bool, u32, String, String, String, String, String, String);
 
 /// The most one `work extend` adds to a step attempt's execution budget.
 const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -2237,7 +2237,7 @@ fn set_step_state_guarded(
                     "SELECT step_runs.status,
                                 step_runs.generation_id=mission_runs.current_generation_id,
                                 step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
-                                run_generations.status, root_runs.status, root_runs.phase
+                                run_generations.status, root_runs.status, root_runs.phase, mission_runs.id
                          FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
                          JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
                          JOIN run_generations ON run_generations.id=step_runs.generation_id
@@ -2253,6 +2253,7 @@ fn set_step_state_guarded(
                             row.get(5)?,
                             row.get(6)?,
                             row.get(7)?,
+                            row.get(8)?,
                         ))
                     },
                 )
@@ -2266,6 +2267,7 @@ fn set_step_state_guarded(
                 generation_status,
                 root_status,
                 root_phase,
+                run_id,
             )) = current
             else {
                 return Ok(false);
@@ -2281,6 +2283,15 @@ fn set_step_state_guarded(
                     && !matches!(status, "completed" | "failed" | "cancelled"))
             {
                 return Ok(false);
+            }
+            if matches!(status, "claimed" | "working" | "verifying") {
+                let run = mission_run_header_tx(transaction, &run_id)?;
+                if store.mission_run_supersession_pending_tx(transaction, &run)? {
+                    return Err(FractalError::new(
+                        "stale-run-generation",
+                        "the mission run awaits automatic revision cutover",
+                    ).into());
+                }
             }
             let now = now_ms();
             let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
@@ -6426,6 +6437,14 @@ impl MissionsStore for Store {
                     }
                 }
                 if action == "claim" {
+                    let run = mission_run_header_tx(transaction, current.run.strip_prefix("mission-run/").unwrap_or(&current.run))
+                        .map_err(internal)?;
+                    if self.mission_run_supersession_pending_tx(transaction, &run).map_err(internal)? {
+                        return Err(FractalError::new(
+                            "stale-run-generation",
+                            "the mission run awaits automatic revision cutover",
+                        ));
+                    }
                     let mut statement = transaction
                         .prepare(
                             "SELECT subject, generation_id, step_path FROM step_runs

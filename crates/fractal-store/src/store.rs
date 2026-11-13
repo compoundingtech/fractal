@@ -4465,8 +4465,9 @@ impl Store {
                     let missions = intent.missions.values()
                         .map(|mission| mission.id.clone()).collect::<Vec<_>>();
                     self.supersede_published_missions_tx(transaction, &missions)?;
+                } else {
+                    self.supersede_mission_publications_tx(transaction)?;
                 }
-                self.supersede_mission_publications_tx(transaction)?;
                 let store_index = current_index_tx(transaction).map_err(internal)?;
                 let response = ApplyResponse {
                     changed: true,
@@ -7626,12 +7627,43 @@ impl Store {
         let secret = hex::encode(bytes);
         let secret_hash = hex::encode(Sha256::digest(secret.as_bytes()));
         let expires = now_ms().saturating_add(lifetime_ms as u128);
-        let connection = self.connection.write();
-        connection.execute(
-            /* sqlite-large-value: allow-for-now lv-hcc836a720503 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO capabilities(secret_hash, kind, subject, incarnation_id, expires_at_unix_ms, used)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![secret_hash, kind, subject, incarnation_id, expires.to_string()],
-        )?;
+        let insert = |connection: &Connection| -> Result<()> {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h91ede9e3c3dc owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO capabilities(secret_hash, kind, subject, incarnation_id, expires_at_unix_ms, used)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![secret_hash, kind, subject, incarnation_id, expires.to_string()],
+            )?;
+            Ok(())
+        };
+        if kind == run_credentials::RUN_CREDENTIAL_KIND {
+            self.with_run_fence_internal(subject, |transaction| -> Result<()> {
+                let run_id: String = transaction
+                    .query_row(
+                        "SELECT step_runs.run_id FROM step_runs
+                         JOIN mission_runs ON mission_runs.id=step_runs.run_id
+                         WHERE step_runs.subject=?1 AND step_runs.attempt=CAST(?2 AS INTEGER)
+                           AND step_runs.status IN ('ready','working','blocked','waiting-person')
+                           AND step_runs.generation_id=mission_runs.current_generation_id
+                           AND mission_runs.phase<>'terminal'",
+                        params![subject, incarnation_id], |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| FractalError::new(
+                        "run-credential-ended",
+                        "the program attempt is no longer current and live",
+                    ))?;
+                let run = mission_run_header_tx(transaction, &run_id)?;
+                if self.mission_run_supersession_pending_tx(transaction, &run)? {
+                    return Err(FractalError::new(
+                        "stale-run-generation",
+                        "the program run awaits automatic revision cutover",
+                    ).into());
+                }
+                insert(transaction)
+            })?;
+        } else {
+            insert(&self.connection.write())?;
+        }
         Ok((secret, expires))
     }
 
@@ -8965,53 +8997,37 @@ fn enforce_mission_run_capacity_excluding(
     requested: &MissionSpec,
     excluded_run: Option<&str>,
 ) -> Result<(), FractalError> {
-    let mut statement = transaction
-        .prepare(
-            "SELECT mission_runs.id, run_generations.revision
-             FROM mission_runs JOIN run_generations
-               ON run_generations.id=mission_runs.current_generation_id
-             WHERE mission_runs.mission_id=?1
-               AND mission_runs.status IN ('running','standing','blocked')
-               AND mission_runs.phase NOT IN ('final-cancelled','cleanup-cancelled')
-               AND (?2 IS NULL OR mission_runs.id<>?2)
-             ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
-        )
-        .map_err(internal)?;
-    let active = statement
-        .query_map(params![&requested.id, excluded_run], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(internal)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(internal)?;
-    let mut limit = requested.max_active_runs;
-    for (_, revision) in &active {
-        let body = transaction
-            .query_row(
-                "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-                params![requested.id, revision],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(internal)?;
-        let revision = serde_json::from_str::<MissionSpec>(&body).map_err(internal)?;
-        limit = match (limit, revision.max_active_runs) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
+    let (active_count, excluded): (u64, bool) = transaction.query_row(
+        "SELECT COALESCE((SELECT active_count FROM mission_run_capacity_totals_v1 WHERE mission_id=?1),0),
+                EXISTS(SELECT 1 FROM mission_run_capacity_v1 WHERE run_id=?2 AND mission_id=?1)",
+        params![requested.id, excluded_run], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(internal)?;
+    let active_count = active_count.saturating_sub(u64::from(excluded));
+    let pinned_limit: Option<i64> = transaction.query_row(
+        "SELECT run_limit FROM mission_run_capacity_v1
+         WHERE mission_id=?1 AND run_limit IS NOT NULL AND (?2 IS NULL OR run_id<>?2)
+         ORDER BY run_limit,run_id LIMIT 1",
+        params![requested.id, excluded_run], |row| row.get(0),
+    ).optional().map_err(internal)?;
+    if pinned_limit == Some(-1) {
+        return Err(FractalError::new("missing-mission-revision",
+            "an active mission run's pinned definition is unavailable"));
     }
-    if limit.is_some_and(|limit| active.len() >= limit as usize) {
+    let pinned_limit = pinned_limit.map(u64::try_from).transpose().map_err(internal)?;
+    let limit = match (requested.max_active_runs.map(u64::from), pinned_limit) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
+    if let Some(limit) = limit.filter(|limit| active_count >= *limit) {
+        let example: Option<String> = transaction.query_row(
+            "SELECT run_id FROM mission_run_capacity_v1
+             WHERE mission_id=?1 AND (?2 IS NULL OR run_id<>?2) LIMIT 1",
+            params![requested.id, excluded_run], |row| row.get(0),
+        ).optional().map_err(internal)?;
         return Err(FractalError::new(
             "mission-run-capacity",
-            format!(
-                "mission `{}` reached its active run limit; active runs: {}",
-                requested.id,
-                active
-                    .iter()
-                    .map(|(id, _)| format!("mission-run/{id}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            format!("mission `{}` reached its active run limit {limit}; active runs: {active_count}; example: {}",
+                requested.id, example.map_or_else(|| "none".to_owned(), |id| format!("mission-run/{id}"))),
         ));
     }
     Ok(())

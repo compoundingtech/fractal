@@ -1909,15 +1909,15 @@ fn publication_supersedes_immediately_even_with_more_than_two_pages_of_head_back
     // Re-enqueue the published definitions even if the daemon already drained their first pass.
     let transaction = connection.transaction().unwrap();
     transaction.execute(
-        "INSERT OR IGNORE INTO local_mission_supersession_heads_v2(mission_id)
+        "INSERT OR IGNORE INTO local_mission_supersession_heads_v3(mission_id)
          SELECT mission_id FROM mission_definitions WHERE mission_id LIKE 'unrelated-%'", [],
     ).unwrap();
     transaction.execute(
-        "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v2))
-         WHERE key='local_mission_supersession_heads_v2_sequence'", [],
+        "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v3))
+         WHERE key='local_mission_supersession_heads_v3_sequence'", [],
     ).unwrap();
     let queued: u64 = transaction.query_row(
-        "SELECT COUNT(*) FROM local_mission_supersession_heads_v2 WHERE mission_id LIKE 'unrelated-%'",
+        "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id LIKE 'unrelated-%'",
         [], |row| row.get(0),
     ).unwrap();
     assert_eq!(queued, 131);

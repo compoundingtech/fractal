@@ -61,18 +61,18 @@ fn finish_cancellation(store: &Store, run: &MissionRunView) {
 fn requeue_heads(store: &Store) {
     // Replay disposable work without changing authoritative publications or refusal claims.
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h700ff73f6bb1 owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v2(mission_id) SELECT mission_id FROM mission_definitions",
+        /* sqlite-large-value: allow-for-now lv-h61cdeaaf5336 owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_mission_supersession_heads_v3(mission_id) SELECT mission_id FROM mission_definitions",
         [],
     ).unwrap();
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h50f9356df39c owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v2))
-         WHERE key='local_mission_supersession_heads_v2_sequence'", [],
+        /* sqlite-large-value: allow-for-now lv-hb6aa7884a00c owner=fractal_missions::store::tests::mission_supersession TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v3))
+         WHERE key='local_mission_supersession_heads_v3_sequence'", [],
     ).unwrap();
 }
 
 fn assert_queue_converged(store: &Store) {
     let pending: u64 = store.readers.get().query_row(
-        "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
+        "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
         [], |row| row.get(0),
     ).unwrap();
     assert_eq!(pending, 0);
@@ -473,4 +473,204 @@ fn mission_supersession_respects_step_level_human_revision_policy() {
     assert!(retained.superseded_by.is_none());
     assert_eq!(store.supersede_idle_mission_run(&retained, &first).unwrap(), None);
     assert!(retained.supersession_fault.is_none());
+}
+
+fn population(store: &Store, count: usize) -> Vec<MissionRunView> {
+    publish_mission(store, ORIGINAL, "population-original");
+    (0..count).map(|index| {
+        store.create_mission_run(&MissionRunRequest {
+            mission: "retry-work".into(), revision: None, workspace: "/work/retry".into(),
+            requester: Some("person/requester".into()), mode: None,
+            inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+            idempotency_key: format!("population-{index}"),
+        }).unwrap()
+    }).collect()
+}
+
+#[test]
+fn mission_supersession_single_head_publication_bounds_source_work_and_drains() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 193);
+    let target = publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "population-fixed");
+    let linked = sources.iter().filter(|source| current(&store, source).superseded_by.is_some()).count();
+    assert!(linked > 0 && linked <= 32,
+        "a publication writer must process at most one source batch, not the whole mission: {linked}");
+    store.supersede_mission_publications().unwrap();
+    let mut replacements = BTreeSet::new();
+    for source in &sources {
+        let fresh = replacement(&store, source);
+        assert_eq!(fresh.revision, target.revision);
+        assert_link(&current(&store, source), &fresh);
+        assert!(replacements.insert(fresh.subject.clone()));
+    }
+    assert!(!store.supersede_mission_publications().unwrap());
+    for source in &sources {
+        assert_eq!(store.claims_for(&replacement(&store, source).subject, Some("mission-run.created")).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn mission_supersession_single_head_sql_work_scales_linearly_without_warming() {
+    fn work(count: usize) -> smallclaims::sqlite::work::SqliteWork {
+        let store = Store::open_memory("owner").unwrap();
+        let sources = population(&store, count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "population-fixed");
+        store.supersede_mission_publications().unwrap();
+        let work = scope.finish();
+        assert!(sources.iter().all(|source| current(&store, source).superseded_by.is_some()));
+        work
+    }
+    let small = work(64);
+    let large = work(256);
+    assert!(large.statements < small.statements * 6,
+        "four times the population must not reload every active pinned definition for each replacement: {small:?} -> {large:?}");
+    assert!(large.vm_steps < small.vm_steps * 6,
+        "source paging and capacity admission must have bounded per-source work: {small:?} -> {large:?}");
+}
+
+#[test]
+fn mission_supersession_partial_head_change_restarts_pins_and_refusals_without_starvation() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 129);
+    publish_mission(&store, &ORIGINAL.replace("input \"value\"", "input \"replacement\""), "population-refused");
+    assert!(sources.iter().any(|source| current(&store, source).supersession_fault.is_none()));
+    let corrected = publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "population-corrected");
+    store.supersede_mission_publications().unwrap();
+    for source in &sources {
+        let fresh = replacement(&store, source);
+        assert_eq!(fresh.revision, corrected.revision);
+        assert!(current(&store, source).supersession_fault.is_none());
+    }
+    assert!(!store.supersede_mission_publications().unwrap());
+}
+
+#[test]
+fn mission_supersession_large_population_capacity_refusal_is_atomic_and_bounded() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 97);
+    publish_mission(&store, &ORIGINAL.replace("concurrent-runs", "concurrent-runs max=1"), "population-limited");
+    store.supersede_mission_publications().unwrap();
+    for source in &sources {
+        let refused = current(&store, source);
+        assert_eq!(refused.status, "running");
+        assert_eq!(refused.generation, source.generation);
+        assert!(refused.superseded_by.is_none());
+        assert!(refused.supersession_fault.as_deref().unwrap().contains("mission-run-capacity"));
+        assert_eq!(store.claims_for(&source.subject, Some("reconcile.fault")).unwrap().len(), 1);
+    }
+    assert!(!store.supersede_mission_publications().unwrap());
+    assert_eq!(store.active_mission_runs_for_mission("retry-work").unwrap().len(), 97);
+}
+
+#[test]
+fn mission_run_capacity_keeps_strict_pinned_limits_across_status_rebuild_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("capacity.sqlite");
+    let store = Store::open(&path, "owner").unwrap();
+    let bounded = ORIGINAL.replace("concurrent-runs", "concurrent-runs max=2")
+        .replace("state=\"ready\"", "state=\"ready\" revisions=\"human-only\"");
+    let first = publish_mission(&store, &bounded, "bounded-original");
+    let request = |key: &str, revision: Option<String>| MissionRunRequest {
+        mission: "retry-work".into(), revision, workspace: "/work/retry".into(),
+        requester: Some("person/requester".into()), mode: None,
+        inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+        idempotency_key: key.into(),
+    };
+    let one = store.create_mission_run(&request("one", Some(first.revision.clone()))).unwrap();
+    let two = store.create_mission_run(&request("two", Some(first.revision))).unwrap();
+    publish_mission(&store, &ORIGINAL.replace("state=\"ready\"", "state=\"ready\" revisions=\"human-only\""), "unlimited-head");
+    store.set_mission_run_state(&one.id, "blocked", "normal", None).unwrap();
+    rebuild(&store, &[&one, &two]);
+    assert_eq!(store.create_mission_run(&request("refused", None)).unwrap_err().code, "mission-run-capacity");
+    drop(store);
+    let store = Store::open(&path, "owner").unwrap();
+    assert_eq!(store.create_mission_run(&request("refused", None)).unwrap_err().code, "mission-run-capacity");
+    store.request_mission_run_cancellation(&one.id, "release its capacity").unwrap();
+    store.create_mission_run(&request("admitted", None)).unwrap();
+    assert_eq!(store.create_mission_run(&request("still-refused", None)).unwrap_err().code, "mission-run-capacity");
+    store.request_mission_run_cancellation(&two.id, "release the last strict pin").unwrap();
+    store.create_mission_run(&request("unlimited-again", None)).unwrap();
+}
+
+#[test]
+fn mission_run_capacity_admission_sql_is_population_independent() {
+    fn work(count: usize) -> smallclaims::sqlite::work::SqliteWork {
+        let store = Store::open_memory("owner").unwrap();
+        let sources = population(&store, count);
+        let mission = store.mission_spec("retry-work", Some(&sources[0].revision)).unwrap().unwrap();
+        let reader = store.readers.get();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        for _ in 0..8 {
+            fractal_store::store::enforce_mission_run_capacity(&reader, &mission).unwrap();
+        }
+        scope.finish()
+    }
+    let small = work(32);
+    let large = work(256);
+    assert!(large.statements <= small.statements + 8,
+        "admission must not load one definition per active run: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps * 2,
+        "admission must seek the maintained count and minimum, not fold the active population: {small:?} -> {large:?}");
+}
+
+#[test]
+fn mission_supersession_targeted_dispatch_check_reaches_unpaged_sources_but_preserves_new_pins() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 97);
+    let selected = publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "dispatch-head");
+    let unpaged = sources.iter().find(|source| current(&store, source).superseded_by.is_none()).unwrap();
+    assert!(store.supersede_current_mission_run(unpaged).unwrap());
+    assert_eq!(replacement(&store, unpaged).revision, selected.revision);
+    let pin = store.create_mission_run(&MissionRunRequest {
+        mission: "retry-work".into(), revision: Some(unpaged.revision.clone()),
+        workspace: "/work/retry".into(), requester: Some("person/requester".into()), mode: None,
+        inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+        idempotency_key: "post-publication-pin".into(),
+    }).unwrap();
+    assert!(!store.supersede_current_mission_run(&pin).unwrap());
+    store.supersede_mission_publications().unwrap();
+    assert!(current(&store, &pin).superseded_by.is_none());
+    assert_eq!(current(&store, &pin).revision, unpaged.revision);
+}
+
+#[test]
+fn mission_supersession_start_fence_is_read_only_and_releases_recorded_refusals() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 97);
+    publish_mission(&store, &ORIGINAL.replace("input \"value\"", "input \"replacement\""), "start-fence-incompatible");
+    let unpaged = sources.iter().find(|source| current(&store, source).supersession_fault.is_none()).unwrap();
+    let index = store.index().unwrap();
+    assert!(store.mission_run_supersession_pending_tx(&store.readers.get(), unpaged).unwrap());
+    assert_eq!(store.index().unwrap(), index, "the start predicate must never write a refusal or link");
+    let step = unpaged.steps.iter().find(|step| step.step == "prepare").unwrap();
+    assert!(store.set_step_state(&step.subject, "working", None).unwrap_err().to_string().contains("automatic revision cutover"));
+    assert!(store.issue_run_credential(&step.subject, step.attempt, 60_000).is_err());
+    assert_eq!(store.run_credentials_issued_for_tests(&step.subject), 0);
+    assert_eq!(current(&store, unpaged).steps.iter().find(|candidate| candidate.subject == step.subject).unwrap().status, step.status);
+    assert!(store.supersede_current_mission_run(unpaged).unwrap());
+    let refused = current(&store, unpaged);
+    assert!(refused.supersession_fault.is_some());
+    assert!(refused.superseded_by.is_none());
+    assert!(!store.mission_run_supersession_pending_tx(&store.readers.get(), &refused).unwrap());
+    assert!(store.set_step_state(&step.subject, "working", None).unwrap());
+    let credential = store.issue_run_credential(&step.subject, step.attempt, 60_000).unwrap();
+    assert_eq!(store.run_binding(&credential).unwrap().run, unpaged.subject);
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "start-fence-corrected");
+    while store.supersede_mission_publications().unwrap() {}
+    assert!(current(&store, unpaged).superseded_by.is_some());
+}
+
+#[test]
+fn mission_supersession_program_dispatch_credential_is_fenced_before_its_source_page() {
+    let store = Store::open_memory("owner").unwrap();
+    let sources = population(&store, 97);
+    let source = sources.iter().max_by(|left, right| left.id.cmp(&right.id)).unwrap();
+    let step = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&step.subject, "working", None).unwrap();
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "credential-head");
+    assert!(current(&store, source).superseded_by.is_none());
+    let error = store.issue_run_credential(&step.subject, step.attempt, 60_000).unwrap_err();
+    assert!(error.to_string().contains("automatic revision cutover"));
+    assert_eq!(store.run_credentials_issued_for_tests(&step.subject), 0);
 }

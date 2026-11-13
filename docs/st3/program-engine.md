@@ -57,7 +57,8 @@ Taken by the owner on 2026-11-10:
 - **R05 Generations pin code; publication replaces active stale runs:** dispatch and resume
   execute the code pinned by their generation. New-revision publication preflights a fresh
   replacement before ordinary source cancellation and cleanup; the replacement waits for
-  terminal cleanup, then restarts on the new code without adopting the source journal.
+  terminal cleanup, confirmed owned-runtime quiescence, and effective program-effect fencing,
+  then restarts on the new code without adopting the source journal.
   Admission refusal leaves the source active with a visible fault. Explicit run revision
   remains a distinct generation transition; replay never substitutes code in a journal.
 - **R06 No divergent replay:** replay never feeds a journal to different code.
@@ -144,6 +145,7 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| host → daemon | `cancelled` | `step`, `attempt` | this host stopped the attempt's effect creation and fenced its effect groups; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
@@ -171,6 +173,16 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+For publication supersession, sending `cancel` is not sufficient to admit the replacement.
+The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
+fences recorded leftover effect groups by verified boot/process-start identity. A failed
+kill or unprovable identity remains visible as `supersession-effect-fence`; it cannot be
+converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
+and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
+wake reconciliation; no polling or replacement execution timeout is introduced. New program
+credentials are minted inside the run writer fence only for the current live attempt and
+after checking that it does not await automatic publication cutover.
 
 ### 3. Declaration and authority
 

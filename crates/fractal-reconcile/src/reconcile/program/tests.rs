@@ -206,3 +206,33 @@ fn recorded_groups_are_killed_only_when_their_leader_is_verified() {
         child.wait().unwrap();
     }
 }
+
+#[test]
+fn supersession_fences_recorded_effect_groups_without_signalling_reused_identities() {
+    use std::os::unix::process::CommandExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let groups = engine.groups_dir();
+    std::fs::create_dir_all(&groups).unwrap();
+    let mut effect = Command::new("sleep").arg("1000").process_group(0).spawn().unwrap();
+    let mut reused = Command::new("sleep").arg("1000").process_group(0).spawn().unwrap();
+    let record = |child: &Child, start: Option<String>| {
+        std::fs::write(groups.join(format!("{}.json", child.id())), json!({
+            "pid": child.id(), "boot_id": boot_id().unwrap(), "start_time": start,
+            "step": "step-run/retired-generation/effect", "attempt": 1,
+        }).to_string()).unwrap();
+    };
+    // An unconfirmed identity is a visible error, never permission to run the
+    // replacement or to signal a process whose identity we cannot prove.
+    record(&effect, None);
+    assert!(engine.fence_left_effects().is_err());
+    assert!(effect.try_wait().unwrap().is_none());
+    record(&effect, start_time(effect.id() as i32));
+    record(&reused, Some("not-this-process".into()));
+    assert!(engine.fence_left_effects().unwrap());
+    let status = effect.wait().unwrap();
+    assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL));
+    assert!(reused.try_wait().unwrap().is_none());
+    reused.kill().unwrap();
+    reused.wait().unwrap();
+}

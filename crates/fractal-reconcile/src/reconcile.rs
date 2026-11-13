@@ -11150,6 +11150,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         mission: Option<MissionSpec>,
     ) -> Result<bool> {
+        if matches!(run.phase.as_str(), "normal" | "supersession-waiting")
+            && self.store.supersede_current_mission_run(run)?
+        {
+            return Ok(true);
+        }
         if run.phase != "normal"
             && run.phase != "supersession-waiting"
             && !run.phase.starts_with("cleanup-")
@@ -11160,7 +11165,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A replacement that never admitted still cannot overlap its source.
             return Ok(false);
         }
+        if run.supersedes.is_some() && run.phase.starts_with("final-")
+            && let Some(engine) = self.program_engine.get()
+        {
+            match engine.fence_left_effects() {
+                Ok(false) => return Ok(false),
+                Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
+                Err(error) => {
+                    self.record_fault(&run.subject, "supersession-effect-fence", Err(error))?;
+                    return Ok(false);
+                }
+            }
+        }
         if run.phase == "supersession-waiting" {
+            let ready = self.store.mission_run_supersession_predecessors_terminal(run)?;
             // The predecessor may have reached terminal since its last evaluation. Release its
             // program host before promoting the replacement: the host processes cancellation
             // (including killing effect groups) before any later replacement dispatch.
@@ -11173,7 +11191,28 @@ impl<R: RuntimeControl> Reconciler<R> {
                     engine.release_left(&view)?;
                     predecessor = view.supersedes;
                 }
+                if ready {
+                    match engine.fence_left_effects() {
+                        Ok(false) => return Ok(false),
+                        Ok(true) => self.record_fault(&run.subject, "supersession-effect-fence", Ok(()))?,
+                        Err(error) => {
+                            self.record_fault(&run.subject, "supersession-effect-fence", Err(error))?;
+                            return Ok(false);
+                        }
+                    }
+                }
             }
+            if !ready {
+                if let Some(predecessor) = &run.supersedes
+                    && self.store.mission_run(predecessor)?.is_some_and(|view| view.phase == "terminal")
+                {
+                    self.record_fault(&run.subject, "supersession-runtime-quiescence", Err(anyhow::anyhow!(
+                        "replacement execution is fenced: terminal predecessor ancestry still has live or unconfirmed execution"
+                    )))?;
+                }
+                return Ok(false);
+            }
+            self.record_fault(&run.subject, "supersession-runtime-quiescence", Ok(()))?;
             return self.store.resume_superseding_mission_run(&run.id).map_err(Into::into);
         }
         if run.phase == "normal"
@@ -12053,6 +12092,19 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_mission_run_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        // A child can still own execution after its superseded parent ended.
+        // Preserve its cleanup confirmation and recovery path as well.
+        let mut supersession_cleanup = run.superseded_by.is_some();
+        let mut parent_step = run.parent_step_run.clone();
+        let mut seen = BTreeSet::new();
+        while !supersession_cleanup {
+            let Some(step) = parent_step else { break };
+            anyhow::ensure!(seen.insert(step.clone()), "mission cleanup ancestry cycles at {step}");
+            let Some(step) = self.store.step_run(&step)? else { break };
+            let Some(parent) = self.store.mission_run(&step.run)? else { break };
+            supersession_cleanup = parent.superseded_by.is_some();
+            parent_step = parent.parent_step_run;
+        }
         let owner_runs = if run.mode == "eval" {
             self.store
                 .mission_runs_for_root(&run.id)?
@@ -12096,21 +12148,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<Vec<_>>();
         let mut live = Vec::new();
         for subject in &owned {
-            let actual = self.store.latest_actual_value(&subject.subject)?;
-            // A stop declaration for a runtime that never existed has no process
-            // to await. Otherwise cleanup can remain pending forever.
-            if subject.kind == "stop" && actual.is_none() {
+            // Only unrelated runs may release a never-observed stop or retained
+            // seat. Supersession requires positive execution confirmation.
+            if !supersession_cleanup && subject.kind == "stop"
+                && self.store.latest_actual_value(&subject.subject)?.is_none()
+            {
                 continue;
             }
-            let status = actual
-                .as_ref()
-                .and_then(|actual| actual_field(actual, "status"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if !matches!(status.as_deref(), Some("stopped" | "absent" | "exited")) {
+            if !self.store.runtime_execution_quiescent(&subject.subject)? {
                 // A seat kept for unread mail or another run's work does not hold this run
                 // open. Its stop declaration stays and takes effect once it is free.
-                if subject.kind == "stop"
+                if !supersession_cleanup && subject.kind == "stop"
                     && self
                         .seat_retention(&subject.subject, &run.subject)?
                         .is_some()
@@ -12161,12 +12209,30 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(intake_stopped);
             }
             unstopped = Some(format!(
-                "cleanup ended at its deadline with runtimes still live: {}",
+                "{}: {}",
+                if supersession_cleanup {
+                    "cleanup deadline expired with runtimes still live or unconfirmed"
+                } else {
+                    "cleanup ended at its deadline with runtimes still live"
+                },
                 live.iter()
                     .map(|subject| subject.subject.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+            // A superseding run shares this workspace. Expiring cleanup releases
+            // neither execution authority nor its runtime-confirmation dependency.
+            if supersession_cleanup {
+                self.record_fault(
+                    &run.subject,
+                    "cleanup-runtime-quiescence",
+                    Err(anyhow::anyhow!("{}", unstopped.as_deref().unwrap())),
+                )?;
+                return Ok(intake_stopped);
+            }
+        }
+        if supersession_cleanup && live.is_empty() {
+            self.record_fault(&run.subject, "cleanup-runtime-quiescence", Ok(()))?;
         }
         let mut status = run.phase.strip_prefix("cleanup-").unwrap_or("failed");
         let mut changed = intake_stopped;

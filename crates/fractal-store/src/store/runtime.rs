@@ -1035,13 +1035,13 @@ mod schema_install_tests {
             }).unwrap();
             store.apply(&intent, &plan.subject_tokens, &format!("counter-{attempt}")).unwrap();
             let sequence: u64 = store.readers.get().query_row(
-                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v2_sequence'",
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
                 [], |row| row.get(0),
             ).unwrap();
             assert!(sequence > previous, "emptying and reopening must not reuse a drain ceiling");
             previous = sequence;
             assert_eq!(store.readers.get().query_row(
-                "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
                 [], |row| row.get::<_, u64>(0),
             ).unwrap(), 0, "ordinary publication drains its own head");
             let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
@@ -1055,7 +1055,7 @@ mod schema_install_tests {
     fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         for (refused_table, refused_meta_insert) in [
-            ("local_mission_supersession_heads_v2", 0), ("meta", 1), ("meta", 2),
+            ("local_mission_supersession_heads_v3", 0), ("meta", 1), ("meta", 2),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("bootstrap.sqlite");
@@ -1070,9 +1070,9 @@ mod schema_install_tests {
                 let connection = store.connection.write();
                 connection.execute("DELETE FROM meta WHERE key=?1",
                     [mission_supersession::BOOTSTRAP_KEY]).unwrap();
-                connection.execute("DELETE FROM local_mission_supersession_heads_v2", []).unwrap();
+                connection.execute("DELETE FROM local_mission_supersession_heads_v3", []).unwrap();
                 let counter = || connection.query_row(
-                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v2_sequence'",
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
                     [], |row| row.get::<_, u64>(0),
                 ).unwrap();
                 let counter_before = counter();
@@ -1095,7 +1095,7 @@ mod schema_install_tests {
                 assert!(connection.is_autocommit(), "failed bootstrap must roll back");
                 assert_eq!(counter(), counter_before, "failed bootstrap must roll back its allocator");
                 assert_eq!(connection.query_row(
-                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v2",
+                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
                     [], |row| row.get::<_, u64>(0),
                 ).unwrap(), 0, "head seed and completion marker must commit together");
                 assert!(!connection.query_row(
@@ -1107,7 +1107,7 @@ mod schema_install_tests {
             let store = Store::open(&path, "owner").unwrap();
             let connection = store.connection.write();
             assert_eq!(connection.query_row(
-                "SELECT COUNT(*) FROM local_mission_supersession_heads_v2 WHERE mission_id='existing-head'",
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id='existing-head'",
                 [], |row| row.get::<_, u64>(0),
             ).unwrap(), 1, "reopen must recover the existing selected head");
             assert!(connection.query_row(
