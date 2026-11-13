@@ -79,6 +79,9 @@ final class SpeechCoordinatorTests: XCTestCase {
 
     speech.muteAll(.hours(1), now: now)
     XCTAssertEqual(speech.status[second.id], .held(.muted(until: now + 3600)))
+    XCTAssertEqual(
+      deliveries.shown.last, .init(id: second.id, delivery: .held(.muted(until: now + 3600))),
+      "a queued item a mute holds still gets its banner")
     await until { speech.current == nil }
     let skipped = await output.skipped
     XCTAssertEqual(skipped, ["attention/one#claim/1"])
@@ -96,7 +99,7 @@ final class SpeechCoordinatorTests: XCTestCase {
 
   func testMutingAnAgentHoldsOnlyItsItems() async {
     let output = ScriptedSpeech()
-    let (speech, _) = coordinator(output)
+    let (speech, deliveries) = coordinator(output)
     let first = urgent("one", from: "release-captain")
     let second = urgent("two", from: "observability")
     let third = urgent("three", from: "janitor")
@@ -105,6 +108,7 @@ final class SpeechCoordinatorTests: XCTestCase {
 
     speech.mute(agent: "observability", .endOfToday, now: now)
     XCTAssertEqual(speech.queue.map(\.id), [third.id])
+    XCTAssertEqual(deliveries.shown.last?.id, second.id, "its banner still shows")
     guard case .held(.agentMuted) = speech.status[second.id] else { return XCTFail("\(String(describing: speech.status[second.id]))") }
     XCTAssertEqual(speech.current?.id, first.id, "another requester keeps speaking")
     let skipped = await output.skipped

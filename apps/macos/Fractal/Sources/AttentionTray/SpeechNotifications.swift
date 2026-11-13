@@ -77,7 +77,11 @@ final class SpeechNotifications: NSObject, SpeechDeliverySink, UNUserNotificatio
   func retain(_ open: Set<String>) {
     let closed = shown.filter { id, notice in
       if open.contains(id) { return false }
-      if case .answered(.committed) = notice.state { return false }
+      // An answer in flight or committed stays as its receipt: the commit closes the card.
+      switch notice.state {
+      case .answered(.sending), .answered(.committed): return false
+      case .speaking, .held, .answered(.refused): break
+      }
       return true
     }.map(\.key)
     guard !closed.isEmpty else { return }
