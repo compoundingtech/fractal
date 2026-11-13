@@ -174,9 +174,13 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `operational.recovered` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `episode:string`, `failure:string`, `reason:string` |  |
 | `ordered-membership.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)` |  |
 | `owned-set.revised` | `owned-set` | `system-only` | `append` | `durable` | `body!:object`, `revision!:string` |  |
+| `person.deadline-clock-set` | `person` | `capability-holder` | `state-transition` | `durable` | `deadline_clock!:string`, `until_unix_ms:integer` |  |
 | `person.delegation-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `actions!:array` |  |
 | `person.directive-note-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `expires_at:string`, `text!:string or null` |  |
+| `person.interruptions-set` | `person` | `capability-holder` | `state-transition` | `durable` | `interruptions!:string`, `until_unix_ms:integer` |  |
+| `person.presence-observed` | `person` | `capability-holder` | `append` | `durable` | `observed_at_unix_ms!:integer`, `presence!:string`, `source!:string` |  |
 | `person.rename.completed` | `person` | `authorized-requester` | `append` | `durable` | `new_person:subject-reference`, `old_person:subject-reference`, `report:object` |  |
+| `person.status-set` | `person` | `capability-holder` | `state-transition` | `durable` | `status!:string or null`, `until_unix_ms:integer` |  |
 | `planning-session.approved` | `planning-session` | `authorized-requester` | `once` | `durable` | `candidate_revision:integer`, `kdl:subject-reference`, `markdown:subject-reference`, `mission_revision:string`, `preview_hash:string`, `preview_token:string`, `requester:subject-reference`, `variant:string` |  |
 | `planning-session.cancelled` | `planning-session` | `authorized-requester` | `once` | `durable` | `reason:string`, `requester:subject-reference` | `cancellation` |
 | `planning-session.candidate-submitted` | `planning-session` | `authorized-participant` | `append` | `durable` | `candidate_revision:integer`, `kdl:subject-reference`, `markdown:subject-reference`, `mission_revision:string`, `revision:integer`, `variant:string` |  |
@@ -337,6 +341,14 @@ All members must upgrade before publishing accountable roots. Older members reta
 Notes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.
 
 Publication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.
+
+## Person availability
+
+Four kinds on `person/NAME` record a person's availability. Only that exact person may write them, through dedicated operations only, including replicated admission. `person.status-set` takes `status` (`available`, `away`, or null to clear the override); `person.interruptions-set` takes `interruptions` (`all`, `urgent`, `none`); `person.deadline-clock-set` takes `deadline_clock` (`run`, `hold-routine`, `hold-all`). Each takes optional `until_unix_ms`, after which that axis returns to its default: presence-derived status, `all` interruptions and a running clock. The canonical latest claim of each kind is that axis's current value.
+
+`person.presence-observed` is one client's report: `presence` (`present`, `idle`, `locked`), the daemon-assigned `source` and the client's `observed_at_unix_ms`. Without an override, status is `available` only while some source's newest report is fresh and `present`; stale or missing reports never count as present.
+
+A deadline-clock hold pauses ask deadlines: `hold-all` every ask, `hold-routine` asks without an explicit deadline of at most one hour. The durable clock history records held time; an ask's effective deadline is its stored deadline plus the time held since it was asked. Availability never grants authority.
 
 ## Arrangement operation vocabulary
 
