@@ -8,6 +8,9 @@
 //! before the window: a count's event time is a field its retries repeat, so a retry is either
 //! deduplicated inside the window or ignored before it.
 //!
+//! A sample or event an `exclude` names, or one an `only` leaves out, is counted apart in its
+//! row's explanation, so nothing the claims hold disappears without a trace.
+//!
 //! An open sample is censored, not dropped: for each target it enters the percentile at its age
 //! once that age is over the target's `within`, since it is certain to be over.
 //!
@@ -23,7 +26,7 @@ use std::sync::{Mutex, PoisonError};
 use serde_json::{Map, Value, json};
 
 use crate::model::{ClaimRecord, FractalError};
-use crate::objective::{Bound, Breach, Count, Exclude, Indicator, Interval, Objective, Window, percentile_row};
+use crate::objective::{Bound, Breach, Count, Exclude, Indicator, Interval, Objective, Only, Window, percentile_row};
 use crate::objective_faults::{ObjectiveFaults, ObjectiveResponse, check_with_response, end_unjudged};
 use crate::objectives::{clamp_percent, duration, nearest_rank, plural};
 use crate::store::Store;
@@ -67,17 +70,20 @@ enum Measure {
     Count(Box<Count>),
 }
 
-/// A subject's event: its earliest event claim's time, and the label and exclude fields of it.
+/// A subject's event: its earliest event claim's time and id (the id breaks a tie, so every member
+/// keeps the same claim), and the label, exclude and `only` fields of it.
 #[derive(Debug)]
 struct Counted {
     at: u64,
+    id: String,
     fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default)]
 struct Sample {
-    /// The earliest start, and the label and exclude fields of its claim.
-    start: Option<(u64, BTreeMap<String, String>)>,
+    /// The earliest start by its time, then its claim id, so every member keeps the same claim;
+    /// and the label, exclude and `only` fields of that claim.
+    start: Option<(u64, String, BTreeMap<String, String>)>,
     expect: Option<Expect>,
     /// Each member's stop times; without `member=`, under "".
     stops: BTreeMap<String, BTreeSet<u64>>,
@@ -104,6 +110,7 @@ enum Class {
     Closed { value: u64, stop: u64 },
     Open { age: u64 },
     Cancelled { at: u64 },
+    /// Named by an `exclude`, or left out by an `only`: counted apart, never in a percentile.
     Excluded { last_seen: u64 },
     /// Claims under the prefix with no start claim yet.
     Unstarted,
@@ -208,7 +215,7 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             store,
             rows,
             &ids,
-            Some(ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name }),
+            ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name },
         )?;
         total.opened += check.opened;
         total.recovered += check.recovered + end_unjudged(store, |id| owns(&name, id), &ids)?;
@@ -280,7 +287,7 @@ impl Tracked {
             return;
         };
         self.seen = true;
-        let kept = kept_fields(&count.labels, &count.excludes, fields);
+        let kept = kept_fields(&count.labels, &count.excludes, &count.only, fields);
         for label in &count.labels {
             let Some(value) = kept.get(label) else {
                 continue;
@@ -292,9 +299,9 @@ impl Tracked {
         if at < horizon {
             return;
         }
-        let event = Counted { at, fields: kept };
+        let event = Counted { at, id: claim.id.clone(), fields: kept };
         match self.events.get_mut(&claim.subject) {
-            Some(earliest) if at < earliest.at => *earliest = event,
+            Some(earliest) if (at, claim.id.as_str()) < (earliest.at, earliest.id.as_str()) => *earliest = event,
             Some(_) => {}
             None => {
                 self.events.insert(claim.subject.clone(), event);
@@ -302,7 +309,7 @@ impl Tracked {
         }
     }
 
-    /// Drop the samples that stopped, were cancelled or were excluded before the window.
+    /// Drop the samples that stopped, were cancelled or were excluded or left out before the window.
     fn prune(&mut self, interval: &Interval, window: Window, now: u64) {
         let horizon = now.saturating_sub(window.ms);
         self.samples.retain(|_, sample| match sample.class(interval, None, now) {
@@ -408,27 +415,44 @@ impl Sample {
         let kind = claim.kind.as_str();
         let starts = kind == interval.start.kind;
         let expects = interval.expect.as_ref().filter(|(event, _)| event.kind == kind);
+        let stops = kind == interval.stop.0.kind;
         let at = if starts || expects.is_some() {
-            // One kind may both start and set the expected members; read every role before
-            // changing the sample, so an unreadable claim changes nothing.
+            // One kind may both start and set the expected members, or start and stop the sample;
+            // read every role before changing the sample, so an unreadable claim changes nothing.
             let start = if starts { Some(time(&interval.start.at)?) } else { None };
             let expect = match expects {
                 Some((event, set)) => Some((time(&event.at)?, fields.and_then(|fields| fields.get(set)).and_then(string_list)?)),
                 None => None,
             };
+            // A `stop` naming the `start` kind takes no `member=`.
+            let stop = if stops { Some(time(&interval.stop.0.at)?) } else { None };
+            let selected = start.is_some_and(|at| {
+                self.start.as_ref().is_none_or(|(start, id, _)| (at, claim.id.as_str()) < (*start, id.as_str()))
+            });
             if let Some(at) = start
-                && self.start.as_ref().is_none_or(|(start, _)| at < *start)
+                && selected
             {
-                self.start = Some((at, kept_fields(&interval.labels, &interval.excludes, fields)));
+                self.start = Some((at, claim.id.clone(), kept_fields(&interval.labels, &interval.excludes, &interval.only, fields)));
             }
-            let latest = start.into_iter().chain(expect.as_ref().map(|(at, _)| *at)).max().unwrap_or_default();
+            let latest = start.into_iter().chain(expect.as_ref().map(|(at, _)| *at)).chain(stop).max().unwrap_or_default();
             if let Some((at, set)) = expect
                 && self.expect.as_ref().is_none_or(|expect| (at, claim.id.as_str()) > (expect.at, expect.id.as_str()))
             {
-                self.expect = Some(Expect { at, id: claim.id.clone(), set, fields: kept_fields(&interval.labels, &interval.excludes, fields) });
+                self.expect = Some(Expect { at, id: claim.id.clone(), set, fields: kept_fields(&interval.labels, &interval.excludes, &interval.only, fields) });
+            }
+            if let Some(at) = stop {
+                if starts {
+                    // One claim is the whole sample: only the start claim's own stop closes it, so a
+                    // sample never pairs one claim's start with another's stop.
+                    if selected {
+                        self.stops.insert(String::new(), BTreeSet::from([at]));
+                    }
+                } else {
+                    self.stops.entry(String::new()).or_default().insert(at);
+                }
             }
             latest
-        } else if kind == interval.stop.0.kind {
+        } else if stops {
             let at = time(&interval.stop.0.at)?;
             let member = match &interval.stop.1 {
                 Some(field) => fields.and_then(|fields| fields.get(field)).and_then(text)?,
@@ -460,16 +484,19 @@ impl Sample {
     }
 
     fn label(&self, field: &str) -> Option<&str> {
-        let start = self.start.as_ref().and_then(|(_, fields)| fields.get(field));
+        let start = self.start.as_ref().and_then(|(_, _, fields)| fields.get(field));
         start.or_else(|| self.expect.as_ref().and_then(|expect| expect.fields.get(field))).map(String::as_str)
     }
 
+    /// Whether an `exclude` names a value of its start or expect claim, or an `only` does not hold
+    /// of its start claim.
     fn excluded(&self, interval: &Interval) -> bool {
-        interval.excludes.iter().any(|exclude| {
-            let start = self.start.as_ref().and_then(|(_, fields)| fields.get(&exclude.field));
+        let excluded = interval.excludes.iter().any(|exclude| {
+            let start = self.start.as_ref().and_then(|(_, _, fields)| fields.get(&exclude.field));
             let expect = self.expect.as_ref().and_then(|expect| expect.fields.get(&exclude.field));
             [start, expect].into_iter().flatten().any(|value| exclude.values.contains(value))
-        })
+        });
+        excluded || self.start.as_ref().is_some_and(|(_, _, fields)| !holds(&interval.only, fields))
     }
 
     /// The earliest stop of `member` at or after `start`.
@@ -479,7 +506,7 @@ impl Sample {
 
     /// The sample at `now`, or with `member`, that member's part of it.
     fn class(&self, interval: &Interval, member: Option<&str>, now: u64) -> Class {
-        let Some((start, _)) = &self.start else {
+        let Some((start, _, _)) = &self.start else {
             return Class::Unstarted;
         };
         let start = *start;
@@ -528,15 +555,16 @@ impl Sample {
     }
 }
 
-/// The fields a sample's start or expect claim, or a count's event claim, keeps: its labels' and
-/// its excludes'.
-fn kept_fields(labels: &[String], excludes: &[Exclude], fields: Option<&Map<String, Value>>) -> BTreeMap<String, String> {
+/// The fields a sample's start or expect claim, or a count's event claim, keeps: its labels', its
+/// excludes' and its `only`s'.
+fn kept_fields(labels: &[String], excludes: &[Exclude], only: &[Only], fields: Option<&Map<String, Value>>) -> BTreeMap<String, String> {
     let Some(fields) = fields else {
         return BTreeMap::new();
     };
     labels
         .iter()
         .chain(excludes.iter().map(|exclude| &exclude.field))
+        .chain(only.iter().map(|only| &only.field))
         .filter_map(|name| Some((name.clone(), text(fields.get(name)?)?)))
         .collect()
 }
@@ -590,7 +618,7 @@ impl Tracked {
         part: Option<(&str, &str)>,
         events: &[&Counted],
     ) -> Value {
-        let excluded = events.iter().filter(|event| excluded(&count.excludes, &event.fields)).count() as u64;
+        let excluded = events.iter().filter(|event| left_out(count, &event.fields)).count() as u64;
         let counted = events.len() as u64 - excluded;
         let span = span(window.ms);
         let rate = counted as f64 / (window.ms as f64 / 3_600_000.0);
@@ -604,7 +632,7 @@ impl Tracked {
         };
         let declared = format!("Declared as {subject} at revision {}.", self.short_revision());
         let tallied = format!(
-            "In the last {span}: {counted} counted, {excluded} excluded, {} unreadable {}. Each subject under {} counts once, at its earliest {} claim.",
+            "In the last {span}: {counted} counted, {excluded} excluded or left out, {} unreadable {}. Each subject under {} counts once, at its earliest {} claim.",
             self.unreadable,
             if self.unreadable == 1 { "claim" } else { "claims" },
             count.subject_prefix,
@@ -662,9 +690,15 @@ enum Limit {
     Max(f64),
 }
 
-/// Whether an exclude names one of `fields`' values.
-fn excluded(excludes: &[Exclude], fields: &BTreeMap<String, String>) -> bool {
-    excludes.iter().any(|exclude| fields.get(&exclude.field).is_some_and(|value| exclude.values.contains(value)))
+/// Whether an exclude names one of an event's `fields`' values, or an `only` does not hold of them.
+fn left_out(count: &Count, fields: &BTreeMap<String, String>) -> bool {
+    count.excludes.iter().any(|exclude| fields.get(&exclude.field).is_some_and(|value| exclude.values.contains(value)))
+        || !holds(&count.only, fields)
+}
+
+/// Whether each `only` names the value of its field in `fields`; a missing field does not hold.
+fn holds(only: &[Only], fields: &BTreeMap<String, String>) -> bool {
+    only.iter().all(|only| fields.get(&only.field).is_some_and(|value| only.values.contains(value)))
 }
 
 /// A time from an RFC 3339 string or Unix milliseconds, either possibly JSON-encoded in a string.
@@ -777,7 +811,7 @@ impl Context<'_> {
         let about = &self.objective.about;
         let goal = format!("Goal: {p} of every 100 stop within {goal_within}, so {} in 100 may run over.", 100 - p);
         let mut counted = format!(
-            "In the last {window}: {closed} closed, {} open over {goal_within}, {open_within} open within it, {cancelled} cancelled, {excluded} excluded, {} unreadable {}.",
+            "In the last {window}: {closed} closed, {} open over {goal_within}, {open_within} open within it, {cancelled} cancelled, {excluded} excluded or left out, {} unreadable {}.",
             open_over.len(),
             self.unreadable,
             if self.unreadable == 1 { "claim" } else { "claims" },
