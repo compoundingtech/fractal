@@ -252,10 +252,12 @@ or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` 
 person. Without it, a person reads themselves and an agent reads the people whose directive
 notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
 gets them as `null` and sees only the effective status with `status_until`, the interruptions
-and the deadline clock.
+and the deadline clock. A local harness or peer (an agent harness or its descendant, a bound
+run, a native delivery peer) is another reader even when it names the person.
 
 Writes act as the session's own person, which the body never names; agent sessions are refused
-with `403` even though a local agent session holds every scope. The daemon records the source
+with `403` even though a local agent session holds every scope, and so is a local harness or
+peer that names the person. The daemon records the source
 of every write on its claim: the exact pairing grant for a paired device, otherwise
 `host/<member>`; a body never names it. `PUT /v1/client/availability` (`availability.set`,
 scope `write.availability`) takes an `AvailabilitySet`: each present axis names its `value`
