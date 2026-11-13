@@ -1349,6 +1349,63 @@ describe('Fractal declarations', () => {
       agent({ id: 'garden/worker', harness: { kind: 'claude', model: '' } }),
     ).toThrow()
   })
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'renders a %s first-turn message with escaped text and an id property',
+    (kind) => {
+      const message = { text: 'Start "here".\nRead C:\\notes\\plan.', id: 'startup-v1' }
+      const harness = { kind, model: 'example-model', effort: 'high' as const, message }
+      const expected =
+        `version 2\nagent "example/message" {\n  harness "${kind}" {\n` +
+        '    model "example-model"\n    effort "high"\n' +
+        '    message "Start \\"here\\".\\nRead C:\\\\notes\\\\plan." id="startup-v1"\n  }\n}\n'
+      expect(emit([agent({ id: 'example/message', harness })])).toBe(expected)
+      if (kind === 'omp') {
+        expect(emit([agent({ id: 'example/message', harness: omp(harness) })])).toBe(expected)
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'rejects invalid %s first-turn messages at schema and render boundaries',
+    (kind) => {
+      for (const message of [
+        { text: '', id: 'startup' },
+        { text: ' \n\t', id: 'startup' },
+        { text: 'Start.' },
+        { text: 'Start.', id: '' },
+        { text: 'Start.', id: 'a'.repeat(257) },
+        { text: 'Start.', id: 'é'.repeat(129) },
+        { text: 'a'.repeat(65537), id: 'startup' },
+        { text: 'é'.repeat(32769), id: 'startup' },
+        { text: 'Start.\0Stop.', id: 'startup' },
+      ]) {
+        const declaration = {
+          id: 'example/message',
+          harness: { kind, model: 'example-model', effort: 'high', message },
+        }
+        expect(() => Schema.decodeUnknownSync(AgentSchema)(declaration)).toThrow()
+        expect(() => agent(declaration as never)).toThrow()
+        if (kind === 'omp') {
+          expect(() => omp(declaration.harness as never)).toThrow()
+        }
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'accepts %s messages at the native UTF-8 byte limits',
+    (kind) => {
+      const declaration = {
+        id: 'example/message',
+        harness: {
+          kind,
+          model: 'example-model',
+          effort: 'high' as const,
+          message: { text: 'é'.repeat(32768), id: 'é'.repeat(128) },
+        },
+      }
+      expect(Schema.decodeUnknownSync(AgentSchema)(declaration)).toEqual(declaration)
+      expect(() => agent(declaration)).not.toThrow()
+    },
+  )
   it('decodes and renders an OMP role selector without adding effort', () => {
     const harness = { kind: 'omp', model: '@generalist_root' } as const
     const declaration = { id: 'example/omp', harness }
@@ -2768,7 +2825,11 @@ testWithSt(
               id: 'garden/xhigh',
               workspace: dir,
               rollout: 'manual',
-              harness: omp({ model: 'example-model', effort: 'xhigh' }),
+              harness: omp({
+                model: 'example-model',
+                effort: 'xhigh',
+                message: { text: 'Start "here".\nRead C:\\notes\\plan.', id: 'startup-v1' },
+              }),
             }),
           ]),
         )
@@ -2781,6 +2842,8 @@ testWithSt(
         expect(xhighShown.status, xhighShown.stderr).toBe(0)
         expect(xhighShown.stdout).toContain('harness "omp"')
         expect(xhighShown.stdout).toMatch(/^\s*effort "xhigh"\s*$/mu)
+        expect(xhighShown.stdout).toContain('message')
+        expect(xhighShown.stdout).toContain('id="startup-v1"')
         const xhighReapplied = applySeat(xhighShown.stdout)
         expect(xhighReapplied.status, xhighReapplied.stderr).toBe(0)
         expect(JSON.parse(xhighReapplied.stdout)).toMatchObject({ changed: false })
