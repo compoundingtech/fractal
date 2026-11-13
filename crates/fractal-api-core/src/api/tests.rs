@@ -16865,3 +16865,68 @@ async fn invocation_input_rejects_non_message_events_and_foreign_or_untagged_mes
     }
     assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
+    use http_body_util::BodyExt as _;
+    for caller in ["person", "own-agent", "foreign-agent", "unavailable"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.owning_person = Some("person/owner".into());
+        let agent = "agent/example/unix-private";
+        let invocation = "invocation/unix-private";
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+            actor:None, fields:serde_json::from_value(json!({"agent":agent,
+                "invocation_id":invocation,"operation_id":"unix-private","phase":"admitted"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        let artifact = fractal_store::invocation_artifacts::capture_input(root.path(), invocation,
+            "private-unix-input", now_ms()).unwrap();
+        fractal_store::invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+        let socket = root.path().join("private.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let store = state.store.clone();
+        // Use the production accept/ancestry-to-request handoff, not manually inserted
+        // request extensions. Only the completed ancestry lookup result is controlled.
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, router(state), Some(store), None,
+            move |_, _| Ok(match caller {
+                "person" => HarnessAncestry::Person,
+                "own-agent" => HarnessAncestry::Bound("agent/example/unix-private".into()),
+                "foreign-agent" => HarnessAncestry::Bound("agent/other".into()),
+                _ => HarnessAncestry::Unavailable,
+            }),
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        let connection = tokio::spawn(connection);
+        let uri = format!("/v1/client/invocation-artifacts/{}?invocation={}&kind=input",
+            artifact.sha256, urlencoding::encode(invocation));
+        let allowed = matches!(caller, "person" | "own-agent");
+        for method in ["GET", "DELETE"] {
+            let response = sender.send_request(Request::builder().method(method).uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status().is_success(), allowed, "{caller} {method}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            if allowed && method == "GET" {
+                assert_eq!(bytes.as_ref(), b"private-unix-input");
+            } else {
+                assert!(!String::from_utf8_lossy(&bytes).contains("private-unix-input"));
+            }
+        }
+        if allowed {
+            let response = sender.send_request(Request::builder().method("GET").uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{caller}");
+            response.into_body().collect().await.unwrap();
+        }
+        connection.abort();
+        server.abort();
+    }
+}
