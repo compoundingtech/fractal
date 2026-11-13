@@ -244,7 +244,7 @@ export function step<ES extends Codec, S extends Codec = typeof Schema.Void, R =
 export function step<S extends Codec = typeof Schema.Void>(
   options: StepOptions & { readonly success?: S; readonly execution: true },
 ): Effect.Effect<
-  { readonly value: S['Type']; readonly executions: readonly StepExecution[] | undefined },
+  { readonly value: S['Type']; readonly executions?: readonly StepExecution[] },
   ChildFailed,
   Worker | ProgramServices
 >
@@ -284,7 +284,10 @@ export function step(
         return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
       }
       return options.execution === true
-        ? Effect.map(decode(), (value) => ({ value, executions: done.executions }))
+        ? Effect.map(decode(), (value) => ({
+          value,
+          ...(done.executions === undefined ? {} : { executions: done.executions }),
+        }))
         : decode()
     }),
   )
