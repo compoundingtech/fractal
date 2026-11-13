@@ -325,6 +325,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -561,6 +563,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -884,6 +888,14 @@ fn validate_surfaces(
         "Capability",
         "DirectiveNote",
         "DirectiveNotes",
+        "PersonAvailability",
+        "PersonAvailabilities",
+        "AvailabilityStatusChange",
+        "AvailabilityInterruptionsChange",
+        "AvailabilityDeadlineClockChange",
+        "AvailabilitySet",
+        "PresenceReport",
+        "PresenceReportResult",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
@@ -1117,6 +1129,8 @@ fn validate_surfaces(
         "pub async fn harness_questions(",
         "pub async fn harness_question(",
         "pub async fn push_register",
+        "pub async fn availability_set(",
+        "pub async fn presence_report(",
         "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
@@ -1141,6 +1155,8 @@ fn validate_surfaces(
         "func events(",
         "func observationsReport(",
         "func pushRegister(",
+        "func availabilitySet(",
+        "func presenceReport(",
         "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
@@ -1778,6 +1794,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,

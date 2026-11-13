@@ -295,6 +295,46 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/blair"])
+        XCTAssertEqual(read.value.people[0].statusSource, .override)
+        XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
+        XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        XCTAssertEqual(read.value.people[2].status, .available)
+        XCTAssertEqual(read.value.people[2].statusSource, .unreported)
+        let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
+        XCTAssertEqual(own.value.presence, .present)
+        let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
+        XCTAssertEqual(set.deadlineClock?.value, "run")
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
+        XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "active", lastInputAt: "2026-11-12T09:57:30Z", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, try JSONSerialization.jsonObject(with: Data(contentsOf: fixtures.appendingPathComponent("presence-report.json"))) as? NSDictionary)
+        let locked = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "locked", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(locked, ["state": "locked", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let reported = try JSONDecoder().decode(Envelope<PresenceReportResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("presence-report-result.json")))
+        XCTAssertEqual(reported.value.availability.presence, .present)
+        XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
+    }
+
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
+        let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
+        let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
+        XCTAssertEqual(future.status, .unknown("busy"))
+        XCTAssertEqual(future.statusSource, .unknown("calendar"))
+        XCTAssertEqual(future.presence, .unknown("in-call"))
+        XCTAssertEqual(future.interruptions, .unknown("priority"))
+        XCTAssertEqual(future.deadlineClock, .unknown("hold-weekend"))
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
+        XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
+        XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

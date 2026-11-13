@@ -713,6 +713,14 @@ const PROBES: &[Probe] = &[
         "text":format!("Invented current person context {attempt}"),
     })),
     get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/availability", "/v1/client/availability"),
+    put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
+        "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
+    })),
+    post("POST /v1/client/presence", "/v1/client/presence", |_, _| json!({
+        "state": "active",
+        "observed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })),
     get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
