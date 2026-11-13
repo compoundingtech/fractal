@@ -26,6 +26,8 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"harness.invocation" = { class = "durable" }
+"harness.invocation-artifact" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
 "deploy.go-consumed" = { class = "durable" }

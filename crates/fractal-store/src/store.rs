@@ -243,6 +243,7 @@ pub mod accounts;
 pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
+pub mod invocation_receipts;
 pub mod roster_admission;
 
 pub mod adhoc_work;
@@ -12055,6 +12056,7 @@ fn replicated_work_validation_fields<'a>(
         body,
         record.accepted_at_unix_ms,
     )?;
+    invocation_receipts::record_diagnostic_tx(transaction, origin, &record)?;
     Ok(record)
 }
 
