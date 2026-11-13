@@ -1483,6 +1483,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st hosts ls",
+      "description": "List active execution-host admission holds",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts hold",
+      "description": "Place an authenticated execution-host admission hold",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts release",
+      "description": "Resolve an owned hold at its observed revision",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st lanes approve",
       "description": "Approve an entry as the lane's approver",
       "tests": [
