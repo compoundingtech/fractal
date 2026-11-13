@@ -1582,6 +1582,11 @@ administrator enables live enforcement. A PR cannot bootstrap its own trusted sc
 the workflow checks out the immutable event base SHA and fetches candidate head objects
 without checking out or executing the candidate. A base without the scanner contract fails
 rather than falling back to candidate code.
+The runner job is named `public-repo-history-runner`; it explicitly publishes the required
+`public-repo-history` commit status on the immutable candidate head SHA for both events.
+This is necessary because a `pull_request_target` run is associated with the base SHA.
+The token has `contents: read` and `statuses: write`, is not persisted in the checkout,
+and is never exposed to candidate code.
 
 Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-only pre-push
 guard, using the trusted base's scanner before the existing evidence-signing path. The guard
