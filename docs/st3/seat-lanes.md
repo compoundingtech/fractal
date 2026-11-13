@@ -19,6 +19,7 @@ Connect to the target host's daemon and use:
 fractal hosts hold host-a --operation activation --reason "Investigate failed activation" --as person/operator
 fractal hosts ls
 fractal hosts release host-a host-hold/ID --expected-revision 1 --resolution "Repaired and verified" --as person/operator
+fractal hosts recover host-a host-hold/ID --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
 ```
 
 Repeat `--operation` to cover several native lane operation names, or use `--operation '*'` for
@@ -29,6 +30,18 @@ credentials authenticate program requests. Naming an actor in JSON does not conf
 Active holds appear in attention/now and `hosts ls`; their origin run and receipt remain links,
 not lifecycle owners. Released records remain durable for inspection. Resolution commits the
 host predicate transition and wakes queued admission; there is no retry timer or polling lock.
+
+Ordinary release requires the authenticated hold owner, including while its run is
+live. `hosts recover` is a distinct recovery action available only to the execution
+host's configured owning person through the local operator API; bound agents and
+runs cannot borrow that person's identity. Recovery requires the exact observed
+revision and a reason, and only applies to a run-owned hold whose owning mission
+run (directly or through the owner's declaration) is positively terminal. A missing
+or nonterminal run retains custody; other owners must use ordinary release.
+Recovery preserves the original owner and records a separate `host-hold.recovered`
+history fact with the acting operator, original owner, reason and revisions.
+Ordinary release records `host-hold.released`. Neither terminal runs nor answered
+asks automatically resolve a hold.
 
 ## Resource lane telemetry
 
@@ -578,6 +591,7 @@ A default scheduler weight is declared `not-enforced` with reason `default weigh
 inactive units and absent controllers retain their observed reasons. This fixture
 policy distinguishes an explicitly configured share from a default share; it does
 not imply that the kernel ignores default scheduler weights.
+
 
 ## Finite execution custody
 

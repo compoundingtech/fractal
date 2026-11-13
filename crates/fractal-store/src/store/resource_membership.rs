@@ -203,7 +203,7 @@ impl Store {
 
     pub fn resource_admission_remaining(&self, id: &str, owner: &Owner, now_ms: u64) -> Result<Option<u64>> {
         let member = self.resource_membership_record(id, owner)?;
-        if member.state != "queued" { return Ok(None); }
+        if !matches!(member.state.as_str(), "queued" | "admitted") || member.payload_released_at.is_some() { return Ok(None); }
         let (elapsed, _) = self.resource_admission_elapsed(id, member.queued_at, now_ms);
         Ok(member.request.admission_timeout_ms.map(|budget| budget.saturating_sub(elapsed)))
     }
@@ -430,7 +430,7 @@ impl Store {
         }
         write(&transaction, &member)?;
         transaction.commit()?;
-        if member.state != "queued" { self.finish_resource_admission_clock(&request.id); }
+        if matches!(member.state.as_str(), "retired" | "refused") { self.finish_resource_admission_clock(&request.id); }
         self.observe_resource_transition(&connection, &member, previous.as_deref(), now_ms, false);
         Ok(admission(member))
     }
@@ -508,6 +508,7 @@ impl Store {
     {
         let mut connection = self.connection.write();
         let mut member;
+        let mut admission_failure = None;
         {
             let transaction = connection.transaction()?;
             member = read(&transaction, &grant.membership_id)?;
@@ -517,8 +518,30 @@ impl Store {
                 .context("payload release has no durable preparation")?;
             anyhow::ensure!(root.execution.is_none(), "payload generation already authorized");
             root.execution = Some(ExecutionIdentity::from(execution));
+            // Admission covers preparation and scope creation, not merely waiting for a seat.
+            // Bind the gated producer even on refusal so cleanup must prove its retirement
+            // before the charged membership can return capacity.
+            if member.payload_released_at.is_none() {
+                let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+                let (elapsed, uncertain) = self.resource_admission_elapsed(&member.request.id, member.queued_at, now);
+                if member.clock_uncertain || uncertain {
+                    admission_failure = Some("admission clock uncertain before payload release");
+                } else if member.request.admission_timeout_ms.is_some_and(|limit| elapsed >= limit) {
+                    admission_failure = Some("admission-expired before payload release");
+                }
+                if let Some(reason) = admission_failure {
+                    member.state = "retiring".into();
+                    member.reason = reason.into();
+                    member.retirement_requested_at.get_or_insert(now);
+                }
+            }
             write(&transaction, &member)?;
             transaction.commit()?;
+        }
+        if let Some(reason) = admission_failure {
+            // The runtime closes the gate and kills the producer when authorization fails.
+            // Its exact identity remains charged here until whole-tree retirement succeeds.
+            anyhow::bail!(reason);
         }
         // Keep the writer guard, not a transaction, across the OS action. A crash can leave
         // a known gated/released generation; neither cancellation nor a replacement can race it.
@@ -1014,6 +1037,37 @@ mod tests {
         assert!(incremental.needs("finite-waiter", now_ms()));
         assert!(incremental.needs("seat-waiter", now_ms()));
         assert!(matches!(store.request_resource_membership(&second, fit, 4).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn admission_budget_covers_preparation_until_first_payload_release() {
+        let store = fixture();
+        let mut request = request("slow-preparation");
+        request.admission_timeout_ms = Some(60_000);
+        request.capacity = Some(Capacity { cores: 1, memory: 1024 });
+        let grant = match store.request_resource_membership(&request,
+            Fit { room: Some(Capacity { cores: 2, memory: 4096 }), ..Fit::default() }, 100).unwrap() {
+            Admission::Admitted(grant) => grant,
+            other => panic!("{other:?}"),
+        };
+        store.prepare_resource_membership(&grant, "gated").unwrap();
+        // Advance monotonic age, not wall time, while OS preparation is in progress.
+        store.advance_resource_admission_clock(&request.id, 60_000);
+        let execution: ExecGeneration = serde_json::from_value(json!({
+            "schema": "st.runtime.exec-generation.v1", "pid": 1, "createdAtUnixMs": 100,
+            "startToken": 1, "generationId": "gated-generation"
+        })).unwrap();
+        let mut released = false;
+        let error = store.release_resource_payload(&grant, "gated", &execution,
+            &mut || { released = true; Ok(200) }).unwrap_err();
+        assert!(error.to_string().contains("admission-expired"));
+        assert!(!released);
+        let member = store.resource_membership_for_grant(&grant).unwrap();
+        assert_eq!(member.state, "retiring");
+        assert_eq!(member.roots[0].execution.as_ref().unwrap().generation_id, "gated-generation");
+        assert_eq!(member.payload_released_at, None);
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 1024,
+            "expiry cannot return capacity before the gated producer retires");
     }
 
     #[test]

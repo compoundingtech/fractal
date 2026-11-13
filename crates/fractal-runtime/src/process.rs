@@ -871,19 +871,38 @@ impl ExecRuntime {
     /// Exact-generation whole-tree retirement. A missing/replaced record is not empty evidence.
     /// Detached sessions cannot prove escaped descendant quiescence and therefore retain custody.
     pub fn retired_if(&self, id: &str, expected_generation: &str) -> Result<bool> {
+        self.retired_with_scope_proof(id, expected_generation, &crate::isolate::observe_closed_scope)
+    }
+
+    fn retired_with_scope_proof(&self, id: &str, expected_generation: &str,
+        proof: &dyn Fn(&str) -> Result<Option<crate::isolate::ScopeRetirementProof>>) -> Result<bool> {
         let observation = self.observe(id)?.context("finite execution generation is missing")?;
-        let generation = match observation {
-            ExecObservation::Running(generation) | ExecObservation::Exited(generation) => generation,
+        let mut generation = match observation {
+            ExecObservation::Exited(generation) => generation,
+            ExecObservation::Running(generation) => {
+                anyhow::ensure!(generation.generation_id == expected_generation, "finite execution generation changed");
+                return Ok(false);
+            }
             ExecObservation::Indeterminate(reason) => anyhow::bail!("finite execution retirement is indeterminate: {reason}"),
         };
         anyhow::ensure!(generation.generation_id == expected_generation, "finite execution generation changed");
         let unit = generation.scope_unit.as_deref().context(
             "logical-only containment cannot prove whole-tree retirement; custody retained",
         )?;
+        let Some(proof) = proof(unit)? else { return Ok(false); };
+        proof.validate(unit)?;
+        // PID reuse proves leader identity loss, not process-group emptiness. The exact scope
+        // proof supplies that missing evidence without inspecting or signalling the reused PID.
         if !generation.group_exited {
-            return Ok(false);
+            let current = self.read_generation_path(&self.record_path(id))?
+                .context("finite execution generation disappeared during scope reconciliation")?;
+            anyhow::ensure!(current.generation_id == expected_generation
+                && current.scope_unit == generation.scope_unit,
+                "finite execution generation changed during scope reconciliation");
+            generation.group_exited = true;
+            self.write_generation(id, &generation)?;
         }
-        Ok(crate::isolate::observe_closed_scope(unit)?.is_some())
+        Ok(true)
     }
 
     /// The work scope of an exec whose process group has ended. It can still hold a process that
@@ -1456,6 +1475,41 @@ mod tests {
         let record = runtime.read_generation_path(&runtime.record_path("omitted")).unwrap().unwrap();
         assert_eq!(record.payload_released_at_unix_ms, None);
         assert_eq!(record.resource_membership, Some(fixture_resource_binding()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reused_leader_pid_requires_exact_empty_scope_before_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        fs::create_dir_all(&runtime.state_dir).unwrap();
+        // A restarted daemon has no owned child; the persisted PID names another process.
+        let generation = ExecGeneration {
+            scope_unit: Some("st3-reused-leader.scope".into()),
+            ..serde_json::from_value(serde_json::json!({
+                "schema": SCHEMA, "pid": std::process::id(), "createdAtUnixMs": 1,
+                "startToken": process_start_token(std::process::id()).unwrap().wrapping_add(1),
+                "generationId": "old-generation"
+            })).unwrap()
+        };
+        runtime.write_generation("reused", &generation).unwrap();
+        assert!(!runtime.retired_with_scope_proof("reused", "old-generation", &|_| Ok(None)).unwrap());
+        assert!(!runtime.read_generation_path(&runtime.record_path("reused")).unwrap().unwrap().group_exited);
+        let proof = crate::isolate::ScopeRetirementProof {
+            version: 1, unit: generation.scope_unit.clone().unwrap(),
+            load_state: "not-found".into(), active_state: "inactive".into(),
+            control_group: String::new(), cgroup: None,
+        };
+        let mut wrong = proof.clone();
+        wrong.unit = "st3-other.scope".into();
+        assert!(runtime.retired_with_scope_proof("reused", "old-generation", &|_| Ok(Some(wrong.clone()))).is_err());
+        assert!(runtime.retired_with_scope_proof("reused", "old-generation", &|unit| {
+            assert_eq!(unit, proof.unit);
+            Ok(Some(proof.clone()))
+        }).unwrap());
+        assert!(runtime.read_generation_path(&runtime.record_path("reused")).unwrap().unwrap().group_exited);
+        assert!(matches!(runtime.observe("reused").unwrap(), Some(ExecObservation::Exited(_))));
+        assert!(runtime.retired_with_scope_proof("reused", "replacement", &|_| Ok(Some(proof.clone()))).is_err());
     }
 
     #[test]

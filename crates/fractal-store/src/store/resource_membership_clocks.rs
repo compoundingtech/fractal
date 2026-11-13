@@ -82,6 +82,12 @@ impl Store {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::store) fn advance_resource_admission_clock(&self, id: &str, elapsed_ms: u64) {
+        let mut clocks = self.resource_clocks.get().unwrap().lock().unwrap();
+        clocks.admission.get_mut(id).unwrap().prior_ms += elapsed_ms;
+    }
+
     pub(in crate::store) fn finish_resource_admission_clock(&self, id: &str) {
         if let Some(clocks) = self.resource_clocks.get() {
             clocks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).admission.remove(id);
