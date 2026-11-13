@@ -1240,6 +1240,9 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
     let actions = operations["actions"].as_object().unwrap();
     for required in [
         "attention.resolve",
+        "attention.seen",
+        "attention.snooze",
+        "attention.dismiss",
         "review.approve",
         "review.reject",
         "message.send",

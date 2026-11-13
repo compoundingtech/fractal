@@ -367,3 +367,12 @@ do not hand-edit it. The simulation and audit reports select v27. The fixed loca
 only seed 21 without a checkpoint trim; all other fixed seeds trimmed. Its test additionally
 requires every modern node to trim after the old build is excused and the next cut falls due.
 This characterization belongs to v27, not an inherited older corpus schedule.
+
+`claims-v28.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
+kinds (docs/st3/schema.md, "Person attention controls") on top of v27's trace and availability
+registry. Versions 1 through 27 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v28.json`;
+do not hand-edit it. The simulation and audit reports select v28. Control draws use the person's
+native admission path over a few rows, with a snooze that sometimes ends; the focused regression
+admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
+converge. PENDING: hosted never-trim characterization of v28.
