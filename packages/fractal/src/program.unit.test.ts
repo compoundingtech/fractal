@@ -446,7 +446,7 @@ describe('asks, child runs and worker turns', () => {
       }
       const worker = Fractal.mission(
         { meta, id: 'factory/test', goal: 'Read.', reportTo, input: Change,
-          output: Schema.Struct({ value: Verdict, executions: Schema.Unknown }) },
+          output: Schema.Struct({ value: Verdict, executions: Schema.optionalKey(Schema.Unknown) }) },
         () => Fractal.step({ id: 'read', success: Verdict, execution: true }).pipe(
           Effect.provide(Fractal.Worker.layer({ mission: 'worker', product: 'verdict' })),
         ),
