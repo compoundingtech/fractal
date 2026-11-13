@@ -12,6 +12,30 @@ export const formatInstant = (at: number, now: number, zone: HumanTimeZone = {})
   return days === 0 ? clock : days === 1 ? `tomorrow ${clock}` : days === -1 ? `yesterday ${clock}` : `${formatDate(at, now, zone)} ${clock}`
 }
 
+/** How long a change lasts: until changed again, a fixed span, tomorrow at 9:00 local time, or a chosen local time. */
+export type UntilPreset = 'open' | '30m' | '1h' | '2h' | 'tomorrow' | 'custom'
+export const untilPresets: readonly (readonly [UntilPreset, string])[] = [
+  ['open', 'Until changed'], ['30m', '30 min'], ['1h', '1 hour'], ['2h', '2 hours'], ['tomorrow', 'Tomorrow 9:00'], ['custom', 'Custom'],
+]
+const spans: Readonly<Record<'30m' | '1h' | '2h', number>> = { '30m': 30 * 60_000, '1h': 60 * 60_000, '2h': 120 * 60_000 }
+
+/**
+ * The end a preset names at `now`: `open` has none; `tomorrow` is 9:00 local time on the next calendar day;
+ * `custom` is a `datetime-local` value read as local time and must lie in the future, else it is `invalid`.
+ */
+export const untilFor = (preset: UntilPreset, now: Date, custom = ''): Date | 'open' | 'invalid' => {
+  switch (preset) {
+    case 'open': return 'open'
+    case 'tomorrow': return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0, 0, 0)
+    case 'custom': {
+      // A `datetime-local` value has no offset, so `Date` reads it as local time.
+      const at = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(custom) ? new Date(custom).getTime() : Number.NaN
+      return Number.isFinite(at) && at > now.getTime() ? new Date(at) : 'invalid'
+    }
+    default: return new Date(now.getTime() + spans[preset])
+  }
+}
+
 /** Looks a response word up in a table of the words this build knows; Fractal may send words it does not know yet. */
 const lookup = <V>(table: Readonly<Record<string, V>>, word: string): V | undefined => Object.hasOwn(table, word) ? table[word] : undefined
 /** A response word as the person reads it: its label when known, else the word itself. */

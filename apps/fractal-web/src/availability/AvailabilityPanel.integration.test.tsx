@@ -10,7 +10,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { SettingsControl } from '../web/SettingsDialog.tsx'
 import type { AvailabilityPort, AvailabilityRead } from './availability-port.ts'
-import { observedAvailability } from './availability.fixtures.ts'
+import { fixtureAvailabilityPort, observedAvailability } from './availability.fixtures.ts'
 
 vi.mock('@stylexjs/stylex', () => ({
   create: (styles: unknown) => styles,
@@ -35,8 +35,8 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-const open = async (availability: AvailabilityPort | undefined) => {
-  const source = { ...fixtureSource({ world: fixtureProjections }), ...(availability === undefined ? {} : { availability }) }
+const open = async (availability: Partial<AvailabilityPort> | undefined) => {
+  const source = { ...fixtureSource({ world: fixtureProjections }), ...(availability === undefined ? {} : { availability: { ...fixtureAvailabilityPort('available'), ...availability } }) }
   await act(async () => root.render(<DataSourceProvider source={source} registry={AtomRegistry.make()}>
     <SettingsControl scheme="dark" onSchemeChange={() => undefined} />
   </DataSourceProvider>))
@@ -47,18 +47,18 @@ const open = async (availability: AvailabilityPort | undefined) => {
 it('reads availability when Settings opens and again when the page regains focus', async () => {
   const read = vi.fn(async (): Promise<AvailabilityRead> => observedAvailability('away'))
   const dialog = await open({ read })
-  const section = within(dialog).getByRole('region', { name: 'Availability' })
+  const facts = within(dialog).getByTestId('availability-facts')
   expect(read).toHaveBeenCalledTimes(1)
-  expect(section.textContent).toContain('Away')
-  expect(section.textContent).toContain('Set by you')
-  expect(section.textContent).toContain('Urgent asks only')
-  expect(section.textContent).toContain('Held for routine asks')
-  expect(section.textContent).toContain('Ship the release notes first.')
+  expect(facts.textContent).toContain('Away · until')
+  expect(facts.textContent).toContain('Set by you')
+  expect(facts.textContent).toContain('Urgent asks only')
+  expect(facts.textContent).toContain('Held for routine asks')
+  expect(facts.textContent).toContain('Ship the release notes first.')
   read.mockResolvedValueOnce(observedAvailability('available'))
   await act(async () => window.dispatchEvent(new Event('focus')))
   expect(read).toHaveBeenCalledTimes(2)
-  expect(section.textContent).toContain('Follows your presence')
-  expect(section.textContent).toContain('No note')
+  expect(facts.textContent).toContain('Follows your presence')
+  expect(facts.textContent).toContain('No note')
 })
 
 it('explains a refused read in words, and shows no section without a gateway', async () => {

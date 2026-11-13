@@ -9,17 +9,16 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import type { AvailabilityPort, AvailabilityRead } from './availability-port.ts'
-import { observedAvailability, type AvailabilityFixture } from './availability.fixtures.ts'
+import type { AvailabilityPort } from './availability-port.ts'
+import { fixtureAvailabilityPort, type AvailabilityFixture } from './availability.fixtures.ts'
 import { AvailabilityPanel } from './AvailabilityPanel.tsx'
 
 const AvailabilitySurface = ({ state, scheme = 'dark' }: { readonly state: AvailabilityFixture | 'refused'; readonly scheme?: 'dark' | 'light' }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState(() => fixtureSource({ world: fixtureProjections }))
-  const [port] = React.useState((): AvailabilityPort => {
-    const read: AvailabilityRead = state === 'refused' ? { _tag: 'Unavailable', detail: 'Reading availability has not been granted to this device.' } : observedAvailability(state)
-    return { read: async () => read }
-  })
+  const [port] = React.useState((): AvailabilityPort => state === 'refused'
+    ? { ...fixtureAvailabilityPort('available'), read: async () => ({ _tag: 'Unavailable', detail: 'Reading availability has not been granted to this device.' }) }
+    : fixtureAvailabilityPort(state))
   return <DataSourceProvider source={source} registry={registry}>
     <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
       <section aria-label="Availability" {...stylex.props(styles.sheet)}><AvailabilityPanel port={port} /></section>
@@ -36,6 +35,7 @@ const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Surfaces/Availability',
   component: AvailabilitySurface,
+  argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] } },
   parameters: {
     scenario: { _tag: 'contract-fixture', reason: 'The production availability panel over literal PersonAvailability and DirectiveNote rows pins each axis, its source and bounds, and the note.' },
     layout: 'fullscreen',
