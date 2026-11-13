@@ -268,6 +268,7 @@ mission "service-work" state="ready" {
         assert!(!view.to_string().contains("worker-progress-secret-sentinel"));
     }
     let ask = state.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         legacy_request:None,person:"person/owner".into(),title:"Private question".into(),
         reason:"Private reason".into(),actor:"agent/node.reader".into(),step:Some(subject.clone()),
         new_run:None,incarnation:Some("service-runtime".into()),request:None,
