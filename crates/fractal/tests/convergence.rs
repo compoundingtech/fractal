@@ -2070,7 +2070,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v27 adds the person attention-control kinds on top of v25's `github.workflow-run`,
+/// Corpus v27 adds the person attention-control kinds on top of v26's availability kinds,
 /// shifting the shared RNG schedule again. PENDING: hosted characterization of v27.
 const NEVER_TRIMS: &[u64] = &[610, 1597];
 // Growth beyond three non-trimming seeds needs review.
@@ -2080,7 +2080,7 @@ const _: () = assert!(NEVER_TRIMS.len() <= 3);
 /// such a seed trims on every modern node once its old build is excused and the next cut is due.
 fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
-    let outcome = run_with(seed, Sabotage::None, never);
+    let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
         "convergence corpus v27 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut

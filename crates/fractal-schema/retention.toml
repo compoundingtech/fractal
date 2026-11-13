@@ -150,6 +150,10 @@
 "person.attention-snoozed" = { class = "current", pending = "needs a per-row newest-per-slot rule keyed by attention_id" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
+"person.status-set" = { class = "durable" }
+"person.interruptions-set" = { class = "durable" }
+"person.deadline-clock-set" = { class = "durable" }
+"person.presence-observed" = { class = "current", pending = "the presence fold reads each source's newest report; no per-source checkpoint slot yet" }
 "person.rename.completed" = { class = "durable" }
 "planning-session.approved" = { class = "durable" }
 "planning-session.cancelled" = { class = "durable" }

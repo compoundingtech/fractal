@@ -345,6 +345,21 @@ waits for, not how claims trim. Each never-trim seed's test goes on to excuse th
 the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
 authority (#6210).
 
+`claims-v26.json` adds the person-availability kinds `person.status-set`,
+`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`, the
+optional `source` of `person.directive-note-set` and the optional `priority` of
+`work.person-asked`. Versions 1 through 25 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v26.json`;
+do not hand-edit it. The simulation and audit reports select v26. Draws use the generic append
+path: only the subject person's own claims are admitted, as on every admission path. The new
+kinds and fields shift the shared random schedule.
+
+Hosted [burst run 43455339387](https://github.com/compoundingtech/fractal/actions/runs/43455339387)
+observed every fixed seed converge and trim a checkpoint, including v25's non-trimming seeds 2
+and 233 and the earlier availability corpus's seed 21. The exact v26 `NEVER_TRIMS` set is empty:
+no previous corpus's schedule-specific exception carries forward. There are no untrimmed seeds
+requiring the old-build excusal and next-cut continuation in this corpus.
+
 `claims-v27.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
 kinds (docs/st3/schema.md, "Person attention controls") on top of everything the previous
 snapshot covers, plus any optional fields main added since. Earlier versions stay frozen. Generate it with
