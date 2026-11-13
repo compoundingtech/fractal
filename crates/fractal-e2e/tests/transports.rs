@@ -1648,9 +1648,9 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         &advertised.into_body().collect().await.unwrap().to_bytes(),
     ).unwrap();
     assert_eq!(advertisement, serde_json::json!({
-        "api_version": fractal_client::API_VERSION,
+        "api_version": fractal_daemon::api::CLIENT_API_VERSION,
         "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-    }), "a client that did not ask sees exactly the one capability older clients validate");
+    }), "a client that did not ask sees exactly the one capability in the default advertisement");
     let asked = unix_response(&gateway_socket, "/v1/client/capabilities?accepts=fabric-gateway-grant", None).await;
     let asked: Value = serde_json::from_slice(&asked.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(asked["capabilities"], serde_json::json!([

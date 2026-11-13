@@ -1546,6 +1546,11 @@ pub struct GateCheckRequest {
     /// Values for the mission's inputs. A gate that reads an input without one is unchecked.
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
+    /// Check only these mission subjects' gates; omitted checks every mission in the intent. An
+    /// owned-set publication names the missions whose declaration differs from the selected
+    /// revision, so an unchanged member's gates do not run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missions: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -1883,6 +1888,9 @@ pub struct ApplyResponse {
     /// Open source debt this set publication closed, with each change it reverted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_debts_reverted: Vec<SourceDebt>,
+    /// Set publications with `--source-map`: claims recorded or kept, file texts stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_maps: Option<fractal_schema::source_map::SourceMapCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2404,10 +2412,10 @@ impl AttentionItemView {
 
 /// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
 /// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
-/// person published that is broken all are. An update asks nothing, and a message stays in its
-/// conversation.
+/// person published that is broken all are. An update asks nothing, a model-drift summary
+/// waits on nothing (its seats keep working), and a message stays in its conversation.
 pub fn attention_is_alert(kind: &str, update: bool) -> bool {
-    !update && kind != "unread-message"
+    !update && kind != "unread-message" && kind != "model-drift"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2981,6 +2989,17 @@ pub struct MissionRunRequest {
     pub idempotency_key: String,
 }
 
+/// Start an independent run from a failed run without changing the failed run's history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunRetryRequest {
+    pub actor: String,
+    #[serde(default)]
+    pub same_revision: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
     #[serde(
@@ -3068,6 +3087,12 @@ pub struct MissionRunView {
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<MissionRunOutcomeView>,
+    /// The failed run this fresh run retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Independent retry runs linked to this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     #[serde(default)]

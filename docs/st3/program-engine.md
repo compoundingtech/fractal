@@ -242,6 +242,39 @@ name. The CLI defaults its actor to the run when the credential is present and n
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
 same run. The same-UID boundary is cooperative, as for agents.
 
+**Private integration instances.** A test running inside a mission exec is not a person,
+even when it creates a private daemon. Socket or state-directory ownership does not grant
+person attribution. A run credential belongs to the issuing store: a scratch store cannot
+resolve the enclosing fleet run's credential. Clearing a leaf client's environment alone
+does not erase that credential from its ancestors.
+
+Use the existing explicit agent caller contract for isolated integration tests:
+
+1. Create a fresh private directory (mode `0700`), config, state, runtime paths and Unix
+   sockets. Do not join a fleet, configure peers, or select an ambient daemon endpoint.
+   Start the daemon outside an agent harness tree (for example a separate user service),
+   without `ST_AGENT`, `FRACTAL_AGENT` or `ST_RUN_CREDENTIAL` in its startup environment.
+   Keep it in the caller's user namespace so native peer/process inspection remains possible.
+2. For **each scratch client exec**, supply `ST_AGENT=agent/fixture/scratch`, omit
+   `FRACTAL_AGENT` and `ST_RUN_CREDENTIAL`, and pass the explicit scratch endpoint.
+   Use `--as agent/fixture/scratch` on `apply` and `missions start`. A test helper should
+   expose that actor directly rather than infer a person from an absent ambient agent marker.
+   This identity is a test author, not a configured seat that the daemon must launch.
+3. Keep default free-mode authorization on that isolated store, or explicitly grant the
+   fixture agent the required publish/start authority when testing enforced rules. This
+   does not grant it authority on another daemon. Never change fleet rules for a test.
+4. Stop the private daemon and remove only its test-owned directory when the test ends.
+
+The closest verified exec-time agent marker binds the scratch request before the walk
+reaches the enclosing mission credential. Publication claims and run requesters remain
+attributed to `agent/fixture/scratch`, never a person. A process carrying both agent and
+run markers is invalid; a scratch agent naming a person or another agent is refused.
+This is the ordinary cooperative same-UID agent boundary, not a new instance-owner
+credential or a private-instance bypass: peer generation checks, ancestry failures,
+foreign-actor checks and enforced authorization remain identical on every daemon.
+Environment isolation and explicit endpoints are requirements of the test harness, not
+capabilities that authenticate it to a fleet.
+
 **Publication.** A run publishes with `fractal apply` like any other author: `apply` and
 `fractal missions publish` take `--as mission-run/RUN`, and `apply` without `--as` publishes as
 the harness's own seat, else as the run whose credential it holds. Its `publish` rules decide
@@ -384,6 +417,14 @@ receives:
 | resolved at its deadline | the same, with the default answer (none for a free-text ask) and `resolved_by: 'deadline'` |
 | withdrawn while the run goes on | Failure `{ _tag: 'AskCancelled', ask }` |
 
+Withdrawal is a typed failure, not a successful empty answer. A program may handle
+`AskCancelled` (for example with `Effect.catchTag`) and continue. If it leaves that failure
+uncaught, its waiting program step fails and the run follows ordinary failure handling,
+including declared native `finally` steps; the attempt's other open children and asks are
+cancelled. Native Data-DSL steps have no typed program handler: cancelling their ask fails
+the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries and `finally`
+handling rather than resuming the step as ready.
+
 An ask that ends with its run is never resolved: the program ended with it.
 
 **Cancellation.** Cancelling the parent run cancels its children through
@@ -490,8 +531,9 @@ A program waiting on an ask or a child run stays loaded in the host. A replaced 
 program to the same wait.
 
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
-bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
-root so the bytes do not depend on where the tree is checked out, and writes it to
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun
+--minify-whitespace`, which drops Bun's per-module path comments so the bytes do not depend on where
+the tree or its dependencies are checked out, and writes it to
 `<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
 loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
 one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and

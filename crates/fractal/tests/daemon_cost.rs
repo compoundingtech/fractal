@@ -44,6 +44,10 @@
 //! Every sample starts without a registration for POST and with one for DELETE; fixture writes
 //! and row-count assertions stay outside the measured request.
 //!
+//! Retry samples create independent runs from one failed terminal source in a concurrent-runs
+//! mission. Each attempt uses its own stable key, so every measured request writes a new run
+//! rather than measuring idempotent replay; source preparation is outside the counted region.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
@@ -143,6 +147,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/source-blobs/{hash}",
+        "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
+    ),
     (
         "GET /v1/custom/decision-inputs",
         "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
@@ -499,6 +507,34 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "image bytes, outside the graph",
     ),
     (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
         "requires owner-native transcript content; scope, bounded chunk and revision invalidation are covered by conversation_blocks tests",
     ),
@@ -574,6 +610,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/mailbox/receipts",
         "a bound mailbox stream's receipt; the same lifecycle write is measured as \
          POST /v1/messages/{message_id}/claims",
+    ),
+    (
+        "GET /v1/source-maps/revisions",
+        "reads the source.mapped claims of one subject through the claims (subject, kind) index; generated cost stores publish no source maps, so the probe would measure an empty range; cost grows with that subject's mapped revisions",
+    ),
+    (
+        "GET /v1/source-maps/where",
+        "a reverse lookup that decodes the source map of every live agent and non-retired mission revision and reads the matching file texts on each request; generated cost stores publish no source maps; cost grows with live mapped subjects and is not measured here",
+    ),
+    (
+        "GET /v1/source-maps/declaration",
+        "renders one stored agent or mission revision as canonical KDL by subject and revision key; generated cost stores publish no source maps, so the subject has no mapped revision to resolve",
+    ),
+    (
+        "GET /v1/client/source-maps",
+        "reads one subject's source.mapped claim at one revision (or its current revision) through the claims (subject, kind) index and renders that revision as canonical KDL; generated cost stores publish no source maps, so the probe would measure a 404",
+    ),
+    (
+        "GET /v1/client/source-blobs/{hash}",
+        "reads one content-addressed source blob after checking the subject's map at that revision names it; generated cost stores publish no source maps or blobs, so the probe would measure a 404",
     ),
 ];
 
@@ -746,6 +802,7 @@ const PROBES: &[Probe] = &[
         owned_set_request(&format!("apply-{attempt}"))
     }),
     get("GET /v1/source/status", "/v1/source/status"),
+    get("GET /v1/source-maps", "/v1/source-maps?subject=agent/bench/cost/fixture&texts=true"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -1405,6 +1462,16 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    post(
+        "POST /v1/mission-runs/{run}/retry",
+        "/v1/mission-runs/{retry_run}/retry",
+        |_, attempt| json!({
+            "actor": "person/bench-operator",
+            "same_revision": false,
+            "reason": "Retry the invented failed work.",
+            "idempotency_key": format!("cost-mission-retry-{attempt}"),
+        }),
+    ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
@@ -3391,10 +3458,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         publication["revision"].as_str(),
         Some(expected_publication_revision.as_deref().unwrap())
     );
-    client
-        .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
+    // The fixture set carries a source map, so the source-map read probe answers a real claim.
+    let mut fixture_set = owned_set_request("fixture");
+    fixture_set["source_map"] = json!({
+        "schema": "fractal.source-map/v1",
+        "files": [{"repository": "acme/garden", "path": "graph/fixture.ts", "blob": "b".repeat(40),
+            "text": "export default fixture\n"}],
+        "subjects": {"agent/bench/cost/fixture": {"declaration": 0, "inputs": [0]}},
+    });
+    let applied: Value = client
+        .post("/v1/sets/apply", &fixture_set)
         .await
         .expect("the owned-set read fixture must publish");
+    assert_eq!(applied["publication"]["source_maps"]["recorded"], 1, "{applied}");
     let selected: Value = person
         .get("/v1/client/sets/bench/cost/fixture")
         .await
@@ -3478,6 +3554,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         }
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
+        }
+        if probe.route == "POST /v1/mission-runs/{run}/retry" {
+            prepare_retry(&store, &mut fixture, root);
         }
         if probe.route == "GET /v1/client/conversations/search" {
             // The cold build owns all SQL work through the worker's explicit completion,
@@ -3580,6 +3659,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     client.clone()
                 };
                 let expected_publication = &publication;
+                let expected_retry_source = fixture.items.get("retry_subject");
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -3601,6 +3681,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                 anyhow::ensure!(
                                     value["published"] == true,
                                     "the transport cost probe must publish an attributed endpoint announcement",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                                let source = expected_retry_source.expect("retry source is prepared");
+                                anyhow::ensure!(
+                                    value["retry_of"].as_str() == Some(source.as_str())
+                                        && value["subject"].as_str().is_some_and(|subject| subject != source.as_str())
+                                        && value["steps"].as_array().is_some_and(|steps| {
+                                            !steps.is_empty() && steps.iter().all(|step| {
+                                                step["status"] == "pending" && step["attempt"] == 1
+                                            })
+                                        }),
+                                    "the retry cost probe must create a fresh linked run with pending steps",
                                 );
                             }
                             if probe.route == "GET /v1/client/quota" {
@@ -3641,6 +3734,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     "SELECT COUNT(*) FROM local_push_registrations", [], |row| row.get(0),
                 ).unwrap();
                 assert_eq!(rows, u64::from(probe.body.is_some()));
+            }
+            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                let source = store.mission_run(&fixture.items["retry_subject"]).unwrap().unwrap();
+                assert_eq!(source.status, "failed", "retry must leave its source terminal");
+                assert!(source.steps.iter().all(|step| step.status == "failed"));
+                assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -4050,6 +4149,34 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// Keep the source terminal and permit all four independent retries without bypassing admission.
+fn prepare_retry(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let kdl = r#"version 2
+mission "cost-retry" state="ready" {
+  concurrent-runs
+  input "value" kind="text"
+  goal "Retry independent invented work."
+  step "review" { assigned-to "person/bench-operator" }
+}"#;
+    let intent = fractal_daemon::parse_intent(kdl, NODE).unwrap();
+    store.apply_internal(&intent, "cost-retry-definition").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-retry".into(),
+        revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()),
+        mode: None,
+        inputs: BTreeMap::from([("value".into(), "Invented retry input".into())]),
+        idempotency_key: "cost-retry-source".into(),
+    }).unwrap();
+    for step in &source.steps {
+        store.set_step_state(&step.subject, "failed", Some("Invented failure")).unwrap();
+    }
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("Invented failure")).unwrap();
+    fixture.items.insert("retry_run", source.id);
+    fixture.items.insert("retry_subject", source.subject);
 }
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the

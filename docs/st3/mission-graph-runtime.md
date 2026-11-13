@@ -10,6 +10,16 @@ A mission is an immutable definition in the claims graph. Publishing a mission d
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
+## Retrying a failed run
+
+`fractal missions retry RUN [--same-revision] [--reason REASON] --as ACTOR` creates a new run from a failed, terminal source. A person or the owning agent must have ordinary run-start authority. The trusted API is `POST /v1/mission-runs/{run}/retry`, with `actor`, `same_revision` (default `false`), optional `reason`, and a stable `idempotency_key`. Repeating the same idempotency key must not create another run.
+
+By default the new run selects the latest published revision of the source mission. `--same-revision` selects the source's current revision, including an explicitly revised generation. Both modes preserve the source's exact resolved inputs and workspace. Incompatible latest-revision inputs refuse with the source revision, selected revision, and reason; there is no fallback to the source revision and no substitution of new input defaults.
+
+All steps and the program start from the top under new run and generation identities. No successful work or program journal is carried from the source. Steps must be idempotent with respect to effects already present in the workspace or external systems; retry does not roll them back.
+
+The source's status, generation, and execution history are immutable. Append-only `mission-run.retry-linked` claims link source and retry on both subjects, with `source`, `retry`, and optional `reason`; they do not rewrite source state. Run views and `missions show` expose `retry_of` on the new run and `retried_by` on the source. Ordinary starts omit `retry_of`; an empty `retried_by` may be omitted from JSON.
+
 ## First readiness under load
 
 The origin-local reconciler evaluates active mission runs with all-pending current generations
@@ -1026,6 +1036,18 @@ gate "the release is approved" type="human" {
 
 A human gate requires a full `person/...` reviewer. The question and repeated review targets are optional.
 
+A step's first human gate requests review as soon as the step becomes `ready`, including at run
+start for first steps. Later human gates open in declaration order after the earlier gates pass,
+so two questions for the same reviewer cannot hide one another. No worker claim or completion
+report is required: the person can see
+the alert and approve while the worker has not claimed the step. Approval does not complete
+worker work; the worker must still submit it and the other completion conditions must hold.
+Claiming or re-evaluating the same step attempt does not open another request. Cancelling or
+superseding the step closes its old review.
+For `mode="feedback"` on an unclaimed open-pool step, a request for changes stays bound to
+the current request until a worker claims it; then that worker receives the feedback and the
+next attempt starts.
+
 Fractal creates one `gate.requested` claim for the exact mission or step revision and attempt. A review decision must match that request.
 A newer Fractal build can word the same gate's request differently and ask again for the same attempt.
 The reviewer then sees one review: the newest request, which is the one the gate waits on, aged
@@ -1084,6 +1106,21 @@ and send the requester one message from `daemon/runtime` with the answer. They s
 turns, re-declarations and the end of the agent's owning work while the agent remains declared.
 Only an answer, deadline resolution, withdrawal, or removal of the agent ends them.
 A requester withdraws with `fractal work cancel-ask STEP --as AGENT --summary TEXT`.
+For an ask attached to a native Data-DSL step, withdrawal fails the waiting step with
+`ask cancelled by ACTOR`; ordinary retry, run failure and `finally` handling apply.
+The response projection applies this only to the exact originating attempt still waiting on
+that asking episode. A delayed cancellation from another member cannot fail a newer attempt,
+replace a later ask, or clear a resumed step's live lease, including during full replay.
+Derived origin state claims remain notifications for reactive run invalidation, not a second
+authoritative cancellation effect. Upgraded readers also ignore those redundant effects from
+older writers; older daemons must be upgraded to gain this consumption fence.
+Automatic cancellation when the requester ends follows the same failure path and records the
+exact asking episode. Historical automatic cancellations without an explicit episode are
+accepted only when the asking claim is a direct causal predecessor; an explicit mismatching
+episode is never replaced by that historical form.
+It does not resume that step as ready. A program's `Fractal.ask` instead propagates typed
+`AskCancelled`, which the program may catch; uncaught, it fails the program step and
+uses the same ordinary failure cleanup (see [program engine §6](program-engine.md#6-linked-child-runs-worker-turns-and-asks)).
 Repeated keys return the same source.
 
 #### Deadlines
@@ -1272,7 +1309,7 @@ advertises `mission_program=1` on its `daemon.started` (`mission-program-unavail
 
 ## Run reports
 
-A run tells nobody about itself unless its mission or its start names an agent:
+A run's mission or its start names the agent that hears about the run:
 
 ```kdl
 version 2
@@ -1293,7 +1330,17 @@ fractal missions start release --report-to agent/ops/watcher --as person/operato
 `--report-to` replaces the mission's `report-to` for that run, and `--report-completed` adds the
 completed event. Only an agent can be named. A person is reached through their own agent. The
 choice is recorded on the run's creation claim, so a later revision of the mission does not
-change who a running run reports to. A run with neither writes nothing extra and is never reported.
+change who a running run reports to.
+
+A run that names neither still reports a stall, to a default reporter: its requester when that is
+an agent, else the first agent that a stuck agent is `under`. A stuck agent holds or is assigned a
+ready or held step; it is never told about itself. A person requester has no inbox, so it is
+skipped, and an agent that is not running is passed over without a fault. A run with no stuck
+agent, such as a schedule parent or an observer run that only waits on gates, gets no default. A
+run linked from a parent step is reported through its parent, which counts its stuck agents. The limit is 30 minutes, and a silence already past it when
+the default came on (daemon start, or the config) is not reported, so an upgrade sends no burst.
+Failures, cancellations and completions are reported only to a named reporter. Turn the default
+off with `default_stall_reports = false` under `[reconcile]`.
 
 A running run can be opted in, moved to another agent, or cleared without restarting it:
 
@@ -1308,7 +1355,7 @@ call states the whole report, as `missions start --report-to` would: `--stalled-
 to the mission's `stalled-after`, else 30 minutes; `--report-stalls true|false` defaults to the
 mission's `report-stalls`, else true; and the completed event is reported with
 `--report-completed` or when the mission asks for it. `--clear` reports the run to nobody, even
-when its mission names a reporter. The change is a `mission-run.report-to` claim on the run. Its
+when its mission names a reporter, and stops the default. The change is a `mission-run.report-to` claim on the run. Its
 latest one replaces what the creation claim recorded, and the creation claim itself is left
 alone, so declaring the run again as it was started is still a retry. A request that changes
 nothing writes nothing. The run reads it at its next evaluation. A stall is still measured from
@@ -1862,7 +1909,8 @@ A bare target inside a mission uses the same mission run. A full external agent 
 
 The relation is visible in `fractal agents ls --json`, status, and assigned work. It is suitable for a tree or graph UI.
 
-The relation does not create permission, lifecycle, scheduling, or mandatory reporting behavior.
+The relation does not create permission, lifecycle or scheduling behavior. It only picks who hears
+of a stall in a run that names no reporter (see [Run reports](#run-reports)).
 
 The target must be declared: a missing grouping target blocks publication. A top-level
 seat grouped under itself produces a warning. Grouping does not check for cycles.
@@ -1911,6 +1959,8 @@ agentless
 `agentless` means that the reconciler performs the work without an agent claim. Subgraphs and gates can complete an agentless step.
 
 An agentless step hands off without waiting for a reconcile pass. When its exec's `driver exec` wrapper reports the exit, the daemon evaluates the run from that change, and evaluates it again at once while each evaluation writes (at most eight in a row): the step completes, the next step becomes ready, and the evaluation that declares the next step's exec also starts it. An exec that renders files, has run before or is under a rollout still starts in the next pass.
+
+A new run starts the same way. Its creation is the change the daemon evaluates it from, on the host that originates it, so its first step becomes ready and starts its exec or program without waiting for a reconcile pass.
 
 A local selector replaces the inherited selector. It does not add to it.
 

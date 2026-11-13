@@ -21,13 +21,16 @@ pub async fn start_gate_check(
     };
     let initial = parse_intent(&source, &state.node).map_err(ApiError::bad)?;
     // Check the commands a publication would store: document names pinned to their versions.
-    let intent = state
+    let mut intent = state
         .store
         .document_bindings_at(&initial.document_refs, None)
         .ok()
         .and_then(|bindings| resolve_document_references(&source, &bindings).ok())
         .and_then(|resolved| parse_intent(&resolved, &state.node).ok())
         .unwrap_or(initial);
+    if let Some(only) = &request.missions {
+        intent.missions.retain(|_, mission| only.contains(&mission.subject));
+    }
     let workspace = std::path::Path::new(&request.workspace);
     if !workspace.is_absolute() {
         return Err(ApiError::bad(FractalError::new(
@@ -292,6 +295,10 @@ pub struct OutcomeHistoryQuery {
     until: Option<u64>,
     status: Option<String>,
     actor: Option<String>,
+    /// One mission's runs (identity- or canonical-named); absent keeps the fleet-wide page.
+    /// Terminal transitions only: `/v1/mission-runs?mission=` still serves the
+    /// running and waiting runs.
+    mission: Option<String>,
     before: Option<u64>,
     limit: Option<usize>,
 }
@@ -323,6 +330,7 @@ pub async fn outcome_history(
                 query.until.map(u128::from).unwrap_or_else(client_now_ms),
                 query.status.as_deref(),
                 query.actor.as_deref(),
+                query.mission.as_deref(),
                 query.before.unwrap_or(index.saturating_add(1)),
                 query.limit.unwrap_or(50),
             )
@@ -460,6 +468,18 @@ pub async fn get_mission_run(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(found))
+}
+
+pub async fn retry_mission_run(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+    Json(request): Json<crate::model::MissionRunRetryRequest>,
+) -> Result<Json<MissionRunView>, ApiError> {
+    let store = state.store.clone();
+    let mut retried = blocking_action(move || store.retry_mission_run(&run, &request)).await?;
+    present_mission_run(&state.store, &mut retried).map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(retried))
 }
 
 pub async fn revise_mission_run(

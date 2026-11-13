@@ -2684,7 +2684,7 @@ mission "cli/child" state="ready" {
     assert!(socket.exists(), "client-v0 test socket did not appear");
 
     let now = value(&run_cli(&socket, &["now", "--as", "person/alex"]).await);
-    assert_eq!(now["api_version"], "st3.client.v0");
+    assert_eq!(now["api_version"], "fractal.client.v0");
     assert_eq!(now["value"]["collection"], "now");
     assert_eq!(now["value"]["filters"]["person"], "person/alex");
 
@@ -2697,7 +2697,7 @@ mission "cli/child" state="ready" {
         vec!["terminals", "ls"],
     ] {
         let page = value(&run_cli(&socket, &arguments).await);
-        assert_eq!(page["api_version"], "st3.client.v0", "{arguments:?}");
+        assert_eq!(page["api_version"], "fractal.client.v0", "{arguments:?}");
         assert_eq!(page["value"]["kind"], "page", "{arguments:?}");
         assert!(page["value"]["items"].is_array(), "{arguments:?}");
         assert!(page["value"]["filters"].is_object(), "{arguments:?}");
@@ -2737,7 +2737,7 @@ mission "cli/child" state="ready" {
     assert!(first_agent["value"]["page"]["next_cursor"].is_string());
 
     let machines = value(&run_cli(&socket, &["machines"]).await);
-    assert_eq!(machines["api_version"], "st3.client.v0");
+    assert_eq!(machines["api_version"], "fractal.client.v0");
     assert_eq!(machines["value"]["items"][0]["id"], "machine/client-v0-cli");
     assert_eq!(machines["value"]["items"][0]["kind"], "machine");
     assert_eq!(
@@ -2830,7 +2830,7 @@ mission "cli/child" state="ready" {
     );
 
     let activity = value(&run_cli(&socket, &["activity", "--limit", "10"]).await);
-    assert_eq!(activity["api_version"], "st3.client.v0");
+    assert_eq!(activity["api_version"], "fractal.client.v0");
     assert_eq!(activity["value"]["kind"], "event-page");
 
     let devices = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2844,7 +2844,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(pairing["api_version"], "st3.client.v0");
+    assert_eq!(pairing["api_version"], "fractal.client.v0");
     assert_eq!(pairing["value"]["kind"], "pairing-challenge");
 
     let revoked = value(
@@ -2854,7 +2854,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(revoked["api_version"], "st3.client.v0");
+    assert_eq!(revoked["api_version"], "fractal.client.v0");
     assert_eq!(revoked["value"]["status"], "completed");
 
     let current = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2992,7 +2992,7 @@ mission "queued-work" state="ready" {
 
     let queue =
         value(&run_queue_cli(&socket, &config_home, true, &["agents", "queue", &seat]).await);
-    assert_eq!(queue["api_version"], "st3.client.v0");
+    assert_eq!(queue["api_version"], "fractal.client.v0");
     assert_eq!(queue["value"]["kind"], "agent-queue");
     assert_eq!(queue["value"]["next_work_id"], step(0));
 
@@ -4227,6 +4227,154 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_start_uses_the_declared_workspace_on_a_remote_placement() {
+    // A declared agent placed on another member keeps its declaration's workspace when a
+    // different member starts it: the caller's own directory must not leak into the agent.
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve_creation_api(root.path(), None).await;
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = root.path().join("remote.kdl");
+    std::fs::write(
+        &source,
+        format!(
+            "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"omp\" {{}}\n  restart always\n }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    value(
+        &run_cli(
+            &socket,
+            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            "--as",
+            "person/avery",],
+        )
+        .await,
+    );
+    let subject = "agent/dotfiles/build-capacity";
+    let original = agent_declaration(&socket, subject).await;
+    assert_eq!(
+        original.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    // The fixture daemon answers as another member, so the declared placement is remote and
+    // the declared workspace does not exist on this machine.
+    assert!(!std::path::Path::new(declared).exists());
+    let preview = run_cli(
+        &socket,
+        &["agents", "start", subject, "--as", "person/avery", "--print-kdl"],
+    )
+    .await;
+    assert!(preview.status.success(), "{preview:?}");
+    let intent =
+        fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
+            .unwrap();
+    assert_eq!(intent.subjects[subject].member, original.member);
+    value(&run_cli(&socket, &["agents", "start", subject, "--as", "person/avery"]).await);
+    assert_eq!(
+        agent_declaration(&socket, subject).await.member,
+        original.member
+    );
+    // A workspace override names a path on the placement host: it is published as written
+    // even when the caller's machine has no such path.
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    value(
+        &run_cli(
+            &socket,
+            &[
+                "agents",
+                "start",
+                subject,
+                "--as",
+                "person/avery",
+                "--workspace",
+                missing.to_str().unwrap(),
+            ],
+        )
+        .await,
+    );
+    let changed = agent_declaration(&socket, subject).await;
+    let mut expected = original.member.unwrap();
+    expected.workspace = missing.to_str().unwrap().into();
+    expected.cwd = expected.workspace.clone();
+    assert_eq!(changed.member, Some(expected));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_start_asks_the_placement_host_to_name_a_new_agents_workspace() {
+    // A new agent placed on another member without --workspace gets the directory that member
+    // names through the relay, and the member creates it when the agent starts.
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let owner_root = root.path().join("distant");
+    std::fs::create_dir_all(&owner_root).unwrap();
+    let owner_socket = owner_root.join("st3.sock");
+    let owner = AppState {
+        store: Arc::new(Store::open_memory("distant").unwrap()),
+        node: "distant".into(),
+        ..test_state(&owner_root)
+    };
+    let owner_server = serve_for_test(&owner_socket, fractal_daemon::api::router(owner)).await;
+    let peer = smallclaims::sync::PeerState::new(
+        fractal_daemon::peer::MainBackend::new(owner_socket),
+        "distant".into(),
+        fractal_daemon::peer::FleetAuth::test("fleet-test", &[7; 32]),
+        smallclaims::sync::FleetContext::legacy(["client-v0-cli".to_owned()].into()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer_server = tokio::spawn(async move {
+        let routes =
+            fractal_daemon::peer::fractal_routes(fractal_daemon::api::raw_terminal_owner_splice);
+        axum::serve(listener, smallclaims::sync::peer_router(peer, routes)).await
+    });
+    let secret = root.path().join("fleet-secret");
+    std::fs::write(&secret, [7_u8; 32]).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut gateway = test_state(root.path());
+    gateway.client_relay =
+        fractal_daemon::peer::ClientRelay::from_config(&fractal_daemon::config::Config {
+            node: "client-v0-cli".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![fractal_daemon::config::PeerConfig {
+                name: "distant".into(),
+                url: format!("http://{address}"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    let socket = root.path().join("st3.sock");
+    let server = serve_for_test(&socket, fractal_daemon::api::router(gateway)).await;
+    let subject = "agent/example/routed";
+    let named = fractal_daemon::config::default_agent_workspace(subject)
+        .unwrap()
+        .display()
+        .to_string();
+    let args = ["agents", "start", subject, "--host", "distant", "--as", "person/avery"];
+    let preview = run_cli(&socket, &[&args[..], &["--print-kdl"][..]].concat()).await;
+    assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stderr));
+    let intent =
+        fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
+            .unwrap();
+    let member = intent.subjects[subject].member.as_ref().unwrap();
+    assert_eq!(
+        (member.host.as_str(), member.workspace.as_str(), member.workspace_create),
+        ("distant", named.as_str(), true)
+    );
+    value(&run_cli(&socket, &args).await);
+    let declared = agent_declaration(&socket, subject).await.member.unwrap();
+    assert_eq!(
+        (declared.host.as_str(), declared.workspace.as_str(), declared.workspace_create),
+        ("distant", named.as_str(), true)
+    );
+    server.abort();
+    peer_server.abort();
+    owner_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
@@ -4312,6 +4460,10 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
 async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
+    // No member reaches `placement`, so these starts name its workspace: a path for another
+    // member is published as written.
+    let workspace = root.path().join("on-the-placement");
+    let workspace = workspace.to_str().unwrap();
     for (identity, subject) in [
         ("example/worker", "agent/example/worker"),
         ("agent/example/worker", "agent/example/worker"),
@@ -4326,6 +4478,8 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
                 identity,
                 "--host",
                 "placement",
+                "--workspace",
+                workspace,
                 "--as",
                 "person/avery",
             ],
@@ -4344,6 +4498,8 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
                 identity,
                 "--host",
                 "placement",
+                "--workspace",
+                workspace,
                 "--as",
                 "person/avery",
                 "--print-kdl",
@@ -4354,6 +4510,37 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         let kdl = String::from_utf8(preview.stdout).unwrap();
         let intent = fractal_daemon::parse_intent(&kdl, "client-v0-cli").unwrap();
         assert!(intent.subjects.contains_key(subject), "{kdl}");
+        assert_eq!(
+            intent.subjects[subject]
+                .member
+                .as_ref()
+                .map(|member| member.workspace.as_str()),
+            Some(workspace),
+            "{kdl}"
+        );
+    }
+    // Without --workspace a new agent there gets the directory `placement` names, and an
+    // unreachable host names none: the start fails rather than borrowing a local path.
+    for preview in [false, true] {
+        let mut args = vec![
+            "agents",
+            "start",
+            "agent/example/unrouted",
+            "--host",
+            "placement",
+            "--as",
+            "person/avery",
+        ];
+        if preview {
+            args.push("--print-kdl");
+        }
+        let error = failure(&run_cli(&socket, &args).await);
+        assert!(
+            error.contains(
+                "placement did not name a workspace for `agent/example/unrouted`; pass --workspace"
+            ),
+            "{error}"
+        );
     }
     for preview in [false, true] {
         let mut args = vec![
@@ -4373,10 +4560,12 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         assert!(error.contains("ID or agent/ID"), "{error}");
     }
     let agents = value(&run_cli(&socket, &["agents", "ls", "--all"]).await);
-    assert!(
-        !agents.to_string().contains("accidental"),
-        "rejected identity created a seat: {agents}"
-    );
+    for refused in ["accidental", "unrouted"] {
+        assert!(
+            !agents.to_string().contains(refused),
+            "a refused start created a seat: {agents}"
+        );
+    }
     server.abort();
 }
 

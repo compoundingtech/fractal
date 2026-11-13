@@ -235,6 +235,11 @@ describe('Fractal.objective validation', () => {
     expect(() => Fractal.objective(input as ObjectiveInput)).toThrow(message)
   })
 
+  it('lets the expect kind also start the sample', () => {
+    const mergeToLive = { ...base, indicator: { ...interval, start: { kind: 'custom.acme.change-merged', at: 'merged_at' } } }
+    expect(Fractal.objective(mergeToLive as ObjectiveInput).indicator).toMatchObject({ start: { kind: 'custom.acme.change-merged' } })
+  })
+
   it('names the objective in its errors', () => {
     expect(() => Fractal.objective({ ...base, targets: [] })).toThrow(
       'objective `ops/change-rollout`: has no `target`',

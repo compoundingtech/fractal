@@ -128,6 +128,7 @@ export type Agent = ResourceHeader & {
 
 } | null;
   lifecycle?: AgentLifecycle;
+  live_model?: string | null;
   mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
@@ -725,6 +726,7 @@ export type AssistantAttentionItem = {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
   | "custom"
   | "unknown"
 ;
@@ -1021,6 +1023,7 @@ export type Attention = ResourceHeader & {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
  | string);
   because?: string;
   blocked?: AttentionBlocked;
@@ -1849,7 +1852,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1996,6 +1999,327 @@ export type Fence = {
   [key: string]: Revision;
 };
   terminal_sequence?: number;
+};
+
+export type GithubCheckRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  summary: (string | null);
+  url: string;
+  workflow: (string | null);
+};
+
+export type GithubChecks = {
+  head_sha: string;
+  runs: Array<GithubCheckRun>;
+  truncated: boolean;
+};
+
+export type GithubChecksRead = ({
+  fetched_at: string;
+  item: GithubChecks;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubComment = {
+  author: (GithubUser | null);
+  author_association: string;
+  body: string;
+  created_at: string;
+  id: number;
+  number: number;
+  owner: string;
+  reactions: Array<GithubReaction>;
+  repo: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubCommentRead = ({
+  fetched_at: string;
+  item: GithubComment;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubConversation = {
+  comments: Array<GithubComment>;
+  review_threads: Array<GithubReviewThread>;
+  reviews: Array<GithubReview>;
+  truncated: boolean;
+};
+
+export type GithubConversationRead = ({
+  fetched_at: string;
+  item: GithubConversation;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubFile = {
+  additions: number;
+  deletions: number;
+  patch: (string | null);
+  path: string;
+  previous_path: (string | null);
+  status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged";
+};
+
+export type GithubFiles = {
+  files: Array<GithubFile>;
+  total: number;
+  truncated: boolean;
+};
+
+export type GithubFilesRead = ({
+  fetched_at: string;
+  item: GithubFiles;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubIssue = {
+  assignees: Array<string>;
+  author: (GithubUser | null);
+  body: string;
+  closed_at: (string | null);
+  comments: number;
+  created_at: string;
+  is_pull_request: boolean;
+  labels: Array<GithubLabel>;
+  milestone: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  state: "open" | "closed";
+  state_reason: ("completed" | "not_planned" | "reopened" | null);
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubIssueRead = ({
+  fetched_at: string;
+  item: GithubIssue;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubItemLink = {
+  number: number;
+  owner: string;
+  repo: string;
+  state: string;
+  title: string;
+};
+
+export type GithubJob = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubLabel = {
+  color: string;
+  name: string;
+};
+
+export type GithubMovedTo = {
+  number: (number | null);
+  owner: string;
+  repo: string;
+};
+
+export type GithubPluginRead = (GithubPullRequestRead | GithubIssueRead | GithubCommentRead | GithubConversationRead | GithubChecksRead | GithubFilesRead | GithubRunRead);
+
+export type GithubPullRequest = {
+  additions: number;
+  author: (GithubUser | null);
+  base_ref: string;
+  body: string;
+  changed_files: number;
+  closed_at: (string | null);
+  closing_issues: Array<GithubItemLink>;
+  comments: number;
+  commits: number;
+  created_at: string;
+  deletions: number;
+  draft: boolean;
+  head_ref: string;
+  head_sha: string;
+  labels: Array<GithubLabel>;
+  merge_state: (
+  "clean"
+  | "dirty"
+  | "blocked"
+  | "behind"
+  | "unstable"
+  | "has_hooks"
+  | "draft"
+  | "unknown"
+ | null);
+  merged_at: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  requested_reviewers: Array<string>;
+  review_decision: ("approved" | "changes_requested" | "review_required" | null);
+  state: "open" | "closed" | "merged";
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubPullRequestRead = ({
+  fetched_at: string;
+  item: GithubPullRequest;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubReaction = {
+  content: string;
+  count: number;
+};
+
+export type GithubReview = {
+  author: (GithubUser | null);
+  body: string;
+  id: string;
+  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
+  submitted_at: (string | null);
+  url: string;
+};
+
+export type GithubReviewThread = {
+  comments: Array<GithubThreadComment>;
+  id: string;
+  line: (number | null);
+  outdated: boolean;
+  path: string;
+  resolved: boolean;
+};
+
+export type GithubRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  event: string;
+  head_branch: (string | null);
+  head_sha: string;
+  id: number;
+  jobs: Array<GithubJob>;
+  name: string;
+  owner: string;
+  pull_requests: Array<number>;
+  repo: string;
+  run_attempt: number;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubRunRead = ({
+  fetched_at: string;
+  item: GithubRun;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubThreadComment = {
+  author: (GithubUser | null);
+  body: string;
+  created_at: string;
+  id: string;
+  url: string;
+};
+
+export type GithubUser = {
+  login: string;
+  url: string;
 };
 
 export type Glass = ResourceHeader & {
@@ -2552,6 +2876,9 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  retried_by?: Array<MissionRunId>;
+  retry_of?: MissionRunId;
+  revision?: Revision;
   started_at?: number | null;
   state_since: Timestamp;
   status: string;
@@ -3649,6 +3976,68 @@ export type Snapshot = {
 
 export type SnapshotId = string;
 
+export type SourceBlob = {
+  hash: string;
+  text: string;
+};
+
+export type SourceMapClaim = {
+  declaration: number;
+  files: Array<SourceMapFile>;
+  inputs: Array<number>;
+  nodes: Array<SourceMapNode>;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+  subject: string;
+};
+
+export type SourceMapFile = {
+  blob: string;
+  blob_hash: string;
+  path: string;
+  repository: string;
+};
+
+export type SourceMapFrame = {
+  end: SourceMapPosition;
+  file: number;
+  precision: ("exact" | "enclosing" | string);
+  role: ("declaration" | "helper" | "value" | "constructor" | "fragment" | string);
+  start: SourceMapPosition;
+};
+
+export type SourceMapNode = {
+  frames: Array<SourceMapFrame>;
+  kdl: string;
+  kdlLines: Array<number>;
+  span: SourceMapSpan;
+};
+
+export type SourceMapPosition = {
+  column: number;
+  line: number;
+};
+
+export type SourceMapRevision = {
+  recorded_at_unix_ms: number;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+};
+
+export type SourceMapSpan = {
+  end: SourceMapPosition;
+  file: number;
+  start: SourceMapPosition;
+};
+
 export type StatusHistory = {
   complete: boolean;
   items: Array<StatusTransition>;
@@ -3721,6 +4110,15 @@ export type SubjectDefinition = {
   desired_token: string;
   kdl: string;
   kind: "subject-definition";
+  subject: string;
+};
+
+export type SubjectSourceMap = {
+  current?: Revision;
+  kdl: string;
+  map: SourceMapClaim;
+  revision: Revision;
+  revisions: Array<SourceMapRevision>;
   subject: string;
 };
 

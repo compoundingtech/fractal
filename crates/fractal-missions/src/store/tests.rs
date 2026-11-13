@@ -26,6 +26,7 @@ mod huge_part_rebuild_bench;
 mod run_projection_fence_cost;
 mod run_mutation_writer_guard;
 use fractal_delivery::store::shared_missions::*;
+mod run_retry;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
 use fractal_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
@@ -5028,6 +5029,12 @@ fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() 
         .unwrap()
         .unwrap();
     assert_eq!(run_report_fields(&latest.body), None);
+    assert_eq!(reports(), 3);
+    // Clearing it again writes nothing.
+    let again = store
+        .set_mission_run_report(run, "agent/ops/owner", None, None, None, false, "owner-clears-again")
+        .unwrap();
+    assert!(!again.changed);
     assert_eq!(reports(), 3);
 
     // The creation claim is what the run started with, so declaring the run again exactly

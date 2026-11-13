@@ -269,7 +269,8 @@ const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail:
   const interval = value as unknown as IndicatorOf<'interval'>
   const kinds = [
     interval.start.kind,
-    ...(interval.expect === undefined ? [] : [interval.expect.kind]),
+    // The expect claim may also start the sample (merge to live); every other kind has one role.
+    ...(interval.expect === undefined || interval.expect.kind === interval.start.kind ? [] : [interval.expect.kind]),
     interval.stop.kind,
     ...(interval.cancel === undefined ? [] : [interval.cancel]),
     ...(interval.pause === undefined ? [] : [interval.pause.kind, interval.pause.resume]),

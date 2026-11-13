@@ -47,10 +47,12 @@ pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
 pub mod mission_declaration;
+pub mod source_maps;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
@@ -128,6 +130,13 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -137,6 +146,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
         .route("/v1/client/publication-definition", get(publication_definition))
         .route("/v1/client/mission-declaration", get(mission_declaration::get))
+        .route("/v1/client/source-maps", get(source_maps::get))
+        .route("/v1/client/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -359,11 +370,11 @@ fn record_subscription_page(value: &Value, bytes: usize) {
     span.record("span.label", format!("{collection} {rows}"));
 }
 
-const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
-const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
+const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 
-const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
+const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
@@ -650,7 +661,7 @@ async fn collection_items_with_windows(
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
-    let custom_forms = session.custom_forms;
+    let attention_compatibility = session.attention_compatibility();
     let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
@@ -998,7 +1009,7 @@ async fn collection_items_with_windows(
                         )?,
                         _ => unreachable!(),
                     };
-                    client_attention_compatibility(&mut items, custom_forms);
+                    client_attention_compatibility(&mut items, attention_compatibility);
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
@@ -3080,7 +3091,7 @@ fn mission_visualization(
         decisions.extend(super::client_launch_decision_resources(store, &session)?);
     }
     Ok(Some(json!({
-        "version":"st3.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
+        "version":"fractal.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
         "mission":mission_id, "nodes":nodes, "edges":edges, "groups":[],
         "timeline":{"entries":timeline}, "swimlanes":[], "goals":mission.goals,
         "constraints":mission.constraints, "gates":mission.gates, "resources":mission.products,
@@ -3322,7 +3333,9 @@ fn mission_resources_filtered(
                     } else if selected_id.is_some() {
                         store.with_step_states(header.clone(), true)?
                     } else {
-                        header.clone()
+                        let mut run = header.clone();
+                        store.enrich_mission_run_retry_links(&mut run)?;
+                        run
                     };
                     let done = run
                         .steps
@@ -3502,10 +3515,12 @@ fn mission_resources_filtered(
                             })
                             .collect::<Vec<_>>()
                     });
-                    Ok::<Value, anyhow::Error>(json!({
+                    let mut value = json!({
                         "id": run.subject,
                         "generation_id": run.generation,
+                        "revision": run.revision,
                         "requester": run.requester,
+                        "retried_by": run.retried_by,
                         "status": run.status,
                         "phase": run.phase,
                         "progress": {"done": done, "total": run.steps.len()},
@@ -3525,7 +3540,11 @@ fn mission_resources_filtered(
                         "after": run.after,
                         "deadline": run.deadline_at_unix_ms.map(client_timestamp),
                         "steps": steps,
-                    }))
+                    });
+                    if let Some(source) = &run.retry_of {
+                        value["retry_of"] = json!(source);
+                    }
+                    Ok::<Value, anyhow::Error>(value)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let state = if run_details.iter().any(|run| run["blocker"]["scope"] == crate::reconcile::FIRST_READINESS_FAULT_SCOPE) { "blocked" } else { state };
@@ -7264,7 +7283,7 @@ fn terminal_stream_envelope(state: &AppState, value: Value) -> Value {
 fn terminal_stream_error(error: &ApiError) -> Value {
     json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": format!("request/{}", new_request_id()),
         "code": client_error_code(Some(&error.code)),
         "message": error.message,
@@ -10282,6 +10301,39 @@ mod tests {
             "an unchanged store index does not rebuild the list");
     }
 
+    #[test]
+    fn server_subprotocols_use_fractal_and_negotiate_legacy_offers() {
+        for (canonical, expected, legacy) in [
+            (TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0", "st3.client.terminal.v0"),
+            (CONVERSATION_SUBPROTOCOL, "fractal.client.conversation.v0", "st3.client.conversation.v0"),
+            (COLLECTION_SUBPROTOCOL, "fractal.client.collections.v0", "st3.client.collections.v0"),
+        ] {
+            assert_eq!(canonical, expected);
+            assert_eq!(super::super::wire_names::selected_protocol(&[legacy], canonical), Some(legacy));
+            assert_eq!(super::super::wire_names::selected_protocol(&[canonical], canonical), Some(canonical));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_pairing_accepts_legacy_requests_and_emits_fractal() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let response = super::super::router(state).oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": version, "device_name": "Old client", "person_id": "person/ada"
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["api_version"], "fractal.client.v0");
+            assert_eq!(response["value"]["kind"], "pairing-challenge");
+        }
+    }
+
     #[tokio::test]
     async fn published_runtimes_readiness_errors_survive_http_encoding() {
         for ended in [false, true] {
@@ -10305,7 +10357,7 @@ mod tests {
             let envelope: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
             assert_eq!(envelope["retryable"], !ended);
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert_eq!(envelope["details"], json!({}));
         }
     }
@@ -16463,6 +16515,28 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn model_drift_attention_is_its_own_feature_not_implied_by_custom_forms() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            // What clients before the kind send: custom forms alone never imply it.
+            (Some("custom-subjects.v1, conversation-blocks.v1"), false),
+            (Some("model-drift-attention.v2"), false),
+            (Some("custom-subjects.v1, model-drift-attention.v1 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/attention");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let session = authenticate(&state, &request, "unix").unwrap();
+            assert_eq!(session.model_drift_attention, expected, "{features:?}");
+            assert_eq!(session.attention_compatibility().model_drift, expected, "{features:?}");
+        }
+    }
+
+    #[test]
     fn messages_paging_requires_the_exact_request_feature_token() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16922,6 +16996,52 @@ mission "example/looped" state="ready" {
             .find(|value| value["id"] == "mission/example/looped")
             .unwrap();
         assert_eq!(retired["state"], "retired");
+    }
+
+    #[test]
+    fn mission_list_and_detail_preserve_retry_links_without_null_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "retry-node");
+        let mission = "mission/example/retry-links";
+        let source = r#"version 2
+mission "example/retry-links" state="ready" {
+  goal "Keep retry lineage visible."
+  step "work" { agentless }
+}"#;
+        let intent = crate::graph::parse_intent(source, "retry-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-retry-links", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let original = start("retry-links-original");
+        state.store.set_mission_run_state(&original.id, "failed", "terminal", Some("a gate failed")).unwrap();
+        let retried = state.store.retry_mission_run(&original.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/operator".into(), same_revision: false, reason: None,
+            idempotency_key: "retry-links-new".into(),
+        }).unwrap();
+        state.store.set_mission_run_state(&retried.id, "failed", "terminal", Some("another gate failed")).unwrap();
+        let ordinary = start("retry-links-ordinary");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+        for items in [&cards, &detail, &history] {
+            let card = items.iter().find(|item| item["id"] == mission).unwrap();
+            let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+            let runs = card["run_details"].as_array().unwrap();
+            let original_view = runs.iter().find(|run| run["id"] == original.subject).unwrap();
+            assert!(original_view.get("retry_of").is_none(), "{original_view}");
+            assert_eq!(original_view["retried_by"], json!([retried.subject]));
+            let retry_view = runs.iter().find(|run| run["id"] == retried.subject).unwrap();
+            assert_eq!(retry_view["retry_of"], original.subject);
+            let ordinary_view = runs.iter().find(|run| run["id"] == ordinary.subject).unwrap();
+            assert!(ordinary_view.get("retry_of").is_none(), "{ordinary_view}");
+            assert_eq!(ordinary_view["retried_by"], json!([]));
+        }
     }
 
     #[test]
@@ -17604,6 +17724,7 @@ mission "example/zero-run" state="ready" {
         )
         .unwrap();
         assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["visualization"]["version"], "fractal.visualization.v0");
         assert_eq!(
             details[0]["visualization"]["mission"],
             "mission/example/zero-run"
@@ -24620,6 +24741,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,

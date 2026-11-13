@@ -127,6 +127,7 @@
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
 "mission-run.created" = { class = "durable" }
 "mission-run.report-to" = { class = "durable" }
+"mission-run.retry-linked" = { class = "durable" }
 "mission-run.state" = { class = "durable" }
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
@@ -201,6 +202,7 @@
 "source.audited" = { class = "durable" }
 "source.debt.closed" = { class = "durable" }
 "source.debt.recorded" = { class = "durable" }
+"source.mapped" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }

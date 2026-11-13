@@ -854,6 +854,107 @@
         "renderer": {"type": "string", "description": "What rendered the source into KDL, for example fractal-declarations."}
       }
     },
+    "SubjectSourceMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["subject", "revision", "map", "kdl", "revisions"],
+      "description": "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get).",
+      "properties": {
+        "subject": {"type": "string", "pattern": "^(agent|mission)/[^\\s@]+$"},
+        "revision": {"$ref": "#/$defs/Revision"},
+        "current": {"$ref": "#/$defs/Revision", "description": "The subject's current revision; absent when it has none. Agent declaration ids are not revisions."},
+        "map": {"$ref": "#/$defs/SourceMapClaim"},
+        "kdl": {"type": "string", "description": "Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes."},
+        "revisions": {"type": "array", "items": {"$ref": "#/$defs/SourceMapRevision"}, "description": "The subject's mapped revisions, newest first. Only revisions whose render changed have one."}
+      }
+    },
+    "SourceMapRevision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "set_revision", "repository", "ref", "sha", "sequence", "recorded_at_unix_ms"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/Revision"},
+        "set_revision": {"type": "string"},
+        "repository": {"type": "string"},
+        "ref": {"type": "string"},
+        "sha": {"type": "string", "pattern": "^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "recorded_at_unix_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "SourceMapClaim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["subject", "revision", "set_revision", "repository", "ref", "sha", "sequence", "files", "declaration", "inputs", "nodes"],
+      "description": "The source.mapped claim body, verbatim. File indices refer to `files`; lines and columns are 1-based, columns in UTF-16 code units.",
+      "properties": {
+        "subject": {"type": "string"},
+        "revision": {"$ref": "#/$defs/Revision"},
+        "set_revision": {"type": "string"},
+        "repository": {"type": "string"},
+        "ref": {"type": "string"},
+        "sha": {"type": "string", "pattern": "^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/SourceMapFile"}},
+        "declaration": {"type": "integer", "minimum": 0, "description": "Index of the subject's own file."},
+        "inputs": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Indices of the static import closure."},
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/SourceMapNode"}}
+      }
+    },
+    "SourceMapFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "path", "blob", "blob_hash"],
+      "properties": {
+        "repository": {"type": "string"},
+        "path": {"type": "string", "description": "Repository-relative path."},
+        "blob": {"type": "string", "description": "The git blob id at the source commit."},
+        "blob_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the file text; read it with source-blob.get."}
+      }
+    },
+    "SourceMapNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kdl", "kdlLines", "span", "frames"],
+      "properties": {
+        "kdl": {"type": "string", "description": "KDL node path, the join key: agent, mission, step and gate by name, other nodes by sibling index, e.g. mission[x]/step[review]/goal[0]."},
+        "kdlLines": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 2, "maxItems": 2, "description": "First and last line in the published KDL; a hint only, canonical KDL differs."},
+        "span": {"$ref": "#/$defs/SourceMapSpan"},
+        "frames": {"type": "array", "items": {"$ref": "#/$defs/SourceMapFrame"}, "description": "declaration → helper → value, outermost first."}
+      }
+    },
+    "SourceMapSpan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "start", "end"],
+      "properties": {
+        "file": {"type": "integer", "minimum": 0},
+        "start": {"$ref": "#/$defs/SourceMapPosition"},
+        "end": {"$ref": "#/$defs/SourceMapPosition"}
+      }
+    },
+    "SourceMapPosition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["line", "column"],
+      "properties": {
+        "line": {"type": "integer", "minimum": 1},
+        "column": {"type": "integer", "minimum": 1}
+      }
+    },
+    "SourceMapFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "start", "end", "role", "precision"],
+      "properties": {
+        "file": {"type": "integer", "minimum": 0},
+        "start": {"$ref": "#/$defs/SourceMapPosition"},
+        "end": {"$ref": "#/$defs/SourceMapPosition"},
+        "role": {"anyOf": [{"enum": ["declaration", "helper", "value", "constructor", "fragment"]}, {"type": "string"}]},
+        "precision": {"anyOf": [{"enum": ["exact", "enclosing"]}, {"type": "string"}], "description": "exact: the property or call itself; enclosing: the whole initializer around a computed access."}
+      }
+    },
+    "SourceBlob": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hash", "text"],
+      "description": "The UTF-8 text of one source file version, by sha256. Immutable. Requires read.declarations.",
+      "properties": {
+        "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "text": {"type": "string"}
+      }
+    },
     "SubjectDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -901,6 +1002,8 @@
             { "$ref": "#/$defs/PublicationDefinition" },
             { "$ref": "#/$defs/AttentionBudgetReport" },
             { "$ref": "#/$defs/MissionDeclaration" },
+            { "$ref": "#/$defs/SubjectSourceMap" },
+            { "$ref": "#/$defs/SourceBlob" },
             { "$ref": "#/$defs/AgentWorkspace" },
             { "$ref": "#/$defs/Page" },
             { "$ref": "#/$defs/OrderedMembershipPage" },
@@ -928,7 +1031,8 @@
             { "$ref": "#/$defs/UsageHubQuota" },
             { "$ref": "#/$defs/MailBacklog" },
             { "$ref": "#/$defs/SloList" },
-            { "$ref": "#/$defs/SloHistory" }
+            { "$ref": "#/$defs/SloHistory" },
+            { "$ref": "#/$defs/GithubPluginRead" }
           ]
         }
       }
@@ -1058,7 +1162,8 @@
               "agent-request",
               "fault",
               "harness-login",
-              "harness-prompt"
+              "harness-prompt",
+              "model-drift"
             ]}, {"type": "string", "pattern": "^custom\\.[a-zA-Z0-9_.-]+$"}]},
           "custom_form": {"type": "object", "description": "Data-only registered reply form; absent on native attention."},
             "source_kind": {"type": "string"},
@@ -1857,6 +1962,9 @@
       "properties": {
         "id": { "$ref": "#/$defs/MissionRunId" },
         "generation_id": { "$ref": "#/$defs/RunGenerationId" },
+        "retry_of": { "$ref": "#/$defs/MissionRunId", "description": "Source run for this new-run retry; omitted for an ordinary start." },
+        "retried_by": { "type": "array", "items": { "$ref": "#/$defs/MissionRunId" }, "description": "New runs created by retrying this run; omitted when empty." },
+        "revision": { "$ref": "#/$defs/Revision", "description": "The mission revision this run is pinned to. Older daemons omit it." },
         "requester": { "$ref": "#/$defs/ActorRef" },
         "status": { "type": "string" },
         "phase": { "type": "string" },
@@ -2492,6 +2600,7 @@
             "current_work": { "type": "array", "items": { "$ref": "#/$defs/WorkLabel" }, "description": "current_work_ids named for display, in the same order." },
             "next_work": { "oneOf": [{ "$ref": "#/$defs/WorkLabel" }, { "type": "null" }] },
             "upcoming_work": { "type": "array", "items": { "$ref": "#/$defs/WorkLabel" } },
+            "live_model": { "type": ["string", "null"], "description": "The model the seat actually runs on: the model its own session last reported (harness.usage context_occupancy or session_cumulative) for the card's incarnation, or null when it reported none. Response spend, which includes subagents' models, never counts. Differs from the declaration while the harness silently fell back to another model." },
             "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
             "under": { "type": "array", "items": { "$ref": "#/$defs/AgentRelationship" } },
             "delivery": { "oneOf": [{ "$ref": "#/$defs/AgentDelivery" }, { "type": "null" }], "description": "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." },
@@ -4230,6 +4339,7 @@
           "fault",
           "harness-login",
           "harness-prompt",
+          "model-drift",
           "custom",
           "unknown"
         ], "description": "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." },
@@ -5050,6 +5160,32 @@
           }
         }
       ]
-    }
+    },
+    "GithubUser": {"description": "A GitHub account, by login and profile page; avatars are never fetched.", "type": "object", "additionalProperties": false, "required": ["login", "url"], "properties": {"login": {"type": "string"}, "url": {"type": "string"}}},
+    "GithubLabel": {"type": "object", "additionalProperties": false, "required": ["name", "color"], "properties": {"name": {"type": "string"}, "color": {"type": "string"}}},
+    "GithubItemLink": {"description": "A pull request or issue another item links to, such as a closing issue.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "title", "state"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "title": {"type": "string"}, "state": {"type": "string"}}},
+    "GithubPullRequest": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "url", "title", "body", "state", "draft", "merge_state", "review_decision", "author", "base_ref", "head_ref", "head_sha", "additions", "deletions", "changed_files", "commits", "comments", "created_at", "updated_at", "merged_at", "closed_at", "labels", "requested_reviewers", "closing_issues"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "state": {"enum": ["open", "closed", "merged"]}, "draft": {"type": "boolean"}, "merge_state": {"oneOf": [{"enum": ["clean", "dirty", "blocked", "behind", "unstable", "has_hooks", "draft", "unknown"]}, {"type": "null"}]}, "review_decision": {"oneOf": [{"enum": ["approved", "changes_requested", "review_required"]}, {"type": "null"}]}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "base_ref": {"type": "string"}, "head_ref": {"type": "string"}, "head_sha": {"type": "string"}, "additions": {"type": "integer", "minimum": 0}, "deletions": {"type": "integer", "minimum": 0}, "changed_files": {"type": "integer", "minimum": 0}, "commits": {"type": "integer", "minimum": 0}, "comments": {"type": "integer", "minimum": 0}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "merged_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "closed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "labels": {"type": "array", "items": {"$ref": "#/$defs/GithubLabel"}}, "requested_reviewers": {"type": "array", "items": {"type": "string"}}, "closing_issues": {"type": "array", "items": {"$ref": "#/$defs/GithubItemLink"}}}},
+    "GithubIssue": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "number", "url", "title", "body", "state", "state_reason", "author", "assignees", "labels", "milestone", "comments", "created_at", "updated_at", "closed_at", "is_pull_request"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "state": {"enum": ["open", "closed"]}, "state_reason": {"oneOf": [{"enum": ["completed", "not_planned", "reopened"]}, {"type": "null"}]}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "assignees": {"type": "array", "items": {"type": "string"}}, "labels": {"type": "array", "items": {"$ref": "#/$defs/GithubLabel"}}, "milestone": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "comments": {"type": "integer", "minimum": 0}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "closed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "is_pull_request": {"type": "boolean"}}},
+    "GithubReaction": {"type": "object", "additionalProperties": false, "required": ["content", "count"], "properties": {"content": {"type": "string"}, "count": {"type": "integer", "minimum": 0}}},
+    "GithubComment": {"description": "An issue or pull request comment; number is the item it is on.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "id", "number", "url", "author", "author_association", "body", "created_at", "updated_at", "reactions"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "id": {"type": "integer", "minimum": 0}, "number": {"type": "integer", "minimum": 0}, "url": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "author_association": {"type": "string"}, "body": {"type": "string"}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}, "reactions": {"type": "array", "items": {"$ref": "#/$defs/GithubReaction"}}}},
+    "GithubReview": {"type": "object", "additionalProperties": false, "required": ["id", "author", "state", "body", "submitted_at", "url"], "properties": {"id": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "state": {"enum": ["approved", "changes_requested", "commented", "dismissed", "pending"]}, "body": {"type": "string"}, "submitted_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}}},
+    "GithubThreadComment": {"type": "object", "additionalProperties": false, "required": ["id", "author", "body", "created_at", "url"], "properties": {"id": {"type": "string"}, "author": {"oneOf": [{"$ref": "#/$defs/GithubUser"}, {"type": "null"}]}, "body": {"type": "string"}, "created_at": {"type": "string"}, "url": {"type": "string"}}},
+    "GithubReviewThread": {"type": "object", "additionalProperties": false, "required": ["id", "path", "line", "resolved", "outdated", "comments"], "properties": {"id": {"type": "string"}, "path": {"type": "string"}, "line": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}, "resolved": {"type": "boolean"}, "outdated": {"type": "boolean"}, "comments": {"type": "array", "items": {"$ref": "#/$defs/GithubThreadComment"}}}},
+    "GithubConversation": {"description": "Latest opinionated reviews, review threads and issue comments, at most 100 of each; truncated when GitHub has more.", "type": "object", "additionalProperties": false, "required": ["reviews", "review_threads", "comments", "truncated"], "properties": {"reviews": {"type": "array", "items": {"$ref": "#/$defs/GithubReview"}}, "review_threads": {"type": "array", "items": {"$ref": "#/$defs/GithubReviewThread"}}, "comments": {"type": "array", "items": {"$ref": "#/$defs/GithubComment"}}, "truncated": {"type": "boolean"}}},
+    "GithubCheckRun": {"type": "object", "additionalProperties": false, "required": ["name", "workflow", "status", "conclusion", "started_at", "completed_at", "url", "summary"], "properties": {"name": {"type": "string"}, "workflow": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}, "summary": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "GithubChecks": {"description": "Check runs and statuses on a pull request's head, at most 100.", "type": "object", "additionalProperties": false, "required": ["head_sha", "runs", "truncated"], "properties": {"head_sha": {"type": "string"}, "runs": {"type": "array", "items": {"$ref": "#/$defs/GithubCheckRun"}}, "truncated": {"type": "boolean"}}},
+    "GithubFile": {"type": "object", "additionalProperties": false, "required": ["path", "previous_path", "status", "additions", "deletions", "patch"], "properties": {"path": {"type": "string"}, "previous_path": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "status": {"enum": ["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]}, "additions": {"type": "integer", "minimum": 0}, "deletions": {"type": "integer", "minimum": 0}, "patch": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "GithubFiles": {"description": "A pull request's files, at most 3,000 and a bounded amount of patch text; truncated past either.", "type": "object", "additionalProperties": false, "required": ["total", "files", "truncated"], "properties": {"total": {"type": "integer", "minimum": 0}, "files": {"type": "array", "items": {"$ref": "#/$defs/GithubFile"}}, "truncated": {"type": "boolean"}}},
+    "GithubJob": {"type": "object", "additionalProperties": false, "required": ["name", "status", "conclusion", "started_at", "completed_at", "url"], "properties": {"name": {"type": "string"}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "url": {"type": "string"}}},
+    "GithubRun": {"type": "object", "additionalProperties": false, "required": ["owner", "repo", "id", "name", "event", "status", "conclusion", "head_branch", "head_sha", "url", "run_attempt", "started_at", "completed_at", "pull_requests", "jobs"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "id": {"type": "integer", "minimum": 0}, "name": {"type": "string"}, "event": {"type": "string"}, "status": {"enum": ["queued", "in_progress", "completed", "waiting", "requested", "pending"]}, "conclusion": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "head_branch": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "head_sha": {"type": "string"}, "url": {"type": "string"}, "run_attempt": {"type": "integer", "minimum": 0}, "started_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "completed_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "pull_requests": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "jobs": {"type": "array", "items": {"$ref": "#/$defs/GithubJob"}}}},
+    "GithubMovedTo": {"description": "Where a 301 from GitHub points, parsed back to a typed item; never followed.", "type": "object", "additionalProperties": false, "required": ["owner", "repo", "number"], "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}},
+    "GithubPullRequestRead": {"description": "One GitHub plugin read of a GithubPullRequest: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubPullRequest"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubIssueRead": {"description": "One GitHub plugin read of a GithubIssue: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubIssue"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubCommentRead": {"description": "One GitHub plugin read of a GithubComment: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubComment"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubConversationRead": {"description": "One GitHub plugin read of a GithubConversation: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubConversation"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubChecksRead": {"description": "One GitHub plugin read of a GithubChecks: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubChecks"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubFilesRead": {"description": "One GitHub plugin read of a GithubFiles: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubFiles"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubRunRead": {"description": "One GitHub plugin read of a GithubRun: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["status", "fetched_at", "stale", "item"], "properties": {"status": {"const": "found"}, "fetched_at": {"type": "string"}, "stale": {"type": "boolean"}, "item": {"$ref": "#/$defs/GithubRun"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "to"], "properties": {"status": {"const": "moved"}, "to": {"$ref": "#/$defs/GithubMovedTo"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "gone"}}}, {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_found"}}}, {"type": "object", "additionalProperties": false, "required": ["status", "reason", "retry_after_s"], "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string"}, "retry_after_s": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}}}]},
+    "GithubPluginRead": {"description": "Any GitHub plugin read; the non-found states are shared, so the reads are told apart by route, not shape.", "anyOf": [{"$ref": "#/$defs/GithubPullRequestRead"}, {"$ref": "#/$defs/GithubIssueRead"}, {"$ref": "#/$defs/GithubCommentRead"}, {"$ref": "#/$defs/GithubConversationRead"}, {"$ref": "#/$defs/GithubChecksRead"}, {"$ref": "#/$defs/GithubFilesRead"}, {"$ref": "#/$defs/GithubRunRead"}]}
   }
 }

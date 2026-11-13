@@ -382,6 +382,15 @@ pub(super) async fn run_agents(
                     )
                     .await?
             } else {
+                let workspace = resolve_start_workspace(
+                    &client,
+                    endpoint,
+                    &args,
+                    existing.as_ref(),
+                    configured_person,
+                    &subject,
+                )
+                .await?;
                 let mut uris = BTreeMap::new();
                 if let Some(existing) = &existing {
                     for reference in fractal_daemon::graph::declared_resources(&existing.desired) {
@@ -397,7 +406,7 @@ pub(super) async fn run_agents(
                         }
                     }
                 }
-                let kdl = agent_start_document(&args, existing.as_ref(), &uris)?;
+                let kdl = agent_start_document(&args, existing.as_ref(), &uris, &workspace)?;
                 if args.print_kdl {
                     print!("{kdl}");
                     return Ok(());
@@ -588,11 +597,22 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "from_stale_handoff": args.from_stale_handoff,
                         "ignore_fit": args.ignore_fit,
                         "reason": args.reason,
                     }),
                 )
                 .await?;
+            if request.body["fields"]["fresh_session"] == true
+                && request.body["fields"]["operation"] != fractal_daemon::handoff::RESTART_NOW_OPERATION
+            {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Fresh-session restart pending for {subject}: waiting for the agent to write or mark its handoff ready; no deadline forces the restart");
+                    Ok(())
+                };
+            }
             if request.body["fields"]["action"] == "restart-when-idle" {
                 return if json_output {
                     print_value(&request, true)
@@ -981,6 +1001,86 @@ async fn agent_start_declaration(
             .get(&format!("/v1/claims/by-id/{}", claim.predecessors[0]))
             .await?;
     }
+}
+
+/// The workspace `agents start` publishes: the declaration's own when a declared agent starts
+/// without `--workspace`, otherwise a path resolved for the placement host. The caller only
+/// canonicalizes paths on its own host; a path for another member is taken as written, and a
+/// new agent on another member without `--workspace` gets the directory that host names.
+async fn resolve_start_workspace(
+    client: &Client,
+    endpoint: &Endpoint,
+    args: &AgentStartArgs,
+    existing: Option<&fractal_daemon::model::DesiredSubject>,
+    configured_person: Option<&str>,
+    subject: &str,
+) -> Result<StartWorkspace> {
+    if existing.is_some() && args.workspace.is_none() {
+        return Ok(StartWorkspace::Keep);
+    }
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let placement = args
+        .host
+        .as_deref()
+        .or_else(|| {
+            existing.and_then(|seat| seat.member.as_ref().map(|member| member.host.as_str()))
+        })
+        .unwrap_or(local);
+    let placement = placement.strip_prefix("host/").unwrap_or(placement);
+    let placement = if placement == "local" { local } else { placement };
+    if let Some(workspace) = &args.workspace {
+        if placement == local {
+            let workspace = fs::canonicalize(workspace)
+                .with_context(|| format!("resolve workspace {}", workspace.display()))?;
+            return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+        }
+        anyhow::ensure!(
+            workspace.is_absolute(),
+            "a workspace on {placement} must be an absolute path on that host"
+        );
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    if placement == local {
+        let workspace = fs::canonicalize(Path::new(".")).context("resolve workspace .")?;
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    // Another host's home is only known there, so it names the new agent's directory itself,
+    // like `agents new`: the placement host creates it when the agent starts. A placement no
+    // member can reach names nothing, and the caller's own default is no path on that host.
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!(
+            "asking {placement} for a workspace needs the local Unix endpoint; pass --workspace"
+        );
+    };
+    let person = Some(args.actor.as_str())
+        .filter(|actor| actor.starts_with("person/"))
+        .or(configured_person)
+        .with_context(|| {
+            format!(
+                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+            )
+        })?;
+    let path = format!(
+        "/v1/hosts/{}/agent-workspace?identity={}",
+        urlencoding::encode(placement),
+        urlencoding::encode(subject)
+    );
+    let answer: Value = Client::unix_as(socket.as_ref(), person)?
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+        .get(&path)
+        .await
+        .with_context(|| {
+            format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
+        })?;
+    let workspace = answer
+        .get("workspace")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{placement} returned no workspace"))?;
+    Ok(StartWorkspace::Set(workspace.to_owned(), true))
 }
 
 async fn run_agent_new(

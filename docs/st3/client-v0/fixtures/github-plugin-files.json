@@ -1,0 +1,35 @@
+{
+  "status": "found",
+  "fetched_at": "2026-11-07T06:40:00Z",
+  "stale": false,
+  "item": {
+    "total": 3,
+    "truncated": false,
+    "files": [
+      {
+        "path": "src/scheduler.rs",
+        "previous_path": null,
+        "status": "added",
+        "additions": 180,
+        "deletions": 0,
+        "patch": "@@ -0,0 +1,4 @@\n+pub struct Scheduler {\n+    beds: Vec<Bed>,\n+}\n+"
+      },
+      {
+        "path": "src/beds.rs",
+        "previous_path": "src/bed.rs",
+        "status": "renamed",
+        "additions": 34,
+        "deletions": 37,
+        "patch": "@@ -10,3 +10,3 @@ impl Bed {\n-    fn dry(&self) -> bool { self.moisture < 10 }\n+    fn dry(&self) -> bool { self.moisture < 12 }\n     fn dormant(&self) -> bool { self.dormant }\n"
+      },
+      {
+        "path": "assets/beds.png",
+        "previous_path": null,
+        "status": "added",
+        "additions": 0,
+        "deletions": 0,
+        "patch": null
+      }
+    ]
+  }
+}

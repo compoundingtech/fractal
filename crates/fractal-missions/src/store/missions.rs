@@ -934,7 +934,14 @@ fn set_mission_run_state_tx(
         return Ok(!claim_ids.is_empty());
     }
     if current_status == status && current_phase == phase {
-        return Ok(false);
+        // A blocked run can acquire retained exit evidence without changing state.
+        // Keep the reason durable too, while unchanged running/no-reason passes stay cheap.
+        if reason.is_none()
+            || latest_claim_of_kind_tx(transaction, &subject, "mission-run.state")?
+                .is_some_and(|claim| claim.body.pointer("/fields/reason").and_then(Value::as_str) == reason)
+        {
+            return Ok(false);
+        }
     }
     if (current_phase.starts_with("cleanup-") && phase != "terminal")
         || (current_phase == "final-cancelled"
@@ -1453,6 +1460,8 @@ fn mission_run_steps_view_tx(
         .collect::<Result<Vec<_>, _>>()?;
     apply_step_states_tx(connection, &mut view.steps, summaries)?;
     view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
+    (view.retry_of, view.retried_by) =
+        fractal_store::store::mission_run_retry_links_tx(connection, &view.subject)?;
     Ok(view)
 }
 
@@ -3236,6 +3245,8 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         apply_step_states_tx(&connection, &mut run.steps, summaries)?;
         run.scheduler_fault = first_readiness_fault_tx(&connection, &run.subject)?;
+        (run.retry_of, run.retried_by) =
+            fractal_store::store::mission_run_retry_links_tx(&connection, &run.subject)?;
         Ok(run)
     }
 
@@ -4394,7 +4405,13 @@ impl MissionsStore for Store {
                 ))
             }
         };
-        let changed = desired != current_run_report_tx(transaction, &current.subject)?;
+        let changed = match &desired {
+            // Clearing a run that never named a reporter is recorded too: it also stops the
+            // default stall report.
+            None => latest_claim_of_kind_tx(transaction, &current.subject, RUN_REPORT_KIND)?
+                .is_none_or(|claim| run_report_fields(&claim.body).is_some()),
+            Some(_) => desired != current_run_report_tx(transaction, &current.subject)?,
+        };
         if changed {
             let mut fields = serde_json::Map::new();
             if let Some((report_to, stalled_after_ms, completed, stalls)) = &desired {
@@ -6806,7 +6823,7 @@ impl MissionsStore for Store {
                     return Ok(false);
                 };
                 if attempt != reviewed_attempt
-                    || !matches!(status.as_str(), "verifying" | "working" | "blocked")
+                    || !matches!(status.as_str(), "ready" | "claimed" | "verifying" | "working" | "blocked")
                     || step_owner_is_terminal_tx(transaction, &subject)?
                 {
                     return Ok(false);
