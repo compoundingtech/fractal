@@ -1294,6 +1294,20 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
 }
 
 #[test]
+fn usage_report_marks_unpriced_responses_without_inventing_tokens() {
+    let report = json!({"rows":[{"agent":"agent/incomplete","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":1}]});
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("SPEND  $0.00+ · 0 tokens"));
+    assert!(output.contains("UNPRICED  1 responses without a known price"));
+    let zero = json!({"rows":[{"agent":"agent/zero","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":0}]});
+    let output = render_usage_report(&zero, 24, None);
+    assert!(output.contains("SPEND  $0.00 · 0 tokens"));
+    assert!(!output.contains("UNPRICED"));
+}
+
+#[test]
 fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let report = json!({"rows": [
         {"agent":"agent/cheap","mission_run":"mission-run/one","step":"step-run/one/build","model":"model-a","account":"claude/aaaa","host":"host/a","cost_microusd":250000,"total_tokens":900,"input_tokens":200,"output_tokens":100,"cache_write_tokens":0,"cached_tokens":600,"unpriced_tokens":0},
@@ -2856,15 +2870,13 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
             Some(("Tests pass\nnext: docs", 60_000)),
         ),
         step("step-run/two/review", "Review the parser", None),
-        StepRunView {
-            status: "verifying".into(),
-            completion_summary: Some("Published the guide".into()),
-            ..step(
-                "step-run/two/docs",
-                "Write the guide",
-                Some(("Drafting", 0)),
-            )
-        },
+        StepRunView { executions: None, status: "verifying".into(),
+        completion_summary: Some("Published the guide".into()),
+        ..step(
+            "step-run/two/docs",
+            "Write the guide",
+            Some(("Drafting", 0)),
+        ) },
     ];
 
     let card = render_client_agent(&agent, &current, 360_000);
@@ -4023,7 +4035,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "fractal now --as person/alex");
+    let output = render_now_page(&page, &[], "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -4059,7 +4071,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
+    assert!(!render_now_page(&page, &[], "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -4259,6 +4271,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
+        &[],
         "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
@@ -4271,6 +4284,7 @@ fn now_page_without_work_does_not_claim_zero_working() {
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
+        &[],
         "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
@@ -4279,14 +4293,56 @@ fn now_page_without_work_does_not_claim_zero_working() {
 }
 
 #[test]
+fn now_page_names_availability_before_alerts() {
+    use fractal_client::{
+        AvailabilityDeadlineClock, AvailabilityInterruptions, AvailabilityPresence, AvailabilityStatus,
+        AvailabilityStatusSource,
+    };
+    let away = fractal_client::PersonAvailability {
+        person: "person/alex".into(),
+        status: AvailabilityStatus::Away,
+        status_source: AvailabilityStatusSource::Override,
+        status_until: Some("2026-11-12T18:00:00.000Z".into()),
+        presence: None,
+        presence_observed_at: None,
+        interruptions: AvailabilityInterruptions::None,
+        interruptions_until: None,
+        deadline_clock: AvailabilityDeadlineClock::Run,
+        deadline_clock_since: None,
+        deadline_clock_until: None,
+    };
+    let output = render_now_page(&fixture_product_page(&["attention"], false), std::slice::from_ref(&away), "fractal now");
+    assert!(
+        output.starts_with(
+            "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\n1 alert\n"
+        ),
+        "{output}"
+    );
+    assert_eq!(
+        render_now_page(&fixture_product_page(&[], false), std::slice::from_ref(&away), "fractal now"),
+        "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\nWork: fractal work ls · Health: fractal doctor\n"
+    );
+    let unreported = fractal_client::PersonAvailability {
+        status: AvailabilityStatus::Available,
+        status_source: AvailabilityStatusSource::Unreported,
+        status_until: None,
+        presence: Some(AvailabilityPresence::Unreported),
+        interruptions: AvailabilityInterruptions::All,
+        ..away
+    };
+    let quiet = render_now_page(&fixture_product_page(&["attention"], false), &[unreported], "fractal now");
+    assert!(quiet.starts_with("1 alert\n"), "no device reporting alone prints nothing: {quiet}");
+}
+
+#[test]
 fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let page = fixture_product_page(&["attention"], false);
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, &[], "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "fractal now")
+        render_now_page(&alerts, &[], "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -4302,12 +4358,12 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         speech: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "fractal now");
+    let now = render_now_page(&updates, &[], "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        render_now_page(&fixture_product_page(&[], false), &[], "fractal now"),
         "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.

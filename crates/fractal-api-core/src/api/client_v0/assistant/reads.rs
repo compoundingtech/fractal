@@ -82,6 +82,10 @@ pub async fn project_with_context(
                 "title": item["title"], "detail": item["detail"], "request": attention_request(item),
             })))
         },
+        "availability" => {
+            allow(parameters, SUMMARY_FIELDS, max_bytes)?;
+            availability(state, max_bytes, context).await
+        }
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         "slo" => page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
@@ -285,6 +289,54 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
         })
     })
     .await?
+}
+
+/// The grant person's effective availability and current directive note, from one store
+/// snapshot. The assistant is not the person, so raw device presence is withheld.
+/// The availability fields are never cut. The note text is cut on a character boundary
+/// to what the budget leaves after the whole response envelope, measured with the same
+/// codec as delivery; `directive_note_truncated` says whether it was.
+async fn availability(
+    state: &AppState,
+    max_bytes: usize,
+    context: &response_body::Context,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    use fractal_store::store::availability::AvailabilityStore as _;
+    let person = owner(state)?;
+    let reader = state.clone();
+    let (snapshot, availability, mut note) = blocking_store(move || {
+        reader.store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&reader, index);
+            let now = client_snapshot_time(&snapshot);
+            let availability = reader.store.person_availability(&person, now)?.without_presence();
+            let note = fractal_store::store::directive_notes::current(&reader.store.readers.get(), &person, now)?;
+            Ok((snapshot, availability, note))
+        })
+    })
+    .await?;
+    let text = note.as_mut().map(|note| std::mem::take(&mut note.text)).unwrap_or_default();
+    // Measured with the longer flag literal, so the delivered body never exceeds it.
+    let mut value = json!({
+        "kind": "person-availability", "availability": availability, "directive_note": note,
+        "directive_note_truncated": false,
+    });
+    let envelope = context.value_envelope_size(&snapshot, &value)?;
+    let mut remaining = max_bytes.checked_sub(envelope)
+        .ok_or_else(|| budget_exceeded("the availability does not fit the response budget"))?;
+    let mut end = 0;
+    for character in text.chars() {
+        let size = encoded_len(character.encode_utf8(&mut [0; 4]));
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        end += character.len_utf8();
+    }
+    if !value["directive_note"].is_null() {
+        value["directive_note"]["text"] = json!(&text[..end]);
+        value["directive_note_truncated"] = json!(end < text.len());
+    }
+    Ok((snapshot, value))
 }
 
 /// Native cards put informational person-step requests in `update`, not `request`.

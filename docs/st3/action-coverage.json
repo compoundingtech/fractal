@@ -1905,12 +1905,58 @@
       "verification": "real CLI over private Unix socket; replacement metadata, expiry and invalid inputs, with harness writes refused"
     },
     {
+      "command": "st availability",
+      "description": "Read your own availability, or the coarse availability of the people an agent works for",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_person_sets_reports_presence_and_clears",
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_agent_reads_without_presence_and_cannot_write"
+      ],
+      "verification": "real CLI over private Unix socket; own JSON/human reads with presence, agent reads without presence"
+    },
+    {
+      "command": "st availability clear",
+      "description": "Return the person's own status, interruptions and deadline clock to their defaults",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_person_sets_reports_presence_and_clears",
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_agent_reads_without_presence_and_cannot_write"
+      ],
+      "verification": "real CLI over private Unix socket; clearing restores derived status, all and run, and harness clears are refused"
+    },
+    {
+      "command": "st availability presence",
+      "description": "Report a device presence for the person, as a paired client does",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_person_sets_reports_presence_and_clears",
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_agent_reads_without_presence_and_cannot_write"
+      ],
+      "verification": "real CLI over private Unix socket; a present report makes the derived status available and harness reports are refused"
+    },
+    {
+      "command": "st availability set",
+      "description": "Set the person's own status, interruptions or deadline clock, optionally for a duration or until a time",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_person_sets_reports_presence_and_clears",
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_agent_reads_without_presence_and_cannot_write"
+      ],
+      "verification": "real CLI over private Unix socket; an away override with --for shows its until, and agent writes are refused before any request"
+    },
+    {
+      "command": "st availability show",
+      "description": "Read availability, optionally for one named person",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_person_sets_reports_presence_and_clears",
+        "crates/fractal/tests/client_v0_cli.rs::availability_cli_agent_reads_without_presence_and_cannot_write"
+      ],
+      "verification": "real CLI over private Unix socket; --person reads one person, without presence for anyone else"
+    },
+    {
       "command": "st now",
       "description": "Understand what needs action now",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart",
+        "crates/fractal/tests/client_v0_cli.rs::availability_surfaces_to_an_asking_agent_in_ask_and_now"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+      "verification": "real CLI over private Unix socket; disk store reopened between actions; availability lines lead for a person reader and for an agent reader"
     },
     {
       "command": "st persons rename",
@@ -2748,9 +2794,10 @@
       "command": "st work ask",
       "description": "Ask a person independently, or block specific work with --step",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart",
+        "crates/fractal/tests/client_v0_cli.rs::availability_surfaces_to_an_asking_agent_in_ask_and_now"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+      "verification": "real CLI over private Unix socket; disk store reopened between actions; the asked person's availability follows the result in human and JSON output"
     },
     {
       "command": "st work cancel-ask",

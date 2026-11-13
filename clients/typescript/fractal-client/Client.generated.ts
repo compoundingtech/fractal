@@ -7,6 +7,7 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -471,6 +472,21 @@ export class FractalClient {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
     }
 
+    /** Set or clear the session person's own availability. Requires write.availability; agent sessions are refused. */
+    async availabilitySet(request: AvailabilitySet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailability>> {
+        return this.request<PersonAvailability>('PUT', '/v1/client/availability', request, undefined, undefined, requestOptions);
+    }
+
+    /** Report one device's raw state for the session person, on every state change and again at report_again_at; the daemon derives presence and assigns the source. Requires write.presence. */
+    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PresenceReportResult>> {
+        return this.request<PresenceReportResult>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused. */
+    async notesSet(request: DirectiveNoteSet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNoteSetResult>> {
+        return this.request<DirectiveNoteSetResult>('PUT', '/v1/client/notes', request, undefined, undefined, requestOptions);
+    }
+
     /** Replace this paired device's local-only registration, without a graph receipt. */
     async pushRegister(registration: PushRegistration, requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
         return this.request('POST', '/v1/client/push-registration', registration, undefined, undefined, requestOptions);
@@ -700,6 +716,7 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }

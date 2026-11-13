@@ -4940,20 +4940,42 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
         let mut started = None;
         let mut replaced = false;
+        let mut predecessor = None;
         // Whole history: the oldest running claim of this incarnation, and any other incarnation's.
-        for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
+        let observations = self.store.claims_for(subject, Some("runtime.observed"))?;
+        for claim in &observations {
             if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
                 continue;
             }
-            if claim_incarnation(&claim) == Some(incarnation) {
+            if claim_incarnation(claim) == Some(incarnation) {
                 started.get_or_insert(claim.accepted_at_unix_ms);
             } else {
+                if started.is_none() {
+                    predecessor = claim_incarnation(claim);
+                }
                 replaced = true;
             }
         }
         let now = now_ms();
         if !replaced
             || started.is_none_or(|started| now.saturating_sub(started) > SESSION_START_WINDOW_MS)
+        {
+            return Ok(());
+        }
+        // A step's fresh-context reset deliberately discards continuity. Do not put the
+        // predecessor's handoff (or held work rendered with it) back into the new session.
+        // Match the immediately preceding incarnation, not any historical reset: an ordinary
+        // crash/restart after this new session should retain the usual continuity behavior.
+        if let Some(predecessor) = predecessor
+            && self
+                .store
+                .observations_for(subject, "runtime.action.requested")?
+                .iter()
+                .any(|claim| {
+                    claim.body.pointer("/fields/action").and_then(Value::as_str)
+                        == Some("fresh-context")
+                        && claim_incarnation(claim) == Some(predecessor)
+                })
         {
             return Ok(());
         }
@@ -14869,56 +14891,54 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                 }
                 DependencySpec::Predicate { gate } => {
-                    let fake = crate::model::StepRunView {
-                        subject: format!(
-                            "step-run/{}/{}",
-                            run.generation
-                                .strip_prefix("run-generation/")
-                                .unwrap_or(&run.generation),
-                            step.spec.path
-                        ),
-                        run: run.subject.clone(),
-                        generation: run.generation.clone(),
-                        step: step.spec.path.clone(),
-                        fresh_context: step.spec.fresh_context,
-                        queue: None,
-                        queue_position: None,
-                        definition_hash: step.spec.definition_hash.clone(),
-                        status: "pending".into(),
-                        attempt: 1,
-                        assigned_to: None,
-                        available_to: Vec::new(),
-                        agentless: true,
-                        title: None,
-                        goals: Vec::new(),
-                        constraints: Vec::new(),
-                        under: Vec::new(),
-                        worker_reported: false,
-                        claimant: None,
-                        claim_incarnation: None,
-                        submitted_incarnation: None,
-                        claim_expires_at_unix_ms: None,
-                        carried_claimant: None,
-                        execution_started_at_unix_ms: None,
-                        execution_paused_until_unix_ms: None,
-                        execution_waited_ms: 0,
-                        execution_elapsed_ms: 0,
-                        timeout_ms: None,
-                        timeout_extension_ms: 0,
-                        ready_age_ms: None,
-                        wake: None,
-                        progress_summary: None,
-                        progress_at_unix_ms: None,
-                        completion_summary: None,
-                        readiness_epoch: 0,
-                        blocked_reason: None,
-                        blockers: Vec::new(),
-                        not_before_unix_ms: None,
-                        nudged_at_unix_ms: None,
-                        created_at_unix_ms: run.created_at_unix_ms,
-                        updated_at_unix_ms: run.updated_at_unix_ms,
-                        person_answers: Vec::new(),
-                    };
+                    let fake = crate::model::StepRunView { executions: None, subject: format!(
+                        "step-run/{}/{}",
+                        run.generation
+                            .strip_prefix("run-generation/")
+                            .unwrap_or(&run.generation),
+                        step.spec.path
+                    ),
+                    run: run.subject.clone(),
+                    generation: run.generation.clone(),
+                    step: step.spec.path.clone(),
+                    fresh_context: step.spec.fresh_context,
+                    queue: None,
+                    queue_position: None,
+                    definition_hash: step.spec.definition_hash.clone(),
+                    status: "pending".into(),
+                    attempt: 1,
+                    assigned_to: None,
+                    available_to: Vec::new(),
+                    agentless: true,
+                    title: None,
+                    goals: Vec::new(),
+                    constraints: Vec::new(),
+                    under: Vec::new(),
+                    worker_reported: false,
+                    claimant: None,
+                    claim_incarnation: None,
+                    submitted_incarnation: None,
+                    claim_expires_at_unix_ms: None,
+                    carried_claimant: None,
+                    execution_started_at_unix_ms: None,
+                    execution_paused_until_unix_ms: None,
+                    execution_waited_ms: 0,
+                    execution_elapsed_ms: 0,
+                    timeout_ms: None,
+                    timeout_extension_ms: 0,
+                    ready_age_ms: None,
+                    wake: None,
+                    progress_summary: None,
+                    progress_at_unix_ms: None,
+                    completion_summary: None,
+                    readiness_epoch: 0,
+                    blocked_reason: None,
+                    blockers: Vec::new(),
+                    not_before_unix_ms: None,
+                    nudged_at_unix_ms: None,
+                    created_at_unix_ms: run.created_at_unix_ms,
+                    updated_at_unix_ms: run.updated_at_unix_ms,
+                    person_answers: Vec::new(), };
                     if !matches!(
                         self.evaluate_mission_gate(run, step, &fake, gate)?,
                         GateOutcome::Pass
@@ -15070,8 +15090,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .mission_run_steps(child, false)?
             .with_context(|| format!("the child run {child} disappeared"))?;
+        let executions = view.steps.iter().map(|step| {
+            self.store.step_executions(&step.subject)
+        }).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>();
         if status == "completed" {
-            let mut value = serde_json::json!({"run": child, "status": status});
+            let mut value = serde_json::json!({"run": child, "status": status, "executions": executions});
             let products = self.program_child_products(&view)?;
             if !products.is_empty() {
                 value["products"] = Value::Object(products);
@@ -15088,7 +15111,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
             })
             .unwrap_or_else(|| format!("the child run is {status}"));
-        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason}}))
+        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason, "executions": executions}}))
     }
 
     fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
@@ -49811,6 +49834,39 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     == vec![format!("{}worker-three", crate::handoff::SESSION_START_TAG_PREFIX)])
         );
 
+        // A fresh step must not smuggle the discarded context back through the handoff.
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String("fresh-context".into())),
+                    ("operation".into(), Value::String("step-fresh-reset".into())),
+                    ("incarnation_id".into(), Value::String("worker-three".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("step-fresh-reset".into()),
+            })
+            .unwrap();
+        ready("worker-four");
+        ready("worker-four");
+        assert_eq!(inbox().len(), 2, "a fresh reset does not send the old handoff");
+        // Suppression survives daemon restart; it is not just the session_starts cache.
+        Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .deliver_session_start(&desired.subject, "worker-four")
+        .unwrap();
+        assert_eq!(inbox().len(), 2);
+        // A later ordinary restart is not itself a freshness request.
+        ready("worker-five");
+        assert_eq!(inbox().len(), 3, "ordinary continuity resumes after the fresh session");
+
         // A seat that has written nothing and holds no work is sent nothing at all.
         let quiet = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&quiet, &source, "session-start-quiet");
@@ -51672,6 +51728,7 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -51749,50 +51806,48 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView {
-            subject: subject.into(),
-            run: "mission-run/run-1".into(),
-            generation: "run-generation/run-1".into(),
-            step: path.into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some(assignee.into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: None,
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1,
-            updated_at_unix_ms: 1,
-            person_answers: Vec::new(),
-        };
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { executions: None, subject: subject.into(),
+        run: "mission-run/run-1".into(),
+        generation: "run-generation/run-1".into(),
+        step: path.into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some(assignee.into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: None,
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+        person_answers: Vec::new(), };
         let legacy = step("step-run/run-1/legacy", "legacy", "node/worker");
         assert_eq!(
             next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&legacy), &[]),
@@ -51922,59 +51977,57 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView {
-            subject: "step-run/older/work".into(),
-            run: "mission-run/older".into(),
-            generation: "run-generation/older".into(),
-            step: "work".into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some("agent/worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: Some(crate::model::WorkWakeView {
-                assignee: "agent/worker".into(),
-                assignee_state: "working".into(),
-                incarnation_id: "worker-one".into(),
-                attempts: 1,
-                last_attempt_at_unix_ms: Some(1_000),
-                acknowledged_by: None,
-                failure: None,
-                asks: Default::default(),
-            }),
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 10,
-            updated_at_unix_ms: 10,
-            person_answers: Vec::new(),
-        };
+        let mut first = StepRunView { executions: None, subject: "step-run/older/work".into(),
+        run: "mission-run/older".into(),
+        generation: "run-generation/older".into(),
+        step: "work".into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some("agent/worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: Some(crate::model::WorkWakeView {
+            assignee: "agent/worker".into(),
+            assignee_state: "working".into(),
+            incarnation_id: "worker-one".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: Some(1_000),
+            acknowledged_by: None,
+            failure: None,
+            asks: Default::default(),
+        }),
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 10,
+        person_answers: Vec::new(), };
         let mut legacy = first.clone();
         legacy.assigned_to = Some("node/worker".into());
         assert_eq!(
@@ -52434,59 +52487,57 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView {
-            subject: "step-run/run-1/work".into(),
-            run: "mission-run/run-1".into(),
-            generation: "run-generation/run-1".into(),
-            step: "work".into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some("agent/remote.worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: Some(1),
-            wake: Some(crate::model::WorkWakeView {
-                assignee: "agent/remote.worker".into(),
-                assignee_state: "ready".into(),
-                incarnation_id: "remote-one".into(),
-                attempts: 1,
-                last_attempt_at_unix_ms: Some(1_000),
-                acknowledged_by: None,
-                failure: None,
-                asks: Default::default(),
-            }),
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1,
-            updated_at_unix_ms: 1,
-            person_answers: Vec::new(),
-        };
+        let step = StepRunView { executions: None, subject: "step-run/run-1/work".into(),
+        run: "mission-run/run-1".into(),
+        generation: "run-generation/run-1".into(),
+        step: "work".into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some("agent/remote.worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: Some(1),
+        wake: Some(crate::model::WorkWakeView {
+            assignee: "agent/remote.worker".into(),
+            assignee_state: "ready".into(),
+            incarnation_id: "remote-one".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: Some(1_000),
+            acknowledged_by: None,
+            failure: None,
+            asks: Default::default(),
+        }),
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+        person_answers: Vec::new(), };
         let work = [step];
 
         assert_eq!(
