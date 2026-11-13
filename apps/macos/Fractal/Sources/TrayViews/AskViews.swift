@@ -433,16 +433,16 @@ private struct AttentionControlButtons: View {
   }
 }
 
-/// Tells Fractal the person saw this card when it appears in the live panel, once per revision.
+/// Tells the model this card's row is in the panel (per revision) and when it leaves; the model
+/// marks it seen only while the panel's window is on screen.
 private struct MarksSeen: ViewModifier {
   let record: AttentionRecord
   let model: AttentionModel
-  @Environment(\.marksSeen) private var marksSeen
 
   func body(content: Content) -> some View {
-    content.task(id: record.revision) {
-      if marksSeen { await model.markSeen(record) }
-    }
+    content
+      .task(id: record.revision) { await model.rowAppeared(record) }
+      .onDisappear { model.rowDisappeared(record.id) }
   }
 }
 

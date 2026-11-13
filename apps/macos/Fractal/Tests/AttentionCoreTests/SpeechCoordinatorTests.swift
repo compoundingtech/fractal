@@ -175,6 +175,24 @@ final class SpeechCoordinatorTests: XCTestCase {
     XCTAssertEqual(speech.status, [:])
   }
 
+  func testAnItemNoLongerShownIsStoppedOrDropped() async {
+    let output = ScriptedSpeech()
+    let (speech, deliveries) = coordinator(output)
+    let first = urgent("one", from: "release-captain")
+    let second = urgent("two", from: "observability")
+    consider(speech, [first, second])
+    await output.waitForRequests(1)
+
+    // Both snoozed: Fractal still lists them open, the panel no longer shows them.
+    speech.consider([], open: [first, second], availability: available, macPresence: .present, now: now)
+    await until { speech.current == nil }
+    let skipped = await output.skipped
+    XCTAssertEqual(skipped, ["attention/one#claim/1"], "the one being spoken stops")
+    XCTAssertEqual(speech.queue, [], "the queued one is dropped")
+    XCTAssertEqual(speech.status, [:])
+    XCTAssertEqual(deliveries.retained.last, [first.id, second.id], "their notifications stay while they are open")
+  }
+
   func testLogsVerdictsAndOutcomesOncePerRevisionWithoutText() async {
     let output = ScriptedSpeech()
     let lines = Lines()

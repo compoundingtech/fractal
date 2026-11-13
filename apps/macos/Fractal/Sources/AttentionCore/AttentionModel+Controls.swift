@@ -13,11 +13,28 @@ extension AttentionModel {
     return false
   }
 
-  /// The panel showed this card to the person: tell Fractal once per revision, unless Fractal
-  /// already has it seen. A failure is forgotten, so the next showing tries again.
-  public func markSeen(_ record: AttentionRecord) async {
+  /// The panel's window came on screen or left it; coming on screen marks the cards it holds.
+  public func setPanelVisible(_ visible: Bool) async {
+    isPanelVisible = visible
+    guard visible else { return }
+    for record in rowsInPanel.values { await markSeen(record) }
+  }
+
+  /// A card's row is in the panel (or reached a new revision there): seen if the panel is visible.
+  public func rowAppeared(_ record: AttentionRecord) async {
+    rowsInPanel[record.id] = record
+    await markSeen(record)
+  }
+
+  public func rowDisappeared(_ id: String) { rowsInPanel[id] = nil }
+
+  /// The person sees this card now: tell Fractal once per revision, unless Fractal already has
+  /// it seen. A failure is forgotten, so the next showing tries again.
+  func markSeen(_ record: AttentionRecord) async {
     let key = "\(record.id)#\(record.revision)"
-    guard let adapter, canControl, record.role != .ignored, record.seenAt == nil, !seenMarked.contains(key) else {
+    guard let adapter, isPanelVisible, canControl, record.role != .ignored, record.seenAt == nil,
+      !seenMarked.contains(key)
+    else {
       return
     }
     seenMarked.insert(key)
