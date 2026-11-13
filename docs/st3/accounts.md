@@ -262,6 +262,46 @@ fractal usage --hours 24 --by account
 `fractal usage` also lists each account's 5-hour and weekly limits: the freshest reading any seat on
 that account reported, with when it was measured and when the weekly window resets.
 
+### Historical step executions
+
+Native `Store::step_executions(step_subject)` returns one generic execution envelope for each
+durable agent `work.claimed` receipt. Its stable `id` is that claim's ID; `attempt`, `agent`, and
+`incarnation_id` distinguish retries and seat replacements. Reclaiming the same attempt creates
+another execution, even on the same incarnation. A claimed invocation remains visible when it
+fails or reports no usage. A process that fails before claiming work has no invocation receipt:
+its startup/readiness failure remains runtime evidence, and a never-claimed step has no executions.
+This is a work-invocation history, not an inventory of every agent process launch.
+
+`declared_model` is captured when new work is claimed, never borrowed from the seat's current
+declaration while reading history. `observed_models` contains the distinct models evidenced by
+that invocation's responses; a mismatch does not establish a fallback cause. `fallback` stays
+null without explicit evidence. `trace_id` is captured only from an actual valid propagated
+OpenTelemetry span at claim time, not generated from an execution ID. `exit_evidence`, when
+available, references the runtime observation carrying native exit evidence for that incarnation.
+Old receipts lacking this metadata keep null values, not reconstructed historical facts.
+
+Response accounting reuses the native response-source deduplication and reported-cost/list-price
+logic. It joins the claim and incarnation held at the response's observation time, so delayed
+responses cannot move into a later retry. Response rollups carry `execution_id` in their cumulative
+series key and retain their final totals through replication and timeline trimming. New exact
+partitions do not relabel earlier step-level aggregates; older usage without an invocation key
+remains generic spend and is not retroactively charged to a guessed execution. Held readings
+remain host-local until the existing hourly/end-of-work publication boundary.
+
+Ownership also requires an unexpired historical lease, including renewals and extensions known
+at response time. Missing expiry or overlapping live claims leaves the execution unknown;
+neither a future renewal nor a delayed ready receipt extends earlier ownership.
+
+`usage: null` means no response accounting evidence. A usage object carries input, output,
+cache-write (including one-hour writes), cache-read and total tokens, known `cost_microusd`,
+provider-reported cost, and `unpriced_tokens`. A nonzero unpriced count means the known cost is
+only a priced portion, never a full zero bill. `duration_ms` measures claim to the earliest applicable
+terminal work receipt or recorded native exit; later cleanup cannot lengthen an ended invocation.
+It stays null while the invocation has no ending evidence. Product values and worker reports
+remain independent of execution metadata.
+
+### Automatic stops
+
 A node can stop an account's seats as the account nears its weekly limit. It is off until its
 config enables it:
 

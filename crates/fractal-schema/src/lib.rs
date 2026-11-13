@@ -3687,6 +3687,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("worker_reported", boolean()),
             ("claimant", reference()),
             ("claim_incarnation", string()),
+            ("declared_model", string()),
+            ("trace_id", string()),
+            ("fallback", boolean()),
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
@@ -4300,6 +4303,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
+            ("execution_id", string()),
             (
                 "semantics",
                 required_enum(&[
@@ -5247,6 +5251,13 @@ mod tests {
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
+        for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
+            "work.failed", "work.released", "work.extended"] {
+            for field in ["declared_model", "trace_id", "fallback"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
+        current.claims.get_mut("harness.usage").unwrap().fields.remove("execution_id").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

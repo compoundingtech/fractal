@@ -2447,6 +2447,60 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
 }
 
 #[test]
+fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
+    let store = Store::open_memory("host-one").unwrap();
+    let agent = "agent/example.execution";
+    let step = "step-run/example/generation/work";
+    let at = now_ms().saturating_sub(1_000);
+    let event = |kind: &str, time: u128, fields: Value| {
+        store.set_write_clock_at(time).unwrap();
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        let record = fractal_store::store::append_claim_tx(&tx, store.origin(), step, kind,
+            Some(agent), &json!({"fields":fields,"evidence":[]}), &[], None).unwrap();
+        tx.commit().unwrap();
+        record
+    };
+    let first = event("work.claimed", at,
+        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old","claim_expires_at_unix_ms":at+600_000}));
+    event("work.failed", at + 200, json!({"attempt":1}));
+    let second = event("work.claimed", at + 300,
+        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new","claim_expires_at_unix_ms":at+600_300}));
+    let respond = |entry: &str, source: &str, incarnation: &str, time: u128, body: Value| {
+        let mut input = timeline_observation(agent, incarnation, entry);
+        input.fields.insert("entry_type".into(), json!("usage"));
+        input.fields.insert("source_id".into(), json!(source));
+        input.fields.insert("observed_at_unix_ms".into(), json!(time as u64));
+        input.fields.insert("body".into(), body);
+        let (observation, _) = store.append_claim_outcome(&input).unwrap();
+        let rollup = store.usage_rollup_for_timeline(&observation).unwrap().unwrap();
+        store.append_client_claim(&rollup).unwrap();
+        rollup
+    };
+    let old_usage = json!({"semantics":"response","model":"claude-opus-5-5",
+        "input_tokens":1000,"output_tokens":100,"total_tokens":1100});
+    let old = respond("old-a", "old-response", "old", at + 100, old_usage.clone());
+    assert_eq!(old.fields["execution_id"], first.id);
+    assert_eq!(old.fields["cost_microusd"], 6_000);
+    let duplicate = respond("old-b", "old-response", "old", at + 100, old_usage);
+    assert_eq!(duplicate.fields["total_tokens"], 1100, "native source dedup is shared");
+    respond("old-c", "old-second-response", "old", at + 110,
+        json!({"semantics":"response","model":"claude-opus-5-5",
+            "input_tokens":1000,"output_tokens":100,"total_tokens":1100}));
+    let new = respond("new-a", "new-response", "new", at + 400,
+        json!({"semantics":"response","model":"unknown-local","input_tokens":7,"total_tokens":7}));
+    assert_eq!(new.fields["execution_id"], second.id);
+    assert_eq!(new.fields["unpriced_tokens"], 7, "unknown pricing is not free");
+    let executions = store.step_executions(step).unwrap();
+    assert_eq!(executions.len(), 2);
+    assert_eq!(executions[0].usage.as_ref().unwrap().total_tokens, 2200,
+        "the local held latest rollup replaces, rather than adds to, the replicated snapshot");
+    assert_eq!(executions[1].usage.as_ref().unwrap().total_tokens, 7);
+    assert_eq!(executions[0].status.as_deref(), Some("failed"));
+    assert_eq!(executions[1].fallback, None);
+}
+
+#[test]
 fn counted_responses_are_remembered_for_a_bounded_horizon() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
