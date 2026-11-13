@@ -12668,6 +12668,33 @@ mission "revision" state="ready" {
 }
 
 #[tokio::test]
+async fn mission_run_json_carries_execution_projection_without_inventing_unclaimed_work() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "execution-read" state="ready" {
+  goal "Read execution evidence."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "execution-read-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "execution-read".into(), revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "execution-read-run".into(),
+    }).unwrap();
+    let Json(detail) = super::runs::get_mission_run(
+        State(state), AxumPath(run.id),
+    ).await.unwrap();
+    assert_eq!(detail.steps.len(), 1);
+    let value = serde_json::to_value(detail).unwrap();
+    assert_eq!(value["steps"][0]["executions"], json!([]));
+    // The CLI's native typed read must retain this detail-only field.
+    let decoded: MissionRunView = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.steps[0].executions.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn mission_run_retry_preserves_typed_refusals_and_returns_the_new_run() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

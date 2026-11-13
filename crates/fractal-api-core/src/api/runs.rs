@@ -459,6 +459,9 @@ pub async fn get_mission_run(
         };
         annotate_stuck_gates(&store, std::slice::from_mut(&mut run))?;
         present_mission_run(&store, &mut run)?;
+        for step in &mut run.steps {
+            step.executions = Some(store.step_executions(&step.subject)?);
+        }
         Ok(Some(run))
     })
     .await?

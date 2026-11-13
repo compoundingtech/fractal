@@ -1916,6 +1916,9 @@ pub struct MissionStep {
     /// Mission detail only, on the runs it enriches: each attempt, oldest first. Absent elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<Vec<MissionStepAttempt>>,
+    /// Claim-backed agent invocations; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<StepExecution>>,
     /// Mission detail only: the intervals this step waited, by start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waits: Option<Vec<MissionStepWait>>,
@@ -1928,6 +1931,36 @@ pub struct MissionStep {
     /// Mission detail only: this remaining step's own p25/p75 duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta: Option<MissionStepEta>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct StepExecution {
+    pub id: String,
+    pub step_subject: String,
+    pub attempt: u32,
+    pub agent: String,
+    pub incarnation_id: Option<String>,
+    pub declared_model: Option<String>,
+    pub observed_models: Vec<String>,
+    pub fallback: Option<bool>,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub status: Option<String>,
+    pub trace_id: Option<String>,
+    pub exit_evidence: Option<String>,
+    pub usage: Option<StepExecutionUsage>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct StepExecutionUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_write_1h_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_microusd: u64,
+    pub reported_cost_microusd: u64,
+    pub unpriced_tokens: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionStepProgram {

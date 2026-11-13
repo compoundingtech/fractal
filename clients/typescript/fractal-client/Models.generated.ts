@@ -2943,6 +2943,7 @@ export type MissionStep = {
   completed_at?: number | null;
   constraints?: Array<string>;
   eta?: MissionStepEta;
+  executions?: Array<StepExecution>;
   goals?: Array<string>;
   history_complete?: boolean;
   id: Id;
@@ -4127,6 +4128,36 @@ export type StatusTransition = {
   runtime_incarnation: string;
   seat: AgentId;
   state: string | null;
+};
+
+export type StepExecution = {
+  agent: string;
+  attempt: number;
+  declared_model: string | null;
+  duration_ms: number | null;
+  ended_at_unix_ms: number | null;
+  exit_evidence: string | null;
+  fallback: boolean | null;
+  id: string;
+  incarnation_id: string | null;
+  observed_models: Array<string>;
+  started_at_unix_ms: number;
+  status: string | null;
+  step_subject: string;
+  trace_id: string | null;
+  usage: (StepExecutionUsage | null);
+};
+
+export type StepExecutionUsage = {
+  cache_write_1h_tokens: number;
+  cache_write_tokens: number;
+  cached_tokens: number;
+  cost_microusd: number;
+  input_tokens: number;
+  output_tokens: number;
+  reported_cost_microusd: number;
+  total_tokens: number;
+  unpriced_tokens: number;
 };
 
 export type StepRunId = string;
