@@ -544,9 +544,11 @@ function useAppStore(proof?: FabricProfile) {
   // Availability is not on the collections socket: it is read each time a connection goes live (opening,
   // returning to the foreground, reconnecting) and on pull to refresh, and a write's answer replaces it.
   const availabilityRead = useRef(0);
+  const availabilityWriting = useRef<Capabilities | null>(null);
   const readAvailability = useCallback(async () => {
+    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) { ++availabilityRead.current; setAvailability(NO_AVAILABILITY); return; }
+    if (availabilityWriting.current === caps) return;
     const read = ++availabilityRead.current;
-    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) { setAvailability(NO_AVAILABILITY); return; }
     try {
       const [people, notes] = await Promise.all([client.availabilityList(), client.notesList()]);
       if (availabilityRead.current === read && capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes), issue: '' });
@@ -775,6 +777,18 @@ function useAppStore(proof?: FabricProfile) {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
     try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(refusal(e)); return false; } finally { setBusy(false); }
+  }
+  async function runAvailabilityWrite(write: () => Promise<Partial<Pick<typeof availability, 'person' | 'note'>>>): Promise<boolean> {
+    if (!caps || capsRef.current !== caps || availabilityWriting.current) return false;
+    const writeCaps = caps;
+    const writeGeneration = ++availabilityRead.current;
+    availabilityWriting.current = writeCaps;
+    try {
+      return await runAction(async () => {
+        const changed = await write();
+        if (capsRef.current === writeCaps && availabilityRead.current === writeGeneration) setAvailability(previous => ({ ...previous, ...changed, issue: '' }));
+      }, [], notApplied, writeRefusal);
+    } finally { availabilityWriting.current = null; }
   }
 
   /**
@@ -1114,12 +1128,12 @@ function useAppStore(proof?: FabricProfile) {
     /** Change the person's own availability; Fractal answers with all of it. */
     async changeAvailability(change: AvailabilitySet) {
       if (!client) return false;
-      return runAction(async () => { const person = (await client.availabilitySet(change)).value; setAvailability(previous => ({ ...previous, person, issue: '' })); }, [], notApplied, writeRefusal);
+      return runAvailabilityWrite(async () => ({ person: (await client.availabilitySet(change)).value }));
     },
     /** Set the person's directive note until `until` (or until cleared), or clear it with `null`. */
     async changeNote(text: string | null, until: Date | null = null) {
       if (!client) return false;
-      return runAction(async () => { const { note } = (await client.notesSet({ text, ...(until ? { expires_at: until.toISOString() } : {}) })).value; setAvailability(previous => ({ ...previous, note })); }, [], notApplied, writeRefusal);
+      return runAvailabilityWrite(async () => ({ note: (await client.notesSet({ text, ...(until ? { expires_at: until.toISOString() } : {}) })).value.note }));
     },
     /**
      * Answer a native prompt from its alert with one of the answers it offers: a question's
