@@ -76,6 +76,27 @@ An interval or count keeps a sample or event only when its start (or event) clai
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
 
+### Harness startup messages
+
+OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
+
+```ts
+Fractal.agent({
+  id: 'garden/worker',
+  harness: Fractal.omp({
+    model: '@generalist_root',
+    message: { text: 'Read the garden plan and begin.', id: 'garden-start-v1' },
+  }),
+})
+```
+
+This lowers to `harness "omp" { model "@generalist_root"; message "Read the garden plan and begin." id="garden-start-v1"; }`.
+For Codex or Claude, supply the same `message` field on the harness record.
+The native runtime delivers it as a one-shot first-turn message keyed by
+`(subject, id)`, not as a recurring prompt. Changing either the text or the id
+restarts the agent. Text must be nonblank, contain no NUL, and fit in 64 KiB of
+UTF-8; the nonempty id must fit in 256 UTF-8 bytes, matching native admission.
+
 `step()` and `gate.*()` validate eagerly, so a step handle's `assignedTo` must be an object with an `id`; a path-derived reference works in an inline step object, which the loader lowers.
 
 ## Loading and rendering
