@@ -1,5 +1,6 @@
 import AppKit
 import AttentionCore
+import BuildIdentity
 import SwiftUI
 
 /// Renders the open panel offscreen to a PNG: the app's snapshot mode and the design gallery's

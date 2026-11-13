@@ -157,9 +157,8 @@ host_provision() {
 }
 
 # stdin: tar with TrayGallery and renders/capture.json; stdout: tar with capture.json + capture/.
+# The gallery binary embeds its own build identity, recorded as each manifest's `trayRev`.
 host_capture() {
-  local rev=$1
-  shift
   exists || die "no $vm VM on $(hostname -s): run capture-vm.sh provision first"
   start
   # Stop the guest this run started on every exit, so a failed capture leaves no VM running.
@@ -167,7 +166,7 @@ host_capture() {
   guest 'rm -rf ~/gallery && mkdir ~/gallery && tar -x -C ~/gallery -f -'
   log "capturing on macOS $(guest 'sw_vers -productVersion') ($vm on $(hostname -s))"
   # Nobody uses the guest's screen: consent is implied and there is no idle wait.
-  guest "cd ~/gallery && TRAY_GALLERY_REV=$(printf %q "$rev") ./TrayGallery renders --capture --consent --away 0 $(printf '%q ' "$@")" >&2
+  guest "cd ~/gallery && ./TrayGallery renders --capture --consent --away 0 $(printf '%q ' "$@")" >&2
   guest 'cd ~/gallery/renders && tar -c -f - capture.json capture'
 }
 
@@ -205,14 +204,13 @@ case $command in
   stop) on_host stop ;;
   capture)
     gallery=$(nix build --no-link --print-out-paths "$root/flakes/attention-tray#gallery")
-    rev=$(sed -n 's/^TRAY_GALLERY_REV=\([^ ]*\) .*/\1/p' "$gallery/bin/attention-tray-gallery")
     stage=$(mktemp -d)
     trap 'rm -rf "$stage"' EXIT
     mkdir -p "$stage/seed/renders" "$stage/out"
-    cp "$gallery/libexec/TrayGallery" "$stage/seed/"
+    cp "$gallery/bin/attention-tray-gallery" "$stage/seed/TrayGallery"
     # The gallery merges into the manifest it finds: a --only run keeps every other entry.
     [[ -f $renders/capture.json ]] && cp "$renders/capture.json" "$stage/seed/renders/"
-    tar -c -f - -C "$stage/seed" . | on_host capture "$rev" "$@" | tar -x -f - -C "$stage/out"
+    tar -c -f - -C "$stage/seed" . | on_host capture "$@" | tar -x -f - -C "$stage/out"
     [[ -f $stage/out/capture.json ]] || die "the guest returned no capture.json"
     mkdir -p "$renders/capture"
     find "$stage/out/capture" -name '*.png' -exec cp {} "$renders/capture/" \;

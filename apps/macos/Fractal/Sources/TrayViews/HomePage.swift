@@ -1,5 +1,6 @@
 import AppKit
 import AttentionCore
+import BuildIdentity
 import SwiftUI
 
 /// The top level, Control Center style: a row of module tiles (availability, speech,
@@ -570,6 +571,7 @@ private struct ConfigurationNotice: View {
 struct PanelFooter: View {
   let model: AttentionModel
   let build: BuildIdentity
+  private static let fractalClientRev = Bundle.main.object(forInfoDictionaryKey: "FractalClientRevision") as? String
 
   var body: some View {
     VStack(spacing: 0) {
@@ -577,13 +579,17 @@ struct PanelFooter: View {
       HStack(spacing: 10) {
         SettingsButton()
         Spacer()
-        Text(build.machineVersion)
-          .font(.footnote.monospaced())
-          .foregroundStyle(.tertiary)
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .textSelection(.enabled)
-          .help(build.details)
+        // The relative age stays current; the hover holds the exact versions and times.
+        TimelineView(.everyMinute) { context in
+          Text(build.footerText(now: context.date))
+            .font(.footnote.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .lineLimit(2)
+            .multilineTextAlignment(.trailing)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+            .help(build.hoverText(now: context.date, fractalClientRev: Self.fractalClientRev))
+        }
         RefreshButton(model: model)
       }
       .buttonStyle(.borderless)
