@@ -32,8 +32,12 @@ export const observedAvailability = (state: AvailabilityFixture): AvailabilityRe
 const at = new Date(worldNow).toISOString()
 const fold = (a: PersonAvailability, { status, interruptions, deadline_clock: clock }: AvailabilitySet): PersonAvailability => ({
   ...a,
+  // Following presence again: available while present, away while devices report but none is present, and the
+  // default available when no device reports.
   ...(status === undefined ? {} : status.value === null
-    ? { status: a.presence === 'present' ? 'available' : 'away', status_source: 'presence', status_until: null }
+    ? a.presence === 'unreported' || a.presence === null
+      ? { status: 'available', status_source: 'unreported', status_until: null }
+      : { status: a.presence === 'present' ? 'available' : 'away', status_source: 'presence', status_until: null }
     : { status: status.value, status_source: 'override', status_until: status.until ?? null }),
   ...(interruptions === undefined ? {} : { interruptions: interruptions.value, interruptions_until: interruptions.until ?? null }),
   ...(clock === undefined ? {} : { deadline_clock: clock.value, deadline_clock_since: clock.value === 'run' ? null : at, deadline_clock_until: clock.until ?? null }),
