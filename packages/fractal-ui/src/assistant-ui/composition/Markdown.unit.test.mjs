@@ -592,6 +592,30 @@ test('the WebAssembly parser builds the tree remark builds without changing the 
   assertParser(block('**x**'))
 })
 
+test('HTML closing-tag whitespace has identical raw and policy-filtered mdast on both parsers', async () => {
+  const parse = (source, plugins) => {
+    let tree
+    const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+    ReactMarkdown({ children: source, remarkPlugins: [...plugins, capture] })
+    return tree
+  }
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    // This covers type-1 block lines as well as inline closers: only the latter are HTML grammar tokens.
+    for (const tag of ['script', 'style', 'iframe']) for (const whitespace of ['', '\t', '\n', '\r', ' ', '\f', '\v', '\u00a0']) {
+      for (const prefix of ['', 'Visible ', 'src/x.ts Visible\nVisible ']) {
+        const source = `${prefix}<${tag}>SECRET</${tag}${whitespace}>SECRET`
+        for (const policy of [[], [htmlPolicy.remarkHtmlPolicy]]) {
+          assert.deepEqual(parse(source, [parity.remarkPulldown, ...policy]), parse(source, [remarkGfm, ...policy]), JSON.stringify({ source, filtered: policy.length !== 0 }))
+        }
+      }
+    }
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+})
+
 test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
   const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
   try {

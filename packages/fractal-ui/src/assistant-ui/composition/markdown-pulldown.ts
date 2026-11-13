@@ -132,7 +132,17 @@ export function pulldownTree(source: string): MdastNode {
         break
       }
       case 'c': if (top().type === 'image') top().alt += fields[0]!; else append({ type: 'inlineCode', value: fields[0]! }); break
-      case 'h': if (top().type === 'html') top().value += fields[0]!; else append({ type: 'html', value: fields[0]! }); break
+      case 'h': {
+        if (top().type === 'html') top().value += fields[0]!
+        else {
+          const value = fields[0]!
+          // pulldown accepts FF in inline closing tags; CommonMark/remark permits only space, TAB and line endings.
+          // Keep invalid closers as text so the policy cannot end a hidden region earlier than remark does.
+          const type = value.startsWith('</') && !/^<\/[A-Za-z][A-Za-z0-9-]*[\t\n\r ]*>$/.test(value) ? 'text' : 'html'
+          append({ type, value })
+        }
+        break
+      }
       case 'sb': if (top().type === 'image') top().alt += ' '; else append({ type: 'text', value: '\n' }); break
       case 'hb': append({ type: 'break' }); break
       case 'r': append({ type: 'thematicBreak' }); break
