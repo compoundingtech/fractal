@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Response-source deduplication and generic reported-cost/list-price accounting are unchanged. Exact attribution selects the durable work claim held by the agent incarnation at response time; retries and reclaims have distinct claim-ID accounting keys. Final rollup totals retain each execution partition through compaction."
+    "detail": "Response-source deduplication and generic reported-cost/list-price accounting are unchanged. Exact attribution requires one unambiguous durable work claim with an unexpired historical lease for the agent incarnation at response time; missing expiry and future renewals cannot establish ownership. Retries and reclaims have distinct claim-ID accounting keys. Final rollup totals retain each execution partition through compaction."
   },
   "compatibility": {
     "status": "changed",
