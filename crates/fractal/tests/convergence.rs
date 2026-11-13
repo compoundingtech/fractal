@@ -1994,15 +1994,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Every fixed seed must converge and trim a checkpoint with corpus v24.
+/// Every fixed seed must converge and trim a checkpoint with corpus v25.
 /// A new kind-selection schedule must earn its own checkpoint coverage.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v24 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v25 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
-    assert!(outcome.trimmed, "corpus v24 seed {seed} did not trim a checkpoint");
+    assert!(outcome.trimmed, "corpus v25 seed {seed} did not trim a checkpoint");
 }
 
 /// The seeds are independent, so each is its own test and the test runner spreads them over its
@@ -2213,7 +2213,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v24.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
         }))
         .unwrap(),
     )
