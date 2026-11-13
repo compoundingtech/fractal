@@ -180,9 +180,8 @@ fn resolve_node_documents(node: &mut KdlNode, bindings: &BTreeMap<String, String
     }
 }
 
-/// The authority blocks a desired agent declaration carries, including `mission-authority
-/// "none"`. They still parse, so existing declarations stay valid, but free mode grants every
-/// agent in the fleet what its person may do and ignores them until principals and grants land.
+/// Historical authority blocks, including `mission-authority "none"`. Readers and previews
+/// retain them, but new publications and local claims refuse them: they never restrict agents.
 pub fn declared_authority_blocks(desired: &Value) -> Vec<&'static str> {
     let children = desired
         .get("children")

@@ -18,9 +18,9 @@ Use these documents for implementation details:
 - [Accountable fleet roots](accountable-roots.md) defines person-authored trace attribution and its upgrade and rollback requirements.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
-  runs the fleet may do, as itself, until principals and grants land.
-- [Principals and grants](principals-and-grants.md) defines the #867 acceptance matrix, delegated authority,
-  read-only service identity, explicit deferrals and release gates.
+  runs the fleet may do, as itself. Mission run actors have a separate run-authority boundary.
+- [Principals and grants](principals-and-grants.md) retains the historical #867 safety matrix;
+  its parallel universal-grants roadmap is superseded by run authority, not claimed as shipped.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
 - [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.

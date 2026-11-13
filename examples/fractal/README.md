@@ -56,7 +56,7 @@ and chief seat files declare other seats, named for their roles. omp seats run b
 | --- | --- |
 | Send one mission's steps to several seats, and share a seat between missions | [`many-to-many.kdl`](many-to-many.kdl), [`seats/planner.kdl`](seats/planner.kdl), [`seats/reviewer.kdl`](seats/reviewer.kdl) |
 | Serve several missions from one seat, and reorder its queue | [`seat-queue.kdl`](seat-queue.kdl) |
-| Let an agent reorder another seat's queue (`queue-authority`) | [`seats/chief.kdl`](seats/chief.kdl) |
+| Let a coordinating agent reorder another seat's queue in free mode | [`seats/chief.kdl`](seats/chief.kdl) |
 | Run steps of one mission in a fixed order | [`queued-work.kdl`](queued-work.kdl) |
 | Start a fresh harness session for one step or every step a seat claims | [`fresh-context.kdl`](fresh-context.kdl) |
 | Run nested jobs one after another | [`queued-nested-work.kdl`](queued-nested-work.kdl) |

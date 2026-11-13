@@ -1379,7 +1379,7 @@ fn ignored_authority_warnings(
         .into_iter()
         .map(|(subject, blocks)| {
             format!(
-                "free-mode: `{subject}` declares {}, which st ignores; within a fleet every agent may do what its person may do",
+                "free-mode: `{subject}` declares {}, which never restricts agents; new writes are refused with retired-agent-authority",
                 blocks
                     .iter()
                     .map(|block| format!("`{block}`"))

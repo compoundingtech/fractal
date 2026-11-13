@@ -1,8 +1,26 @@
 # Principals and grants
 
-Status: Draft acceptance contract for [#867](https://github.com/compoundingtech/fractal/issues/867).
+Status: Historical acceptance matrix; the parallel universal-grants roadmap is superseded
+by [the run-authority direction](https://github.com/compoundingtech/fractal/issues/2205#issuecomment-6855046018).
 
-This document specifies the acceptance boundary for delegated person authority.
+Launch approval, run authority, human gate and ask are the native concepts. Run authority
+is the mission's operations intersected with its starter's authority; see
+[Program engine](program-engine.md). The matrix below preserves historical safety requirements
+and its dated evidence, not a second reusable approval/grant store or a current delivery plan.
+
+The superseding direction does **not** certify universal enforcement. Attribution, expiry and
+revocation checked at authoritative effect admission (including check/use races and unavailable
+authority), explicit actor-bound subset delegation without implicit child inheritance, and
+renewed launch review for scope-widening revisions remain acceptance obligations. Ask answers
+and human-gate approvals are episode evidence, not reusable authority. Existing immutable
+authorization evidence stays readable. The run admission implementation does not by itself
+establish these properties for agents, native commands or cross-person resources.
+
+Legacy agent authority blocks are rejected on new writes rather than accepted as an illusory
+restriction. Historical parsing and replay remain available. No absent grant, account-use,
+expiry or revocation enforcement in this matrix is promoted to DONE by this cleanup.
+
+This historical document specified the acceptance boundary for delegated person authority.
 It builds on the [resource graph gist][gist], the [October 1 decisions][oct1],
 the [namespace clarification][namespaces], the [October 3 restriction cases][restriction],
 the [October 11 service requirement][service], and the [ownership decision][ownership].

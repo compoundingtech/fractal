@@ -2,11 +2,8 @@ version 2
 
 // A durable coordinating seat that may reorder the worker seat's queue.
 //
-// A seat has no authority over any queue by default, including its own. `queue-authority` lets
-// this agent move runs in the queues it names: an exact seat identity or a terminal `/*`
-// namespace, without the `agent/` prefix. A person grants it, or an authorized agent delegates it.
-// st refuses a top-level
-// delegation unless the caller has `agent-authority` and holds every proposed rule.
+// In free mode an agent can move any seat's queue, as itself. This declaration does not
+// restrict that authority; queue moves record the executing agent as their actor.
 //
 // Apply it as a person, after one of the worker seat files beside it:
 //
@@ -24,8 +21,5 @@ agent "example/chief" {
   harness "omp" {
     model "openai-codex/gpt-6-astra"
     effort "medium"
-  }
-  queue-authority {
-    move "example/worker"
   }
 }

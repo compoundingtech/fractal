@@ -3492,6 +3492,7 @@ impl Store {
         checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
+        run_authority::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard, force, source_map } = checks;
         if source_map.is_some() && owned.is_none() {
@@ -11898,6 +11899,7 @@ fn replicated_work_validation_fields<'a>(
     forced_batch: Option<&str>,
     source_forced: bool,
 ) -> Result<ClaimRecord> {
+    run_authority::validate_new_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
