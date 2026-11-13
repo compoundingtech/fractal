@@ -314,7 +314,7 @@ final class FractalClientTests: XCTestCase {
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
         let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
-        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/ben"])
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/blair"])
         XCTAssertEqual(read.value.people[0].statusSource, .override)
         XCTAssertNil(read.value.people[0].presence)
         XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
