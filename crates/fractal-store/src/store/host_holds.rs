@@ -86,6 +86,7 @@ fn changed_tx(transaction: &Transaction<'_>, origin: &str, hold: &HostHold) -> R
         ]),
         evidence: Vec::new(),
         idempotency_key: None,
+        expected_subject: None,
     }, now_ms())?;
     Ok(())
 }
