@@ -39,7 +39,11 @@ pub async fn input(
         require_scope(session, "control.runtimes")?;
     }
     let receipts = state.store.invocation_receipts(&request.invocation_id).map_err(ApiError::internal)?;
-    if request.incarnation.is_empty() || request.message_id.is_empty()
+    let message = state.store.message(&request.message_id).map_err(ApiError::internal)?;
+    let message_matches = message.is_some_and(|message|
+        message.subject == request.message_id && message.to == request.agent
+            && message.tags.iter().any(|tag| tag.strip_prefix("fractal-invocation:") == Some(request.invocation_id.as_str())));
+    if request.incarnation.is_empty() || request.message_id.is_empty() || !message_matches
         || !receipts.iter().any(|receipt| receipt.agent == request.agent
             && receipt.incarnation.as_deref() == Some(request.incarnation.as_str())
             && receipt.event_key.as_deref() == Some(request.message_id.as_str()))
@@ -97,14 +101,30 @@ pub async fn get(
     }).await?.map(Json).ok_or_else(|| ApiError::not_found("invocation does not exist"))
 }
 
-fn authorize(state: &AppState, session: &ClientSession, agent: &str) -> Result<(), ApiError> {
+fn authorize(state: &AppState, session: &ClientSession, agent: &str,
+    bound: Option<&BoundActor>, peer: Option<&NativeDeliveryPeer>, ancestry: Option<&HarnessAncestry>,
+) -> Result<(), ApiError> {
     require_scope(session, "read.projections")?;
-    if session.authority_actor == agent
-        || state.owning_person.as_deref() == Some(session.authority_actor.as_str())
+    let denied = || ApiError { status: StatusCode::FORBIDDEN, code:"forbidden".into(),
+        message:"invocation artifacts are private to their verified agent and the configured owning person".into(),
+        details:Box::default() };
+    if matches!(ancestry, Some(HarnessAncestry::Unavailable)) || matches!(bound, Some(BoundActor::Run(_))) {
+        return Err(denied());
+    }
+    // Unix identity headers are not authority for a harness GET. Every serving-boundary
+    // agent binding must match the artifact owner, regardless of the claimed person header.
+    for caller in bound.map(BoundActor::actor).into_iter().chain(peer.map(|peer| peer.agent.as_str())) {
+        if !is_bound_actor(&state.store, agent, caller)? { return Err(denied()); }
+    }
+    if bound.is_some() || peer.is_some() { return Ok(()); }
+    if session.local_peer || (session.transport == "unix" && session.pairing_grant.is_none()
+        && !matches!(ancestry, Some(HarnessAncestry::Person))) {
+        return Err(denied());
+    }
+    if state.owning_person.as_deref() == Some(session.authority_actor.as_str())
+        || (session.authority_actor == agent && (session.transport != "unix" || session.pairing_grant.is_some()))
     { return Ok(()); }
-    Err(ApiError { status: StatusCode::FORBIDDEN, code:"forbidden".into(),
-        message:"invocation artifacts are private to their agent and the configured owning person".into(),
-        details:Box::default() })
+    Err(denied())
 }
 
 fn retained(store: &Store, agent: &str, invocation: &str, kind: &str, hash: &str) -> Result<InvocationArtifact, ApiError> {
@@ -123,9 +143,12 @@ fn retained(store: &Store, agent: &str, invocation: &str, kind: &str, hash: &str
 pub async fn artifact(
     State(state): State<AppState>, Extension(session): Extension<ClientSession>,
     AxumPath(hash): AxumPath<String>, Query(query): Query<ArtifactQuery>,
+    bound: Option<BoundActor>, peer: Option<Extension<NativeDeliveryPeer>>,
+    ancestry: Option<Extension<HarnessAncestry>>,
 ) -> Result<Response, ApiError> {
     let agent = invocation_agent(&state.store, &query.invocation)?;
-    authorize(&state, &session, &agent)?;
+    authorize(&state, &session, &agent, bound.as_ref(), peer.as_ref().map(|peer| &peer.0),
+        ancestry.as_ref().map(|ancestry| &ancestry.0))?;
     let artifact = retained(&state.store, &agent, &query.invocation, &query.kind, &hash)?;
     let bytes = invocation_artifacts::read(&state.state_dir, &artifact, now_ms()).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError {status:StatusCode::GONE,code:"artifact-expired".into(),
@@ -137,10 +160,13 @@ pub async fn artifact(
 pub async fn delete_artifact(
     State(state): State<AppState>, Extension(session): Extension<ClientSession>,
     AxumPath(hash): AxumPath<String>, Query(query): Query<ArtifactQuery>,
+    bound: Option<BoundActor>, peer: Option<Extension<NativeDeliveryPeer>>,
+    ancestry: Option<Extension<HarnessAncestry>>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "control.runtimes")?;
     let agent = invocation_agent(&state.store, &query.invocation)?;
-    authorize(&state, &session, &agent)?;
+    authorize(&state, &session, &agent, bound.as_ref(), peer.as_ref().map(|peer| &peer.0),
+        ancestry.as_ref().map(|ancestry| &ancestry.0))?;
     let artifact = retained(&state.store, &agent, &query.invocation, &query.kind, &hash)?;
     invocation_artifacts::delete(&state.state_dir, &state.store, &agent, &artifact, now_ms()).map_err(ApiError::internal)?;
     signal_changed(&state);
