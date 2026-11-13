@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Markdown applies one GitHub-like HTML policy to normal and fallback rendering: caught render failures use the already-filtered mdast, and delimiter floods use the same CommonMark/GFM parser with attention resolution disabled instead of a second Markdown scanner. Fallbacks render approved text and literal code as escaped text; a failure before the filtered tree exists shows no source. Raw pre/code retains its words, details disclose, links allow http(s) and document references, images wait for consent, and nesting is capped at 32",
+  "summary": "Markdown applies a GitHub-like HTML policy during normal rendering. Exceptional fallbacks intentionally fail closed: delimiter/bracket floods use a linear HTML-only scrub instead of CommonMark, whose nested-image parsing remains quadratic even without emphasis; caught render failures scrub text flattened from the already-filtered mdast. These rare views can hide HTML-looking literal code or additional text, never disclose hidden HTML. Raw pre/code retains its words in normal rendering, details disclose, links allow http(s) and document references, images wait for consent, and nesting is capped at 32",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."

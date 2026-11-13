@@ -75,9 +75,9 @@ class BlockFallback extends React.Component<{ readonly source: string; readonly 
   override state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   override componentDidUpdate(previous: { readonly source: string }) { if (previous.source !== this.props.source && this.state.failed) this.setState({ failed: false }) }
-  override render() { return this.state.failed ? <PlainBlock text={this.props.parsed.tree === undefined ? '' : markdownTreeText(this.props.parsed.tree)} /> : this.props.children }
+  override render() { return this.state.failed ? <PlainBlock text={this.props.parsed.tree === undefined ? '' : filteredMarkdownText(markdownTreeText(this.props.parsed.tree))} /> : this.props.children }
 }
-function delimiters(source: string): number {
+export function markdownNeedsFallback(source: string): boolean {
   let count = 0
   let fence: string | undefined
   for (const line of source.split('\n')) {
@@ -89,12 +89,12 @@ function delimiters(source: string): number {
     const prose = line.replace(/(`+)[^`]*?\1/g, '')
     for (let index = 0; index < prose.length; index++) { const code = prose.charCodeAt(index); if (code === 42 || code === 95 || code === 126) count++; else if (code === 91) count += 2 }
   }
-  return count
+  return count > DELIMITER_LIMIT
 }
 const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
   const parsed = React.useMemo<MarkdownParsedTree>(() => ({}), [source])
   const plugins: NonNullable<React.ComponentProps<typeof ReactMarkdown>['remarkPlugins']> = [...(hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS), [remarkCaptureTree, parsed]]
-  if (delimiters(source) > DELIMITER_LIMIT) return <PlainBlock text={filteredMarkdownText(source)} />
+  if (markdownNeedsFallback(source)) return <PlainBlock text={filteredMarkdownText(source)} />
   return <BlockFallback source={source} parsed={parsed}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={plugins} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
 })
 /** Images keep their source for the consent-gated placeholder; a link opens only an http(s) URL. */

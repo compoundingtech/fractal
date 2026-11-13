@@ -3,7 +3,7 @@ import { after, test } from 'node:test'
 import { createServer } from 'vite'
 import stylex from '@stylexjs/unplugin'
 
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { createElement as h } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
@@ -19,52 +19,76 @@ const server = await createServer({
   logLevel: 'error',
 })
 after(() => server.close())
-const { completeStreamingTail, Markdown, InlineMarkdown } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
-const { splitMarkdownBlocks } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+const { completeStreamingTail, Markdown, InlineMarkdown, markdownNeedsFallback } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+const { splitMarkdownBlocks, limitNesting } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
 const htmlPolicy = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
 const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-security.json', import.meta.url), 'utf8')).payloads
-function policyTree(source, { attentionOff = false, policy = true } = {}) {
+function policyTree(source) {
   const capture = {}
-  ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, ...(attentionOff ? [htmlPolicy.remarkDisableAttention] : []), ...(policy ? [htmlPolicy.remarkHtmlPolicy] : []), [htmlPolicy.remarkCaptureTree, capture]] })
+  ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
   return capture.tree
 }
 
-test('attention-off fallback preserves HTML and code segmentation across the 1453-source FPL corpus', () => {
-  const segmentation = tree => {
-    const result = []
-    const pending = [tree]
-    while (pending.length > 0) {
-      const node = pending.pop()
-      if (['html', 'code', 'inlineCode'].includes(node.type)) result.push([node.type, node.value])
-      else for (const child of [...(node.children ?? [])].reverse()) pending.push(child)
-    }
-    return result
-  }
+test('fail-closed fallback never discloses more than the normal parser across the 1453-source FPL corpus', () => {
   assert.equal(fallbackCorpus.length, 1453)
   assert.equal(fallbackCorpus.filter(entry => entry.priorLeak).length, 258)
   for (const { id, source, priorLeak } of fallbackCorpus) {
-    assert.deepEqual(segmentation(policyTree(source, { policy: false, attentionOff: true })), segmentation(policyTree(source, { policy: false })), id)
     const full = htmlPolicy.markdownTreeText(policyTree(source))
     const fallback = htmlPolicy.filteredMarkdownText(source)
-    assert.equal(fallback.includes('SECRET'), full.includes('SECRET'), `${id}: hidden/code classification`)
-    if (priorLeak) assert.doesNotMatch(fallback, /SECRET/, id)
+    if (!full.includes('SECRET') || priorLeak) assert.doesNotMatch(fallback, /SECRET/, id)
+    assert.doesNotMatch(fallback, /<[/!A-Za-z]/, id)
   }
 })
 
-test('attention-off delimiter floods parse with bounded CPU and preserve literal code', t => {
-  for (const [name, source] of [
-    ['emphasis', '*a '.repeat(3000) + '<script>SECRET</script> `<!-- literal -->`'],
-    ['strike', '~a '.repeat(3000) + '<!-- SECRET -->'],
-    ['brackets', '['.repeat(6000) + '<script>SECRET</script>'],
-    ['images', '!['.repeat(2000) + 'x' + '](https://example.test)'.repeat(2000)],
+test('HTML-only fallback scrub keeps image, bracket and corpus CPU work linear', t => {
+  for (const [name, sources] of [
+    ['emphasis', ['*a '.repeat(3000) + '<script>SECRET</script> `<!-- literal -->`']],
+    ['strike', ['~a '.repeat(3000) + '<!-- SECRET -->']],
+    ['brackets', ['['.repeat(6000) + '<script>SECRET</script>']],
+    ['images', ['!['.repeat(2000) + 'x' + '](https://example.test)'.repeat(2000)]],
+    ['whole corpus', fallbackCorpus.map(entry => entry.source)],
   ]) {
-    const { result, milliseconds } = cpuMilliseconds(() => htmlPolicy.filteredMarkdownText(source))
-    t.diagnostic(`${name}: ${milliseconds}ms CPU; budget 1000ms`)
-    assert.ok(milliseconds < 1000, `${name}: ${milliseconds}ms CPU`)
-    assert.doesNotMatch(result, /SECRET/)
-    if (name === 'emphasis') assert.match(result, /<!-- literal -->/)
+    const { result, milliseconds } = cpuMilliseconds(() => sources.map(htmlPolicy.filteredMarkdownText))
+    t.diagnostic(`${name}: ${milliseconds}ms CPU; unchanged budget 300ms`)
+    assert.ok(milliseconds < 300, `${name}: ${milliseconds}ms CPU`)
+    for (const value of result) assert.doesNotMatch(value, /SECRET/)
   }
+})
+
+test('the eight malformed original openers are escaped inline code in the NORMAL view', t => {
+  for (const tag of ['object', 'svg', 'math', 'template']) for (const ticks of ['`', '```']) {
+    const source = `<${tag} data-x=${ticks}>SECRET</${tag}>${ticks}`
+    const html = block(source)
+    t.diagnostic(JSON.stringify({ source, normalHTML: html }))
+    assert.match(html, /SECRET/)
+    assert.match(html, /<code/)
+    assert.doesNotMatch(html, /<(?:object|svg|math|template)[\s>]/)
+    assert.doesNotMatch(htmlPolicy.filteredMarkdownText(source), /SECRET/)
+  }
+})
+
+test('fallback guard incidence on existing Markdown and scenario transcript messages', async t => {
+  const samples = documents.map((source, index) => ({ origin: `Markdown fixture ${index}`, source }))
+  const root = new URL('../../../../../fixtures/scenarios/', import.meta.url)
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const conversation = JSON.parse(await readFile(new URL(`${entry.name}/conversation.json`, root), 'utf8'))
+    const pending = [{ value: conversation, path: entry.name }]
+    while (pending.length > 0) {
+      const { value, path } = pending.pop()
+      if (value === null || typeof value !== 'object') continue
+      for (const [key, child] of Object.entries(value)) {
+        if (key === 'text' && typeof child === 'string') samples.push({ origin: `${path}.text`, source: child })
+        else if (child !== null && typeof child === 'object') pending.push({ value: child, path: `${path}.${key}` })
+      }
+    }
+  }
+  assert.ok(samples.length >= 200, `only ${samples.length} messages found`)
+  const guarded = samples.filter(({ source }) => splitMarkdownBlocks(limitNesting(source)).some(markdownNeedsFallback))
+  const codeGuarded = guarded.filter(({ source }) => /```|~~~|^(?: {4}|\t)/m.test(source))
+  t.diagnostic(JSON.stringify({ messages: samples.length, guarded: guarded.length, share: guarded.length / samples.length, codeBlockMessagesGuarded: codeGuarded }))
+  assert.deepEqual(codeGuarded, [], 'ordinary code-block messages must not take the fallback')
 })
 
 test('generated Pierre IDs and aliases match the installed package', async () => {
@@ -183,6 +207,10 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
 })
 
 const FALLBACK_HTML_PAYLOADS = [
+  '<script>hidden</scripture>SECRET</script>Visible',
+  '<style>hidden</stylesheet>SECRET</style>Visible',
+  '<script>hidden</script\u0000>SECRET</script>Visible',
+  '<span <script>SECRET</script>Visible',
   '<script data-x="`">SECRET</script>`',
   "<script data-x='`'>SECRET</script>`",
   '<script data-x=`>SECRET</script>`',
@@ -227,23 +255,23 @@ const FALLBACK_CONTAINER_CODE = [
   '> quote\n\nOutside the quote\n\n\t<!-- literal -->',
 ]
 
-test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
+test('fallbacks intentionally fail closed even for HTML-looking literal code', async () => {
   const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
   const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
   assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
   assert.match(block(hostile), /Visible/)
   for (const source of [...FALLBACK_LITERAL_CODE, ...FALLBACK_CONTAINER_CODE]) {
-    assert.equal(filteredMarkdownText(source), htmlPolicy.markdownTreeText(policyTree(source)), source)
+    assert.doesNotMatch(filteredMarkdownText(source), /<[/!A-Za-z]|literal/, source)
   }
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
   assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
-  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '`` after')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
   for (const source of FALLBACK_HTML_PAYLOADS) {
     assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
     assert.doesNotMatch(block(source), /HIDDEN|SECRET/, `normal parser must hide the same payload: ${source}`)
   }
-  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible <span data-x="unfinished')
-  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible <span data-x="`')
+  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible ')
+  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible ')
 })
 
 test('delimiter guard and caught renderer failure keep attribute markers and container HTML out of the real fallback DOM', async () => {
@@ -271,7 +299,7 @@ test('delimiter guard and caught renderer failure keep attribute markers and con
         assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
         assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
         assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
-        if (payload.includes('literal')) assert.ok(container.textContent.includes('literal'), `${mode} must preserve literal code: ${payload}`)
+        assert.doesNotMatch(container.textContent, /<[/!A-Za-z]/, `${mode}: literal HTML may be hidden in a fallback`)
         if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
       }
     }

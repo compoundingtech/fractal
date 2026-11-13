@@ -15,9 +15,6 @@
  * - resource exhaustion (thousands of nested quotes, lists, tags): nesting past `maxDepth` collapses to plain text.
  */
 
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-
 export const HTML_POLICY = {
   /** Element name → attributes it keeps. */
   elements: {
@@ -245,29 +242,64 @@ export function markdownTreeText(tree: Node): string {
   return values.join('').trimEnd()
 }
 
-/** Keep CommonMark's code/HTML/link segmentation, but do not resolve expensive attention delimiter floods. */
-export function remarkDisableAttention(this: { data(): object }) {
-  const data = this.data()
-  const extensions = 'micromarkExtensions' in data ? data.micromarkExtensions : undefined
-  const disabled = { disable: { null: ['attention', 'strikethrough'] } }
-  if (Array.isArray(extensions)) extensions.push(disabled)
-  else Object.assign(data, { micromarkExtensions: [disabled] })
-}
-
-/** The synchronous react-markdown entry uses the same parser, GFM and policy as normal rendering. Only its
- * attention constructs are disabled. The final transform collapses the approved mdast before HAST construction. */
+/**
+ * Fail-closed HTML-only fallback, deliberately NOT a second Markdown parser. Delimiter/image floods cannot use
+ * CommonMark safely (nested images remain quadratic with attention disabled). Even HTML-looking literal code may
+ * disappear here. Render errors apply this same scrub to text flattened from the already-filtered mdast.
+ *
+ * One forward scan consumes each character once. Open-count lookups skip unmatched closes; matched closes only
+ * pop entries, so total stack work is linear. Malformed tags/comments hide through their end or EOF, never expose
+ * their attributes. A nested '<' outside quotes begins another candidate rather than swallowing its opener.
+ */
 export function filteredMarkdownText(source: string): string {
-  const capture: MarkdownParsedTree = {}
-  ReactMarkdown({
-    children: source,
-    skipHtml: true,
-    remarkPlugins: [remarkGfm, remarkDisableAttention, remarkHtmlPolicy, [remarkCaptureTree, capture], function plainTree() {
-      return (tree: Node) => {
-        tree.children = [{ type: 'paragraph', children: [{ type: 'text', value: markdownTreeText(tree) }] }]
+  const values: string[] = []
+  const hidden: string[] = []
+  const opened = new Map<string, number>()
+  let plain = 0
+  let at = 0
+  while (at < source.length) {
+    const start = source.indexOf('<', at)
+    if (start === -1) break
+    at = start + 1
+    if (source.startsWith('!--', at)) {
+      if (hidden.length === 0) values.push(source.slice(plain, start))
+      const end = source.indexOf('-->', at + 3)
+      at = plain = end === -1 ? source.length : end + 3
+      continue
+    }
+    const closing = source[at] === '/'
+    if (closing) at++
+    const nameStart = at
+    if (!/[A-Za-z!?]/.test(source[at] ?? '')) continue
+    while (at < source.length && /[A-Za-z0-9:!?-]/.test(source[at]!)) at++
+    const name = source.slice(nameStart, at).toLowerCase()
+    const closingBoundary = at === source.length || /[\t\n\f\r />]/.test(source[at]!)
+    if (hidden.length === 0) values.push(source.slice(plain, start))
+    let quote: string | undefined
+    while (at < source.length) {
+      const character = source[at]!
+      if (quote !== undefined) { if (character === quote) quote = undefined }
+      else if (character === '"' || character === "'") quote = character
+      else if (character === '<') break
+      else if (character === '>') { at++; break }
+      at++
+    }
+    if (closing && closingBoundary && opened.has(name)) {
+      while (hidden.length > 0) {
+        const closed = hidden.pop()!
+        const remaining = opened.get(closed)! - 1
+        if (remaining === 0) opened.delete(closed)
+        else opened.set(closed, remaining)
+        if (closed === name) break
       }
-    }],
-  })
-  return capture.tree === undefined ? '' : markdownTreeText(capture.tree)
+    } else if (!closing && HTML_POLICY.dropWithContent.includes(name)) {
+      hidden.push(name)
+      opened.set(name, (opened.get(name) ?? 0) + 1)
+    }
+    plain = at
+  }
+  if (hidden.length === 0) values.push(source.slice(plain))
+  return values.join('')
 }
 
 /** Containers whose direct text is layout, not words: whitespace there is dropped and words become paragraphs. */
