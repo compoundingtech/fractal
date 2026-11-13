@@ -166,7 +166,7 @@ const checklist: readonly Check[] = [
     item: 'No hover-only controls',
     verdict: 'pass',
     evidence:
-      'Mark Read, Open in Fractal, Read Aloud and an open ask’s answers are always in the hierarchy; a closed ask opens with its disclosure from the keyboard; no row reflows under the pointer (the full update summary is the help text).',
+      'Mark Read, Snooze, Dismiss, Open in Fractal, Read Aloud and an open ask’s answers are always in the hierarchy; Snooze and Dismiss are icon-only with their names as help and VoiceOver labels; a closed ask opens with its disclosure from the keyboard; no row reflows under the pointer (the full update summary is the help text).',
   },
   {
     item: 'Control size set on the panel root (macOS 27 resets it in popovers)',

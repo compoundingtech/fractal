@@ -5,6 +5,9 @@ import SwiftUI
 extension EnvironmentValues {
   /// The scrolling body's height limit; snapshots lift it to render every section.
   @Entry public var panelMaxHeight: CGFloat = 620
+  /// Cards that appear tell Fractal the person saw them. Only the live menu-bar panel sets it;
+  /// snapshots and gallery renders are nobody seeing anything.
+  @Entry public var marksSeen = false
 }
 
 /// The menu-bar panel, inbox first: asks, updates and speech fill it; availability and

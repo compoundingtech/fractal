@@ -18,8 +18,8 @@ Appearance menu forces Light or Dark.
 ## Stories
 
 - `AttentionTray/V3`: the shipped design. `Locked` lists Ada' picks (L1 A3 H3 S2 M3) and the
-  decisions carried from V2 (K1–K12), then the status item in every state and every scenario;
-  `LightAndDark` puts the busy inbox side by side.
+  decisions carried from V2 (K1–K12) and added since (K13), then the status item in every state
+  and every scenario; `LightAndDark` puts the busy inbox side by side.
 - `AttentionTray/Panel`: the shipped design per scenario, plus `AllStates` (light and dark).
 - `AttentionTray/MenuBar`: the status item per state, plus `AllStates` (light and dark).
 - `AttentionTray/V2`: history. `Exploration` shows the V2 options per dimension (L, A, H, S, M) as

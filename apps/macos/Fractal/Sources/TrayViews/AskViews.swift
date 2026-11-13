@@ -40,6 +40,7 @@ struct AsksSection: View {
           AskRow(record: record, model: model, isFirst: index == 0, leads: record.id == leading)
         }
       }
+      SnoozedNote(model: model)
     }
   }
 }
@@ -59,23 +60,31 @@ private struct AskRow: View {
 
   private var choices: [AnswerChoice] { AnswerChoice.choices(for: record) }
   private var state: AnswerState? { model.answers[record.id] }
-  private var committed: Bool { if case .committed = state { true } else { false } }
+  private var control: AnswerState? { model.controls[record.id] }
+  /// Answered, snoozed or dismissed in Fractal: the card leaves (or hides) on the next read.
+  private var committed: Bool {
+    if case .committed = state { return true }
+    if case .committed = control { return true }
+    return false
+  }
   private var draft: AnswerDraft { model.answerDrafts[record.id] ?? AnswerDraft() }
   private var words: String { draft.words }
   private var selected: String? { draft.selected }
   /// The person has started answering and not yet committed: never hide what they typed or picked.
-  private var inProgress: Bool { editing || !draft.isEmpty || (state != nil && !committed) }
+  private var inProgress: Bool { editing || !draft.isEmpty || ((state != nil || control != nil) && !committed) }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       disclosure
       if let state { WriteStatusView(state: state, write: .answer).padding(.leading, AskSymbol.inset) }
+      if let control { WriteStatusView(state: control, write: .control).padding(.leading, AskSymbol.inset) }
       // While speaking, the Read Aloud control itself says so and stops it.
       if let speech = model.speech?.status[record.id], speech != .speaking {
         SpeechStatusView(status: speech).padding(.leading, AskSymbol.inset)
       }
     }
     .accessibilityElement(children: .contain)
+    .modifier(MarksSeen(record: record, model: model))
     .onChange(of: editing) { _, focused in
       if focused {
         model.focusedInput = record.id
@@ -127,6 +136,7 @@ private struct AskRow: View {
           .help(record.url.absoluteString)
         Spacer(minLength: 8)
         ReadAloudButton(record: record, model: model)
+        AttentionControlButtons(record: record, model: model)
       }
       .buttonStyle(.borderless)
       .controlSize(.small)
@@ -135,7 +145,7 @@ private struct AskRow: View {
   }
 
   /// The answers as buttons (Nothing to Do last), the words field where the ask takes words,
-  /// then Read Aloud and Open in Fractal.
+  /// then Read Aloud, Snooze, Dismiss and Open in Fractal.
   @ViewBuilder private var inlineAnswer: some View {
     let answers = choices.filter { $0.isOption || $0.kind == .nothing }
     if !answers.isEmpty {
@@ -149,6 +159,7 @@ private struct AskRow: View {
     HStack(spacing: 12) {
       ReadAloudButton(record: record, model: model)
       Spacer(minLength: 8)
+      AttentionControlButtons(record: record, model: model)
       Link(destination: record.url) { Label("Open in Fractal", systemImage: "arrow.up.forward") }
         .help(record.url.absoluteString)
     }
@@ -156,6 +167,7 @@ private struct AskRow: View {
     .controlSize(.small)
     .font(.callout)
   }
+
 
   /// Only the leading ask's recommended answer is prominent, and only while nothing is being
   /// typed or left unsent anywhere in the panel. A recommended decline stays red and plain.
@@ -199,7 +211,7 @@ private struct AskRow: View {
     .controlSize(.small)
   }
 
-  private var sending: Bool { if case .sending = state { true } else { false } }
+  private var sending: Bool { model.isSending(record) }
 
   private var effective: AnswerChoice? { AnswerChoice.effective(choices, selected: selected, words: words) }
 
@@ -331,16 +343,20 @@ struct UpdatesSection: View {
   }
 }
 
-/// An update: its summary, and Mark Read and Open in Fractal always in place.
+/// An update: its summary, and Mark Read, Snooze and Open in Fractal always in place. Dismissing
+/// an update reads it, which Mark Read already does.
 private struct UpdateRow: View {
   let record: AttentionRecord
   let model: AttentionModel
 
   private var state: AnswerState? { model.answers[record.id] }
+  private var control: AnswerState? { model.controls[record.id] }
   private var settledOrSending: Bool {
-    switch state {
-    case .sending, .committed: true
-    case .refused, nil: false
+    [state, control].contains { state in
+      switch state {
+      case .sending, .committed: true
+      case .refused, nil: false
+      }
     }
   }
 
@@ -367,6 +383,7 @@ private struct UpdateRow: View {
               }
               .help("Complete this update in Fractal; it leaves every client")
             }
+            AttentionControlButtons(record: record, model: model, dismisses: false)
             Spacer(minLength: 8)
             Link(destination: record.url) { Label("Open in Fractal", systemImage: "arrow.up.forward") }
               .help(record.url.absoluteString)
@@ -376,9 +393,77 @@ private struct UpdateRow: View {
           .font(.callout)
         }
         if let state { WriteStatusView(state: state, write: .answer) }
+        if let control { WriteStatusView(state: control, write: .control) }
       }
     }
     .accessibilityElement(children: .contain)
+    .modifier(MarksSeen(record: record, model: model))
+  }
+}
+
+/// Snooze (a menu of presets) and Dismiss: the person's own controls, borderless and
+/// icon-only beside the row's links, named for VoiceOver and in their help.
+private struct AttentionControlButtons: View {
+  let record: AttentionRecord
+  let model: AttentionModel
+  var dismisses = true
+
+  var body: some View {
+    if model.canControl {
+      Menu {
+        ForEach(Until.snoozePresets) { until in
+          Button(until.label) { Task { await model.snooze(record, until) } }
+        }
+      } label: {
+        Label("Snooze", systemImage: "moon.zzz").labelStyle(.iconOnly)
+      }
+      .menuStyle(.borderlessButton)
+      .menuIndicator(.hidden)
+      .fixedSize()
+      .help("Snooze: hidden on all your devices until then; any deadline still runs")
+      .disabled(model.isSending(record))
+      if dismisses {
+        Button { Task { await model.dismiss(record) } } label: {
+          Label("Dismiss", systemImage: "xmark.circle").labelStyle(.iconOnly)
+        }
+        .help("Dismiss: set this ask aside; the asker reads “dismissed”")
+        .disabled(model.isSending(record))
+      }
+    }
+  }
+}
+
+/// Tells Fractal the person saw this card when it appears in the live panel, once per revision.
+private struct MarksSeen: ViewModifier {
+  let record: AttentionRecord
+  let model: AttentionModel
+  @Environment(\.marksSeen) private var marksSeen
+
+  func body(content: Content) -> some View {
+    content.task(id: record.revision) {
+      if marksSeen { await model.markSeen(record) }
+    }
+  }
+}
+
+/// What the person snoozed: how many, and when the first comes back.
+private struct SnoozedNote: View {
+  let model: AttentionModel
+
+  var body: some View {
+    let snoozed = model.snoozed
+    if let back = snoozed.compactMap(\.snoozedUntil).min() {
+      Label {
+        HStack(spacing: 4) {
+          Text("\(snoozed.count) snoozed ·")
+          RelativeTime(date: back, prefix: "first back")
+        }
+      } icon: {
+        Image(systemName: "moon.zzz")
+      }
+      .font(.callout)
+      .foregroundStyle(.secondary)
+    }
   }
 }
 

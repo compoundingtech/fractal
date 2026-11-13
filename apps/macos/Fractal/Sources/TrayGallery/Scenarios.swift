@@ -19,7 +19,7 @@ private struct Content {
   func record(
     _ id: String, title: String, detail: String = "", from: String, kind: String = "person-step",
     actions: [String] = ["work.done"], request: RequestForm? = nil, update: UpdateNote? = nil,
-    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false
+    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false, snoozedFor: TimeInterval? = nil
   ) -> AttentionRecord {
     AttentionRecord(
       id: "attention/\(id)", revision: "claim/1", kind: kind, state: "open", sourceID: "work/\(id)",
@@ -27,7 +27,7 @@ private struct Content {
       deadlineAt: deadlineIn.map { now + $0 }, defaultAnswerLabel: nil, actions: actions,
       promptAnswers: [], request: request, update: update,
       workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url,
-      isUrgent: urgent)
+      isUrgent: urgent, snoozedUntil: snoozedFor.map { now + $0 })
   }
 
   var shipDecision: RequestForm {
@@ -179,7 +179,8 @@ let scenarios: [Scenario] = [
   ) { now in
     let content = Content(now: now)
     let fractal = FixtureFractal(
-      page: AttentionPage(records: content.asks + [content.update], canAnswer: true), slo: content.strainedSlo,
+      page: AttentionPage(records: content.asks + [content.update], canAnswer: true, canControl: true),
+      slo: content.strainedSlo,
       histories: content.strainedHistories, availability: content.present)
     let model = model(fractal, speech: SpeechCoordinator(output: FixtureSpeech(), log: { _ in }))
     model.macPresence = .present
@@ -194,7 +195,8 @@ let scenarios: [Scenario] = [
     let content = Content(now: now)
     let asks = Array(content.asks.prefix(3))
     let fractal = FixtureFractal(
-      page: AttentionPage(records: asks, canAnswer: true), slo: content.calmSlo, histories: content.calmHistories,
+      page: AttentionPage(records: asks, canAnswer: true, canControl: true), slo: content.calmSlo,
+      histories: content.calmHistories,
       availability: content.present,
       submits: [
         asks[0].id: .hang, asks[1].id: .commit,
@@ -205,6 +207,30 @@ let scenarios: [Scenario] = [
     Task { await answer(model, asks[0], choice: "answer:ship") }
     await answer(model, asks[1], choice: "answer:local")
     await answer(model, asks[2], choice: "yes")
+    return model
+  },
+  Scenario(
+    id: "controls", title: "Snooze and dismiss",
+    description:
+      "The person's own controls: a snooze still sending, a dismissal Fractal refused for a form answered in Fractal (its reason verbatim), and one ask snoozed out of view."
+  ) { now in
+    let content = Content(now: now)
+    let asks = content.asks
+    let snoozed = content.record(
+      "dev5-gc", title: "Run the weekly store GC on dev5?", from: "agent/janitor", askedAgo: 2 * 3600,
+      snoozedFor: 3600)
+    let fractal = FixtureFractal(
+      page: AttentionPage(records: asks + [snoozed], canAnswer: true, canControl: true), slo: content.calmSlo,
+      histories: content.calmHistories, availability: content.present,
+      controls: [
+        asks[1].id: .hang,
+        asks[3].id: .refuse(
+          "a custom.review row is not an ask: use its own actions (custom.reply) (attention-dismiss-unsupported)."),
+      ])
+    let model = model(fractal)
+    await model.refresh()
+    Task { await model.snooze(asks[1], .hours(1)) }
+    await model.dismiss(asks[3])
     return model
   },
   Scenario(
@@ -237,7 +263,8 @@ let scenarios: [Scenario] = [
   ) { now in
     let content = Content(now: now)
     let fractal = FixtureFractal(
-      page: AttentionPage(records: content.asks + [content.update], canAnswer: true), slo: content.strainedSlo,
+      page: AttentionPage(records: content.asks + [content.update], canAnswer: true, canControl: true),
+      slo: content.strainedSlo,
       histories: content.strainedHistories, availability: content.present)
     let model = model(fractal)
     await model.refresh()

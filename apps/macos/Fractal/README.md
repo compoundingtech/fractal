@@ -17,9 +17,19 @@ collection, but `FractalClient` has no typed attention or availability stream.
   takes Return, since answers are irreversible.
   Typed answers and the note draft live on the model, so closing the panel keeps
   them.
-- The tray offers no Dismiss and no snooze. Web's Dismiss sends a `work.done`
-  that the asker reads as an answer; dismissing and snoozing are person
-  attention controls, distinct from answering and shared by every client.
+- **Snooze and Dismiss** are the person's own attention controls
+  (`attention.snooze`, `attention.dismiss`), offered when the session is
+  granted them, on every open ask (and Snooze on updates), never as an answer.
+  Snooze (1 hour, 4 hours, until tomorrow 9:00) hides the card on all the
+  person's clients until then; its deadline still runs. Fractal still lists
+  snoozed rows: the tray leaves them out of the list, the count and speech, says
+  how many are snoozed and when the first returns, and re-renders when the
+  earliest snooze ends. Dismiss sets a person-step ask aside with Fractal's own
+  `dismissed` outcome, which its asker reads; Fractal refuses it for anything
+  else (`attention-dismiss-unsupported`) and the tray shows that refusal
+  verbatim. A card shown in the open panel is marked seen (`attention.seen`)
+  once per revision, unless Fractal already has it seen. Controls are fenced and
+  keyed exactly as answers are (below).
 - Answers mirror Fractal web `alert-action-port.ts`: re-read the card, require it
   open, offering `work.done` and at the revision the person read, then submit
   one `work.done` fenced on that read. The action ID and idempotency key are
@@ -28,7 +38,8 @@ collection, but `FractalClient` has no typed attention or availability stream.
   "committed" only after Fractal's result, or Fractal's refusal verbatim; it is
   never removed optimistically.
 - **Updates** are listed apart and not counted; Mark Read sends the server's
-  prefilled `work.done` (`Read`, answer `read`).
+  prefilled `work.done` (`Read`, answer `read`), which is also what dismissing
+  an update does, so updates offer Mark Read and Snooze.
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   They stay in the panel: the status item shows asks only (one template glyph
@@ -218,10 +229,11 @@ notification still lands in Notification Center.
 
 The panel's views live in the `TrayViews` target and read only `AttentionCore`.
 `TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
-answering, quiet, read-only, degraded, unconfigured; speech: speaking, in a
-call, muted) for the design Storybook in `design/`, from the Nix-built gallery
-(`nix run ./flakes/attention-tray#gallery -- <dir> …`). Every manifest records
-the source rev. It needs a Mac with a login session and has these outputs:
+answering, snooze and dismiss, quiet, read-only, degraded, unconfigured;
+speech: speaking, in a call, muted) for the design Storybook in `design/`, from
+the Nix-built gallery (`nix run ./flakes/attention-tray#gallery -- <dir> …`).
+Every manifest records the source rev. It needs a Mac with a login session and
+has these outputs:
 
 - `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
   as `@2x` PNGs, and the status item in every state, plus `manifest.json`,

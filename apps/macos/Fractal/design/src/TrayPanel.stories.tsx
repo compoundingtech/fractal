@@ -44,6 +44,7 @@ const scenarioStory = ({ scenario }: { scenario: ScenarioId }): Story => {
 
 export const Busy: Story = scenarioStory({ scenario: 'busy' })
 export const Answering: Story = scenarioStory({ scenario: 'answering' })
+export const Controls: Story = scenarioStory({ scenario: 'controls' })
 export const Quiet: Story = scenarioStory({ scenario: 'quiet' })
 export const ReadOnly: Story = scenarioStory({ scenario: 'read-only' })
 export const Degraded: Story = scenarioStory({ scenario: 'degraded' })

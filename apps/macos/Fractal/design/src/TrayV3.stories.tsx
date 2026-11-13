@@ -1,6 +1,6 @@
 /**
  * Attention tray V3: the design the tray ships. Ada picked L1 A3 H3 S2 M3 from the V2
- * exploration (AttentionTray/V2, kept as history); with K1–K12 they are locked. Every scenario
+ * exploration (AttentionTray/V2, kept as history); with K1–K13 they are locked. Every scenario
  * shows as the real capture when one exists, else the flat render, labelled.
  */
 import type { Meta, StoryObj } from '@storybook/react'
@@ -33,7 +33,7 @@ const picks: readonly { readonly id: string; readonly text: string }[] = [
   },
 ]
 
-/** Decisions carried over from V2, restated for the locked design. */
+/** Decisions carried over from V2 (K1–K12) and added since (K13), restated for the locked design. */
 const locked: readonly { readonly id: string; readonly text: string }[] = [
   {
     id: 'K1',
@@ -53,7 +53,7 @@ const locked: readonly { readonly id: string; readonly text: string }[] = [
   },
   {
     id: 'K5',
-    text: 'No hover-only actions: Mark Read, Open in Fractal, Read Aloud and an open ask’s answers are always in place; keyboard and VoiceOver reach every control and every disclosure.',
+    text: 'No hover-only actions: Mark Read, Snooze, Dismiss, Open in Fractal, Read Aloud and an open ask’s answers are always in place; keyboard and VoiceOver reach every control and every disclosure.',
   },
   {
     id: 'K6',
@@ -83,6 +83,10 @@ const locked: readonly { readonly id: string; readonly text: string }[] = [
     id: 'K12',
     text: 'Histograms: Swift Charts bars per hour; an hour without a bar carries a baseline mark that differs in shape, not only color (spent: red cross, unmeasured: grey ring); the nearly-spent zone is a dashed rule; a key under the chart names the rule and the marks.',
   },
+  {
+    id: 'K13',
+    text: 'Snooze (a preset menu) and Dismiss are borderless icon-only controls in the ask row’s link line and beside Open in Fractal in an open ask; updates: Snooze beside Mark Read. Their outcome is a status row in words, never color alone; snoozed cards leave the list and a “N snoozed · first back …” line says so. Seen has no control: a card shown in the open panel is marked seen.',
+  },
 ]
 
 const Decisions = ({
@@ -109,7 +113,7 @@ const stateIds = menuBarStates.length > 0 ? menuBarStates.map((state) => state.i
 const LockedView = () => (
   <div className="at-gallery">
     <Decisions title="Locked in V3: Ada’ picks (2026-11-13)" decisions={picks} />
-    <Decisions title="Locked in V3: carried from V2" decisions={locked} />
+    <Decisions title="Locked in V3: carried from V2 and added since" decisions={locked} />
     <section className="at-gallery-row" aria-label="Menu-bar item">
       <h2 className="at-gallery-heading">Menu-bar item · M3</h2>
       <div className="at-gallery-pair">
@@ -146,7 +150,7 @@ const meta = {
     docs: {
       description: {
         component:
-          'V3: the shipped design. Ada’ V2 picks L1 A3 H3 S2 M3 and K1–K12 are locked; AttentionTray/V2 keeps the exploration as history. Each image is a real window-server capture where one exists (labelled), else the flat cacheDisplay render. Appearance follows macOS; override it in the toolbar.',
+          'V3: the shipped design. Ada’ V2 picks L1 A3 H3 S2 M3 and K1–K13 are locked; AttentionTray/V2 keeps the exploration as history. Each image is a real window-server capture where one exists (labelled), else the flat cacheDisplay render. Appearance follows macOS; override it in the toolbar.',
       },
     },
   },
