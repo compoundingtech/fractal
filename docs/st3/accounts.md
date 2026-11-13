@@ -288,6 +288,10 @@ partitions do not relabel earlier step-level aggregates; older usage without an 
 remains generic spend and is not retroactively charged to a guessed execution. Held readings
 remain host-local until the existing hourly/end-of-work publication boundary.
 
+Ownership also requires an unexpired historical lease, including renewals and extensions known
+at response time. Missing expiry or overlapping live claims leaves the execution unknown;
+neither a future renewal nor a delayed ready receipt extends earlier ownership.
+
 `usage: null` means no response accounting evidence. A usage object carries input, output,
 cache-write (including one-hour writes), cache-read and total tokens, known `cost_microusd`,
 provider-reported cost, and `unpriced_tokens`. A nonzero unpriced count means the known cost is

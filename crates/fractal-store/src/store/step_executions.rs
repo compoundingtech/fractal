@@ -59,7 +59,7 @@ pub(super) fn response_execution(connection: &Connection, agent: &str, incarnati
     -> Result<Option<(String, String)>>
 {
     if incarnation.is_empty() { return Ok(None); }
-    let mut statement = connection.prepare(&format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h3a0be1d87c44 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claimed.id, claimed.subject FROM claims claimed INDEXED BY claims_execution_actor_index
          WHERE claimed.actor=?1 AND claimed.kind='work.claimed'
            AND json_extract(claimed.body,'$.fields.claimant')=?1
@@ -94,7 +94,7 @@ pub(super) fn response_execution(connection: &Connection, agent: &str, incarnati
 /// a future renewal, or the already-mutated step projection.
 pub(super) fn execution_lease_at(connection: &Connection, claim: &str, at: u128)
     -> Result<Option<u128>> {
-    let mut statement = connection.prepare(&canonical_sql(&format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb150610e49d0 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.body,claims.accepted_at_unix_ms FROM claims
          JOIN claims claimed ON claimed.id=?1
          WHERE claims.subject=claimed.subject
@@ -107,6 +107,7 @@ pub(super) fn execution_lease_at(connection: &Connection, claim: &str, at: u128)
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         smallclaims::store::canonical::after_sql("claims", "claimed"))))?;
     let reading: Option<(String, String)> = statement.query_row(
+        /* sqlite-large-value: allow-for-now lv-h988f5ad3eefe owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
         params![claim, at.min(i64::MAX as u128) as i64], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     let Some((body, effective_at)) = reading else { return Ok(None); };
     let body: Value = serde_json::from_str(&body)?;
@@ -295,6 +296,80 @@ mod tests {
             "claim_expires_at_unix_ms": at + 600_000,
             "declared_model": "declared-at-claim", "trace_id": "0123456789abcdef0123456789abcdef",
         }))
+    }
+
+    #[test]
+    fn response_ownership_ends_at_expiry_before_the_ready_receipt() {
+        let store = Store::open_memory("source").unwrap();
+        let first = event(&store, STEP, "work.claimed", 0, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600,
+        }));
+        event(&store, STEP, "step-run.state", 700, json!({"attempt":1,"status":"ready"}));
+        let connection = store.readers.get();
+        assert_eq!(response_execution(&connection, AGENT, "one", 599).unwrap(),
+            Some((first.id.clone(), STEP.into())), "late ingestion retains genuine earlier responses");
+        assert_eq!(response_execution(&connection, AGENT, "one", 600).unwrap(), None);
+        assert_eq!(response_execution(&connection, AGENT, "one", 650).unwrap(), None);
+    }
+
+    #[test]
+    fn historical_lease_renewals_and_extensions_are_episode_and_time_fenced() {
+        let store = Store::open_memory("source").unwrap();
+        let first = event(&store, STEP, "work.claimed", 0, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600,
+        }));
+        event(&store, STEP, "work.renewed", 300, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":900,
+        }));
+        event(&store, STEP, "work.extended", 800, json!({
+            "attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":1200,
+        }));
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            tx.execute("INSERT INTO local_work_lease_renewals
+                (subject,attempt,lease_owner,lease_incarnation,lease_expires_at_unix_ms,updated_at_unix_ms)
+                VALUES(?1,1,?2,'one','1500','1100')", params![STEP, AGENT]).unwrap();
+            tx.commit().unwrap();
+        }
+        let connection = store.readers.get();
+        assert_eq!(execution_lease_at(&connection, &first.id, 200).unwrap(), Some(600));
+        assert_eq!(execution_lease_at(&connection, &first.id, 700).unwrap(), Some(900));
+        assert_eq!(execution_lease_at(&connection, &first.id, 1000).unwrap(), Some(1200));
+        assert_eq!(execution_lease_at(&connection, &first.id, 1300).unwrap(), Some(1500));
+        for at in [700, 1000, 1300] {
+            assert_eq!(response_execution(&connection, AGENT, "one", at).unwrap(),
+                Some((first.id.clone(), STEP.into())));
+        }
+        assert_eq!(response_execution(&connection, AGENT, "one", 1500).unwrap(), None);
+        drop(connection);
+        store.connection.write().execute("UPDATE local_work_lease_renewals SET attempt=2", []).unwrap();
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 1300).unwrap(), None,
+            "a different attempt's quiet renewal cannot extend the earlier claim");
+    }
+
+    #[test]
+    fn a_claim_without_lease_evidence_does_not_prove_response_ownership() {
+        let store = Store::open_memory("source").unwrap();
+        event(&store, STEP, "work.claimed", 100,
+            json!({"attempt":1,"claimant":AGENT,"claim_incarnation":"one"}));
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 150).unwrap(), None);
+    }
+
+    #[test]
+    fn overlapping_step_claims_are_unknown_not_latest_wins() {
+        let store = Store::open_memory("source").unwrap();
+        let first = claim(&store, 1, "one", 100);
+        event(&store, "step-run/example/generation/review", "work.claimed", 110,
+            json!({"attempt":1,"claimant":AGENT,"claim_incarnation":"one","claim_expires_at_unix_ms":600110}));
+        let connection = store.readers.get();
+        assert_eq!(response_execution(&connection, AGENT, "one", 105).unwrap(),
+            Some((first.id.clone(), STEP.into())));
+        assert_eq!(response_execution(&connection, AGENT, "one", 120).unwrap(), None);
+        drop(connection);
+        event(&store, "step-run/example/generation/review", "work.released", 130, json!({"attempt":1}));
+        assert_eq!(response_execution(&store.readers.get(), AGENT, "one", 140).unwrap(),
+            Some((first.id, STEP.into())));
     }
 
     fn rollup(store: &Store, execution: &ClaimRecord, model: &str, total: u64, at: u128) {
