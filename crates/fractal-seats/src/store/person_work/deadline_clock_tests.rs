@@ -149,7 +149,7 @@ fn an_ask_records_its_priority_and_only_critical_makes_its_row_urgent() {
     // `normal` is no priority at all, so an update may name it.
     input.priority = Some("normal".into());
     let named_normal = store.ask_person(&input).err().map(|error| error.code);
-    assert_ne!(named_normal.as_deref(), Some("invalid-ask-priority"));
+    assert_ne!(named_normal, Some("invalid-ask-priority"));
 }
 
 /// A hold with `until` ends by itself, with no claim: the deadline moves by exactly the hold's
