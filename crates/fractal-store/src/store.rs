@@ -10020,6 +10020,16 @@ pub fn insert_local_observation_tx(
             .and_then(|body| body.get("semantics"))
             .and_then(Value::as_str)
             == Some("response")
+        // A terminal response may carry identity/timing but no accounting observations.
+        // Keep that timeline evidence without reserving a spend receipt or inventing a
+        // zero-token, zero-cost response from missing counters.
+        && input.fields.get("body").is_some_and(|usage| {
+            ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "total_tokens"]
+                .iter()
+                .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                || usage.get("cost").and_then(Value::as_f64)
+                    .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
+        })
     {
         let desired: Option<(Option<String>, Option<String>, Option<String>)> = transaction
             .query_row(
@@ -10100,16 +10110,27 @@ pub fn insert_local_observation_tx(
             .and_then(Value::as_f64)
             .filter(|cost| cost.is_finite() && *cost >= 0.0)
             .map(|cost| (cost * 1_000_000.0).round() as u64);
-        let estimated_cost = crate::pricing::cost_microusd(
-            model,
-            crate::pricing::Tokens {
-                input: input_tokens,
-                output: output_tokens,
-                cache_read: cached_tokens,
-                cache_write: cache_write_tokens,
-                cache_write_1h: cache_write_1h_tokens,
-            },
-        );
+        // Rate-card pricing requires observed disjoint buckets. An absent bucket
+        // is not zero; an unknown cache-write TTL is not a five-minute write.
+        let complete_tokens = ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+            && (cache_write_tokens == 0
+                || usage.get("cache_write_1h_tokens").and_then(Value::as_u64).is_some());
+        let estimated_cost = if complete_tokens {
+            crate::pricing::cost_microusd(
+                model,
+                crate::pricing::Tokens {
+                    input: input_tokens,
+                    output: output_tokens,
+                    cache_read: cached_tokens,
+                    cache_write: cache_write_tokens,
+                    cache_write_1h: cache_write_1h_tokens,
+                },
+            )
+        } else {
+            None
+        };
         let cost_microusd = reported_cost.or(estimated_cost).unwrap_or(0);
         let unpriced_tokens = if reported_cost.or(estimated_cost).is_some() {
             0
@@ -10228,7 +10249,7 @@ pub fn insert_local_observation_tx(
             if reported_cost.is_none() {
                 entry["price_table_id"] = json!(crate::pricing::PRICE_TABLE_ID);
                 entry["price_table_version"] = json!(crate::pricing::price_table_version());
-                if let Some(rates) = crate::pricing::applied_rates(model, tokens) {
+                if complete_tokens && let Some(rates) = crate::pricing::applied_rates(model, tokens) {
                     let mut rates = serde_json::to_value(rates).map_err(internal)?;
                     rates.as_object_mut().unwrap().remove("long_context");
                     entry["rates_usd_per_million_tokens"] = rates;
