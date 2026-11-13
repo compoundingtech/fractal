@@ -146,6 +146,10 @@ fn an_ask_records_its_priority_and_only_critical_makes_its_row_urgent() {
     input.priority = Some("critical".into());
     input.request = Some(serde_json::json!({"version": 1, "type": "update", "about": origin.run}));
     assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-ask-priority");
+    // `normal` is no priority at all, so an update may name it.
+    input.priority = Some("normal".into());
+    let named_normal = store.ask_person(&input).err().map(|error| error.code);
+    assert_ne!(named_normal.as_deref(), Some("invalid-ask-priority"));
 }
 
 /// A hold with `until` ends by itself, with no claim: the deadline moves by exactly the hold's
