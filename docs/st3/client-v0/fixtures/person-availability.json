@@ -35,6 +35,19 @@
         "deadline_clock": "hold-routine",
         "deadline_clock_since": "2026-11-12T09:30:00Z",
         "deadline_clock_until": "2026-11-12T17:00:00Z"
+      },
+      {
+        "person": "person/ben",
+        "status": "available",
+        "status_source": "unreported",
+        "status_until": null,
+        "presence": null,
+        "presence_observed_at": null,
+        "interruptions": "all",
+        "interruptions_until": null,
+        "deadline_clock": "run",
+        "deadline_clock_since": null,
+        "deadline_clock_until": null
       }
     ]
   }

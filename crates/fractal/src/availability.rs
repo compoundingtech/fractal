@@ -3,8 +3,9 @@ use fractal_daemon::{cli_print as print, cli_println as println};
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use fractal_client::{
-    AvailabilityDeadlineClockChange, AvailabilityInterruptionsChange, AvailabilitySet,
-    AvailabilityStatusChange, PersonAvailability, PresenceReport,
+    AvailabilityDeadlineClock, AvailabilityDeadlineClockChange, AvailabilityInterruptions,
+    AvailabilityInterruptionsChange, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange,
+    AvailabilityStatusSource, PersonAvailability, PresenceReport,
 };
 use fractal_daemon::client::Endpoint;
 
@@ -35,11 +36,16 @@ enum AvailabilityCommand {
         #[arg(value_enum)]
         axes: Vec<Axis>,
     },
-    /// Report this device's presence, as a paired client does. Persons only.
+    /// Report this device's state, as a paired client does on each transition. Persons only.
     Presence {
-        #[arg(value_parser = ["present", "idle", "locked"])]
-        presence: String,
-        /// When the device observed it, UTC RFC3339; defaults to now.
+        /// active: in use; inactive: idle at the screen; locked; sleeping.
+        #[arg(value_parser = ["active", "inactive", "locked", "sleeping"])]
+        state: String,
+        /// The device's last user input, UTC RFC3339; the daemon counts an active device present
+        /// until ten minutes after it.
+        #[arg(long, value_name = "RFC3339")]
+        last_input_at: Option<String>,
+        /// When the device observed the state, UTC RFC3339; defaults to now.
         #[arg(long, value_name = "RFC3339")]
         observed_at: Option<String>,
     },
@@ -144,7 +150,12 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
     let at = |label: &str, time: &Option<String>| {
         time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
     };
-    let source = if availability.status_source == "override" { "set" } else { "from presence" };
+    let source = match availability.status_source {
+        AvailabilityStatusSource::Override => "set",
+        AvailabilityStatusSource::Presence => "from presence",
+        AvailabilityStatusSource::Unreported => "no device reporting",
+        AvailabilityStatusSource::Unknown => "source not known to this client",
+    };
     let mut block = format!("{}\n", availability.person);
     let _ = writeln!(
         block,
@@ -176,16 +187,14 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
 }
 
 /// Whether `fractal now` should name this availability: only when something departs from the
-/// default. Non-self readers (agents) never see raw presence (`presence` is `None`), so a
-/// presence-derived away always shows for them: the person is effectively away and the agent
-/// should park. Only the person's own view can tell an unknown presence (no fresh device
-/// report) apart, and that says nothing they can act on.
+/// default. Any away shows, set or derived from presence: the asker should park. No device
+/// reporting (`unreported`) is the default, available, and stays quiet. A word this client does
+/// not know departs from the default and shows.
 pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
-    availability.status_source == "override"
-        || (availability.status == "away"
-            && matches!(availability.presence.as_deref(), None | Some("idle" | "locked")))
-        || availability.deadline_clock != "run"
-        || availability.interruptions != "all"
+    availability.status_source == AvailabilityStatusSource::Override
+        || availability.status != AvailabilityStatus::Available
+        || availability.interruptions != AvailabilityInterruptions::All
+        || availability.deadline_clock != AvailabilityDeadlineClock::Run
 }
 
 /// One line for someone about to wait on the person: the status always, the rest only when it
@@ -200,20 +209,51 @@ pub(super) fn summary_line(availability: &PersonAvailability) -> String {
         availability.status,
         at("until", &availability.status_until)
     );
-    if availability.interruptions != "all" {
+    if availability.interruptions != AvailabilityInterruptions::All {
         line.push_str(&format!(
             "; interruptions: {}{}",
             availability.interruptions,
             at("until", &availability.interruptions_until)
         ));
     }
-    if availability.deadline_clock != "run" {
+    if availability.deadline_clock != AvailabilityDeadlineClock::Run {
         line.push_str(&format!(
             "; deadline clock: {}{}{}",
             availability.deadline_clock,
             at("since", &availability.deadline_clock_since),
             at("until", &availability.deadline_clock_until)
         ));
+    }
+    line
+}
+
+/// Whether the person's deadline clock holds an ask's deadline now: `hold-all` holds every ask,
+/// `hold-routine` every ask that is not urgent. `None` for a clock word this client does not know.
+pub(super) fn holds_deadline(availability: &PersonAvailability, urgent: bool) -> Option<bool> {
+    match availability.deadline_clock {
+        AvailabilityDeadlineClock::Run => Some(false),
+        AvailabilityDeadlineClock::HoldRoutine => Some(!urgent),
+        AvailabilityDeadlineClock::HoldAll => Some(true),
+        AvailabilityDeadlineClock::Unknown => None,
+    }
+}
+
+/// The asker's line about its own ask: whether it is urgent and, when the person's availability
+/// was read and their deadline clock is not `run`, whether that clock holds the ask's deadline.
+pub(super) fn ask_line(urgent: bool, availability: Option<&PersonAvailability>) -> String {
+    let mut line = if urgent {
+        "this ask is urgent (priority critical)".to_owned()
+    } else {
+        "this ask is not urgent".to_owned()
+    };
+    let Some(availability) = availability else { return line };
+    match holds_deadline(availability, urgent) {
+        Some(true) => line.push_str(&format!("; {} holds its deadline", availability.deadline_clock)),
+        Some(false) if availability.deadline_clock == AvailabilityDeadlineClock::HoldRoutine => {
+            line.push_str("; its deadline runs through hold-routine")
+        }
+        Some(false) => {}
+        None => line.push_str("; deadline clock not known to this client"),
     }
     line
 }
@@ -264,15 +304,21 @@ pub(super) async fn run(
             .availability_set(&clear_request(&axes))
             .await
             .context("could not clear your availability")?,
-        Some(AvailabilityCommand::Presence { presence, observed_at }) => {
-            let observed_at = match observed_at.as_deref() {
-                Some(at) => parse_time(at, "--observed-at")?,
-                None => utc_millis(now),
-            };
-            client
-                .presence_report(&PresenceReport { presence, observed_at })
+        Some(AvailabilityCommand::Presence { state, last_input_at, observed_at }) => {
+            let reported = client
+                .presence_report(&presence_request(state, last_input_at.as_deref(), observed_at.as_deref(), now)?)
                 .await
                 .context("could not report your presence")?
+                .value;
+            if json_output {
+                return super::print_value(&reported, true);
+            }
+            print!("{}", render_block(&reported.availability));
+            match &reported.report_again_at {
+                Some(at) => println!("Report again at {at} if the state has not changed by then."),
+                None => println!("Report again on the next state change or input."),
+            }
+            return Ok(());
         }
     }
     .value;
@@ -283,11 +329,30 @@ pub(super) async fn run(
     Ok(())
 }
 
+/// A presence report for `state`; times are normalized to UTC milliseconds, `observed_at`
+/// defaulting to `now`.
+fn presence_request(
+    state: String,
+    last_input_at: Option<&str>,
+    observed_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PresenceReport> {
+    Ok(PresenceReport {
+        state,
+        last_input_at: last_input_at.map(|at| parse_time(at, "--last-input-at")).transpose()?,
+        observed_at: match observed_at {
+            Some(at) => parse_time(at, "--observed-at")?,
+            None => utc_millis(now),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
     use serde_json::json;
     use super::*;
+    use fractal_client::AvailabilityPresence;
 
     fn parse(argv: &[&str]) -> AvailabilityArgs {
         let mut full = vec!["st", "availability"];
@@ -371,30 +436,45 @@ mod tests {
     }
 
     #[test]
-    fn availability_presence_offers_only_reportable_values() {
-        let args = parse(&["presence", "idle", "--observed-at", "2026-11-12T17:00:00Z"]);
-        let Some(AvailabilityCommand::Presence { presence, observed_at }) = args.command else { panic!("expected presence") };
-        assert_eq!(presence, "idle");
-        assert_eq!(observed_at.as_deref(), Some("2026-11-12T17:00:00Z"));
-        assert!(refused(&["presence", "unknown"]));
+    fn availability_presence_reports_raw_device_states_with_utc_times() {
+        let args = parse(&[
+            "presence", "active", "--last-input-at", "2026-11-12T18:55:00+01:00", "--observed-at", "2026-11-12T17:00:00Z",
+        ]);
+        let Some(AvailabilityCommand::Presence { state, last_input_at, observed_at }) = args.command else {
+            panic!("expected presence")
+        };
+        assert_eq!(
+            serde_json::to_value(
+                presence_request(state, last_input_at.as_deref(), observed_at.as_deref(), at("2026-11-12T17:01:00Z"))
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"state": "active", "last_input_at": "2026-11-12T17:55:00.000Z", "observed_at": "2026-11-12T17:00:00.000Z"})
+        );
+        assert_eq!(
+            serde_json::to_value(presence_request("locked".into(), None, None, at("2026-11-12T17:01:00Z")).unwrap()).unwrap(),
+            json!({"state": "locked", "observed_at": "2026-11-12T17:01:00.000Z"})
+        );
+        assert!(presence_request("active".into(), Some("soon"), None, at("2026-11-12T17:01:00Z")).is_err());
+        for state in ["inactive", "sleeping"] {
+            assert!(!refused(&["presence", state]), "{state}");
+        }
+        for derived in ["present", "idle", "unreported", "unknown"] {
+            assert!(refused(&["presence", derived]), "{derived} is derived by the daemon, not reported");
+        }
         assert!(refused(&["presence"]));
     }
 
     #[test]
     fn availability_block_shows_presence_only_when_the_read_carries_it() {
-        let own = PersonAvailability {
-            person: "person/ada".into(),
-            status: "away".into(),
-            status_source: "override".into(),
-            status_until: Some("2026-11-12T18:00:00.000Z".into()),
-            presence: Some("idle".into()),
-            presence_observed_at: Some("2026-11-12T17:00:00.000Z".into()),
-            interruptions: "urgent".into(),
-            interruptions_until: None,
-            deadline_clock: "hold-all".into(),
-            deadline_clock_since: Some("2026-11-12T16:00:00.000Z".into()),
-            deadline_clock_until: None,
-        };
+        let own: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "away", "status_source": "override",
+            "status_until": "2026-11-12T18:00:00.000Z",
+            "presence": "idle", "presence_observed_at": "2026-11-12T17:00:00.000Z",
+            "interruptions": "urgent", "interruptions_until": null,
+            "deadline_clock": "hold-all", "deadline_clock_since": "2026-11-12T16:00:00.000Z", "deadline_clock_until": null,
+        }))
+        .unwrap();
         assert_eq!(
             render_block(&own),
             concat!(
@@ -410,44 +490,74 @@ mod tests {
     }
 
     #[test]
+    fn availability_block_names_an_unreported_or_unknown_source() {
+        let unreported: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "available", "status_source": "unreported", "status_until": null,
+            "presence": "unreported", "presence_observed_at": null,
+            "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        let block = render_block(&unreported);
+        assert!(block.contains("  status          available (no device reporting)\n"), "{block}");
+        assert!(block.contains("  presence        unreported\n"), "{block}");
+        // A word from a newer daemon still renders instead of failing the read.
+        let newer: PersonAvailability = serde_json::from_value(json!({
+            "person": "person/ada", "status": "in-a-meeting", "status_source": "calendar", "status_until": null,
+            "presence": null, "presence_observed_at": null,
+            "interruptions": "all", "interruptions_until": null,
+            "deadline_clock": "run", "deadline_clock_since": null, "deadline_clock_until": null,
+        }))
+        .unwrap();
+        assert!(render_block(&newer).contains("  status          unknown (source not known to this client)\n"));
+    }
+
+    #[test]
     fn availability_summary_names_status_always_and_only_non_default_rest() {
         let available = PersonAvailability {
             person: "person/ada".into(),
-            status: "available".into(),
-            status_source: "presence".into(),
+            status: AvailabilityStatus::Available,
+            status_source: AvailabilityStatusSource::Presence,
             status_until: None,
             presence: None,
             presence_observed_at: None,
-            interruptions: "all".into(),
+            interruptions: AvailabilityInterruptions::All,
             interruptions_until: None,
-            deadline_clock: "run".into(),
+            deadline_clock: AvailabilityDeadlineClock::Run,
             deadline_clock_since: None,
             deadline_clock_until: None,
         };
         assert_eq!(summary_line(&available), "person/ada is available");
         assert!(!worth_showing(&available));
-        let unknown_away = PersonAvailability {
-            status: "away".into(),
-            presence: Some("unknown".into()),
+        let unreported = PersonAvailability {
+            status_source: AvailabilityStatusSource::Unreported,
+            presence: Some(AvailabilityPresence::Unreported),
             ..available.clone()
         };
-        assert!(!worth_showing(&unknown_away), "unknown presence alone says nothing");
-        assert!(worth_showing(&PersonAvailability { presence: Some("idle".into()), ..unknown_away.clone() }));
-        assert!(worth_showing(&PersonAvailability { presence: Some("locked".into()), ..unknown_away.clone() }));
-        assert!(
-            worth_showing(&PersonAvailability { presence: None, ..unknown_away }),
-            "a non-self reader sees no raw presence, so presence-derived away must still show"
-        );
-        assert!(worth_showing(&PersonAvailability { status_source: "override".into(), ..available.clone() }));
-        assert!(worth_showing(&PersonAvailability { interruptions: "urgent".into(), ..available.clone() }));
-        assert!(worth_showing(&PersonAvailability { deadline_clock: "hold-routine".into(), ..available.clone() }));
+        assert!(!worth_showing(&unreported), "no device reporting is the default: agents ask normally");
+        assert_eq!(summary_line(&unreported), "person/ada is available");
+        let presence_away = PersonAvailability { status: AvailabilityStatus::Away, ..available.clone() };
+        assert!(worth_showing(&presence_away), "presence-derived away shows: the asker should park");
+        assert!(worth_showing(&PersonAvailability { status: AvailabilityStatus::Unknown, ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability {
+            status_source: AvailabilityStatusSource::Override,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
+            interruptions: AvailabilityInterruptions::Urgent,
+            ..available.clone()
+        }));
+        assert!(worth_showing(&PersonAvailability {
+            deadline_clock: AvailabilityDeadlineClock::HoldRoutine,
+            ..available.clone()
+        }));
         let away = PersonAvailability {
-            status: "away".into(),
-            status_source: "override".into(),
+            status: AvailabilityStatus::Away,
+            status_source: AvailabilityStatusSource::Override,
             status_until: Some("2026-11-12T18:00:00.000Z".into()),
-            interruptions: "urgent".into(),
+            interruptions: AvailabilityInterruptions::Urgent,
             interruptions_until: Some("2026-11-12T18:00:00.000Z".into()),
-            deadline_clock: "hold-all".into(),
+            deadline_clock: AvailabilityDeadlineClock::HoldAll,
             deadline_clock_since: Some("2026-11-12T17:00:00.000Z".into()),
             deadline_clock_until: Some("2026-11-12T18:00:00.000Z".into()),
             ..available
@@ -457,5 +567,38 @@ mod tests {
             summary_line(&away),
             "person/ada is away until 2026-11-12T18:00:00.000Z; interruptions: urgent until 2026-11-12T18:00:00.000Z; deadline clock: hold-all since 2026-11-12T17:00:00.000Z until 2026-11-12T18:00:00.000Z"
         );
+    }
+
+    #[test]
+    fn ask_line_says_whether_the_ask_is_urgent_and_whether_the_clock_holds_it() {
+        let with_clock = |deadline_clock| PersonAvailability {
+            person: "person/ada".into(),
+            status: AvailabilityStatus::Available,
+            status_source: AvailabilityStatusSource::Presence,
+            status_until: None,
+            presence: None,
+            presence_observed_at: None,
+            interruptions: AvailabilityInterruptions::All,
+            interruptions_until: None,
+            deadline_clock,
+            deadline_clock_since: None,
+            deadline_clock_until: None,
+        };
+        let routine = with_clock(AvailabilityDeadlineClock::HoldRoutine);
+        assert_eq!(ask_line(false, Some(&routine)), "this ask is not urgent; hold-routine holds its deadline");
+        assert_eq!(
+            ask_line(true, Some(&routine)),
+            "this ask is urgent (priority critical); its deadline runs through hold-routine"
+        );
+        let all = with_clock(AvailabilityDeadlineClock::HoldAll);
+        assert_eq!(ask_line(true, Some(&all)), "this ask is urgent (priority critical); hold-all holds its deadline");
+        let run = with_clock(AvailabilityDeadlineClock::Run);
+        assert_eq!(holds_deadline(&run, false), Some(false));
+        assert_eq!(ask_line(false, Some(&run)), "this ask is not urgent");
+        let newer = with_clock(AvailabilityDeadlineClock::Unknown);
+        assert_eq!(holds_deadline(&newer, false), None);
+        assert_eq!(ask_line(false, Some(&newer)), "this ask is not urgent; deadline clock not known to this client");
+        // Without a read, only the urgency is known.
+        assert_eq!(ask_line(true, None), "this ask is urgent (priority critical)");
     }
 }
