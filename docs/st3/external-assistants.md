@@ -121,8 +121,8 @@ command = "/absolute/path/to/fractal-mcp"
 args = ["--socket", "/absolute/path/to/fractal-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
 ```
 
-The thirteen tools are `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
-`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+The fourteen tools are `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_availability_get`, `fractal_conversations_list`,
 `fractal_conversation_detail`, `fractal_conversation_timeline`, `fractal_conversation_search`,
 `fractal_conversation_read`, `fractal_message_send`, `fractal_slo_list`, and `fractal_slo_history`. Each declares an `outputSchema`
 and returns a `structuredContent` envelope with a text mirror for older clients.
@@ -308,6 +308,7 @@ The attention, missions, and agents pages retain the optional native `sync` noti
 | GET route under `/v1/client/assistant/` | Scope | Allowed fields, in addition to snapshot/page metadata |
 | --- | --- | --- |
 | `summary` | `read.assistant.summary` | Counts of the configured owner's attention, agent states, mission states; `as_of` |
+| `availability` | `read.assistant.availability` | `kind: "person-availability"`, the configured owner's own `PersonAvailability` (effective status and source, override expiry, interruptions, deadline clock with since/until; `presence` and `presence_observed_at` are null because raw device presence is person-only), and their current `DirectiveNote` or null, its text cut on a character boundary to fit `max_response_bytes` with `directive_note_truncated` saying so; no other person's availability or note |
 | `attention` | `read.assistant.attention` | ID, attention-kind enum, person fixed to the configured owner, agent/mission references, revision/episode, waiting-since; no title, body, options |
 | `missions` | `read.assistant.missions` | Mission/run/agent IDs, phase, step counts, blocked count, revision, updated-at; no authored goal or status prose |
 | `agents` | `read.assistant.agents` | Agent ID, lifecycle/runtime-state enums, current mission/run IDs, updated-at; no paths, environment, conversation previews |
@@ -357,6 +358,7 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | Route | Query | Response value |
 | --- | --- | --- |
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
+| `availability` | `max_response_bytes` | `kind: "person-availability"`, `availability` (`PersonAvailability` without raw presence; an assistant is not the person, never cut), `directive_note` (`DirectiveNote` or null, text cut to the budget) and `directive_note_truncated` |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
 | `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
@@ -369,12 +371,15 @@ Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgR
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
 
-The MCP adapter advertises exactly thirteen canonical tools:
+The MCP adapter advertises exactly fourteen canonical tools:
 `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
-`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_availability_get`, `fractal_conversations_list`,
 `fractal_conversation_detail`, `fractal_conversation_timeline`,
 `fractal_conversation_search`, `fractal_conversation_read`, `fractal_message_send`,
-`fractal_slo_list`, and `fractal_slo_history`. The two SLO tools read the `slo` and
+`fractal_slo_list`, and `fractal_slo_history`.
+`fractal_availability_get` reads the `availability` projection and needs the optional
+`read.assistant.availability` scope; assistants park blocking asks while the person is
+away or interruptions is `none`. The two SLO tools read the `slo` and
 `slo-history` projections and need the optional `read.assistant.slo` scope.
 The corresponding `st_*` names are deprecated, callable aliases for the adapter's
 0.1.0 release only and are removed in `fractal-chatgpt` 0.2.0. They are hidden from
