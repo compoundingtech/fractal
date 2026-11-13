@@ -2071,7 +2071,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 }
 
 /// Corpus v28 adds the person attention-control kinds on top of v27's trace kinds.
-/// PENDING: characterize the regenerated schedule after merging main's step-execution fields.
+/// Hosted burst 43519468054 observed all 32 fixed seeds trim (33 tests including real-disk seed 1).
 /// No prior corpus's schedule-specific exception carries forward.
 const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
