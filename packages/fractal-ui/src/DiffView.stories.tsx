@@ -51,6 +51,7 @@ export const scenarioExemptions: readonly string[] = [
   'NarrowLight:primitive',
   'RendererDrawsNothing:primitive',
   'RendererNeverPaints:primitive',
+  'RendererReportsError:primitive',
   'RendererThrows:primitive',
   'SchemeSwitch:primitive',
   'Split:primitive',
@@ -250,9 +251,21 @@ function SubstituteRenderer({ renderer, scheme, width }: { readonly renderer: Re
 }
 const NeverPaints = () => <div data-renderer-stub />
 const Throws = (): React.ReactNode => { throw new Error('Injected renderer failure') }
+/** Notifies after every commit with nothing drawn, like Pierre's hydrate before its highlighter is ready. */
 function DrawsNothing({ onRendered }: PierrePatchProps) {
   const node = React.useRef<HTMLDivElement>(null)
   React.useLayoutEffect(() => { onRendered(node.current!) }, [onRendered])
+  return <div ref={node} data-renderer-stub />
+}
+/** Paints an error panel the way Pierre's caught render errors do, then notifies. */
+function PaintsError({ onRendered }: PierrePatchProps) {
+  const node = React.useRef<HTMLDivElement>(null)
+  React.useLayoutEffect(() => {
+    const host = node.current!
+    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+    root.innerHTML = '<div data-error-wrapper><div data-error-message>Injected Pierre error</div></div>'
+    onRendered(host)
+  }, [onRendered])
   return <div ref={node} data-renderer-stub />
 }
 const showDiff = async (canvasElement: HTMLElement) => {
@@ -260,22 +273,30 @@ const showDiff = async (canvasElement: HTMLElement) => {
   return await waitFor(() => { const view = canvasElement.querySelector<HTMLElement>('[data-testid="diff-view"]'); expect(view).not.toBeNull(); return view! })
 }
 
+const staysOnPlainLines = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  const view = await showDiff(canvasElement)
+  // Longer than any frame-count deadline a fallback could hide behind.
+  for (let frame = 0; frame < 240; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
+  await expect(view.dataset.diffState).toBe('rendering')
+  await expect(view.getAttribute('aria-busy')).toBe('true')
+  const plain = view.querySelector<HTMLElement>('[data-diff-plain]')!
+  await expect(plain.textContent).toContain('retained row')
+  await expect(getComputedStyle(plain).visibility).toBe('visible')
+  await expect(plain.getBoundingClientRect().height).toBeGreaterThan(0)
+  await expect(getComputedStyle(view.querySelector<HTMLElement>('[data-renderer-stub]')!).visibility).toBe('hidden')
+  await expect(view.querySelector('[role="alert"]')).toBeNull()
+}
+
 /** A renderer that never reports a paint: the plain first paint stays the visible content and the host stays busy, however many frames pass. */
 export const RendererNeverPaints: Story = {
   render: ({ scheme, width }) => <SubstituteRenderer renderer={NeverPaints} scheme={scheme} width={width} />,
-  play: async ({ canvasElement }) => {
-    const view = await showDiff(canvasElement)
-    // Longer than any frame-count deadline a fallback could hide behind.
-    for (let frame = 0; frame < 240; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
-    await expect(view.dataset.diffState).toBe('rendering')
-    await expect(view.getAttribute('aria-busy')).toBe('true')
-    const plain = view.querySelector<HTMLElement>('[data-diff-plain]')!
-    await expect(plain.textContent).toContain('retained row')
-    await expect(getComputedStyle(plain).visibility).toBe('visible')
-    await expect(plain.getBoundingClientRect().height).toBeGreaterThan(0)
-    await expect(getComputedStyle(view.querySelector<HTMLElement>('[data-renderer-stub]')!).visibility).toBe('hidden')
-    await expect(view.querySelector('[role="alert"]')).toBeNull()
-  },
+  play: staysOnPlainLines,
+}
+
+/** A post-render notification with no diff lines drawn is not a paint: no swap, and no success. */
+export const RendererDrawsNothing: Story = {
+  render: ({ scheme, width }) => <SubstituteRenderer renderer={DrawsNothing} scheme={scheme} width={width} />,
+  play: staysOnPlainLines,
 }
 
 const failsVisibly = (message: string) => async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -300,10 +321,10 @@ export const RendererThrows: Story = {
   play: failsVisibly('Injected renderer failure'),
 }
 
-/** A post-render notification with no diff lines drawn is a failure, never a swap. */
-export const RendererDrawsNothing: Story = {
-  render: ({ scheme, width }) => <SubstituteRenderer renderer={DrawsNothing} scheme={scheme} width={width} />,
-  play: failsVisibly('The diff renderer finished without drawing any diff line'),
+/** A renderer that paints its own error panel: the notification is read as a failure, reported and shown. */
+export const RendererReportsError: Story = {
+  render: ({ scheme, width }) => <SubstituteRenderer renderer={PaintsError} scheme={scheme} width={width} />,
+  play: failsVisibly('The diff renderer failed: Injected Pierre error'),
 }
 
 const styles = stylex.create({

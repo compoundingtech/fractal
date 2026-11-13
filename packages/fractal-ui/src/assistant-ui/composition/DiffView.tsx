@@ -67,13 +67,17 @@ export const DiffRendererContext = React.createContext<React.ComponentType<Pierr
 type FileOutcome = 'rendering' | 'rendered' | 'failed'
 type ReportOutcome = (key: string, outcome: FileOutcome) => void
 
-/** Pierre catches its own render errors and paints them into the shadow root, then still notifies; read what it actually drew. */
-function paintOutcome(node: HTMLElement, collapsed: boolean): 'rendered' | Error {
+/**
+ * Read what a post-render notification actually drew. Pierre catches its own render errors and paints
+ * them into the shadow root before notifying; its hydrate also notifies before the highlighter is
+ * ready, with nothing drawn yet, and notifies again once it draws. So: an error panel is a failure,
+ * drawn diff lines are a paint, and anything else is not a paint yet.
+ */
+function paintOutcome(node: HTMLElement, collapsed: boolean): 'rendered' | Error | undefined {
   const root = node.shadowRoot
   const error = root?.querySelector('[data-error-message]')
   if (error) return new Error(`The diff renderer failed: ${error.textContent ?? ''}`)
-  if (!collapsed && !root?.querySelector('[data-line]')) return new Error('The diff renderer finished without drawing any diff line')
-  return 'rendered'
+  return collapsed || root?.querySelector('[data-line]') ? 'rendered' : undefined
 }
 
 /**
@@ -154,14 +158,17 @@ function PlainDiff({ file, wrap }: { readonly file: NormalizedDiffFile; readonly
 
 /**
  * Pierre paints asynchronously (an empty frame first). The plain lines hold the same grid cell, and
- * stay the visible content, until Pierre's post-render notification shows drawn diff lines; then
- * the cells swap, so the region never collapses. A notification without lines throws into the
- * boundary instead of swapping.
+ * stay the visible content, until a post-render notification shows drawn diff lines; then the cells
+ * swap, so the region never collapses. Until then the file stays `rendering`; a renderer error
+ * throws into the boundary.
  */
 function RenderedFile({ Renderer, fileKey, report, plain, props }: { readonly Renderer: React.ComponentType<PierrePatchProps>; readonly fileKey: string; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly props: Omit<PierrePatchProps, 'onRendered'> }) {
   const [outcome, setOutcome] = React.useState<'rendering' | 'rendered' | Error>('rendering')
   const collapsed = props.collapsed === true
-  const onRendered = React.useCallback((node: HTMLElement) => setOutcome(paintOutcome(node, collapsed)), [collapsed])
+  const onRendered = React.useCallback((node: HTMLElement) => {
+    const painted = paintOutcome(node, collapsed)
+    if (painted !== undefined) setOutcome(painted)
+  }, [collapsed])
   React.useLayoutEffect(() => { if (!(outcome instanceof Error)) report(fileKey, outcome) }, [fileKey, outcome, report])
   if (outcome instanceof Error) throw outcome
   const painted = outcome === 'rendered'
