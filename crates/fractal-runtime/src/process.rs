@@ -87,6 +87,24 @@ pub struct FiniteLane {
     pub require_enforced: bool,
 }
 
+/// The host authority binds a generation and commits its payload release together.
+pub type PayloadAuthorization<'a> =
+    dyn Fn(&ExecGeneration, &mut dyn FnMut() -> Result<u64>) -> Result<()> + 'a;
+
+/// Borrowed host admission policy and callbacks for one finite launch.
+pub struct FiniteExecutionAuthorization<'a> {
+    pub lane: &'a FiniteLane,
+    pub binding: &'a ResourceExecutionBinding,
+    pub guard: &'a dyn Fn() -> Result<()>,
+    pub authorize: &'a PayloadAuthorization<'a>,
+}
+
+#[derive(Default)]
+struct ExecutionGuards<'a> {
+    check: Option<&'a dyn Fn() -> Result<()>>,
+    release: Option<&'a PayloadAuthorization<'a>>,
+}
+
 #[derive(Debug)]
 pub struct UnsupportedCoverage;
 
@@ -231,7 +249,7 @@ impl ExecRuntime {
         cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<ExecGeneration> {
-        self.spawn_guarded(id, launch, cwd, env, None, None)
+        self.spawn_guarded(id, launch, cwd, env, ExecutionGuards::default())
     }
 
     pub fn spawn_checked(
@@ -242,7 +260,7 @@ impl ExecRuntime {
         env: &BTreeMap<String, String>,
         guard: &dyn Fn() -> Result<()>,
     ) -> Result<ExecGeneration> {
-        self.spawn_guarded(id, launch, cwd, env, Some(guard), None)
+        self.spawn_guarded(id, launch, cwd, env, ExecutionGuards { check: Some(guard), release: None })
     }
 
     /// Runtime-only checked launch. A guard check is not atomic with an external authority's
@@ -272,16 +290,15 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
-        lane: &FiniteLane,
-        binding: &ResourceExecutionBinding,
-        guard: &dyn Fn() -> Result<()>,
-        authorize: &dyn Fn(&ExecGeneration, &mut dyn FnMut() -> Result<u64>) -> Result<()>,
+        authorization: FiniteExecutionAuthorization<'_>,
     ) -> Result<ExecGeneration> {
-        lane.coverage()?;
+        authorization.lane.coverage()?;
         let mut runtime = self.clone();
-        runtime.finite_lane = Some(lane.clone());
-        runtime.resource_membership = Some(binding.clone());
-        runtime.spawn_guarded(id, launch, cwd, env, Some(guard), Some(authorize))
+        runtime.finite_lane = Some(authorization.lane.clone());
+        runtime.resource_membership = Some(authorization.binding.clone());
+        runtime.spawn_guarded(id, launch, cwd, env, ExecutionGuards {
+            check: Some(authorization.guard), release: Some(authorization.authorize),
+        })
     }
 
     fn spawn_guarded(
@@ -290,11 +307,10 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
-        guard: Option<&dyn Fn() -> Result<()>>,
-        authorize: Option<&dyn Fn(&ExecGeneration, &mut dyn FnMut() -> Result<u64>) -> Result<()>>,
+        guards: ExecutionGuards<'_>,
     ) -> Result<ExecGeneration> {
         let mut child_created = false;
-        self.spawn_inner(id, launch, cwd, env, guard, authorize, &mut child_created)
+        self.spawn_inner(id, launch, cwd, env, guards, &mut child_created)
             .map_err(|error| {
                 if child_created {
                     error
@@ -312,10 +328,10 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
-        guard: Option<&dyn Fn() -> Result<()>>,
-        authorize: Option<&dyn Fn(&ExecGeneration, &mut dyn FnMut() -> Result<u64>) -> Result<()>>,
+        guards: ExecutionGuards<'_>,
         child_created: &mut bool,
     ) -> Result<ExecGeneration> {
+        let ExecutionGuards { check: guard, release: authorize } = guards;
         crate::procfs::require_matching_procfs()?;
         fs::create_dir_all(&self.state_dir)?;
         fs::create_dir_all(&self.log_dir)?;
@@ -1398,8 +1414,9 @@ mod tests {
         let authorized = std::cell::Cell::new(false);
         let generation = runtime.spawn_in_lane_authorized(
             "authorized", &crate::Launch::Shell("touch payload-started; exit 9".into()),
-            root.path(), &std::env::vars().collect(), &policy, &fixture_resource_binding(), &|| Ok(()),
-            &|execution, release| {
+            root.path(), &std::env::vars().collect(), FiniteExecutionAuthorization {
+                lane: &policy, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|execution, release| {
                 let bound = runtime.read_generation_path(&runtime.record_path("authorized"))?.unwrap();
                 assert_eq!(bound.generation_id, execution.generation_id);
                 assert_eq!(bound.payload_released_at_unix_ms, None);
@@ -1411,6 +1428,7 @@ mod tests {
                 assert!(release().is_err(), "authorization cannot release a generation twice");
                 authorized.set(true);
                 Ok(())
+                },
             },
         ).unwrap();
         assert!(authorized.get());
@@ -1428,8 +1446,10 @@ mod tests {
         };
         let error = runtime.spawn_in_lane_authorized(
             "omitted", &crate::Launch::Shell("touch unauthorized-payload".into()),
-            root.path(), &std::env::vars().collect(), &policy, &fixture_resource_binding(), &|| Ok(()),
-            &|_, _| Ok(()),
+            root.path(), &std::env::vars().collect(), FiniteExecutionAuthorization {
+                lane: &policy, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|_, _| Ok(()),
+            },
         ).unwrap_err();
         assert!(format!("{error:#}").contains("omitted payload release receipt"));
         assert!(!root.path().join("unauthorized-payload").exists());

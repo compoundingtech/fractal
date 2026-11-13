@@ -914,8 +914,10 @@ mod tests {
             authority_epoch: current.authority_epoch.clone(),
         };
         let generation = runtime.spawn_in_lane_authorized("holder", &fractal_runtime::Launch::Argv(vec!["sleep".into(), "60".into()]),
-            root.path(), &std::env::vars().collect(), &policy, &binding, &|| Ok(()),
-            &|execution, release| store.release_resource_payload(&current, "holder", execution, release)).unwrap();
+            root.path(), &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                lane: &policy, binding: &binding, guard: &|| Ok(()),
+                authorize: &|execution, release| store.release_resource_payload(&current, "holder", execution, release),
+            }).unwrap();
         store.launch_resource_membership(&current, "holder", &generation, wall()).unwrap();
         let waiters = (0..8).map(|index| {
             let mut waiter = request(&format!("native-{index}"));
@@ -952,14 +954,16 @@ mod tests {
                 authority_epoch: next.authority_epoch.clone(),
             };
             let generation = runtime.spawn_in_lane_authorized(&id, &fractal_runtime::Launch::Argv(vec!["true".into()]),
-                root.path(), &std::env::vars().collect(), &policy, &binding, &|| Ok(()),
-                &|execution, release| store.release_resource_payload(&next, &id, execution, release)).unwrap();
+                root.path(), &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &policy, binding: &binding, guard: &|| Ok(()),
+                    authorize: &|execution, release| store.release_resource_payload(&next, &id, execution, release),
+                }).unwrap();
             store.launch_resource_membership(&next, &id, &generation, wall()).unwrap();
             handoffs.push(started.elapsed().as_secs_f64() * 1000.0);
             let ended = runtime.wait_for_exit(&id, &generation.generation_id).unwrap();
             assert_eq!(ended.exit_code, Some(0));
             execution_observed.push(std::time::Duration::from_millis(wall().saturating_sub(
-                u64::try_from(generation.payload_released_at_unix_ms.unwrap()).unwrap())).as_secs_f64() * 1000.0);
+                generation.payload_released_at_unix_ms.unwrap())).as_secs_f64() * 1000.0);
             store.end_resource_execution(&next, &id, wall()).unwrap();
             let retiring = std::time::Instant::now();
             assert!(store.retire_resource_membership(&next, &waiter.owner, &runtime, wall()).unwrap());

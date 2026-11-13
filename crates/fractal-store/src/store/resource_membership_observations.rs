@@ -48,27 +48,25 @@ impl Observations {
         if active.admission.is_none() && (member.state == "queued" || previous.is_none() || previous == Some("queued")) {
             active.admission = Some(make_phase(LanePhaseKind::Admission, member.queued_at));
         }
-        if member.state != "queued" {
-            if let Some(mut phase) = active.admission.take() {
-                if let Some(grant) = &member.grant { phase.set_generation(&grant.generation); }
-                let outcome = if member.state == "refused" {
-                    if member.refusal_code == Some(super::RefusalCode::AdmissionExpired) { LaneOutcome::Expired } else { LaneOutcome::Refused }
-                } else if member.grant.is_some() { LaneOutcome::Succeeded } else { LaneOutcome::Cancelled };
-                phase.finish(outcome);
-            }
+        if member.state != "queued" && let Some(mut phase) = active.admission.take() {
+            if let Some(grant) = &member.grant { phase.set_generation(&grant.generation); }
+            let outcome = if member.state == "refused" {
+                if member.refusal_code == Some(super::RefusalCode::AdmissionExpired) { LaneOutcome::Expired } else { LaneOutcome::Refused }
+            } else if member.grant.is_some() { LaneOutcome::Succeeded } else { LaneOutcome::Cancelled };
+            phase.finish(outcome);
         }
         for root in &member.roots {
-            if let Some(at) = root.payload_released_at {
-                if root.execution_ended_at.is_none() && !terminal && !active.executions.contains_key(&root.runtime_id) {
-                    let mut phase = make_phase(LanePhaseKind::Execution, at);
-                    if let Some(execution) = &root.execution { phase.set_generation(&execution.generation_id); }
-                    active.executions.insert(root.runtime_id.clone(), phase);
-                }
+            if let Some(at) = root.payload_released_at
+                && root.execution_ended_at.is_none() && !terminal && !active.executions.contains_key(&root.runtime_id)
+            {
+                let mut phase = make_phase(LanePhaseKind::Execution, at);
+                if let Some(execution) = &root.execution { phase.set_generation(&execution.generation_id); }
+                active.executions.insert(root.runtime_id.clone(), phase);
             }
-            if root.execution_ended_at.is_some() || terminal {
-                if let Some(phase) = active.executions.remove(&root.runtime_id) {
-                    phase.finish(if root.execution_ended_at.is_some() { LaneOutcome::Succeeded } else { LaneOutcome::Uncertain });
-                }
+            if (root.execution_ended_at.is_some() || terminal)
+                && let Some(phase) = active.executions.remove(&root.runtime_id)
+            {
+                phase.finish(if root.execution_ended_at.is_some() { LaneOutcome::Succeeded } else { LaneOutcome::Uncertain });
             }
         }
         if matches!(member.state.as_str(), "retiring" | "uncertain") && active.release.is_none() {

@@ -120,13 +120,13 @@ impl LaneTelemetry {
     /// Include zero counts and retain occupancy until the whole generation is retired.
     /// `lane` must be a configured policy name, never a membership/run/hold identifier.
     pub fn snapshot(&self, lane: &str, occupancy: u64, queued: u64, holds: u64) {
-        if let Some(metrics) = &self.instruments {
-            if let Ok(mut snapshots) = metrics.snapshots.write() {
-                if let Some(snapshot) = snapshots.get_mut(lane) {
-                    *snapshot = Snapshot { occupancy, queued, holds };
-                } else {
-                    snapshots.insert(lane.to_owned(), Snapshot { occupancy, queued, holds });
-                }
+        if let Some(metrics) = &self.instruments
+            && let Ok(mut snapshots) = metrics.snapshots.write()
+        {
+            if let Some(snapshot) = snapshots.get_mut(lane) {
+                *snapshot = Snapshot { occupancy, queued, holds };
+            } else {
+                snapshots.insert(lane.to_owned(), Snapshot { occupancy, queued, holds });
             }
         }
     }
