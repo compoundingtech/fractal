@@ -102,6 +102,7 @@ const Command = ({ children }: { readonly children: React.ReactNode }) => <code 
 const elsewhere = (alert: Native.Attention, step: string | undefined): React.ReactNode => {
   switch (alert.attention_kind) {
     case 'harness-login': return 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
+    case 'model-drift': return 'Nothing to answer: these agents keep working on another model. This clears by itself once each runs its declared model again.'
     case 'revision-approval': return <>A revision isn't approved from the web yet. Run <Command>fractal work revision approve</Command> or <Command>cancel</Command>, as in the terminal app.</>
     case 'fault': return step === undefined
       ? <>This is a fault to act on, not a question. Run <Command>fractal alerts</Command> to see what it offers.</>
