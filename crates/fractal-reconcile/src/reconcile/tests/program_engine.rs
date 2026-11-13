@@ -94,7 +94,13 @@ mission "program-test" state="ready" {{
         "program-test-definition",
     );
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
-    let engine = ProgramEngine::new(store.clone(), Arc::new(|_: &str| {}), dir.path().join("programs"), liveness);
+    let incremental = reconciler.incremental.clone();
+    let notify = reconciler.notify.clone();
+    let event_notify = reconciler.event_notify.clone();
+    let engine = ProgramEngine::new(store.clone(), Arc::new(move |subject: &str| {
+        incremental.touch(subject);
+        signal_changed(&notify, &event_notify);
+    }), dir.path().join("programs"), liveness);
     assert!(reconciler.program_engine.set(engine.clone()).is_ok());
     Fixture { store, reconciler, engine, dir }
 }
