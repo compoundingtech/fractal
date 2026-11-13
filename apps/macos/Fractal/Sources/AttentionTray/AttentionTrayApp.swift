@@ -13,8 +13,7 @@ struct AttentionTrayApp: App {
     // The window-style MenuBarExtra toggles: a second click on the icon closes the panel.
     MenuBarExtra(isInserted: $showInMenuBar) {
       // Only the live panel reports its window on screen, so only it marks cards seen.
-      TrayPanel(model: delegate.model, build: delegate.build)
-        .background(PanelVisibility(model: delegate.model))
+      LiveTrayPanel(model: delegate.model, build: delegate.build)
     } label: {
       TrayMenuBarLabel(model: delegate.model)
     }

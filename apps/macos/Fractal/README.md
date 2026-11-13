@@ -39,7 +39,8 @@ collection, but `FractalClient` has no typed attention or availability stream.
   screen, and when the panel comes back on screen; a closed panel polls no
   page. Each part keeps its last value when a read fails and says why; a
   member that does not grant a read, or predates its route (404), leaves only
-  that part unread. A page's images leave memory with its card.
+  that part unread. Raw image data leaves the model with its card; decoded images
+  use a shared, evictable 32 MiB cache (charged by decoded pixels).
 - **Snooze and Dismiss** are the person's own attention controls
   (`attention.snooze`, `attention.dismiss`), offered when the session is
   granted them, on every ask's page (and Snooze on an update's), never as an
@@ -78,6 +79,7 @@ collection, but `FractalClient` has no typed attention or availability stream.
   history is read after its rows, again only when the row changes or an hour has
   passed, and is its own section: a failed history read keeps the last one and
   marks only that section stale.
+  Due history requests run serially, avoiding a per-refresh burst of transport workers.
 - **Availability** (`GET v1/client/availability`, `GET v1/client/notes`): status
   (available or away, by hand or from device presence; "no device reporting"
   when Fractal reads it as `unreported`), interruptions (all, urgent only, none)
@@ -415,3 +417,44 @@ rmdir "$HOME/.config/attention-tray" 2>/dev/null || true
 
 Never print the profile. Report only the revoke result and that the directory
 is gone.
+
+## Scroll and refresh performance Mac gate
+
+`PanelScroll` and `PanelForm` preserve their compact ideal height but accept a shorter
+window proposal (bounded by the scroll cap). Markdown blocks/inline attributed strings
+and attachment images use bounded content-keyed caches. Ages share one minute-aligned
+clock. Identical page polls and pruning do not rewrite observable sections; separately
+kept successful-read timestamps preserve accurate subsequent stale errors. Closing the
+panel removes its page observation subscriptions, preserving only a lightweight sized
+placeholder and visibility reporter.
+
+Run from the repository root on an authorized Mac, with the compatible FractalClient
+package supplied by the development shell (record its exact SHA):
+
+```sh
+nix develop ./flakes/attention-tray -c bash flakes/attention-tray/scripts/validate-scroll-mac.sh check
+# Attach to an already-running, muted tray; do not launch another copy:
+bash flakes/attention-tray/scripts/validate-scroll-mac.sh trace "$TRAY_PID"
+bash flakes/attention-tray/scripts/validate-scroll-mac.sh memory "$TRAY_PID"
+```
+
+The `check` mode builds both products, runs Swift tests and invokes the offscreen
+`TrayGallery <out-dir> --scroll-probe`. The probe fails unless the bottom is reachable
+at 300/400 pt with inline/pinned answers, and 20 identical full refreshes preserve the
+scroll view/offset without any context, excerpt or attachment writes. It never orders
+a window front and does **not** measure actual screen presentation or 120 Hz behavior.
+
+`trace` records Animation Hitches and Time Profiler and exports their data tables.
+The script lists the interaction procedure and strict pass thresholds: every drill-in
+and back first frame <100 ms; at 120 Hz, 8.333 ms/frame with zero drops/hitches.
+`NavigationFirstFrame` signposts measure first AppKit draw submission; the reviewer must
+also correlate actual presentation in Instruments. Missing data is not a passing result.
+`memory` captures `footprint -p "$TRAY_PID"` and `vmmap -summary "$TRAY_PID"` at roughly
+one-second cadence for three minutes to investigate the previously observed transient
+~289 MB spikes every 30–60 seconds. This remains an unproven perf suspect, not a claimed
+memory fix.
+
+Build, tests, probe, UI/TCC, frame-time and memory validation for this change:
+**NOT RUN (needs Mac)**. Linux cannot compile or exercise AppKit/SwiftUI. The V4 base's
+flake client may also fail on `AvailabilityRule.word`; use and record the compatible
+client revision rather than treating a mismatched dependency build as a tray result.
