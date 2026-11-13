@@ -137,7 +137,8 @@ wrong until the host is repaired; exchanges cannot fix it.
 
 ## Navigation
 
-The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
+The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage; its
+palette also opens Availability, the person's own availability and directive note.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
