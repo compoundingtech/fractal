@@ -55,7 +55,9 @@ const main = () => {
   const killGroup = (pid) => {
     try {
       process.kill(-pid, 'SIGKILL')
-    } catch {}
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+    }
     rmSync(join(groupsDir, `${pid}.json`), { force: true })
   }
   /** End an attempt: its worker and every effect group it started. */
@@ -168,8 +170,11 @@ const main = () => {
     if (message.t === 'ping') return send({ t: 'pong', seq: message.seq })
     if (message.t === 'start') return start(message)
     const run = runs.get(message.step)
+    if (message.t === 'cancel') {
+      if (run !== undefined && run.attempt === message.attempt) end(run)
+      return send({ t: 'cancelled', step: message.step, attempt: message.attempt })
+    }
     if (run === undefined || run.attempt !== message.attempt) return // another attempt's message
-    if (message.t === 'cancel') return end(run)
     run.worker.postMessage(message) // ack, nack, resolved
   })
   // The daemon is gone: its replacement resumes every program from the journal. End all effects now.

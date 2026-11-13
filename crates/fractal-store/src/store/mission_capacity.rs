@@ -6,6 +6,157 @@
 //! `daemon.started`, as the standby barrier reads `schedule_standby`.
 use super::*;
 
+/// Transactionally maintained admission membership: population and the strictest
+/// pinned limit are indexed, rather than re-decoding every active definition.
+pub(super) fn install_run_capacity_schema(connection: &Connection) -> Result<(), FractalError> {
+    let installed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='mission_run_capacity_v1_bootstrapped' AND value='1')
+           AND (SELECT COUNT(*) FROM sqlite_schema WHERE type='table'
+                AND name IN ('mission_run_capacity_v1','mission_run_capacity_totals_v1'))=2",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h5fd8e9f2861f owner=fractal_store::store::mission_capacity TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS mission_run_capacity_v1 (
+             run_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, revision TEXT NOT NULL, run_limit INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS mission_run_capacity_limit_v1
+         ON mission_run_capacity_v1(mission_id,run_limit,run_id);
+         CREATE INDEX IF NOT EXISTS mission_run_capacity_revision_v1
+         ON mission_run_capacity_v1(mission_id,revision);
+         CREATE TABLE IF NOT EXISTS mission_run_capacity_totals_v1 (
+             mission_id TEXT PRIMARY KEY, active_count INTEGER NOT NULL
+         );
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_add_v1
+         AFTER INSERT ON mission_run_capacity_v1 BEGIN
+             INSERT INTO mission_run_capacity_totals_v1 VALUES(NEW.mission_id,1)
+             ON CONFLICT(mission_id) DO UPDATE SET active_count=active_count+1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_remove_v1
+         AFTER DELETE ON mission_run_capacity_v1 BEGIN
+             UPDATE mission_run_capacity_totals_v1 SET active_count=active_count-1
+             WHERE mission_id=OLD.mission_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_insert_v1
+         AFTER INSERT ON mission_runs BEGIN
+             INSERT INTO mission_run_capacity_v1
+             SELECT NEW.id,NEW.mission_id,g.revision,
+                    CASE WHEN d.body IS NULL THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM run_generations g LEFT JOIN mission_revisions d
+               ON d.mission_id=NEW.mission_id AND d.revision=g.revision
+             WHERE g.id=NEW.current_generation_id
+               AND NEW.status IN ('running','standing','blocked')
+               AND NEW.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_update_v1
+         AFTER UPDATE OF status,phase,current_generation_id,mission_id ON mission_runs BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.id;
+             INSERT INTO mission_run_capacity_v1
+             SELECT NEW.id,NEW.mission_id,g.revision,
+                    CASE WHEN d.body IS NULL THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM run_generations g LEFT JOIN mission_revisions d
+               ON d.mission_id=NEW.mission_id AND d.revision=g.revision
+             WHERE g.id=NEW.current_generation_id
+               AND NEW.status IN ('running','standing','blocked')
+               AND NEW.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_delete_v1
+         AFTER DELETE ON mission_runs BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_v1
+         AFTER INSERT ON run_generations BEGIN
+             INSERT OR IGNORE INTO mission_run_capacity_v1
+             SELECT r.id,r.mission_id,NEW.revision,
+                    CASE WHEN d.body IS NULL THEN -1
+                         WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                         WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                         WHEN json_type(d.body,'$.max_active_runs')='integer'
+                           AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                           THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+             FROM mission_runs r LEFT JOIN mission_revisions d
+               ON d.mission_id=r.mission_id AND d.revision=NEW.revision
+             WHERE r.id=NEW.run_id AND r.current_generation_id=NEW.id
+               AND r.status IN ('running','standing','blocked')
+               AND r.phase NOT IN ('final-cancelled','cleanup-cancelled');
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_delete_v1
+         AFTER DELETE ON run_generations BEGIN
+             DELETE FROM mission_run_capacity_v1 WHERE run_id=OLD.run_id
+               AND EXISTS(SELECT 1 FROM mission_runs r WHERE r.id=OLD.run_id AND r.current_generation_id=OLD.id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_generation_update_v1
+         AFTER UPDATE OF revision ON run_generations BEGIN
+             UPDATE mission_runs SET current_generation_id=current_generation_id
+             WHERE id=NEW.run_id AND current_generation_id=NEW.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_insert_v1
+         AFTER INSERT ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=
+                 CASE WHEN json_type(NEW.body,'$.max_active_runs') IS NULL THEN 1
+                      WHEN json_type(NEW.body,'$.max_active_runs')='null' THEN NULL
+                      WHEN json_type(NEW.body,'$.max_active_runs')='integer'
+                        AND json_extract(NEW.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                        THEN json_extract(NEW.body,'$.max_active_runs') ELSE -1 END
+             WHERE mission_id=NEW.mission_id AND revision=NEW.revision;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_update_v1
+         AFTER UPDATE OF body ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=
+                 CASE WHEN json_type(NEW.body,'$.max_active_runs') IS NULL THEN 1
+                      WHEN json_type(NEW.body,'$.max_active_runs')='null' THEN NULL
+                      WHEN json_type(NEW.body,'$.max_active_runs')='integer'
+                        AND json_extract(NEW.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                        THEN json_extract(NEW.body,'$.max_active_runs') ELSE -1 END
+             WHERE mission_id=NEW.mission_id AND revision=NEW.revision;
+         END;
+         CREATE TRIGGER IF NOT EXISTS mission_run_capacity_revision_delete_v1
+         AFTER DELETE ON mission_revisions BEGIN
+             UPDATE mission_run_capacity_v1 SET run_limit=-1
+             WHERE mission_id=OLD.mission_id AND revision=OLD.revision;
+         END;"
+    ).map_err(internal)?;
+    if !installed {
+        let bootstrap = |connection: &Connection| -> Result<(), FractalError> {
+            connection.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h01f974b1dbac owner=fractal_store::store::mission_capacity TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_capacity_v1;
+                 DELETE FROM mission_run_capacity_totals_v1;
+                 INSERT INTO mission_run_capacity_v1
+                 SELECT r.id,r.mission_id,g.revision,
+                        CASE WHEN d.body IS NULL THEN -1
+                             WHEN json_type(d.body,'$.max_active_runs') IS NULL THEN 1
+                             WHEN json_type(d.body,'$.max_active_runs')='null' THEN NULL
+                             WHEN json_type(d.body,'$.max_active_runs')='integer'
+                               AND json_extract(d.body,'$.max_active_runs') BETWEEN 0 AND 4294967295
+                               THEN json_extract(d.body,'$.max_active_runs') ELSE -1 END
+                 FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id
+                 LEFT JOIN mission_revisions d ON d.mission_id=r.mission_id AND d.revision=g.revision
+                 WHERE r.status IN ('running','standing','blocked')
+                   AND r.phase NOT IN ('final-cancelled','cleanup-cancelled');
+                 INSERT INTO meta(key,value) VALUES('mission_run_capacity_v1_bootstrapped','1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+            ).map_err(internal)
+        };
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction().map_err(internal)?;
+            bootstrap(&transaction)?;
+            transaction.commit().map_err(internal)?;
+        } else {
+            bootstrap(connection)?;
+        }
+    }
+    Ok(())
+}
+
 /// The `daemon.started` feature of a build that reads mission and step capacity.
 pub const FEATURE: &str = "mission_capacity";
 /// The `daemon.started` feature of a build that reads a mission's run `authority`.

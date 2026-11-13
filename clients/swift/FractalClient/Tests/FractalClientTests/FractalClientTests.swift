@@ -6,6 +6,31 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testMissionRunSupersessionLineageAndLegacyOmission() throws {
+        let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)
+        XCTAssertNil(decoded.supersedes)
+        XCTAssertNil(decoded.supersededBy)
+        XCTAssertNil(decoded.supersessionFault)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        for field in ["supersedes", "superseded_by", "supersession_fault"] {
+            XCTAssertNil(encoded[field])
+        }
+        var linked = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        linked["retry_of"] = "mission-run/example/failed"
+        linked["retried_by"] = ["mission-run/example/retry"]
+        linked["supersedes"] = "mission-run/example/previous"
+        linked["superseded_by"] = "mission-run/example/replacement"
+        linked["supersession_fault"] = "revision old -> new: missing [replacement]; extra [value]"
+        let run = try JSONDecoder().decode(MissionRunSummary.self, from: JSONSerialization.data(withJSONObject: linked))
+        XCTAssertEqual(run.retryOf, "mission-run/example/failed")
+        XCTAssertEqual(run.retriedBy, ["mission-run/example/retry"])
+        XCTAssertEqual(run.supersedes, "mission-run/example/previous")
+        XCTAssertEqual(run.supersededBy, "mission-run/example/replacement")
+        XCTAssertEqual(run.supersessionFault, "revision old -> new: missing [replacement]; extra [value]")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(run)) as? NSDictionary, linked as NSDictionary)
+    }
+
     func testPersonOptionNotesRoundTripAndEmptyOmission() throws {
         let legacy = Data(#"{"id":"land","text":"Ship it."}"#.utf8)
         let decoded = try JSONDecoder().decode(PersonAnswerInput.self, from: legacy)
