@@ -72,12 +72,13 @@ it('contains a rejected highlighter import to sticky plain code across transcrip
     const composer = container.querySelector<HTMLTextAreaElement>('textarea')!
     const code = transcript.querySelector('code')!
     const pre = code.closest('pre')!
-    const wrap = transcript.querySelector<HTMLButtonElement>('[aria-label="Wrap code"]')!
+    const wrap = transcript.querySelector<HTMLButtonElement>('[aria-label="Code actions"]')!
     const copy = transcript.querySelector<HTMLButtonElement>('[aria-label="Copy code"]')!
     expect(pre.getAttribute('role')).toBe('group')
     expect(pre.tabIndex).toBe(0)
     expect(copy).not.toBeNull()
-    await act(async () => wrap.click())
+    // The block's controls (now the ⋯ menu trigger) must survive the failed import unremounted.
+    await act(async () => wrap.focus())
     expect(composer).not.toBeNull()
     expect(code.textContent).toBe('const answer = 42\n')
     await act(async () => composer.focus())
@@ -92,7 +93,7 @@ it('contains a rejected highlighter import to sticky plain code across transcrip
     expect(transcript.querySelector('code')).toBe(code)
     expect(code.closest('pre')).toBe(pre)
     expect(transcript.querySelector('[aria-label="Copy code"]')).toBe(copy)
-    expect(wrap.getAttribute('aria-pressed')).toBe('true')
+    expect(transcript.querySelector('[aria-label="Code actions"]')).toBe(wrap)
     vi.doMock('@pierre/highlights', async importOriginal => {
       failedImport.attempts++
       return importOriginal()

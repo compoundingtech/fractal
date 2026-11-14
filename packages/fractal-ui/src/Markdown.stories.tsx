@@ -24,6 +24,8 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'CodeHeaders:contract-fixture',
+  'CodeHeadersLight:contract-fixture',
   'CopyFailure:contract-fixture',
   'InputForegroundDark1440:contract-fixture',
   'Languages:contract-fixture',
@@ -122,7 +124,7 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
     await document.fonts.ready
     await settle()
     const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
-    const wrap = requireElement<HTMLButtonElement>(fence, '[aria-label="Wrap code"]')
+    const actions = requireElement<HTMLButtonElement>(fence, '[aria-label="Code actions"]')
     const copy = requireElement<HTMLButtonElement>(fence, '[aria-label="Copy code"]')
     const append = requireElement<HTMLButtonElement>(canvasElement, '[data-testid="append-stream"]')
     for (let frame = 0; fence.querySelector('[data-syntax-token]') === null && frame < 600; frame++) await settle()
@@ -132,9 +134,14 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
     // Deterministic clipboard transport for the story only; production uses the real Clipboard API.
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { copied.push(value) } } })
     try {
-      flushSync(() => wrap.click())
+      // Wrap lives in the block's ⋯ menu (R8); the menu renders in a portal.
+      await userEvent.click(actions)
       await settle()
-      if (wrap.getAttribute('aria-pressed') !== 'true') throw new Error('Wrap toggle did not enable wrapping')
+      const wrapItem = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Wrap lines')
+      if (wrapItem === undefined) throw new Error('The code menu did not offer Wrap lines')
+      await userEvent.click(wrapItem)
+      await settle()
+      if (fence.dataset.wrap !== 'true') throw new Error('Wrap lines did not enable wrapping')
       flushSync(() => copy.click())
       await settle()
       if (fence.dataset.copyState !== 'copied' || copied[0] !== fence.querySelector('code')?.textContent) throw new Error('Copy did not write the raw rendered code')
@@ -143,7 +150,7 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
         flushSync(() => append.click())
         await settle()
         const current = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
-        if (current !== fence || current.dataset.wrap !== 'true' || current.dataset.copyState !== 'copied' || current.querySelector('[aria-label="Wrap code"]') !== wrap || current.querySelector('[aria-label="Copy code"]') !== copy) throw new Error(`Streaming chunk ${stage} remounted the fence or reset local controls`)
+        if (current !== fence || current.dataset.wrap !== 'true' || current.dataset.copyState !== 'copied' || current.querySelector('[aria-label="Code actions"]') !== actions || current.querySelector('[aria-label="Copy code"]') !== copy) throw new Error(`Streaming chunk ${stage} remounted the fence or reset local controls`)
         if (copy.textContent !== 'Copy') throw new Error('Streaming code change falsely retained a current-version Copied label')
       }
       flushSync(() => copy.click())
@@ -243,3 +250,34 @@ export const InputForegroundDark1440: Story = { name: 'Input foreground', ...con
   await expect(paints()).toEqual([expected, expected, expected])
 } }
 
+
+const codeHeaderText = [
+  'A titled fence names its file:', '', '```ts title=src/selection.ts', 'export const selected = "row-3"', '```', '',
+  'A path as the info names it too:', '', '```src/model.rs', 'fn main() {}', '```', '',
+  'A diff counts what it adds and removes:', '', '```diff', '--- a/src/model.ts', '+++ b/src/model.ts', '@@ -1,2 +1,3 @@', '-const old = 1', '+const next = 2', '+const more = 3', ' const kept = 4', '```', '',
+  '- Nested lists indent', '  - without a guide line', '    - at any depth',
+].join('\n')
+const codeHeaders = (scheme: 'dark' | 'light'): Story => ({ ...contractFixture,
+  args: { scheme },
+  render: ({ scheme: shown }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, shown === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={markdownBlock(codeHeaderText)} /></div></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    await document.fonts.ready
+    const blocks = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
+    await expect(blocks.map(block => block.querySelector('[data-testid="markdown-code-path"]')?.textContent ?? null)).toEqual(['src/selection.ts', 'src/model.rs', null])
+    await expect(blocks.map(block => block.querySelector('[data-testid="markdown-code-language"]')?.textContent)).toEqual(['ts', 'rs', 'diff'])
+    await expect(blocks[2]!.querySelector('[data-testid="markdown-code-diffstat"]')?.textContent).toBe('+2 −1')
+    // Only Copy shows on hover; Wrap and Open live in the ⋯ menu.
+    await expect(blocks[0]!.querySelector('[aria-label="Wrap code"]')).toBeNull()
+    const copy = blocks[0]!.querySelector<HTMLElement>('[aria-label="Copy code"]')!
+    await expect(getComputedStyle(copy).opacity).toBe('0')
+    await userEvent.hover(blocks[0]!)
+    await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
+    await userEvent.click(within(blocks[0]!).getByRole('button', { name: 'Code actions' }))
+    const items = await within(document.body).findAllByRole('menuitem')
+    await expect(items.map(item => item.textContent)).toEqual(['Wrap lines', 'Copy code'])
+    await userEvent.keyboard('{Escape}')
+    for (const list of canvasElement.querySelectorAll<HTMLElement>('[data-list-depth]')) await expect(getComputedStyle(list).borderInlineStartWidth).toBe('0px')
+  },
+})
+export const CodeHeaders: Story = codeHeaders('dark')
+export const CodeHeadersLight: Story = codeHeaders('light')
