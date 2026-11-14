@@ -53,6 +53,13 @@ normal demo mode rebases to the current clock. Without the update flag, contract
 and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
 remain test-only fixtures, never a second runtime demo world.
 
+For a color reference capture, launch the paired client with
+`env -u NO_COLOR TERM=xterm-256color fractal tui --client`, using the intended
+private profile. Agent shells may export `NO_COLOR`; inheriting it makes
+selection/background captures monochrome even inside a color-capable tmux pane.
+Capture with `tmux capture-pane -p -e` to preserve SGR styling. Also inspect a
+separate `NO_COLOR=1` run: selection must remain identifiable without color.
+
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
 [`fractal-feed`](../fractal-feed/README.md). It paints immediately, hydrates attention/agents/sessions first, then fills in

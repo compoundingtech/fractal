@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document explicit color and monochrome launch modes for terminal preview evidence",
+  "replay": { "status": "none", "detail": "No daemon data changes." },
+  "schema": { "status": "none", "detail": "No wire or storage changes." },
+  "rules": { "status": "none", "detail": "No authority changes; capture launchers keep their existing pairing scopes." },
+  "compatibility": { "status": "none", "detail": "NO_COLOR remains supported. Reference evidence must explicitly opt into color rather than accidentally inheriting an agent shell's monochrome setting." },
+  "downtime": { "status": "none", "detail": "Relaunch only the preview client, not the live daemon." },
+  "manual": { "status": "changed", "detail": "Use env -u NO_COLOR TERM=xterm-256color fractal tui --client for color captures and tmux capture-pane -p -e to preserve styling. Keep a separate monochrome selection check." },
+  "recovery": { "status": "none", "detail": "Existing profiles, drafts and history are unchanged." }
+}
