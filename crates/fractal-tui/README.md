@@ -87,10 +87,12 @@ its value (`0` returns it to the default: status from presence, all asks, a runn
 how long it holds: `1` 30 minutes, `2` an hour, `3` two hours, `4` until tomorrow 09:00 local
 time, `5` a typed end (`45m`, `1h30m`, `17:30`, `tomorrow 09:00`, `2026-11-14 09:00`), or Enter
 until it is changed again. `n` edits the directive note, then asks for its end the same way; an
-empty note clears it. `Esc` puts the choice away. Each change goes through `availability.set`
-or `notes.set` one at a time, and the tab shows what Fractal answered. Only a person's own
-session may change them: a pairing without the scope, an agent's session, or a daemon without
-the routes is told so in the tab, and nothing changes.
+empty note clears it. `Esc` puts the choice away. Edits require a live connection. Losing it
+or replacing the connection closes the editor and discards unsent changes, including notes;
+already-sent writes are not retried or presumed canceled. Each change goes through
+`availability.set` or `notes.set` one at a time, and the tab shows what Fractal answered.
+Only a person's own session may change them: a pairing without the scope, an agent's session,
+or a daemon without the routes is told so in the tab, and nothing changes.
 
 Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
 or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
