@@ -4155,6 +4155,7 @@ export type StepExecution = {
   fallback: boolean | null;
   id: string;
   incarnation_id: string | null;
+  invocation_id?: string | null;
   observed_models: Array<string>;
   started_at_unix_ms: number;
   status: string | null;
@@ -4599,7 +4600,10 @@ export type TimelineUsageBody = {
   api?: string;
   attribution: {
   agent_id: Id;
+  attempt?: number | null;
+  execution_id?: string | null;
   generation_id?: string | null;
+  invocation_id?: string | null;
   mission_run_id?: string | null;
   step_id?: string | null;
 };
@@ -5009,12 +5013,15 @@ export type UsageRow = {
   account?: string;
   account_ref?: string;
   agent: Id;
+  attempt?: number;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
   cached_tokens: number;
   cost_microusd: number;
+  execution_id?: string;
   host?: string;
   input_tokens: number;
+  invocation_id?: string;
   mission_run?: Id;
   model?: string;
   native_session_id?: string;
