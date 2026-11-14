@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "5beadbe1e513e4c7bc383b4393664ad3afd36fc93242519c624e7df1c1b90e31",
+  "lockfileSha256": "3d0ebcb9bdb343b069ae25e9ac3d3ac756b26ad7bcf14791a7c8c509b3296634",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -1075,8 +1075,23 @@
       "license": "MIT"
     },
     {
+      "name": "@pierre/diffs",
+      "version": "1.6.1",
+      "license": "apache-2.0"
+    },
+    {
       "name": "@pierre/highlights",
       "version": "0.3.0",
+      "license": "apache-2.0"
+    },
+    {
+      "name": "@pierre/theme",
+      "version": "2.0.0",
+      "license": "apache-2.0"
+    },
+    {
+      "name": "@pierre/theming",
+      "version": "1.0.2",
       "license": "apache-2.0"
     },
     {
@@ -1682,6 +1697,46 @@
     {
       "name": "@rollup/pluginutils",
       "version": "5.4.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/core",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/engine-javascript",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/engine-oniguruma",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/langs",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/primitive",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/themes",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/types",
+      "version": "4.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@shikijs/vscode-textmate",
+      "version": "10.1.0",
       "license": "MIT"
     },
     {
@@ -2640,6 +2695,11 @@
       "license": "MIT"
     },
     {
+      "name": "diff",
+      "version": "9.0.0",
+      "license": "BSD-3-Clause"
+    },
+    {
       "name": "dnssd-advertise",
       "version": "1.1.6",
       "license": "MIT"
@@ -3010,6 +3070,16 @@
       "license": "MIT"
     },
     {
+      "name": "hast-util-to-html",
+      "version": "9.0.5",
+      "license": "MIT"
+    },
+    {
+      "name": "hast-util-to-html",
+      "version": "9.0.6",
+      "license": "MIT"
+    },
+    {
       "name": "hast-util-to-jsx-runtime",
       "version": "2.3.6",
       "license": "MIT"
@@ -3067,6 +3137,11 @@
     {
       "name": "html-url-attributes",
       "version": "3.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "html-void-elements",
+      "version": "3.0.0",
       "license": "MIT"
     },
     {
@@ -3448,6 +3523,11 @@
       "name": "lru-cache",
       "version": "5.1.1",
       "license": "ISC"
+    },
+    {
+      "name": "lru_map",
+      "version": "0.4.1",
+      "license": "MIT"
     },
     {
       "name": "lz-string",
@@ -4020,6 +4100,16 @@
       "license": "MIT"
     },
     {
+      "name": "oniguruma-parser",
+      "version": "0.12.2",
+      "license": "MIT"
+    },
+    {
+      "name": "oniguruma-to-es",
+      "version": "4.3.6",
+      "license": "MIT"
+    },
+    {
       "name": "open",
       "version": "10.2.0",
       "license": "MIT"
@@ -4330,6 +4420,21 @@
       "license": "MIT"
     },
     {
+      "name": "regex",
+      "version": "6.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "regex-recursion",
+      "version": "6.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "regex-utilities",
+      "version": "2.3.0",
+      "license": "MIT"
+    },
+    {
       "name": "regexpu-core",
       "version": "6.5.3",
       "license": "MIT"
@@ -4497,6 +4602,11 @@
     {
       "name": "shell-quote",
       "version": "1.12.0",
+      "license": "MIT"
+    },
+    {
+      "name": "shiki",
+      "version": "4.6.0",
       "license": "MIT"
     },
     {
