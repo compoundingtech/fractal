@@ -615,7 +615,9 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
 value. The success value is encoded with `intent.output` and journaled under the reserved key
-`$result`; a typed failure is encoded with its `_tag` and fields and fails the step with it.
+`$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
+a failed result, and fails the step with it. Retry classification reads this attempt's durable
+failure rather than an inner effect's possibly caught error.
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.
