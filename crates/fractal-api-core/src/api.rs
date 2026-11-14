@@ -11826,7 +11826,7 @@ pub fn accept_message_receipt_with_upload_owner(
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
     accept_message_receipt_authorized(state, request, session_id, device_signature,
-        upload_owner, assistant_authorization, false)
+        upload_owner, assistant_authorization, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11837,10 +11837,10 @@ fn accept_message_receipt_authorized(
     device_signature: Option<smallclaims::principal::ClaimSignature>,
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
-    effect_caller_verified: bool,
+    effect_caller: Option<&str>,
 ) -> Result<MessageSendReceipt, ApiError> {
     let effect_digest = if let Some(owner) = request.owner.as_ref() {
-        if !effect_caller_verified || device_signature.is_some() || assistant_authorization.is_some() {
+        if effect_caller.is_none() || device_signature.is_some() || assistant_authorization.is_some() {
             return Err(ApiError::bad(FractalError::new("effect-caller-refused",
                 "effect-bound sends require an attested worker at the native message endpoint")));
         }
@@ -11943,10 +11943,12 @@ fn accept_message_receipt_authorized(
     let effect = match (request.owner.as_ref(), effect_digest.as_deref()) {
         (Some(owner), Some(digest)) => {
             use crate::store::effects::EffectAdmission;
-            match state.store.admit_message_effect(owner, &from, digest, &to)
+            let caller = effect_caller.expect("effect callers were attested before admission");
+            let (_, caller) = receipt_recipient(&state.store, caller)?;
+            match state.store.admit_message_effect(owner, &caller, &from, digest, &to)
                 .map_err(ApiError::bad)? {
-                EffectAdmission::Originate(record) => Some((record, true)),
-                EffectAdmission::Recover(record) => Some((record, false)),
+                EffectAdmission::Originate(record) => Some((record, true, caller)),
+                EffectAdmission::Recover(record) => Some((record, false, caller)),
                 EffectAdmission::Blocked(error) => return Err(ApiError::bad(error)),
             }
         }
@@ -11958,12 +11960,12 @@ fn accept_message_receipt_authorized(
         .store
         .operation_claim(&request.idempotency_key)
         .map_err(ApiError::internal)?;
-    let recovered = if let Some((effect, false)) = effect.as_ref() {
+    let recovered = if let Some((effect, false, caller)) = effect.as_ref() {
         match previous.as_ref().filter(|claim| claim.kind == "message.sent" && claim.subject == subject) {
             Some(record) => Some(record.clone()),
             None => {
                 state.store.unresolved_message_effect(effect,
-                    "the originating store's committed message is unavailable; absence here is not proof of non-delivery")
+                    "the originating store's committed message is unavailable; absence here is not proof of non-delivery", caller)
                     .map_err(ApiError::bad)?;
                 return Err(ApiError::bad(FractalError::new("effect-unresolved",
                     "the effect cannot be recovered by key; nothing was sent")));
@@ -12145,10 +12147,13 @@ fn accept_message_receipt_authorized(
             Ok((record, false))
         }
     } else {
-        if let Some((effect, true)) = effect.as_ref() {
+        if let Some((effect, true, caller)) = effect.as_ref() {
             state.store.effect_in_flight(effect).map_err(|error| {
                 if let Some(staged) = staged.as_ref() {
                     staged.discard();
+                }
+                if let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller) {
+                    return ApiError::bad(parking);
                 }
                 ApiError::bad(error)
             })?;
@@ -12168,8 +12173,8 @@ fn accept_message_receipt_authorized(
         if let Some(staged) = staged.as_ref() {
             staged.discard();
         }
-        if let Some((effect, _)) = effect.as_ref()
-            && let Err(parking) = state.store.unresolved_message_effect(effect, &error.message)
+        if let Some((effect, _, caller)) = effect.as_ref()
+            && let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller)
         {
             return ApiError::bad(parking);
         }
@@ -12184,8 +12189,8 @@ fn accept_message_receipt_authorized(
             ))
         })?;
     }
-    if let Some((effect, _)) = effect.as_ref() {
-        state.store.confirm_message_effect(effect, &record).map_err(ApiError::bad)?;
+    if let Some((effect, _, caller)) = effect.as_ref() {
+        state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
     }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.

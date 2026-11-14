@@ -34,6 +34,8 @@ pub struct EffectRecord {
     pub lease_owner: String,
     pub lease_incarnation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovering_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
@@ -72,6 +74,12 @@ pub fn validate(
         return Err(error(
             "invalid-effect",
             "an effect must bind its dedicated operation subject and nonempty admission bindings",
+        ));
+    }
+    if record.recovering_actor.as_ref().is_some_and(|actor| actor.trim().is_empty()) {
+        return Err(error(
+            "invalid-effect",
+            "a recovering actor must be nonempty when present",
         ));
     }
     if kind == KIND_CONFIRMED
@@ -171,13 +179,55 @@ mod tests {
     }
 
     #[test]
+    fn recovering_actor_is_optional_nonempty_provenance_for_every_phase() {
+        let registry = crate::registry();
+        for kind in [KIND_INTENDED, KIND_IN_FLIGHT, KIND_CONFIRMED, KIND_UNRESOLVED] {
+            let mut input = fields();
+            input.insert("provider_ref".into(), json!("message/example"));
+            input.insert("evidence".into(), json!(["message/example"]));
+            assert!(registry.validate_claim("effect/op", kind, &input).is_ok());
+            input.insert("recovering_actor".into(), json!("agent/example/recoverer"));
+            assert!(registry.validate_claim("effect/op", kind, &input).is_ok());
+            for invalid in ["", " \t\n"] {
+                input.insert("recovering_actor".into(), json!(invalid));
+                assert!(registry.validate_claim("effect/op", kind, &input).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn observed_recovering_actor_is_serialized_separately_from_lease_owner() {
+        let record = EffectRecord {
+            effect_id: "effect/op".into(),
+            operation_id: "op".into(),
+            provider: "native.message".into(),
+            target: "agent/example/receiver".into(),
+            payload_digest: "digest".into(),
+            class: EffectClass::NativeCoordinated,
+            bound_step_run: "step-run/example/send".into(),
+            bound_attempt: 0,
+            lease_owner: "agent/example/sender".into(),
+            lease_incarnation: "incarnation".into(),
+            recovering_actor: Some("agent/example/recoverer".into()),
+            provider_ref: None,
+            result_digest: None,
+            error: None,
+            evidence: vec![],
+        };
+        let output = serde_json::to_value(&record).unwrap();
+        assert_eq!(output["recovering_actor"], json!("agent/example/recoverer"));
+        assert_eq!(output["lease_owner"], json!("agent/example/sender"));
+        assert_eq!(serde_json::from_value::<EffectRecord>(output).unwrap(), record);
+    }
+
+    #[test]
     fn optional_metadata_is_omitted_and_future_metadata_is_readable() {
         let mut input = fields();
         input.insert("future_metadata".into(), json!({"observed": true}));
         let record: EffectRecord = serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
         assert!(record.evidence.is_empty());
         let output = serde_json::to_value(&record).unwrap();
-        for field in ["provider_ref", "result_digest", "error"] {
+        for field in ["recovering_actor", "provider_ref", "result_digest", "error"] {
             assert!(output.get(field).is_none());
         }
         for (class, encoded) in [(EffectClass::NativeCoordinated, "native-coordinated"),

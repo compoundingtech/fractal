@@ -5,6 +5,7 @@ use crate::model::EffectOwner;
 
 const FLEET: &str = "native-effect-recovery-fixture";
 const INCARNATION: &str = "example-worker:one";
+const RECOVERING_WORKER: &str = "agent/example/replacement";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -20,10 +21,15 @@ impl Fixture {
         state.store.apply_internal(
             &parse_intent(r#"version 2
 agent "example/worker" { workspace "/tmp"; harness "claude" {} }
+agent "example/replacement" { workspace "/tmp"; harness "claude" {} }
 agent "example/reader" { workspace "/tmp"; harness "claude" {} }
 mission "example/report" state="ready" {
   goal "Report the result once."
-  step "report" { assigned-to "agent/example/worker"; goal "Send the report." }
+  step "report" {
+    available-to "agent/example/worker"
+    available-to "agent/example/replacement"
+    goal "Send the report."
+  }
 }
 "#, "origin").unwrap(), "effect-fixture",
         ).unwrap();
@@ -59,7 +65,7 @@ mission "example/report" state="ready" {
     fn admit(&self) -> EffectRecord {
         let (_, sender) = receipt_recipient(&self.state.store, &self.request.from).unwrap();
         let (_, target) = receipt_recipient(&self.state.store, &self.request.to).unwrap();
-        match self.state.store.admit_message_effect(self.owner(), &sender, &payload_digest(&self.request), &target).unwrap() {
+        match self.state.store.admit_message_effect(self.owner(), &sender, &sender, &payload_digest(&self.request), &target).unwrap() {
             EffectAdmission::Originate(record) => record,
             EffectAdmission::Recover(_) | EffectAdmission::Blocked(_) => panic!("first local admission must originate"),
         }
@@ -73,22 +79,30 @@ mission "example/report" state="ready" {
     }
 
     fn replace_attempt(&mut self) {
+        let sender = self.request.from.clone();
+        self.replace_attempt_as(&sender, "example-worker:replacement");
+    }
+
+    fn replace_attempt_as(&mut self, actor: &str, incarnation: &str) -> String {
         let step = self.owner().step.clone();
         let previous_attempt = self.owner().attempt;
         self.state.store.set_step_state(&step, "failed", Some("interrupted worker")).unwrap();
         assert!(self.state.store.retry_step(&step, "replace interrupted worker", 0).unwrap());
         self.state.store.set_step_state(&step, "ready", None).unwrap();
-        let incarnation = "example-worker:replacement";
-        runtime(&self.state, &self.request.from, incarnation);
+        let (_, caller) = receipt_recipient(&self.state.store, actor).unwrap();
+        runtime(&self.state, &caller, incarnation);
         let claimed = self.state.store.work_action(&step, "claim", &WorkRequest {
-            wait_ms: None, actor: Some(self.request.from.clone()),
+            wait_ms: None, actor: Some(caller.clone()),
             incarnation: Some(incarnation.into()), summary: None, reason: None,
-            evidence: vec![], idempotency_key: "example-replacement-claim".into(),
+            evidence: vec![], idempotency_key: format!("replacement-claim/{caller}/{previous_attempt}/{incarnation}"),
         }).unwrap();
         assert!(claimed.attempt > previous_attempt);
+        assert_eq!(claimed.subject, step);
+        assert_eq!(claimed.claimant.as_deref(), Some(caller.as_str()));
         let owner = self.request.owner.as_mut().unwrap();
         owner.attempt = claimed.attempt;
         owner.incarnation = incarnation.into();
+        caller
     }
 
     fn accept(&self) -> Result<MessageSendReceipt, ApiError> {
@@ -140,7 +154,12 @@ fn payload_digest(request: &MessageSendRequest) -> String {
 }
 
 fn verified_send(state: &AppState, request: MessageSendRequest) -> Result<MessageSendReceipt, ApiError> {
-    accept_message_receipt_authorized(state, request, None, None, None, None, true)
+    let sender = request.from.clone();
+    verified_send_as(state, request, &sender)
+}
+
+fn verified_send_as(state: &AppState, request: MessageSendRequest, caller: &str) -> Result<MessageSendReceipt, ApiError> {
+    accept_message_receipt_authorized(state, request, None, None, None, None, Some(caller))
 }
 
 fn assert_message_count(state: &AppState, expected: usize) {
@@ -205,6 +224,115 @@ fn accepted_before_response_restart_recovers_and_confirms_the_same_message() {
 }
 
 #[test]
+fn different_worker_recovers_a_confirmed_effect_without_originating_another_message() {
+    let mut fixture = Fixture::new();
+    let sent = fixture.accept().unwrap();
+    let original = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+    let original_payload = payload_digest(&fixture.request);
+    fixture.restart();
+    let caller = fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+    assert_ne!(caller, fixture.request.from);
+    assert_eq!(payload_digest(&fixture.request), original_payload);
+    for _ in 0..2 {
+        let recovered = verified_send_as(&fixture.state, fixture.request.clone(), &caller).unwrap();
+        assert!(recovered.already_sent);
+        assert_eq!(recovered.message.subject, sent.message.subject);
+        assert_eq!(recovered.message.from, fixture.request.from);
+    }
+    let confirmed = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+    assert_eq!(confirmed.recovering_actor.as_deref(), Some(caller.as_str()));
+    assert_eq!(confirmed.lease_owner, original.lease_owner);
+    assert_eq!(confirmed.lease_incarnation, original.lease_incarnation);
+    assert_eq!(confirmed.bound_step_run, original.bound_step_run);
+    assert_eq!(confirmed.bound_attempt, original.bound_attempt);
+    assert_eq!(confirmed.payload_digest, original.payload_digest);
+    assert_eq!(confirmed.evidence, original.evidence);
+    assert_eq!(confirmed.provider_ref.as_deref(), Some(sent.message.subject.as_str()));
+    assert_eq!(fixture.state.store.claims_for(&original.effect_id, Some("effect.confirmed")).unwrap().len(), 2);
+    assert_eq!(fixture.state.store.claims_for(&original.effect_id, Some("effect.in-flight")).unwrap().len(), 1);
+    assert_message_count(&fixture.state, 1);
+}
+
+#[test]
+fn different_worker_parks_an_undelivered_effect_instead_of_sending() {
+    for in_flight in [false, true] {
+        let mut fixture = Fixture::new();
+        let original = fixture.admit();
+        if in_flight { fixture.state.store.effect_in_flight(&original).unwrap(); }
+        fixture.restart();
+        let caller = fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+        assert_eq!(verified_send_as(&fixture.state, fixture.request.clone(), &caller).unwrap_err().code,
+            "effect-unresolved");
+        fixture.assert_parked(&original);
+        let unresolved = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+        assert_eq!(unresolved.recovering_actor.as_deref(), Some(caller.as_str()));
+        assert_eq!(unresolved.lease_owner, original.lease_owner);
+        assert_eq!(unresolved.bound_step_run, original.bound_step_run);
+        assert_eq!(unresolved.bound_attempt, original.bound_attempt);
+        assert_eq!(unresolved.payload_digest, original.payload_digest);
+        assert!(fixture.state.store.claims_for(&original.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+        assert_eq!(fixture.state.store.claims_for(&original.effect_id, Some("effect.in-flight")).unwrap().len(),
+            usize::from(in_flight));
+        assert!(verified_send_as(&fixture.state, fixture.request.clone(), &caller).is_err());
+        assert_message_count(&fixture.state, 0);
+    }
+}
+
+#[test]
+fn different_worker_cannot_recover_with_a_stale_replacement_attempt() {
+    let mut fixture = Fixture::new();
+    let original = fixture.admit();
+    fixture.seed_message();
+    let caller = fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+    let stale_request = fixture.request.clone();
+    // Keep B's incarnation live: refusal must fence the old attempt, not a dead worker.
+    fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+    assert_eq!(verified_send_as(&fixture.state, stale_request, &caller).unwrap_err().code,
+        "stale-work-lease");
+    assert_eq!(fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap(), original);
+    assert!(fixture.state.store.claims_for(&original.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+    assert!(fixture.state.store.claims_for(&original.effect_id, Some("effect.unresolved")).unwrap().is_empty());
+    assert_message_count(&fixture.state, 1);
+}
+
+#[test]
+fn different_worker_changing_the_original_payload_parks_without_a_second_send() {
+    for field in ["from", "content"] {
+        let mut fixture = Fixture::new();
+        let original = fixture.admit();
+        fixture.seed_message();
+        let caller = fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+        let mut changed = fixture.request.clone();
+        match field {
+            "from" => changed.from.clone_from(&caller),
+            "content" => changed.content.push_str(" Changed by the replacement worker."),
+            _ => unreachable!(),
+        }
+        assert_eq!(verified_send_as(&fixture.state, changed, &caller).unwrap_err().code,
+            "idempotency-mismatch", "{field}");
+        fixture.assert_parked(&original);
+        let unresolved = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+        assert_eq!(unresolved.recovering_actor.as_deref(), Some(caller.as_str()));
+        assert_eq!(unresolved.lease_owner, original.lease_owner);
+        assert_eq!(unresolved.payload_digest, original.payload_digest);
+        assert!(fixture.state.store.claims_for(&original.effect_id, Some("effect.in-flight")).unwrap().is_empty());
+        assert!(fixture.state.store.claims_for(&original.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+        assert_message_count(&fixture.state, 1);
+    }
+}
+
+#[test]
+fn different_worker_cannot_originate_an_effect_as_the_previous_sender() {
+    let mut fixture = Fixture::new();
+    let caller = fixture.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:one");
+    assert_ne!(caller, fixture.request.from);
+    assert_eq!(verified_send_as(&fixture.state, fixture.request.clone(), &caller).unwrap_err().code,
+        "effect-caller-refused");
+    assert!(fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().is_none());
+    assert_message_count(&fixture.state, 0);
+}
+
+#[test]
 fn changed_payload_parks_the_effect_and_step_without_a_second_send() {
     // Exercise changes beyond content against the same immutable effect key.
     for field in ["to", "content", "title", "in_reply_to", "tags"] {
@@ -251,7 +379,7 @@ fn confirmation_requires_the_exact_native_message_operation() {
     unrelated.idempotency_key = "unrelated-native-message".into();
     accept_message_receipt(&fixture.state, unrelated, None, None).unwrap();
     let message = fixture.state.store.operation_claim("unrelated-native-message").unwrap().unwrap();
-    assert_eq!(fixture.state.store.confirm_message_effect(&effect, &message).unwrap_err().code,
+    assert_eq!(fixture.state.store.confirm_message_effect(&effect, &message, &fixture.request.from).unwrap_err().code,
         "effect-evidence-mismatch");
     assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
     assert_message_count(&fixture.state, 1);
@@ -303,7 +431,7 @@ fn intended_restart_without_a_local_receipt_parks_instead_of_sending() {
 }
 
 #[test]
-fn split_host_first_send_converges_to_one_message_and_peer_never_originates() {
+fn split_host_first_send_converges_with_a_durable_peer_fence_and_never_two_messages() {
     let fixture = Fixture::new();
     let peer_root = tempfile::tempdir().unwrap();
     let peer = persistent_state(peer_root.path(), "peer");
@@ -317,17 +445,65 @@ fn split_host_first_send_converges_to_one_message_and_peer_never_originates() {
     });
     let sent = origin_result.unwrap();
     assert!(!sent.already_sent);
-    assert_eq!(peer_result.unwrap_err().code, "effect-origin-unavailable");
+    assert_eq!(peer_result.unwrap_err().code, "effect-unresolved");
     assert_message_count(&fixture.state, 1);
     assert_message_count(&peer, 0);
-    assert!(peer.store.resolve_effect_by_key(fixture.owner()).unwrap().is_none());
+    let parked = peer.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+    assert!(parked.error.is_some());
+    assert_eq!(peer.store.claims_for(&parked.effect_id, Some("effect.unresolved")).unwrap().len(), 1);
+    assert_eq!(peer.store.step_run(&fixture.owner().step).unwrap().unwrap().status, "blocked");
     replicate(&fixture.state, &peer);
-    let recovered = verified_send(&peer, fixture.request.clone()).unwrap();
-    assert!(recovered.already_sent);
-    assert_eq!(recovered.message.subject, sent.message.subject);
+    // Confirmed evidence arriving later must not erase the peer's unresolved fence.
+    assert!(verified_send(&peer, fixture.request.clone()).is_err());
+    assert!(peer.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap().error.is_some());
+    assert_eq!(peer.store.messages(None, false).unwrap()[0].subject, sent.message.subject);
     replicate(&peer, &fixture.state);
+    assert!(fixture.accept().is_err());
+    fixture.assert_parked(&fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap());
+    replicate(&fixture.state, &peer);
     assert_message_count(&fixture.state, 1);
     assert_message_count(&peer, 1);
+}
+
+#[test]
+fn peer_replacement_lease_cannot_originate_an_absent_effect_from_a_foreign_creation_anchor() {
+    let original = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let state = persistent_state(root.path(), "peer");
+    state.store.bind_fleet(FLEET).unwrap();
+    replicate(&original.state, &state);
+    let mut peer = Fixture { root, state, request: original.request.clone() };
+    let step = peer.owner().step.clone();
+    let run = peer.state.store.step_run(&step).unwrap().unwrap().run;
+    let anchor = peer.state.store.claims_for(&run, Some("mission-run.created")).unwrap();
+    assert_eq!(anchor.len(), 1);
+    assert_eq!(anchor[0].origin, "origin");
+    assert!(peer.state.store.resolve_effect_by_key(peer.owner()).unwrap().is_none());
+    assert_message_count(&peer.state, 0);
+
+    let caller = peer.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:peer");
+    peer.request.from.clone_from(&caller);
+    assert_eq!(peer.owner().step, step);
+    let live_claims = peer.state.store.claims_for(&step, Some("work.claimed")).unwrap();
+    assert!(live_claims.iter().any(|claim| claim.origin == "peer"
+        && claim.actor.as_deref() == Some(caller.as_str())
+        && claim.body["fields"]["attempt"] == json!(peer.owner().attempt)
+        && claim.body["fields"]["claim_incarnation"] == peer.owner().incarnation));
+    assert!(peer.state.store.resolve_effect_by_key(peer.owner()).unwrap().is_none());
+    assert_eq!(verified_send_as(&peer.state, peer.request.clone(), &caller).unwrap_err().code,
+        "effect-unresolved");
+    let parked = peer.state.store.resolve_effect_by_key(peer.owner()).unwrap().unwrap();
+    peer.assert_parked(&parked);
+    assert_message_count(&peer.state, 0);
+    assert!(peer.state.store.operation_claim(&native_message_key(peer.owner()).unwrap()).unwrap().is_none());
+    assert!(verified_send_as(&peer.state, peer.request.clone(), &caller).is_err());
+    assert_message_count(&peer.state, 0);
+    let retained = peer.state.store.claims_for(&run, Some("mission-run.created")).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, anchor[0].id);
+    assert_eq!(retained[0].origin, "origin");
+    assert!(original.state.store.resolve_effect_by_key(original.owner()).unwrap().is_none());
+    assert_message_count(&original.state, 0);
 }
 
 #[test]

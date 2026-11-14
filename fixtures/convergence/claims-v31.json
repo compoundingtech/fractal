@@ -1971,6 +1971,12 @@
         "immutable": false,
         "reference": false
       },
+      "recovering_actor": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "result_digest": {
         "value_type": "string",
         "required": false,
@@ -2074,6 +2080,12 @@
         "reference": false
       },
       "provider_ref": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "recovering_actor": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -2187,6 +2199,12 @@
         "immutable": false,
         "reference": false
       },
+      "recovering_actor": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "result_digest": {
         "value_type": "string",
         "required": false,
@@ -2290,6 +2308,12 @@
         "reference": false
       },
       "provider_ref": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "recovering_actor": {
         "value_type": "string",
         "required": false,
         "immutable": false,
