@@ -628,7 +628,7 @@ async fn fixture_agent_attribution_is_declared_only_and_never_enabled_by_the_pro
             ("thread.reply", json!({"target_id":thread,"content":"The fixture agent replied."})),
             ("thread.link-ask", json!({"target_id":thread,"ask_id":ask.subject,"ask_episode":episode})),
         ] {
-            let response = client.post::<Value>("/v1/client/actions", &json!({
+            let response = client.post::<_, Value>("/v1/client/actions", &json!({
                 "api_version":"st3.v1","id":format!("action/{kind}"),"type":kind,
                 "idempotency_key":format!("fixture-{kind}"),"fence":{"snapshot_id":snapshot},
                 "parameters":parameters,
