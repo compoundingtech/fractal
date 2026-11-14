@@ -80,6 +80,11 @@ export const ArrangementPerson = /*#__PURE__*/ (() => Schema.String.check(Schema
 export type ArrangementPerson = typeof ArrangementPerson.Type
 export type ArrangementPersonEncoded = typeof ArrangementPerson.Encoded
 
+/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
+export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
+export type Timestamp = typeof Timestamp.Type
+export type TimestampEncoded = typeof Timestamp.Encoded
+
 export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
   "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
@@ -164,11 +169,6 @@ export type PrivateNotesUriEncoded = typeof PrivateNotesUri.Encoded
 export const ReadPositionConversation = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/[^\\s]+$", "u"))).check(Schema.isMaxCodePoints(512)).annotate({ identifier: "ReadPositionConversation", description: "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes." }))()
 export type ReadPositionConversation = typeof ReadPositionConversation.Type
 export type ReadPositionConversationEncoded = typeof ReadPositionConversation.Encoded
-
-/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
-export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
-export type Timestamp = typeof Timestamp.Type
-export type TimestampEncoded = typeof Timestamp.Encoded
 
 export const HarnessResolvedAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(63))).check(Schema.isMaxLength(64)).check(Schema.isUnique()),
@@ -1565,6 +1565,10 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "requester_id": optionalKey(Id),
   "review_mode": optionalKey(Schema.Literals(["approve","feedback"])),
   "revision": Revision,
+  /** When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls. */
+  "seen_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." }),
+  /** Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls. */
+  "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." }),
   "source_id": Id,
   "source_kind": optionalKey(Schema.String),
   "state": Schema.Literals(["open","resolved"]),
@@ -1834,6 +1838,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "private-notes-indeterminate",
   "invalid-answer",
   "not-answerable",
+  "attention-dismiss-unsupported",
   "internal"
 ]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type

@@ -57,10 +57,10 @@ export function SchemeScreen({ children }: { children: ReactNode }) {
 }
 
 /** Wrapping, inset grouped row. The label carries meaning without a glyph legend; without `onPress` it only reads. A read-only row is not `disabled`: VoiceOver would call it dimmed. */
-export function GroupedRow({ title, context, onPress, onLongPress }: { title: string; context: string; onPress?: () => void; onLongPress?: () => void }) {
+export function GroupedRow({ title, context, onPress, onLongPress, hint = 'Opens alert details' }: { title: string; context: string; onPress?: () => void; onLongPress?: () => void; hint?: string }) {
   const colors = useSystemColors();
   const interactive = onPress !== undefined || onLongPress !== undefined;
-  return <Pressable accessibilityRole={onPress ? 'button' : 'text'} accessibilityLabel={`${title}. ${context}`} accessibilityHint={onPress ? 'Opens alert details' : undefined} onPress={onPress} onLongPress={onLongPress}
+  return <Pressable accessibilityRole={onPress ? 'button' : 'text'} accessibilityLabel={`${title}. ${context}`} accessibilityHint={onPress ? hint : undefined} onPress={onPress} onLongPress={onLongPress}
     style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed && interactive ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
     <View style={{ flex: 1, gap: 6 }}><T bold>{title}</T><T dim>{context}</T></View>
     {onPress ? <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text> : null}

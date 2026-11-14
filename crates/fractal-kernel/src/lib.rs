@@ -7,6 +7,8 @@ pub mod accounts;
 pub mod declaration_kdl;
 /// An `objective` declaration: an indicator, its targets and the response to a miss.
 pub mod objective;
+/// The fleet's `notice-owner` declaration: the member incarnation whose daemon writes notices.
+pub mod notice_owner;
 pub mod archive;
 pub mod boot;
 pub mod config;

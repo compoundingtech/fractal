@@ -123,6 +123,30 @@
       "behavior": "refused without writes across restart"
     },
     {
+      "action": "attention.seen",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts",
+        "crates/fractal/tests/assistant_native.rs::assistant_grants_cannot_use_attention_controls"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; seen accepted after restart and shown on the person's attention row; exact replay after another restart adds no claim; seen again keeps the first time without a claim; works on non-ask rows; agents and assistant grants are forbidden; another person's or an unknown row is not found"
+    },
+    {
+      "action": "attention.snooze",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts",
+        "crates/fractal/tests/assistant_native.rs::assistant_grants_cannot_use_attention_controls"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; snooze accepted after restart and shown on the row; exact replay after another restart adds no claim; null ends the snooze; neither moves the ask's deadline; a past or unparseable until is refused without a claim; agents and assistant grants are forbidden; another person's or an unknown row is not found"
+    },
+    {
+      "action": "attention.dismiss",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts",
+        "crates/fractal/tests/assistant_native.rs::assistant_grants_cannot_use_attention_controls"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; dismiss accepted after restart; exact replay after another restart writes no second answer or notice; choice and free-text asks resolve with outcome dismissed and no option id, and the asker is told dismissed; an update is read, takes no text and tells no one; human gates, authored person steps and asks that offer their own dismiss answer refuse with attention-dismiss-unsupported and stay open; agents and assistant grants are forbidden"
+    },
+    {
       "action": "custom.reply",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::custom_reply_survives_fences_cli_and_daemon_restarts",
@@ -788,6 +812,14 @@
       "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
     },
     {
+      "command": "st alerts dismiss",
+      "description": "Set an ask aside without answering it: the asker is told you dismissed it. An update is read. Other alerts keep their own actions",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; the asker reads dismissed, a human gate refuses with attention-dismiss-unsupported, disk store reopened between actions"
+    },
+    {
       "command": "st alerts ls",
       "description": "List all current human attention items",
       "tests": [
@@ -834,6 +866,22 @@
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st alerts seen",
+      "description": "Mark one of your alerts seen, on every client of yours",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; the seen time is on the person's attention row, disk store reopened between actions"
+    },
+    {
+      "command": "st alerts snooze",
+      "description": "Put one of your alerts off until later, on every client of yours. It stays open, and an ask's deadline does not move",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_alerts_seen_snooze_and_dismiss_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; --for sets a future until and --clear brings it back on the attention row, disk store reopened between actions"
     },
     {
       "command": "st alerts withdraw",
@@ -1481,6 +1529,40 @@
         "crates/fractal/tests/action_coverage.rs::cli_devices_and_native_import_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts ls",
+      "description": "List active execution-host admission holds",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts hold",
+      "description": "Place an authenticated execution-host admission hold",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts release",
+      "description": "Resolve an owned hold at its observed revision",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts recover",
+      "description": "Recover a terminal run-owned hold as the configured host operator",
+      "tests": [
+        "crates/fractal/src/hosts_cli.rs::host_hold_commands_preserve_revision_and_identity",
+        "crates/fractal-api-core/src/api/host_holds.rs::operator_recovery_rejects_payload_impersonation_and_stale_revision",
+        "crates/fractal-store/src/store/host_holds.rs::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"
+      ],
+      "verification": "real Clap parsing plus API and store authority, revision and history regressions"
     },
     {
       "command": "st lanes approve",
@@ -3160,9 +3242,31 @@
     {
       "effect": "Forget",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::remind_me_later_hides_a_message_and_the_badge_counts_what_is_left"
+        "crates/fractal-tui/src/ui/glass.rs::a_message_that_did_not_arrive_can_be_sent_again_or_cleared"
       ],
       "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"
+    },
+    {
+      "effect": "Snooze",
+      "tests": [
+        "crates/fractal-tui/src/ui/mod.rs::l_puts_an_item_off_and_the_badge_counts_what_is_left",
+        "crates/fractal-tui/src/ui/mod.rs::l_asks_st_to_snooze_and_the_row_follows_what_st_says",
+        "crates/fractal-tui/src/ui/adapt.rs::a_row_carries_the_snooze_st_serves_and_the_world_knows_when_it_ends",
+        "crates/fractal-tui/src/ui/live.rs::snooze_and_dismiss_reach_st_as_the_persons_own_controls",
+        "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts"
+      ],
+      "verification": "l reducer emits attention.snooze (3h, or null on a row already put off) and hides nothing itself; rows follow st's snoozed_until against the adapt clock; real daemon transport and restart"
+    },
+    {
+      "effect": "Dismiss",
+      "tests": [
+        "crates/fractal-tui/src/ui/answers.rs::dismissal_without_a_dismiss_answer_carries_every_named_note",
+        "crates/fractal-tui/src/ui/answers.rs::a_requests_own_dismiss_answer_is_answered_with_its_note_and_every_other_note",
+        "crates/fractal-tui/src/ui/answers.rs::a_dismissal_hides_the_card_until_st_confirms_or_refuses_it",
+        "crates/fractal-tui/src/ui/live.rs::snooze_and_dismiss_reach_st_as_the_persons_own_controls",
+        "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts"
+      ],
+      "verification": "x then y on a request without its own dismiss answer emits attention.dismiss with every note folded into its text (one with its own dismiss answer answers it through work.done); optimistic hide with rollback on refusal; real daemon transport and restart"
     }
   ],
   "local_ui_actions": [
@@ -3219,13 +3323,6 @@
       "action": "simplify or expand tool detail",
       "tests": [
         "crates/fractal-tui/src/ui/mod.rs::ctrl_p_simplifies_every_conversation_and_back"
-      ],
-      "verification": "local UI state; no daemon mutation, restart fence not applicable"
-    },
-    {
-      "action": "dismiss/remind me later",
-      "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::remind_me_later_hides_a_message_and_the_badge_counts_what_is_left"
       ],
       "verification": "local UI state; no daemon mutation, restart fence not applicable"
     }
