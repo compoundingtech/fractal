@@ -13,6 +13,7 @@ pub struct StepExecution {
     pub agent: String,
     pub incarnation_id: Option<String>,
     /// Exact durable launch/turn receipt identity; absent on historical unbound claims.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub declared_model: Option<String>,
     pub observed_models: Vec<String>,

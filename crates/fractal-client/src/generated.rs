@@ -1206,12 +1206,12 @@ pub struct UsageRow {
     #[serde(default)]
     pub step: Option<String>,
     /// Immutable work-claim accounting key, not a native process identity.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     /// Exact durable launch/turn receipt identity; absent means unknown.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
     #[serde(default)]
     pub model: Option<String>,
@@ -1979,7 +1979,7 @@ pub struct StepExecution {
     pub id: String,
     pub step_subject: String,
     pub attempt: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub agent: String,
     pub incarnation_id: Option<String>,
@@ -3781,11 +3781,11 @@ pub enum TimelineUsageSemantics {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineAttribution {
     pub agent_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
     pub mission_run_id: Option<String>,
     pub generation_id: Option<String>,

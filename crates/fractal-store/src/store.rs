@@ -10135,10 +10135,18 @@ pub fn insert_local_observation_tx(
             "mission_run_id": if owner_run.is_empty() { None } else { Some(owner_run) },
             "generation_id": owner_generation,
             "step_id": if owner_step.is_empty() { None } else { Some(owner_step) },
-            "execution_id": execution.as_ref().map(|item| item.0.as_str()),
-            "invocation_id": invocation.as_ref().map(|receipt| receipt.invocation_id.as_str()),
-            "attempt": owner_attempt,
         });
+        // New evidence fields are optional, not nullable defaults. A relay must not
+        // invent them when an older owner omitted them.
+        if let Some((execution, _)) = &execution {
+            body["fields"]["attribution"]["execution_id"] = json!(execution);
+        }
+        if let Some(invocation) = &invocation {
+            body["fields"]["attribution"]["invocation_id"] = json!(invocation.invocation_id);
+        }
+        if let Some(attempt) = owner_attempt {
+            body["fields"]["attribution"]["attempt"] = json!(attempt);
+        }
         body["fields"]["host"] = Value::String(origin.to_owned());
         // What st charged this response, so the OpenTelemetry history carries the same cost
         // the graph's totals do.

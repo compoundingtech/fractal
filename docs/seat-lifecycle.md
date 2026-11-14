@@ -198,6 +198,9 @@ partition even when reclaims share a model, account and provider incarnation.
 Older aggregate series remain readable with unknown invocation/attempt joins.
 Step execution evidence exposes the same optional `invocation_id`; its usage and
 receipt history do not depend on retained timeline entries or trace sampling.
+Unknown execution/invocation IDs and attempt evidence are omitted on the wire,
+not synthesized as null fields. Typed clients and signed relays preserve that
+absence; existing explicitly nullable legacy attribution fields remain nullable.
 `st usage --by invocation` groups exact identities; `--by attempt` groups by step
 and attempt together, never by the attempt number alone. The Usage TUI offers the
 same two groupings and keeps missing evidence in explicit unknown groups.
