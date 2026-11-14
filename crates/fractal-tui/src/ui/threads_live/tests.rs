@@ -2422,8 +2422,11 @@ fn thread_preview_evidence() {
         std::fs::write(dir.join(format!("{name}.txt")), &text).unwrap();
         text
     }
+    // This preview uses the ordinary wall-clock renderer, not the fixed unit-test clock.
+    // Keep its message on that same clock so captured relative times remain realistic.
+    let accepted_at = chrono::Utc::now().timestamp_millis() - 120_000;
     let message: ThreadTimelineEvent = serde_json::from_value(serde_json::json!({
-        "id":"message/preview", "actor_id":"agent/atlas", "accepted_at_unix_ms":1_000,
+        "id":"message/preview", "actor_id":"agent/atlas", "accepted_at_unix_ms":accepted_at,
         "kind":"message", "content":"Please review the sensor calibration.", "thread_quote_id":null
     })).unwrap();
     ui.threads.window(
@@ -2432,7 +2435,9 @@ fn thread_preview_evidence() {
         vec!["message/preview".into()], false,
     );
     ui.threads.hover(Some("message/preview"));
-    assert!(capture(&mut ui, &pane, &dir, "harness-hover-reply").contains("↩ Reply"));
+    let hovered = capture(&mut ui, &pane, &dir, "harness-hover-reply");
+    assert!(hovered.contains("↩ Reply"));
+    assert!(hovered.contains("2m ago"), "preview message uses the rendering clock: {hovered}");
     ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
     ui.paste("Keep this unsent draft.".into());
     let focused = capture(&mut ui, &pane, &dir, "harness-focused-composer");
