@@ -123,6 +123,16 @@ describe('composer send contract', () => {
     expect(ungranted.disabledReason).toBe('Message send is not granted for this device.')
   })
 
+  it('waits for the capabilities answer instead of calling unread grants a refusal', async () => {
+    const send = vi.fn<AttachmentPort['send']>()
+    const attachments = { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send }
+    const unread = composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, messageSend: 'ungranted', unread: true }, readable: true, items: [], onRefused: vi.fn() })
+    expect(unread.disabledReason).toBe('Checking whether this browser can send messages…')
+    expect(unread.runtime.isDisabled).toBe(true)
+    await unread.runtime.onNew(message)
+    expect(send).not.toHaveBeenCalled()
+  })
+
   it('uploads composer images at send and names their blob references in the message action', async () => {
     const blob = `blob/${'a'.repeat(64)}`
     const upload = vi.fn<AttachmentPort['upload']>().mockResolvedValue({ _tag: 'Success', value: { blob, sha256: 'a'.repeat(64), size: 3, media_type: 'image/png' } })
