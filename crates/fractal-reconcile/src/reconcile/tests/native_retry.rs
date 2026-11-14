@@ -19,7 +19,7 @@ fn fixture(policy: &str) -> (Clock, Arc<Store>, Reconciler<FakeRuntime>, Mission
 mission "retry-policy" state="ready" {{
   goal "Exercise native retry policy."
   step "program" {{
-    program "program.mjs" sha256="{}"
+    program "/tmp/program.mjs" sha256="{}"
     retry {{ {policy} }}
   }}
 }}"#, "a".repeat(64)), "retry-policy");
