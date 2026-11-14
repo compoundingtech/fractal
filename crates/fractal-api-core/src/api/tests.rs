@@ -11,6 +11,7 @@ pub use crate::api::tests_shared_client_v0_tests::{checked_agent_cache, get_requ
 use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
+use crate::gate_check::now_ms;
 use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
