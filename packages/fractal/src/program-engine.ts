@@ -12,6 +12,7 @@
  */
 import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue } from 'effect'
 import { Workflow, WorkflowEngine } from 'effect/workflow'
+import type { LaneMembership } from './resources.ts'
 
 /** An outcome as the host protocol carries it: a program's, or one journaled key's. */
 export type ProgramExit =
@@ -35,6 +36,24 @@ export interface CommandResult {
   readonly stderr: string
 }
 
+export const CommandResultSchema = Schema.Struct({
+  code: Schema.Number,
+  signal: Schema.NullOr(Schema.String),
+  stdout: Schema.String,
+  stderr: Schema.String,
+})
+
+/** Admission failures are distinct from a command's exit status or a child run's failure. */
+export const ResourceError = Schema.TaggedStruct('ResourceError', {
+  code: Schema.Literals([
+    'admission-expired', 'unsupported-coverage', 'impossible-capacity', 'clock-uncertain',
+    'cancelled', 'retired', 'retiring', 'uncertain', 'invalid-state',
+    'resource-operation-refused', 'execution-timeout', 'stale-membership', 'execution-refused',
+  ]),
+  message: Schema.String,
+})
+export type ResourceError = typeof ResourceError.Type
+
 /** A step's result as the bundle hands it to the daemon to journal. */
 export interface JournalEntry {
   readonly key: string
@@ -44,6 +63,17 @@ export interface JournalEntry {
   readonly ms: number
 }
 
+/** A native resource operation. A grant is never fulfilled from the program journal alone. */
+export interface ResourceRequest {
+  readonly key: string
+  readonly operation:
+    | 'resource.lane.acquire'
+    | 'resource.lane.release'
+    | 'resource.lane.exec'
+    | 'resource.lane.run'
+  readonly payload: unknown
+}
+
 /** What the program host hands a bundle's entry for one attempt of one program step. */
 export interface HostContextV1 {
   /** The program's step run subject. */
@@ -51,6 +81,8 @@ export interface HostContextV1 {
   readonly attempt: number
   /** The mission run subject. */
   readonly run: string
+  /** Inherited from a lane-bound linked run; every native command consumes this context. */
+  readonly resourceMembership?: LaneMembership
   /** The run's native inputs, by name. */
   readonly payload: Readonly<Record<string, string>>
   /** The run's `ST_*` variables. */
@@ -83,6 +115,8 @@ export interface HostContextV1 {
   }): Promise<ProgramExit>
   /** Runs a command as its own process group, which the host ends on cancel. */
   spawn(argv: readonly string[], options?: CommandOptions): Promise<CommandResult>
+  /** Host-authoritative admission, execution and confirmed retirement; never local spawn. */
+  resource(request: ResourceRequest, signal?: AbortSignal): Promise<ProgramExit>
 }
 
 /** One running program attempt: its host, the keys taken so far and its open asks and runs. */
@@ -96,6 +130,9 @@ export class Program extends Context.Service<
     readonly requests: Map<string, () => Promise<ProgramExit>>
   }
 >()('fractal/Program') {}
+
+/** Native resource requests inside a replayable activity use its identity, not global call order. */
+export class ResourceCommandScope extends Context.Service<ResourceCommandScope, string>()('fractal/ResourceCommandScope') {}
 
 /** What a program body may require: the attempt and the workflow it runs as. */
 export type ProgramServices =
