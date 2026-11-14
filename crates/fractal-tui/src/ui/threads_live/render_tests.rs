@@ -266,3 +266,59 @@ fn help_lists_thread_keys_in_lowercase_with_the_selection_context() {
     capture("p1-4-help-90", &screen);
     capture("p1-4-help-140", &draw(140));
 }
+
+#[test]
+fn empty_read_only_thread_tab_shows_title_agent_state_and_why_there_is_no_composer() {
+    let id = "thread/empty";
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    ui.threads.enable(true);
+    ui.threads.put_summary(Envelope {
+        value: ThreadSummary {
+            agent_id: "agent/example/atlas/builder".into(),
+            ..summary(id, "Sensor follow-up")
+        },
+        snapshot: snapshot(),
+        request_id: "request/test".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    });
+    ui.threads.histories.insert(id.into(), History::default());
+    let pane = Pane::Thread(id.into());
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 16);
+    let mut screen = ratatui::buffer::Buffer::empty(area);
+    ui.draw_pane(&mut screen, area, &pane);
+    let shown: String = screen
+        .content
+        .chunks(100)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>() + "\n")
+        .collect();
+    for expected in [
+        "Sensor follow-up · to Atlas Builder · open",
+        "No messages yet.",
+        thread::READ_ONLY,
+    ] {
+        assert!(shown.contains(expected), "{expected:?} missing:\n{shown}");
+    }
+    let at = |needle: &str| shown.find(needle).unwrap();
+    assert!(at("Sensor follow-up") < at("No messages yet.") && at("No messages yet.") < at(thread::READ_ONLY));
+    capture("p1-5-empty-read-only-tab-100", &screen);
+}
+
+#[test]
+fn an_expanded_empty_thread_says_it_has_no_messages_under_its_heading() {
+    let id = "thread/empty";
+    let (mut threads, pane) = listed(&[(id, "Sensor follow-up")], ThreadAccess::default());
+    threads.histories.insert(id.into(), History::default());
+    threads.open.insert(pane.key(), [id.into()].into());
+    let lines = render(&threads, &pane, 100);
+    let heading = lines
+        .iter()
+        .position(|line| line.starts_with("▾ Sensor follow-up"))
+        .unwrap();
+    assert_eq!(lines[heading + 1], "No messages yet.");
+    assert!(
+        !lines.iter().any(|line| line == thread::READ_ONLY),
+        "embedded panels stay compact; the tab explains read-only access"
+    );
+    capture_mount("p1-5-empty-expanded-100", &threads, &pane, 100);
+}

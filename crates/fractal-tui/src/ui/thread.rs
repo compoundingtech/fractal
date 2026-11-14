@@ -30,9 +30,14 @@ pub enum Tap {
 
 pub type Doc = fractal_conversation_ui::doc::Doc<Tap>;
 
+/// Shown in a thread tab instead of a composer when this connection may not change threads.
+pub const READ_ONLY: &str = "Read-only on this device: replies and changes need write access.";
+
 pub struct Summary<'a> {
     pub id: &'a str,
     pub title: &'a str,
+    /// The agent the thread talks to, as the person knows it (its display name).
+    pub agent: &'a str,
     pub closed: bool,
     pub message_count: usize,
     pub unread: bool,
@@ -103,9 +108,11 @@ pub fn client_panel(
 ) -> Option<Doc> {
     use fractal_client::{ThreadState, ThreadTimelineChange};
 
+    let agent = actor_name(&summary.agent_id).unwrap_or_else(|| summary.agent_id.clone());
     let summary = Summary {
         id: &summary.id,
         title: &summary.title,
+        agent: &agent,
         closed: summary.state == ThreadState::Closed,
         message_count: summary.message_count?.try_into().ok()?,
         unread: summary.unread?,
@@ -256,6 +263,27 @@ pub fn panel(
         if !state.open {
             return doc;
         }
+    } else {
+        // A tab has no disclosure heading, so it names the thread, its agent and its state.
+        let title = inline(summary.title);
+        let metadata = format!(
+            " · to {} · {}",
+            inline(summary.agent),
+            if summary.closed { "closed" } else { "open" },
+        );
+        let metadata = if text::width(&metadata) + text::width(&title).min(12) <= width {
+            metadata
+        } else {
+            String::new()
+        };
+        doc.line(Line::from(vec![
+            Span::styled(
+                text::truncate(&title, width.saturating_sub(text::width(&metadata))),
+                theme::strong(theme::SAPPHIRE),
+            ),
+            Span::styled(metadata, theme::dim()),
+        ]));
+        doc.blank();
     }
     if let Some(notice) = state.notice {
         doc.wrap(&[text::run(notice, theme::dim())], width);
@@ -359,6 +387,13 @@ pub fn panel(
             }
         }
     }
+    let has_messages = records
+        .iter()
+        .any(|record| matches!(record, Record::Message { .. }));
+    if !has_messages && !state.has_earlier && !state.loading_earlier {
+        doc.line(Line::from(Span::styled("No messages yet.", theme::dim())));
+        doc.blank();
+    }
     if state.can_reply {
         let focused = state.cursor.is_some();
         doc.line(if state.pending_reply && !focused {
@@ -412,6 +447,9 @@ pub fn panel(
                 width,
             );
         }
+        doc.blank();
+    } else if state.standalone && !(state.can_rename || state.can_close || state.can_reopen) {
+        doc.wrap(&[text::run(READ_ONLY, theme::dim())], width);
         doc.blank();
     }
 
@@ -540,6 +578,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: true,
             message_count: 3,
             unread: true,
@@ -561,6 +600,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: false,
             message_count: 1,
             unread: false,
@@ -595,6 +635,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: false,
             message_count: 0,
             unread: false,
@@ -609,7 +650,8 @@ mod tests {
             },
             80,
         );
-        assert_eq!(doc.lines[1].spans[0].style, theme::fg(theme::ACCENT));
+        assert_eq!(doc.lines[1].to_string(), "No messages yet.");
+        assert_eq!(doc.lines[3].spans[0].style, theme::fg(theme::ACCENT));
         let lines: Vec<_> = doc.lines.iter().map(Line::to_string).collect();
         let controls = lines
             .iter()
@@ -627,6 +669,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: true,
             message_count: 1,
             unread: false,
@@ -679,6 +722,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Sensor follow-up",
+            agent: "Atlas Builder",
             closed: false,
             message_count: 0,
             unread: false,
@@ -720,5 +764,68 @@ mod tests {
         let plain = heading("Worker test", " · 1 message", true, false, 40);
         assert_eq!(plain.to_string(), "▾ Worker test · 1 message");
         assert!(plain.spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn empty_standalone_thread_names_itself_and_says_why_it_cannot_be_answered() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Sensor follow-up",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: false,
+        };
+        let read_only = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..State::default()
+            },
+            80,
+        );
+        let lines: Vec<_> = read_only.lines.iter().map(Line::to_string).collect();
+        assert_eq!(
+            lines[..5],
+            [
+                "Sensor follow-up · to Atlas Builder · open",
+                "",
+                "No messages yet.",
+                "",
+                READ_ONLY,
+            ]
+        );
+        let writable = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..editable()
+            },
+            80,
+        );
+        let lines: Vec<_> = writable.lines.iter().map(Line::to_string).collect();
+        assert!(!lines.iter().any(|line| line == READ_ONLY));
+        assert!(lines.iter().any(|line| line == "No messages yet."));
+        let closed = panel(
+            &Summary {
+                closed: true,
+                ..summary
+            },
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..State::default()
+            },
+            80,
+        );
+        assert_eq!(
+            closed.lines[0].to_string(),
+            "Sensor follow-up · to Atlas Builder · closed"
+        );
     }
 }
