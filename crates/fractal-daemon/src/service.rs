@@ -1716,6 +1716,7 @@ mod tests {
         lanes: None,
         person: None,
         browser_pairing_login: None,
+        inbox_fallback_agent: None,
         pairing_legacy_allowances: Vec::new(),
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
