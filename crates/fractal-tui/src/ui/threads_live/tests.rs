@@ -2395,3 +2395,80 @@ async fn paired_native_transport_replays_the_frozen_signed_packet_byte_for_byte(
     );
     server.abort();
 }
+
+/// Preview-only evidence. These are in-process production mounts, NOT the production binary
+/// transport path. Run with THREAD_PREVIEW_CAPTURE_DIR and --ignored --nocapture.
+#[test]
+#[ignore = "writes explicitly requested preview evidence"]
+fn thread_preview_evidence() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let dir = std::path::PathBuf::from(
+        std::env::var("THREAD_PREVIEW_CAPTURE_DIR").expect("THREAD_PREVIEW_CAPTURE_DIR"),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    ui.threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Thread("thread/worker".into());
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    fn capture(ui: &mut super::super::Ui, pane: &Pane, dir: &std::path::Path, name: &str) -> String {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut screen = Buffer::empty(area);
+        ui.draw_pane(&mut screen, area, pane);
+        let mut text = String::from("HARNESS, NOT PRODUCTION BINARY PATH — production Ui::draw_pane\n");
+        for row in screen.content.chunks(120) {
+            text.push_str(&row.iter().map(|cell| cell.symbol()).collect::<String>());
+            text.push('\n');
+        }
+        std::fs::write(dir.join(format!("{name}.txt")), &text).unwrap();
+        text
+    }
+    let message: ThreadTimelineEvent = serde_json::from_value(serde_json::json!({
+        "id":"message/preview", "actor_id":"agent/atlas", "accepted_at_unix_ms":1_000,
+        "kind":"message", "content":"Please review the sensor calibration.", "thread_quote_id":null
+    })).unwrap();
+    ui.threads.window(
+        ThreadInterest::Timeline("thread/worker".into()), snapshot(), true,
+        ThreadCollectionRows::Timeline(vec![message]), vec![],
+        vec!["message/preview".into()], false,
+    );
+    ui.threads.hover(Some("message/preview"));
+    assert!(capture(&mut ui, &pane, &dir, "harness-hover-reply").contains("↩ Reply"));
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.paste("Keep this unsent draft.".into());
+    let focused = capture(&mut ui, &pane, &dir, "harness-focused-composer");
+    assert!(focused.contains("Keep this unsent draft.") && focused.contains("Send"));
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Rename("thread/worker".into())));
+    assert!(capture(&mut ui, &pane, &dir, "harness-rename").contains("Worker test"));
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Close("thread/worker".into())));
+    let close = ui.threads.writes().pop().expect("production close action");
+    assert!(matches!(close.mutation, Mutation::Close));
+    capture(&mut ui, &pane, &dir, "harness-close-pending");
+
+    let item = "attention/preview";
+    let inbox = Pane::Home(Some(item.into()));
+    let context = ThreadInterest::Inbox { source: "agent/atlas".into(), episode: "claim/preview".into() };
+    ui.threads.origins.insert(item.into(), Origin {
+        context: context.clone(), agent: "agent/atlas".into(),
+        title: "Calibration review".into(), snapshot: snapshot().id,
+    });
+    ui.threads.lists.insert(context.clone(), Vec::new());
+    ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
+    ui.paste("First message stays inline before sending.".into());
+    assert!(capture(&mut ui, &inbox, &dir, "harness-inline-first-message").contains("First message stays inline"));
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let canonical = Input::Start { item: item.into(), episode: "claim/preview".into() }.key();
+    ui.conversation_state.drafts.insert(format!("chat:{item}"), "Different recovered draft".into());
+    let before = ui.conversation_state.drafts.clone();
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
+    assert_eq!(ui.conversation_state.drafts, before);
+    assert!(capture(&mut ui, &inbox, &dir, "harness-draft-collision").contains("Both drafts are kept"));
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::CombineSavedDrafts(item.into())));
+    assert!(ui.conversation_state.drafts[&canonical].contains("Different recovered draft"));
+    assert!(ui.conversation_state.drafts[&canonical].contains("First message stays inline"));
+    capture(&mut ui, &inbox, &dir, "harness-draft-recovered");
+    assert!(ui.threads.writes().is_empty(), "draft recovery never sends");
+    println!("HARNESS evidence: {}", dir.display());
+}
