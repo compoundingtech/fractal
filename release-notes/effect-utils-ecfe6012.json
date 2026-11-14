@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Bump the effect-utils flake input to ecfe6012 for the dotfiles single-SHA rule",
+  "summary": "Bump the effect-utils flake input to 92766f37 for the dotfiles single-SHA rule",
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
