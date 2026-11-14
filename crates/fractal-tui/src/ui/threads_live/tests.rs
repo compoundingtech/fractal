@@ -1858,7 +1858,7 @@ fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_
     let timeline = ThreadInterest::Timeline("thread/worker".into());
     threads.failure(
         timeline.clone(),
-        "Live thread updates paused: shared live-window budget; resumes automatically".into(),
+        THREAD_UPDATES_PAUSED.into(),
         false,
     );
     let render = |threads: &Threads| {
@@ -1877,7 +1877,7 @@ fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_
             .join("\n")
     };
     let paused = render(&threads);
-    assert!(paused.contains("Live thread updates paused"));
+    assert!(paused.contains(PAUSED_NOTICE));
     assert!(paused.contains("Keep this local draft"));
     assert!(!paused.contains("Loading thread"));
     threads.window(
@@ -1890,7 +1890,7 @@ fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_
         false,
     );
     let resumed = render(&threads);
-    assert!(!resumed.contains("Live thread updates paused"));
+    assert!(!resumed.contains(PAUSED_NOTICE));
     assert!(resumed.contains("Keep this local draft"));
 }
 

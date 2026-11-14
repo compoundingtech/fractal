@@ -16,7 +16,7 @@ mod terminal;
 mod read_positions;
 pub mod tree;
 mod thread_windows;
-pub use thread_windows::{ThreadAccess, ThreadInterest};
+pub use thread_windows::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest};
 use thread_windows::ThreadWindows;
 #[cfg(test)]
 mod read_positions_tests;

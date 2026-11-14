@@ -47,7 +47,9 @@ impl ThreadSubscription {
 // Same socket limit enforced by client_v0::COLLECTION_MAX_SUBSCRIPTIONS.
 pub(super) const SOCKET_SLOTS: usize = 16;
 const MAX_THREAD_IDS: usize = 4;
-const PAUSED: &str = "Live thread updates paused: this view exceeds the shared live-window budget. Close another live view or collapse a thread; updates resume automatically.";
+/// Full explanation for a paused thread window. Clients compare against it to show the
+/// paused state under the thread instead of a generic failure.
+pub const THREAD_UPDATES_PAUSED: &str = "Some threads aren't updating live: too many live views are open at once. Collapse a thread or close another view; updates resume automatically.";
 
 #[derive(Default)]
 pub(super) struct ThreadWindows {
@@ -141,7 +143,7 @@ impl ThreadWindows {
             updates
                 .send(Update::ThreadWindowFailed {
                     interest: interest.clone(),
-                    message: PAUSED.into(),
+                    message: THREAD_UPDATES_PAUSED.into(),
                     permanent: false,
                 })
                 .map_err(|_| ClientError::Protocol("Thread update receiver closed".into()))?;
@@ -412,7 +414,7 @@ mod socket_budget_tests {
                     interest: ThreadInterest::Timeline(id),
                     message,
                     permanent: false,
-                } if message.contains("paused") => Some(id),
+                } if message == super::THREAD_UPDATES_PAUSED => Some(id),
                 _ => None,
             })
             .collect();

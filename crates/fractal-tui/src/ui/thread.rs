@@ -62,7 +62,13 @@ pub enum Record<'a> {
 
 #[derive(Default)]
 pub struct State<'a> {
+    /// The requested disclosure. An open thread draws `▾` even while its history is paused
+    /// or loading, so the chevron never claims a collapse the user did not ask for.
     pub open: bool,
+    /// The open thread has no history to draw yet; only the heading and notice render.
+    pub awaiting_history: bool,
+    /// One status line drawn directly under this thread's own heading.
+    pub notice: Option<&'a str>,
     pub standalone: bool,
     pub draft: &'a str,
     pub cursor: Option<usize>,
@@ -208,6 +214,12 @@ pub fn panel(
         if !state.open {
             return doc;
         }
+    }
+    if let Some(notice) = state.notice {
+        doc.wrap(&[text::run(notice, theme::dim())], width);
+    }
+    if state.awaiting_history {
+        return doc;
     }
 
     if state.loading_earlier {
@@ -618,5 +630,37 @@ mod tests {
                 .iter()
                 .any(|target| matches!(target.hit, Tap::Reply { .. }))
         );
+    }
+
+    #[test]
+    fn requested_open_thread_without_history_keeps_open_chevron_and_notice_under_heading() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Sensor follow-up",
+            closed: false,
+            message_count: 0,
+            unread: false,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                awaiting_history: true,
+                notice: Some("Paused · collapse a thread to resume live updates"),
+                ..editable()
+            },
+            80,
+        );
+        let lines: Vec<_> = doc.lines.iter().map(Line::to_string).collect();
+        assert_eq!(
+            lines,
+            [
+                "▾ Sensor follow-up · 0 messages",
+                "Paused · collapse a thread to resume live updates",
+            ],
+            "the chevron follows the requested open state and the notice follows its own heading"
+        );
+        assert_eq!(doc.targets[0].hit, Tap::Toggle(summary.id.to_owned()));
     }
 }
