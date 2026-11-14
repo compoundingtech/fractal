@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { markdownWasmInputs } from './markdown-wasm-inputs.mjs'
 
 const kit = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -14,6 +15,7 @@ const crate = resolve(kit, 'markdown-wasm')
 const output = resolve(kit, 'src/assistant-ui/composition/markdown-pulldown.generated.wasm')
 const manifest = resolve(kit, 'src/assistant-ui/composition/markdown-pulldown.generated.json')
 const LICENSES = { 'pulldown-cmark': 'MIT', bitflags: 'MIT OR Apache-2.0', memchr: 'Unlicense OR MIT', unicase: 'MIT OR Apache-2.0', 'fractal-markdown-wasm': 'repository license' }
+const inputs = await markdownWasmInputs(resolve(kit, '../..'))
 
 // The module must not remember the machine that built it: rustc bakes the source paths of panic
 // locations into the binary, so every absolute prefix it can embed — the cargo home (and with it
@@ -26,8 +28,10 @@ const remapped = [
   [resolve(kit, '../..'), '/repository'],
   [crate, '/crate'],
 ].map(([from, to]) => `--remap-path-prefix=${from}=${to}`)
-const inherited = (process.env.CARGO_ENCODED_RUSTFLAGS ?? process.env.RUSTFLAGS ?? '').split(/\s+/).filter(Boolean)
-const encodedRustflags = [...remapped, ...inherited].join('\t')
+const inherited = process.env.CARGO_ENCODED_RUSTFLAGS !== undefined
+  ? process.env.CARGO_ENCODED_RUSTFLAGS.split('\x1f').filter(Boolean)
+  : (process.env.RUSTFLAGS ?? '').split(/\s+/).filter(Boolean)
+const encodedRustflags = [...inherited, ...remapped].join('\x1f')
 execFileSync('cargo', ['build', '--release', '--locked', '--target', 'wasm32-unknown-unknown'], { cwd: crate, stdio: 'inherit', env: { ...process.env, CARGO_ENCODED_RUSTFLAGS: encodedRustflags } })
 const bytes = await readFile(resolve(crate, 'target/wasm32-unknown-unknown/release/fractal_markdown_wasm.wasm'))
 await writeFile(output, bytes)
