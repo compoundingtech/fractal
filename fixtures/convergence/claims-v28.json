@@ -6252,6 +6252,63 @@
     "projection": "owned-sets",
     "wakes_reconciler": true
   },
+  "person.attention-seen": {
+    "kind": "person.attention-seen",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "attention_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "append",
+    "projection": "person-attention-controls",
+    "wakes_reconciler": false
+  },
+  "person.attention-snoozed": {
+    "kind": "person.attention-snoozed",
+    "subjects": [
+      "person"
+    ],
+    "fields": {
+      "attention_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "until_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "nullable": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "append",
+    "projection": "person-attention-controls",
+    "wakes_reconciler": false
+  },
   "person.deadline-clock-set": {
     "kind": "person.deadline-clock-set",
     "subjects": [

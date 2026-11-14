@@ -2082,6 +2082,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
+        | "attention-dismiss-unsupported"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -5114,6 +5115,10 @@ fn client_attention_resources_from_items(
         }
         resources.push(resource);
     }
+    // Each row's person's own controls: when they first saw it and until when they put it off.
+    // A control claim folds the list again like any other claim attention reads, so watchers
+    // see it.
+    store.overlay_attention_controls(&mut resources)?;
     Ok(resources)
 }
 
