@@ -220,8 +220,11 @@ can be skipped. Do not repeat a skipped question in that onboarding run.
 
 Check the user service with `fractal service status`. On Linux, lingering lets it start
 before login after a reboot; when unavailable, setup prints the exact loginctl
-command for the person. On macOS, inspect `fractal service permissions` and explain the
-permissions the person must grant. A detached daemon fallback stops on reboot.
+command for the person. On macOS, inspect `fractal service permissions` and explain
+the unprotected-workspace boundary, not a broad privacy approval flow. Keep agent
+work outside Desktop, Documents, Downloads, iCloud Drive and removable volumes;
+an access denial or privacy prompt is not permission to grant broad daemon or
+agent access. A detached daemon fallback stops on reboot.
 Never run sudo or try to automate a password or operating-system permission prompt.
 
 The phone pairs through `fractal devices`; it reads and acts through a paired machine,

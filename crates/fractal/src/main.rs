@@ -2620,12 +2620,8 @@ enum ServiceCommand {
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
-    /// Explain the one-time macOS permissions for service-owned work.
-    Permissions {
-        /// Open the matching System Settings pages on macOS.
-        #[arg(long)]
-        open: bool,
-    },
+    /// Explain the macOS protected-folder boundary for agent work.
+    Permissions,
     /// Restart fractal after configuration or binary changes.
     Restart {
         #[arg(long)]
@@ -9479,7 +9475,7 @@ async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()>
     if args.exec {
         let st = match args.st {
             Some(st) => std::path::absolute(st)?,
-            None => std::env::current_exe().context("find this st executable")?,
+            None => std::env::current_exe().context("find this Fractal executable")?,
         };
         let pty_root = std::path::absolute(
             config
@@ -13721,22 +13717,18 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
                 Ok(())
             }
         }
-        ServiceCommand::Permissions { open } => {
+        ServiceCommand::Permissions => {
             if json_output {
                 let guidance = fractal_daemon::service::permissions_guidance()?;
-                if open {
-                    fractal_daemon::service::open_permissions_settings()?;
-                }
                 print_value(
                     &serde_json::json!({
                         "platform": std::env::consts::OS,
                         "guidance": guidance,
-                        "settings_opened": open && cfg!(target_os = "macos"),
                     }),
                     true,
                 )
             } else {
-                fractal_daemon::service::permissions(open)
+                fractal_daemon::service::permissions()
             }
         }
         ServiceCommand::Restart { config } => {
