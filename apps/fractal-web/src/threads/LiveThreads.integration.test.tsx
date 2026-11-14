@@ -207,3 +207,22 @@ it('replaces the composer with a read-only note and keeps lifecycle changes to o
     expect(view.host.querySelector('textarea')).toBeNull()
   } finally { await view.dispose() }
 })
+
+it.each([['lost', true], ['held elsewhere', false]] as const)('focuses a thread tab composer only when focus was %s', async (_, lost) => {
+  const outside = document.createElement('button')
+  document.body.append(outside)
+  if (lost) outside.blur(); else outside.focus()
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    actions: ['thread.reply'],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'message', id: 'message/first', actor_id: agent, content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('textarea')).not.toBeNull())
+    expect(document.activeElement).toBe(lost ? view.host.querySelector('textarea') : outside)
+  } finally {
+    await view.dispose()
+    outside.remove()
+  }
+})

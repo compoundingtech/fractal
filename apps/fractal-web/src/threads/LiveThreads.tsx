@@ -258,17 +258,23 @@ function PendingStartPanel({ source, start, onSent }: {
   </ThreadPanel>
 }
 
+/**
+ * `true` focuses the composer once it mounts. `'when-lost'` does so only when nothing holds focus, as when the
+ * control that opened this thread's tab unmounted with the view it lived in; switching tabs leaves focus alone.
+ */
+type FocusComposer = boolean | 'when-lost'
+
 export function LiveThreadPane({ threadId }: { readonly threadId: string }) {
   const source = useDataSource().threads
   return source === undefined ? <p>This connection does not support threads.</p>
-    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} /></div>
+    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} focusComposer="when-lost" /></div>
 }
 
 function ThreadById({ source, threadId, embedded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly threadId: string
   readonly embedded?: boolean
-  readonly focusComposer?: boolean
+  readonly focusComposer?: FocusComposer
 }) {
   const { read, upgradeRequired } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
@@ -297,7 +303,7 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
   /** The row opens the dedicated tab instead of expanding in place, when a tab can be opened. */
   readonly opensInTab?: boolean
   readonly initiallyExpanded?: boolean
-  readonly focusComposer?: boolean
+  readonly focusComposer?: FocusComposer
 }) {
   const { actions } = useAtomValue(source.access)
   const [expanded, setExpanded] = React.useState(!embedded || initiallyExpanded)
@@ -433,7 +439,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
   /** The connection holds the reply grant; the composer still waits for the thread's own observation. */
   readonly canReply: boolean
   readonly observed: boolean
-  readonly focusComposer: boolean
+  readonly focusComposer: FocusComposer
   readonly timelineRef: React.Ref<HTMLDivElement>
 }) {
   const [, setDraft] = useAtom(source.draft(thread.id))
@@ -441,10 +447,10 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
   const didFocus = React.useRef(false)
   const attachInput = React.useCallback((element: HTMLTextAreaElement | null) => {
     input.current = element
-    if (focusComposer && element !== null && !didFocus.current) {
-      didFocus.current = true
-      element.focus()
-    }
+    if (element === null || didFocus.current) return
+    didFocus.current = true
+    // Refs attach after the commit removed the old view, so a lost focus already reads as the body here.
+    if (focusComposer === true || (focusComposer === 'when-lost' && (document.activeElement === null || document.activeElement === document.body))) element.focus()
   }, [focusComposer])
   const editable = canReply && observed
   const quote = editable ? (event: ThreadMessageEvent, sender: string) => {
