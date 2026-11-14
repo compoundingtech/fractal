@@ -1897,6 +1897,14 @@ impl Ui {
         }
     }
 
+    fn complete_thread(&mut self, receipt: threads_live::Receipt) {
+        if let Some(error) = self.threads.complete(receipt, &mut self.conversation_state.drafts) {
+            self.flash_as(Severity::Warn, error);
+        } else if let Some(message) = self.threads.take_completion_notice() {
+            self.flash_as(Severity::Info, message);
+        }
+    }
+
     /// Put a message st refused back in the box it was sent from, with its images, reply and
     /// dictation mark, so the person can change it and send it again. Only when the box is
     /// empty: what was typed while the send was out is theirs, and the failed message stays in

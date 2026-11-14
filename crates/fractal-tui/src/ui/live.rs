@@ -1162,9 +1162,8 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::ThreadWrite(generation, receipt) => {
-                    if generation == resources_generation
-                        && let Some(error) = ui.threads.complete(receipt, &mut ui.conversation_state.drafts) {
-                        ui.flash_as(super::Severity::Error, error);
+                    if generation == resources_generation {
+                        ui.complete_thread(receipt);
                     }
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
@@ -1532,12 +1531,12 @@ pub fn run(context: Context) -> Result<()> {
         }
         for mut write in ui.threads.writes() {
             if !extras.live {
-                if let Some(error) = ui.threads.complete(write.offline(), &mut ui.conversation_state.drafts) { ui.flash_as(super::Severity::Error, error); }
+                ui.complete_thread(write.offline());
                 continue;
             }
             let writer = client.clone();
             if let Err(error) = ui.threads.bind(&mut write, writer.clone()) {
-                if let Some(error) = ui.threads.complete(write.not_sent(error), &mut ui.conversation_state.drafts) { ui.flash_as(super::Severity::Error, error); }
+                ui.complete_thread(write.not_sent(error));
                 continue;
             }
             let tx = fetched_tx.clone();

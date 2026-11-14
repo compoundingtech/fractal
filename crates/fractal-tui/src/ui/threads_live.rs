@@ -385,6 +385,7 @@ pub(super) struct Threads {
     hover: Option<String>,
     /// Why the last Enter or Send queued nothing, until the shell says it (`take_refusal`).
     refusal: Option<String>,
+    completion_notice: Option<String>,
 }
 
 impl Threads {
@@ -2133,6 +2134,7 @@ impl Threads {
         receipt: Receipt,
         texts: &mut HashMap<String, String>,
     ) -> Option<String> {
+        self.completion_notice = None;
         let Receipt {
             write,
             confirmation,
@@ -2204,6 +2206,15 @@ impl Threads {
         if let Some(summary) = summary {
             self.put_summary(summary);
         }
+        self.completion_notice = match &write.mutation {
+            Mutation::Close => self.summary(&write.id).map(|thread| format!(
+                "Closed “{}” · {} reopens", thread.title,
+                if Self::alt_chords(&write.host) { "alt+z" } else { "z" })),
+            Mutation::Reopen => self.summary(&write.id)
+                .map(|thread| format!("Reopened “{}”", thread.title)),
+            Mutation::Rename(title) => Some(format!("Renamed to “{title}”")),
+            _ => None,
+        };
         if let Some(key) = &write.input {
             self.drafts.remove(key);
             texts.remove(key);
@@ -2241,6 +2252,10 @@ impl Threads {
             _ => {}
         }
         None
+    }
+
+    pub(super) fn take_completion_notice(&mut self) -> Option<String> {
+        self.completion_notice.take()
     }
 }
 

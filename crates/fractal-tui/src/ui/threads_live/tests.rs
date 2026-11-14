@@ -2931,3 +2931,55 @@ fn thread_preview_evidence() {
     capture(&mut ui, &inbox, &dir, "harness-start-pending");
     println!("HARNESS evidence: {}", dir.display());
 }
+
+#[test]
+fn lifecycle_success_flashes_only_after_server_confirmation_with_host_keys() {
+    for pane in [Pane::Agent(Some("agent/example/atlas/builder".into())),
+        Pane::Thread("thread/worker".into()), Pane::Home(Some("thread/worker".into()))] {
+        for action in ["close", "reopen", "rename"] {
+            let mut ui = writable_thread_in(&pane);
+            if action == "reopen" {
+                ui.threads = observed_threads(ThreadState::Closed);
+            }
+            let title = ui.threads.summary("thread/worker").unwrap().title.clone();
+            let tap = match action {
+                "close" => thread::Tap::Close("thread/worker".into()),
+                "reopen" => thread::Tap::Reopen("thread/worker".into()),
+                _ => thread::Tap::Rename("thread/worker".into()),
+            };
+            ui.click(Hit::Thread(pane.key(), tap));
+            if action == "rename" {
+                ui.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                ui.paste("A clearer title".into());
+                ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            let write = ui.threads.writes().pop().expect("lifecycle action queued");
+            assert!(ui.flash.is_none(), "no optimistic success");
+            let repeated = write.clone();
+            ui.complete_thread(Receipt { write, confirmation: Confirmation::Applied(None) });
+            let expected = match action {
+                "close" => format!("Closed “{title}” · {} reopens",
+                    if matches!(pane, Pane::Home(_)) { "z" } else { "alt+z" }),
+                "reopen" => format!("Reopened “{title}”"),
+                _ => "Renamed to “A clearer title”".into(),
+            };
+            assert_eq!(ui.flash.as_ref().map(|(message, _)| message), Some(&expected));
+            assert_eq!(ui.flash_severity, Some(super::super::Severity::Info));
+            ui.flash = None;
+            ui.complete_thread(Receipt { write: repeated, confirmation: Confirmation::Applied(None) });
+            assert!(ui.flash.is_none(), "duplicate receipt is not another success");
+        }
+    }
+}
+
+#[test]
+fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
+    let pane = Pane::Thread("thread/worker".into());
+    let mut ui = writable_thread_in(&pane);
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Close("thread/worker".into())));
+    let write = ui.threads.writes().pop().unwrap();
+    ui.complete_thread(Receipt { write, confirmation: Confirmation::Rejected });
+    assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
+    assert_eq!(ui.flash.as_ref().unwrap().0, "The original thread action was rejected");
+    assert!(ui.threads.take_completion_notice().is_none());
+}
