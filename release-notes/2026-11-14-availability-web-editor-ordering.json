@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal web availability edits no longer overwrite a newer read with an older write answer",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim or client API change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Availability and note edits stay serialized. When a focus, visibility or reconnection read is requested while an edit is in flight, Settings reads availability again after the edit is answered and shows that read instead of the edit's answer; the editor stays pending until it lands."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Returning to the page reads the current state."
+  }
+}
