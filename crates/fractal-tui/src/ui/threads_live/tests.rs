@@ -2119,6 +2119,7 @@ fn selected_thread_shortcuts_still_dispatch_from_agent_list_focus() {
         let mut ui = super::super::Ui::new(super::super::demo::test_world());
         let pane = Pane::Agent(Some("agent/example/atlas/builder".into()));
         ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+        let was_open = matches!(state, ThreadState::Open);
         ui.threads = observed_threads(state);
         ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
         ui.threads.selected.insert(pane.key(), "thread/worker".into());
@@ -2128,8 +2129,8 @@ fn selected_thread_shortcuts_still_dispatch_from_agent_list_focus() {
             assert!(matches!(ui.threads.focused, Some((_, Input::Rename(_)))));
         } else {
             let write = ui.threads.writes().pop().expect("Z lifecycle dispatch from list focus");
-            assert!(matches!((state, write.mutation),
-                (ThreadState::Open, Mutation::Close) | (ThreadState::Closed, Mutation::Reopen)));
+            assert!(matches!((was_open, write.mutation),
+                (true, Mutation::Close) | (false, Mutation::Reopen)));
         }
     }
 }
