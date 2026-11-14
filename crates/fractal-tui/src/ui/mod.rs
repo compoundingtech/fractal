@@ -9,6 +9,7 @@ pub mod adapt;
 mod alerts;
 mod answers;
 mod attach;
+mod availability;
 mod clickable;
 mod content;
 mod context;
@@ -310,7 +311,24 @@ pub enum Effect {
         conversation: String,
         at_ms: i64,
     },
+    /// Put one of the person's attention rows off until `until`, an RFC 3339 instant, or bring
+    /// it back with `None` (`attention.snooze`): every device of theirs hides it meanwhile.
+    Snooze {
+        id: String,
+        until: Option<String>,
+    },
+    /// Set an ask aside with the person's own dismissal (`attention.dismiss`): its asker reads
+    /// `dismissed`, with `text` when the person wrote some.
+    Dismiss {
+        id: String,
+        text: Option<String>,
+    },
 }
+
+/// How long l puts an item off for.
+pub(crate) const SNOOZE: chrono::TimeDelta = chrono::TimeDelta::hours(3);
+/// The l button's words, naming how long [`SNOOZE`] is.
+pub(crate) const SNOOZE_LABEL: &str = "Remind me in 3h";
 
 /// How much longer than the usual flash a refusal's reason stays up.
 pub(crate) const FLASH_REFUSAL: Duration = Duration::from_secs(20);
@@ -430,6 +448,8 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    /// The person's own availability and directive note, as last read.
+    availability: availability::Availability,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -514,8 +534,6 @@ pub struct Ui {
     new_mission: Option<([String; 4], usize)>,
     /// A device awaiting a confirmed revoke.
     revoke: Option<String>,
-    /// Home items put off until later. Demo only: kept in memory on this machine.
-    snoozed: HashSet<String>,
     /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
     pub(crate) drafts_path: Option<std::path::PathBuf>,
     /// Where the person last read each conversation: st's positions merged with this device's,
@@ -858,7 +876,7 @@ impl Ui {
         let mut resource_sidebar = resource_sidebar::Sidebar::default();
         resource_sidebar.observe(&world);
         Self {
-            tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
+            tab_statuses: glass::TabStatuses::new(&world, &HashSet::new()),
             world,
             selected: [0; 6],
             keyboard_enhanced: false,
@@ -877,6 +895,7 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            availability: availability::Availability::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -921,7 +940,6 @@ impl Ui {
             leader: false,
             new_mission: None,
             revoke: None,
-            snoozed: HashSet::new(),
             drafts_path: None,
             reads: read_store::ReadPositions::default(),
             drafts_saved: HashMap::new(),
@@ -963,7 +981,8 @@ impl Ui {
         match effect {
             Effect::Attention { id, .. }
             | Effect::LaunchRevise { id, .. }
-            | Effect::Reply { id, .. } => {
+            | Effect::Reply { id, .. }
+            | Effect::Dismiss { id, .. } => {
                 self.acted.insert(id.clone());
             }
             _ => {}
@@ -1617,6 +1636,12 @@ impl Ui {
         if self.paste_into_palette(&first) {
             return;
         }
+        if self.focused_pane() == Some(Pane::Availability)
+            && let Some(typed) = self.availability.typed_mut()
+        {
+            typed.push_str(&first);
+            return;
+        }
         if self.mission_form_focused()
             && let Some((fields, focus)) = self.new_mission.as_mut()
         {
@@ -1811,7 +1836,7 @@ impl Ui {
 
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
-            0 => screens::home_list(&self.world, &self.snoozed, &self.closed),
+            0 => screens::home_list(&self.world, &self.closed),
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
             1 => screens::agents_list(&self.world, self.spinner(), width),
             2 if self.tree => screens::missions_tree(&self.world, self.spinner(), self.system),
@@ -2627,6 +2652,7 @@ impl Ui {
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
+            Pane::Availability => self.availability.page(self.live, width, &chrono::Local::now()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
     }
@@ -4302,6 +4328,10 @@ impl Ui {
             self.terminal_selecting = false;
             self.cancel_drag();
         }
+        // Back from another window: what was decided there may have changed availability.
+        if event == Event::FocusGained {
+            self.availability.refresh();
+        }
         let focused = self.input_terminal();
         match event {
             Event::Key(key) => self.key(shifted(key)),
@@ -5012,6 +5042,64 @@ impl Ui {
         }
     }
 
+    /// l: put the focused item off for [`SNOOZE`] on every device of the person, or bring one
+    /// already put off back now. st keeps it; the next attention frame hides or shows it here.
+    fn snooze(&mut self) {
+        let Some(item) = self.current_item() else {
+            return;
+        };
+        let (id, back) = (item.id.clone(), item.snoozed(self.world.at));
+        let until = (!back).then(|| chrono::Utc::now() + SNOOZE);
+        let hours = SNOOZE.num_hours();
+        if self.live {
+            self.effects.push(Effect::Snooze {
+                id,
+                until: until.map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            });
+            self.flash(if back { "Bringing it back…".to_owned() } else { format!("Putting it off for {hours}h…") });
+        } else {
+            // The demo's world is its st: keep the snooze on its row, as st would.
+            if let Load::Ready(items) = &mut self.world.attention
+                && let Some(item) = items.iter_mut().find(|item| item.id == id)
+            {
+                item.snoozed_until = until.map(|until| until.fixed_offset());
+            }
+            self.refresh_tab_statuses();
+            let index = self.selected[0];
+            self.select(index);
+            self.flash(if back {
+                "Brought back · demo: nothing was sent".to_owned()
+            } else {
+                format!("Put off for {hours}h · demo: nothing was sent")
+            });
+        }
+    }
+
+    /// What dismissing request `id` says to its asker: every note on its answers as
+    /// `label: note`, a line each, so no note the person wrote is lost; `None` when they wrote
+    /// none. Only for a request without its own `dismiss` answer, which is answered instead.
+    fn dismissal_text(&self, id: &str) -> Option<String> {
+        let Some(AttentionKind::Request { structured: Some(request), .. }) =
+            self.world.attention.items().iter().find(|item| item.id == id).map(|item| &item.kind)
+        else {
+            return None;
+        };
+        let text = self
+            .option_notes(id, None)
+            .iter()
+            .map(|(answer, note)| {
+                let label = request
+                    .answers
+                    .iter()
+                    .find(|option| &option.id == answer)
+                    .map_or(answer.as_str(), |option| option.label.as_str());
+                format!("{label}: {note}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
+    }
+
     fn current_kind(&self) -> Option<&'static str> {
         let id = self.attention_focus()?;
         self.world
@@ -5198,15 +5286,7 @@ impl Ui {
                     )),
                     (_, 'g') => self.go_to_subject(),
                     (_, 't') => self.start_chat(),
-                    ("message", 'l') => {
-                        if let Some(id) = self.selected_id() {
-                            self.snoozed.insert(id);
-                            self.refresh_tab_statuses();
-                            let index = self.selected[0];
-                            self.select(index);
-                            self.flash("Put off until later · demo, this machine only");
-                        }
-                    }
+                    (_, 'l') => self.snooze(),
                     ("request", 'c') => {
                         if self.structured_request().is_some() {
                             self.start_answer_note();
@@ -6013,31 +6093,55 @@ impl Ui {
         {
             return;
         }
-        if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
-            // r closes a request that needs nothing from the person; the step continues. A
-            // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let request = if action == 'r' { self.structured_request() } else { None };
-            let named = request.as_ref().is_some_and(|(_, request)| !request.answers.is_empty());
-            let chosen = request.as_ref()
-                .and_then(|(_, request)| request.answers.iter().find(|answer| answer.id == "dismiss"))
-                .map(|answer| answer.id.as_str());
-            let answer = match action {
-                'y' => "Yes",
-                'n' => "No",
-                _ if named => "Dismissed without an answer.",
-                _ => "Nothing for me to do here.",
-            };
+        if action == 'r' && self.current_kind() == Some("request") {
+            // A request that offers its own `dismiss` answer is answered with it: that answer is
+            // the asker's, so st takes it as work.done, with its note and the other notes.
+            let own = self
+                .structured_request()
+                .is_some_and(|(_, request)| request.answers.iter().any(|answer| answer.id == "dismiss"));
+            if own {
+                let answer = "Dismissed without an answer.";
+                if self.live {
+                    let reason = self
+                        .conversation_state
+                        .drafts
+                        .get(&format!("answer:{id}:dismiss"))
+                        .cloned()
+                        .unwrap_or_else(|| answer.into());
+                    let option_notes = self.option_notes(&id, Some("dismiss"));
+                    self.effects.push(Effect::Attention {
+                        id,
+                        action: "work.done".into(),
+                        reason: Some(reason),
+                        answer: Some("dismiss".into()),
+                        option_notes,
+                    });
+                    self.flash(format!("Answering “{answer}”…"));
+                } else {
+                    self.flash(format!("Answered “{answer}” · demo: nothing was sent"));
+                }
+                return;
+            }
+            // Any other request is set aside with the person's own dismissal
+            // (`attention.dismiss`): its asker reads `dismissed`, and st resumes what waits on it.
+            let text = self.dismissal_text(&id);
             if self.live {
-                let reason = chosen
-                    .and_then(|chosen| self.conversation_state.drafts.get(&format!("answer:{id}:{chosen}")))
-                    .cloned()
-                    .unwrap_or_else(|| answer.into());
-                let option_notes = self.option_notes(&id, chosen);
+                self.effects.push(Effect::Dismiss { id, text });
+                self.flash("Dismissing…");
+            } else {
+                self.flash("Dismissed · demo: nothing was sent");
+            }
+            return;
+        }
+        if matches!(action, 'y' | 'n') && self.current_kind() == Some("request") {
+            let answer = if action == 'y' { "Yes" } else { "No" };
+            if self.live {
+                let option_notes = self.option_notes(&id, None);
                 self.effects.push(Effect::Attention {
                     id,
                     action: "work.done".into(),
-                    reason: Some(reason),
-                    answer: named.then(|| "dismiss".to_owned()),
+                    reason: Some(answer.into()),
+                    answer: None,
                     option_notes,
                 });
                 self.flash(format!("Answering “{answer}”…"));
@@ -6586,6 +6690,9 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Availability(letter) => {
+                self.availability_press(letter);
+            }
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -7593,6 +7700,7 @@ mod tests {
         world.attention = Load::Ready(vec![Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7882,6 +7990,7 @@ mod tests {
         let asks = |id: &str| Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7933,6 +8042,7 @@ mod tests {
         let asks = |id: &str| Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -8245,6 +8355,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -8331,6 +8442,7 @@ mod tests {
             let item = Attention {
                 deadline: None,
                 requested_at: None,
+                snoozed_until: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8372,13 +8484,13 @@ mod tests {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }
         assert!(!screen.contains("Choose an answer"), "{screen}");
-        // x then y closes it with word to its asker, as a plain request does.
+        // x then y sets it aside with st's own dismissal (`attention.dismiss`), as a plain
+        // request is: its asker reads `dismissed`.
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(frame(&ui, 140, 50).join("\n").contains("tell Chief of Staff there is nothing"));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, reason: Some(reason), .. }]
-                if id == "attention/feedback" && action == "work.done" && reason.contains("Nothing for me")),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if id == "attention/feedback"),
             "{:?}",
             ui.effects
         );
@@ -8407,8 +8519,7 @@ mod tests {
         assert!(!confirmation.contains("Dismiss without answering"), "{confirmation}");
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, answer: Some(answer), .. }]
-                if id == "attention/feedback" && action == "work.done" && answer == "dismiss"),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if id == "attention/feedback"),
             "{:?}",
             ui.effects
         );
@@ -8472,6 +8583,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8577,6 +8689,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8671,6 +8784,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8748,6 +8862,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8801,6 +8916,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -9057,6 +9173,7 @@ mod tests {
                 Attention {
                     deadline: None,
                     requested_at: None,
+                    snoozed_until: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
@@ -9101,7 +9218,7 @@ mod tests {
             ui.attention_focus().unwrap()
         };
         let x = |ui: &mut Ui| ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        // A request asks first, then tells its asker there is nothing to do.
+        // A request asks first, then sets it aside with st's own dismissal (`attention.dismiss`).
         let request = pick(&mut ui, "request");
         x(&mut ui);
         assert!(ui.effects.is_empty());
@@ -9112,8 +9229,7 @@ mod tests {
         );
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, .. }]
-                if *id == request && action == "work.done"),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if *id == request),
             "{:?}",
             ui.effects
         );
@@ -9847,22 +9963,66 @@ mod tests {
         assert!(ui.voice.is_none());
     }
 
+    /// The demo's world is its st: l keeps the snooze on the row, which leaves Home and the
+    /// alert count until it ends.
     #[test]
-    fn remind_me_later_hides_a_message_and_the_badge_counts_what_is_left() {
+    fn l_puts_an_item_off_and_the_badge_counts_what_is_left() {
         let mut ui = Ui::new(demo::test_world());
-        let index = ui.ids().iter().position(|id| id == "attention/6").unwrap();
+        let alerts = ui.world.attention.items().iter().filter(|item| item.is_alert()).count();
+        let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
         ui.select(index);
         press(&mut ui, KeyCode::Char('l'));
-        assert!(!ui.ids().contains(&"attention/6".to_owned()));
-        let alerts = ui
-            .world
-            .attention
-            .items()
-            .iter()
-            .filter(|item| item.is_alert() && !ui.snoozed.contains(&item.id))
-            .count();
-        let top = frame(&ui, 150, 30)[0].clone();
-        assert!(top.contains(&format!("◆ {alerts} alert")), "{top}");
+        assert!(!ui.ids().contains(&"attention/1".to_owned()));
+        let item = ui.world.attention.items().iter().find(|item| item.id == "attention/1").unwrap();
+        let left = item.snoozed_until.unwrap().signed_duration_since(chrono::Utc::now());
+        assert!(left > SNOOZE - chrono::TimeDelta::minutes(1) && left <= SNOOZE, "{left}");
+        let screen = frame(&ui, 150, 30);
+        assert!(screen[0].contains(&format!("◆ {} alert", alerts - 1)), "{}", screen[0]);
+        assert!(screen.join("\n").contains("1 put off until later"), "{}", screen.join("\n"));
+    }
+
+    /// Live, l asks st (`attention.snooze`) and hides nothing itself: the row goes when st says
+    /// it is put off, and l on it then brings it back.
+    #[test]
+    fn l_asks_st_to_snooze_and_the_row_follows_what_st_says() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.live = true;
+        let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
+        ui.select(index);
+        press(&mut ui, KeyCode::Char('l'));
+        let [Effect::Snooze { id, until: Some(until) }] = ui.effects.as_slice() else {
+            panic!("{:?}", ui.effects);
+        };
+        assert_eq!(id, "attention/1");
+        let until = chrono::DateTime::parse_from_rfc3339(until).unwrap();
+        let left = until.signed_duration_since(chrono::Utc::now());
+        assert!(left > SNOOZE - chrono::TimeDelta::minutes(1) && left <= SNOOZE, "{left}");
+        assert!(ui.ids().contains(&"attention/1".to_owned()), "nothing is hidden before st says so");
+        ui.effects.clear();
+        // st's next frame carries the snooze: the row leaves Home and is counted as put off.
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            items.iter_mut().find(|item| item.id == "attention/1").unwrap().snoozed_until = Some(until);
+        }
+        ui.set_world(world.clone());
+        assert!(!ui.ids().contains(&"attention/1".to_owned()));
+        assert!(frame(&ui, 150, 30).join("\n").contains("1 put off until later"));
+        // Its card, still open in a pane, offers to bring it back, and l does.
+        ui.replace_focused_pane(Pane::Home(Some("attention/1".into())));
+        assert!(frame(&ui, 150, 40).join("\n").contains("Bring back now"));
+        press(&mut ui, KeyCode::Char('l'));
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::Snooze { id, until: None }] if id == "attention/1"),
+            "{:?}",
+            ui.effects
+        );
+        // A snooze st says has already ended hides nothing.
+        if let Load::Ready(items) = &mut world.attention {
+            items.iter_mut().find(|item| item.id == "attention/1").unwrap().snoozed_until =
+                Some(world.at - chrono::TimeDelta::minutes(1));
+        }
+        ui.set_world(world);
+        assert!(screens::home_list(&ui.world, &ui.closed).ids.contains(&"attention/1".to_owned()));
     }
 
     #[test]
