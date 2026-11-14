@@ -588,6 +588,68 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn ancestry_internal_service_declared_unit_requires_exact_executable() {
+    let services = vec![crate::config::InternalService {
+        unit: "st-fabric-adapter.service".into(), exe: "/nix/store/adapter".into(),
+    }];
+    let cgroup = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/st-fabric-adapter.service";
+    assert!(internal_services::declared_caller(1000, cgroup, Path::new("/nix/store/adapter"), &services));
+    assert!(!internal_services::declared_caller(1000, cgroup, Path::new("/tmp/fake"), &services));
+    assert!(!internal_services::declared_caller(1001, cgroup, Path::new("/nix/store/adapter"), &services));
+    for unit in ["run-u123.service", "undeclared.service", "st-fabric-adapter.service/child"] {
+        let transient = format!("0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}");
+        assert!(!internal_services::declared_caller(1000, &transient, Path::new("/nix/store/adapter"), &services));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ancestry_internal_service_manager_facts_fail_closed() {
+    let cgroup = "0::/user.slice/user-1000.slice/user@1000.service/init.scope";
+    assert!(internal_services::manager_facts(1000, "Uid: 1000 1000 1000 1000", "42 (systemd) S 1", cgroup));
+    for (status, stat, group) in [
+        ("Uid: 1001 1000 1000 1000", "42 (systemd) S 1", cgroup),
+        ("Uid: 1000 1000 1000 1000", "42 (systemd) S 99", cgroup),
+        ("Uid: 1000 1000 1000 1000", "42 (fake-systemd) S 1", cgroup),
+        ("Uid: 1000 1000 1000 1000", "42 (systemd) S 1", "0::/user.slice/app.slice/fake.service"),
+    ] {
+        assert!(!internal_services::manager_facts(1000, status, stat, group));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ancestry_internal_service_root_skips_only_manager_environment() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+        let manager = pid + 2;
+        for (middle, seat, valid_root, expected) in [
+            (false, false, true, HarnessAncestry::Person),
+            (true, false, true, HarnessAncestry::Unavailable),
+            (true, true, true, HarnessAncestry::Bound("agent/fixture/seat".into())),
+            (false, false, false, HarnessAncestry::Unavailable),
+        ] {
+            let ancestry = ancestry_or_record(walk_harness_ancestry_to_root(pid, Some(&peer),
+                |candidate| Ok(HarnessProcess {
+                    uid: 1000, generation: Some((if candidate == pid && middle { pid + 1 } else { manager }, birth)),
+                    generation_error: None,
+                }),
+                |candidate| {
+                    if candidate == pid { return Ok(HarnessAncestry::Person); }
+                    if candidate == pid + 1 && seat { return Ok(HarnessAncestry::Bound("agent/fixture/seat".into())); }
+                    Err(AncestryUnavailableReason::ProcessReadFailed {
+                        operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+                    })
+                },
+                |candidate, _| candidate == manager && valid_root), |_| {});
+            assert_eq!(ancestry, expected);
+        }
+    });
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person() {

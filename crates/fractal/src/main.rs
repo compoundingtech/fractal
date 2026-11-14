@@ -8168,7 +8168,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let serving = async {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                local_reserved,
+                local_reserved.with_internal_services(config.internal_services.clone()),
                 fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
                 Some(worker_observer),

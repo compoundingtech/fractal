@@ -39,6 +39,14 @@ pub struct LegacyPairingAllowance {
     pub until_unix_ms: u64,
 }
 
+/// Explicit executable authority for a production systemd user unit's internal requests.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InternalService {
+    pub unit: String,
+    pub exe: PathBuf,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -66,6 +74,9 @@ pub struct Config {
     /// Worker socket-generation admission. Absent observes without refusing; restart to change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
+    /// Local internal-route services. Empty grants no service-manager ancestry exemption.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub internal_services: Vec<InternalService>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
@@ -819,6 +830,7 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             worker_ingress_generation_check: None,
+            internal_services: Vec::new(),
             seat_priority: None,
             unlaned_seat: None,
             seat_admission: None,

@@ -7410,6 +7410,15 @@ pub struct ReservedUnixSocket {
     // The existing connect probe protects a listening predecessor. This lock also
     // protects a new daemon's bound-but-not-listening address during startup.
     reservation: File,
+    internal_services: Arc<Vec<crate::config::InternalService>>,
+}
+
+impl ReservedUnixSocket {
+    /// Install the daemon's explicit local internal-service authority.
+    pub fn with_internal_services(mut self, services: Vec<crate::config::InternalService>) -> Self {
+        self.internal_services = Arc::new(services);
+        self
+    }
 }
 
 pub fn unix_reservation_path(socket: &Path) -> std::path::PathBuf {
@@ -7474,6 +7483,7 @@ pub async fn reserve_unix_socket(
     Ok(ReservedUnixSocket {
         socket: listener,
         reservation,
+        internal_services: Arc::default(),
     })
 }
 
@@ -7515,6 +7525,7 @@ async fn serve_reserved_unix_with_lookup_ready(
     let ReservedUnixSocket {
         socket,
         reservation: _reservation,
+        internal_services,
     } = reserved;
     // Binding and its Store-aware authorization are one serving-boundary capability.
     // Install it here so directly constructed routers cannot bypass the guard.
@@ -7523,6 +7534,7 @@ async fn serve_reserved_unix_with_lookup_ready(
         Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
         None => app,
     };
+    let app = app.layer(axum::Extension(internal_services));
     let listener = socket.listen(1024)?;
     // Only fractal-fixture initializes this process-local state. Disable host ancestry while
     // retaining native-driver identification, which mailbox subscriptions require.
@@ -7774,6 +7786,7 @@ impl HarnessAncestry {
 }
 
 mod ancestry_diagnostics;
+mod internal_services;
 
 /// Preserve pending diagnostic counts before the daemon exits.
 pub fn flush_ancestry_diagnostics() {
@@ -7856,10 +7869,21 @@ struct HarnessProcess {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn walk_harness_ancestry(
+    pid: u32,
+    peer: Option<&fractal_runtime::PeerProcessIdentity>,
+    inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
+    identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+) -> Result<HarnessAncestry, AncestryUnavailableCause> {
+    walk_harness_ancestry_to_root(pid, peer, inspect, identity, |_, _| false)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry_to_root(
     mut pid: u32,
     peer: Option<&fractal_runtime::PeerProcessIdentity>,
     mut inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
     identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+    root: impl Fn(u32, &HarnessProcess) -> bool,
 ) -> Result<HarnessAncestry, AncestryUnavailableCause> {
     let cause = |pid, reason| AncestryUnavailableCause { pid: Some(pid), reason };
     let first = inspect(pid).map_err(|reason| cause(pid, reason))?;
@@ -7880,11 +7904,12 @@ fn walk_harness_ancestry(
         };
         // An observed ownership transition ends this caller's cooperative ancestry.
         if process.uid != uid { break; }
-        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error
+        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error.clone()
             .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
         if observed.insert(pid, birth).is_some() {
             return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
         }
+        if root(pid, &process) { break; }
         match identity(pid).map_err(|reason| cause(pid, reason))? {
             HarnessAncestry::Person => {}
             HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
@@ -8259,6 +8284,17 @@ async fn guard_bound_actor(
             Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
             _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
         }
+    }
+    #[cfg(target_os = "linux")]
+    if request.uri().path().starts_with("/v1/internal/")
+        && matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && let (Some(peer), Some(services)) = (
+            request.extensions().get::<LocalPeer>().cloned(),
+            request.extensions().get::<Arc<Vec<crate::config::InternalService>>>().cloned(),
+        )
+        && matches!(tokio::task::spawn_blocking(move || internal_services::authorize(&peer, &services)).await, Ok(Ok(())))
+    {
+        request.extensions_mut().insert(HarnessAncestry::Person);
     }
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
