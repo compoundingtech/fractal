@@ -1934,6 +1934,73 @@ fn expanded_threads_keep_one_honest_keyboard_context_after_escape_and_independen
 }
 
 #[test]
+fn ordinary_agent_composer_keeps_thread_shortcut_letters_as_text() {
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    let agent = "agent/example/atlas/builder";
+    let pane = Pane::Agent(Some(agent.into()));
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    ui.threads = observed_threads(ThreadState::Open);
+    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
+    ui.threads.selected.insert(pane.key(), "thread/worker".into());
+    ui.click(Hit::Composer);
+    ui.paste("Please ".into());
+    for letter in "zinc never help".chars() {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+    assert!(
+        ui.threads.writes().is_empty(),
+        "typing in the ordinary composer must not close or mark a selected thread"
+    );
+    assert!(
+        ui.threads.focused.is_none(),
+        "typing n must not open the selected thread's rename editor"
+    );
+    assert_eq!(ui.conversation_state.drafts[agent], "Please zinc never help");
+}
+
+#[test]
+fn conversation_find_keeps_selected_thread_shortcut_letters_as_search_text() {
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    let agent = "agent/example/atlas/builder";
+    let pane = Pane::Agent(Some(agent.into()));
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    ui.threads = observed_threads(ThreadState::Open);
+    ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
+    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    ui.threads.selected.insert(pane.key(), "thread/worker".into());
+    ui.find_in(agent, "");
+    for letter in "zinc never help".chars() {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+    assert!(ui.threads.writes().is_empty(), "search never mutates threads");
+    assert!(ui.threads.focused.is_none(), "search never opens a rename editor");
+    assert_eq!(ui.find.as_ref().unwrap().query, "zinc never help");
+    assert_eq!(ui.main_pane(), pane, "p in a search must not open another tab");
+}
+
+#[test]
+fn selected_thread_shortcuts_still_dispatch_from_agent_list_focus() {
+    for (letter, state) in [('n', ThreadState::Open), ('z', ThreadState::Open), ('z', ThreadState::Closed)] {
+        let mut ui = super::super::Ui::new(super::super::demo::test_world());
+        let pane = Pane::Agent(Some("agent/example/atlas/builder".into()));
+        ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+        ui.threads = observed_threads(state);
+        ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
+        ui.threads.selected.insert(pane.key(), "thread/worker".into());
+        assert!(!ui.editing);
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        if letter == 'n' {
+            assert!(matches!(ui.threads.focused, Some((_, Input::Rename(_)))));
+        } else {
+            let write = ui.threads.writes().pop().expect("Z lifecycle dispatch from list focus");
+            assert!(matches!((state, write.mutation),
+                (ThreadState::Open, Mutation::Close) | (ThreadState::Closed, Mutation::Reopen)));
+        }
+    }
+}
+
+#[test]
 fn accepting_a_new_inbox_thread_keeps_the_existing_expanded_thread_and_its_draft() {
     let mut threads = observed_threads(ThreadState::Open);
     let pane = Pane::Home(Some("attention/notice".into()));

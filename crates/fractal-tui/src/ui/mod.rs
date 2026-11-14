@@ -4383,9 +4383,10 @@ impl Ui {
         }
         if self.threads.available() && key.kind != KeyEventKind::Release && !self.palette_open() && !self.help
             && !self.terminal_focused() && !self.leader && self.popover.is_none() && self.context.is_none()
+            && !self.editing && self.find.is_none() && self.new_mission.is_none() && self.voice.is_none()
         {
             let pane = self.main_pane();
-            if let Some(tap) = self.threads.shortcut(&pane, key) {
+            if !self.threads.editing_in(&pane) && let Some(tap) = self.threads.shortcut(&pane, key) {
                 self.click(Hit::Thread(pane.key(), tap));
                 return;
             }
