@@ -122,6 +122,18 @@ pub async fn done_person_step(
     Ok(Json(result))
 }
 
+pub async fn override_person_step(
+    State(state): State<AppState>,
+    Json(request): Json<PersonStepResponse>,
+) -> Result<Json<StepRunView>, ApiError> {
+    let result = state
+        .store
+        .override_person_step(&request)
+        .map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
 pub async fn cancel_person_ask(
     State(state): State<AppState>,
     Json(request): Json<PersonStepResponse>,

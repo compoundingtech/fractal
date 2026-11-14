@@ -2888,6 +2888,14 @@
       "verification": "shared API restart case"
     },
     {
+      "command": "st work override",
+      "description": "Re-answer a deadline-resolved ask as its person without undoing effects already taken",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::cli_person_override_replaces_a_deadline_default_once"
+      ],
+      "verification": "native CLI over a private Unix socket; deadline default, required answer, person and episode fences, idempotent replay and projected answer"
+    },
+    {
       "command": "st work extend",
       "description": "Add time to the execution budget of claimed work that ran out of it",
       "tests": [
