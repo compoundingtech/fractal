@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Heading, Link, ListBox, ListBoxItem, Popover, Select, SelectValue, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, diffPanelVars as diffColor, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, diffPanelVars as diffColor, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, syntaxVars as syntax, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { HighlightedSource } from '../composition/Markdown'
 import { DeclarationPanel, type DeclarationPanelState } from './DeclarationPanel'
 import {
@@ -283,7 +283,7 @@ const CodeView = React.memo(function CodeView({ label, text, language, marks, sc
 })
 
 const CodeRow = React.memo(function CodeRow({ number, text, language, mark }: { readonly number: number; readonly text: string; readonly language: string; readonly mark: Mark | undefined }) {
-  return <div data-line={number} data-mark={mark} {...stylex.props(styles.row, mark === 'frame' && styles.rowFrame, mark === 'enclosing' && styles.rowEnclosing, mark === 'linked' && styles.rowLinked)}>
+  return <div data-line={number} data-mark={mark} {...stylex.props(styles.row, mark === 'frame' && styles.rowFrame, mark === 'enclosing' && styles.rowEnclosing, mark === 'linked' && styles.rowLinked, mark !== undefined && styles.tintedSyntax)}>
     <span aria-hidden="true" {...stylex.props(styles.lineNumber)}>{number}</span>
     <code {...stylex.props(styles.lineText)}>{language === 'kdl' ? text : <HighlightedSource code={text} language={language} />}</code>
   </div>
@@ -366,7 +366,7 @@ const UnifiedDiff = React.memo(function UnifiedDiff({ label, ops, language }: { 
   return <div role="group" aria-label={label} tabIndex={0} {...stylex.props(styles.scroller, styles.diffScroller)}>
     <div {...stylex.props(styles.code)}>{rows.map((row, at) => row.kind === 'gap'
       ? <div key={at} data-diff-kind="gap" {...stylex.props(styles.row, styles.gap)}><span aria-hidden="true" {...stylex.props(styles.lineNumber)}>⋯</span><span {...stylex.props(styles.lineText, styles.muted)}>{row.folded} unchanged {row.folded === 1 ? 'line' : 'lines'}</span></div>
-      : <div key={at} data-diff-kind={row.kind} {...stylex.props(styles.row, row.kind === 'add' && styles.addRow, row.kind === 'del' && styles.delRow)}>
+      : <div key={at} data-diff-kind={row.kind} {...stylex.props(styles.row, row.kind === 'add' && styles.addRow, row.kind === 'del' && styles.delRow, (row.kind === 'add' || row.kind === 'del') && styles.tintedSyntax)}>
         <span aria-hidden="true" {...stylex.props(styles.lineNumber, styles.diffGutter, row.kind === 'add' && styles.addGutter, row.kind === 'del' && styles.delGutter)}>{row.kind === 'del' ? row.a : row.b}<span>{row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ''}</span></span>
         <code {...stylex.props(styles.lineText)}>{language === 'kdl' ? row.text : <HighlightedSource code={row.text} language={language} />}</code>
       </div>)}</div>
@@ -420,10 +420,19 @@ const styles = stylex.create({
   scroller: { flexGrow: 1, minHeight: 0, overflow: 'auto', backgroundColor: surface.codeBg, fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.codeLeading, color: ink.fgSoft, scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   code: { display: 'flex', flexDirection: 'column', width: 'max-content', minWidth: '100%', paddingBlock: s.sm },
   row: { display: 'flex', alignItems: 'stretch', minWidth: '100%', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent', cursor: 'default' },
-  // Tinted rows raise muted syntax ink (strings, comments) to fgSoft so it keeps AA contrast on the tint.
-  rowFrame: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
-  rowEnclosing: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
-  rowLinked: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: interaction.wash },
+  rowFrame: { backgroundColor: `color-mix(in srgb, ${accent.primary} 14%, transparent)`, borderLeftColor: accent.primary },
+  rowEnclosing: { backgroundColor: `color-mix(in srgb, ${accent.primary} 6%, transparent)`, borderLeftStyle: 'dashed', borderLeftColor: accent.primary },
+  rowLinked: { backgroundColor: interaction.wash },
+  // Tinted rows (marks, additions, deletions) raise every syntax token 20% toward the code ink: darker in light,
+  // lighter in dark. Each light token then reads 5.06:1 or more on the darkest tint, the 14% frame (#d6ddf1).
+  tintedSyntax: {
+    '--fractal-syntax-comment': `color-mix(in srgb, ${syntax.comment}, ${syntax.fg} 20%)`,
+    '--fractal-syntax-keyword': `color-mix(in srgb, ${syntax.keyword}, ${syntax.fg} 20%)`,
+    '--fractal-syntax-string': `color-mix(in srgb, ${syntax.string}, ${syntax.fg} 20%)`,
+    '--fractal-syntax-literal': `color-mix(in srgb, ${syntax.constant}, ${syntax.fg} 20%)`,
+    '--fractal-syntax-function': `color-mix(in srgb, ${syntax.func}, ${syntax.fg} 20%)`,
+    '--fractal-syntax-deleted': `color-mix(in srgb, ${syntax.deleted}, ${syntax.fg} 20%)`,
+  },
   lineNumber: { position: 'sticky', left: 0, flexShrink: 0, minWidth: g.gutter40, boxSizing: 'border-box', paddingInlineEnd: s.md, textAlign: 'right', color: ink.fgMuted, backgroundColor: surface.codeBg, fontVariantNumeric: 'tabular-nums', userSelect: 'none' },
   lineText: { flexGrow: 1, paddingInlineEnd: s.lg, fontFamily: 'inherit', whiteSpace: 'pre' },
   footer: { margin: 0, minHeight: t.metaLeading, paddingInline: s.lg, paddingBlock: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, color: ink.fgMuted, fontSize: t.denseSize, overflowWrap: 'anywhere' },
@@ -444,8 +453,8 @@ const styles = stylex.create({
   diffScroller: { flexGrow: 0, overflowY: 'hidden' },
   gap: { color: ink.fgMuted, backgroundColor: surface.washSubtle },
   diffGutter: { display: 'flex', justifyContent: 'space-between', gap: s.xs2 },
-  addRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
-  delRow: { '--fractal-syntax-muted': ink.fgSoft, backgroundColor: status.diffRemovedWash },
+  addRow: { backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
+  delRow: { backgroundColor: status.diffRemovedWash },
   addGutter: { color: diffColor.added },
   delGutter: { color: diffColor.removed },
 })
