@@ -165,3 +165,78 @@ fn seed_scratch_threads() {
         close.0.id
     );
 }
+
+/// Synthetic scratch authority only: the sole scope is read.projections.
+/// Stop the scratch daemon before running; never use a production state root.
+#[tokio::test]
+#[ignore = "issues a read-only synthetic scratch pairing; never prints the credential"]
+async fn seed_scratch_read_only_pairing() {
+    use axum::{Extension, Json, extract::{Path, State}};
+    use fractal_daemon::api::{AppState, client_v0};
+    let root = std::path::PathBuf::from(
+        std::env::var("THREAD_PREVIEW_ROOT").expect("THREAD_PREVIEW_ROOT"),
+    );
+    assert!(root.ends_with("tui-preview/scratch-root"), "scratch preview root only");
+    let state_dir = root.join("state");
+    let store = Arc::new(Store::open(&root.join("store/claims.sqlite3"), "previewnode").unwrap());
+    store.set_node_key(Arc::new(
+        fractal_daemon::fleet::join::standalone_node_key(&state_dir).unwrap(),
+    )).unwrap();
+    store.configure_thread_write_rollout([]);
+    let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: Some("person/avery".into()),
+        store,
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0).0,
+        node: "previewnode".into(),
+        api_socket: root.join("run/st3.sock"),
+        state_dir,
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+        planner_default: Default::default(),
+    };
+    let local = client_v0::ClientSession::local(Some("person/avery")).unwrap();
+    let Json(challenge) = client_v0::pairing_begin(
+        State(state.clone()), Extension(local.clone()),
+        Json(serde_json::from_value(serde_json::json!({
+            "api_version": fractal_client::API_VERSION,
+            "person_id": "person/avery",
+            "device_name": "Synthetic read-only threads preview",
+            "scopes": ["read.projections"],
+        })).unwrap()),
+    ).await.unwrap();
+    let id = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let public = smallclaims::fleet::MemberKey::generate().unwrap().0.public().to_string();
+    let Json(paired) = client_v0::pairing_complete(
+        State(state), Extension(local), Path(id.into()),
+        Json(serde_json::from_value(serde_json::json!({
+            "api_version": fractal_client::API_VERSION,
+            "code": challenge["code"], "device_public_key": public,
+        })).unwrap()),
+    ).await.unwrap();
+    assert_eq!(paired["scopes"], serde_json::json!(["read.projections"]));
+    let session: fractal_client::PersonPairedSession = serde_json::from_value(paired).unwrap();
+    let profile = fractal_client::device::Profile {
+        devices: vec![fractal_client::device::Device {
+            endpoint: "http://127.0.0.1:17410".into(),
+            allow_public_http: false,
+            person_root_fingerprint: None,
+            signing_key: None,
+            session,
+        }],
+    };
+    let path = root.join("paired-config/fractal/stui-devices.json");
+    profile.save(&path).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    println!("Read-only synthetic preview pairing saved privately; scope=read.projections");
+}
