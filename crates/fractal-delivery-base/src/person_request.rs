@@ -24,7 +24,8 @@ const MAX_CONDITIONS: usize = 6;
 const MAX_LINE: usize = 600;
 /// The longest text an update asks to have spoken; the notice `speech` field has the same limit.
 const MAX_SPEECH: usize = 300;
-const MAX_TEXT: usize = 8_000;
+/// The longest answer text a person may give, in characters.
+pub const MAX_TEXT: usize = 8_000;
 const SUBJECT_KINDS: &[&str] = &[
     "pull_request",
     "issue",
