@@ -363,7 +363,7 @@ requiring the old-build excusal and next-cut continuation in this corpus.
 `claims-v27.json` captures the merged registry with the system-only `mission.run.trace` and
 `program.attempt.trace` correlation claims. Versions 1 through 26 stay frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v27.json`;
-do not hand-edit it. The v27 simulation and audit reports used that snapshot. The fixed local sweep observed
+do not hand-edit it. The simulation and audit reports select v27. The fixed local sweep observed
 only seed 21 without a checkpoint trim; all other fixed seeds trimmed. Its test additionally
 requires every modern node to trim after the old build is excused and the next cut falls due.
 This characterization belongs to v27, not an inherited older corpus schedule.
@@ -405,8 +405,3 @@ The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; 
 trims on every modern node after its old build is excused and the next cut falls due. The
 exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
 schedule measured before main took v29.
-
-`claims-v31.json` captures resource lanes on main's v30 invocation-receipt registry.
-Versions 1 through 30 remain byte-identical historical inputs. Generate it with
-`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v31.json`;
-do not hand-edit it. The simulation and audit reports select v31.
