@@ -1291,11 +1291,11 @@ pub(super) fn attention_item_from_review_at(
     )?;
     Ok(AttentionItemView {
         conversation,
-        ..attention_item_from_review(review)
+        ..attention_item_from_review(review, step)
     })
 }
 
-fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
+fn attention_item_from_review(review: HumanReviewView, step: Option<String>) -> AttentionItemView {
     AttentionItemView {
         deadline_unix_ms: None,
         default_answer: None,
@@ -1317,7 +1317,7 @@ fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
         detail: review.question,
         mission: Some(review.mission),
         mission_run: Some(review.mission_run),
-        step: review.step,
+        step,
         targets: review.review_targets,
         requested_at_unix_ms: review.requested_at_unix_ms,
         actions: vec![
