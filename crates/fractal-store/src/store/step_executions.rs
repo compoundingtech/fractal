@@ -8,7 +8,7 @@ pub(super) fn accumulate_response(
     buckets: [u64; 9], at: u128,
 ) -> Result<()> {
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-ha2dcdd19ebd4 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ "INSERT INTO local_step_execution_spend(execution_id,model,account,host,input_tokens,output_tokens,
+        /* sqlite-large-value: allow-for-now lv-ha2dcdd19ebd4 owner=fractal_store::store::step_executions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_step_execution_spend(execution_id,model,account,host,input_tokens,output_tokens,
          cache_write_tokens,cache_write_1h_tokens,cached_tokens,total_tokens,cost_microusd,
          reported_cost_microusd,unpriced_tokens,observed_at_unix_ms)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
