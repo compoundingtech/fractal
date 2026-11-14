@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use fractal_daemon::store::{self, Store};
+use fractal_daemon::SeatsStoreCore as _;
 
 fn input(kind: &str, actor: &str, key: &str, fields: serde_json::Value) -> smallclaims::ClaimInput {
     serde_json::from_value(serde_json::json!({
@@ -30,6 +31,9 @@ fn seed_scratch_threads() {
     let store = Arc::new(Store::open(&std::path::PathBuf::from(&root).join("store/claims.sqlite3"), "previewnode").unwrap());
     // The scratch config enables thread writes at runtime; mirror that here.
     store.configure_thread_write_rollout([]);
+    let source = std::fs::read_to_string(std::path::PathBuf::from(&root).join("seed.kdl")).unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, store.origin()).unwrap();
+    store.apply_internal(&intent, "preview-declare-agents").unwrap();
 
     let person = "person/avery";
     let botanist = "agent/glasshouse/botanist";
@@ -143,6 +147,15 @@ fn seed_scratch_threads() {
         &store, person, open_thread, "preview-calibration-reopen",
         store::thread_metadata::Edit::Reopen { revision: &observed.revision },
     ).unwrap();
+    // More than four expanded IDs exercise the shared live-window admission limit.
+    for n in 1..=4 {
+        let id = format!("thread/preview-extra-{n}");
+        let title = format!("Sensor follow-up {n}");
+        store::thread_metadata::apply(
+            &store, person, &id, &format!("preview-extra-{n}"),
+            store::thread_metadata::Edit::Create { agent: botanist, title: &title },
+        ).unwrap();
+    }
 
     println!(
         "SEEDED open={open_thread} (rename claim {rename_claim}) closed={closed_thread} (close claim {}) sibling={sibling_thread}",
