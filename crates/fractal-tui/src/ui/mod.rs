@@ -3898,8 +3898,12 @@ impl Ui {
                 ("v", "mark the visible replies read"),
                 ("r", "send an action again when its outcome was not confirmed"),
                 (
+                    "alt+p z n v r",
+                    "the same in an agent or a thread tab, where a bare letter types",
+                ),
+                (
                     "esc",
-                    "leave the thread's message box; the letters above work again",
+                    "leave the thread's message box; the keys above work again",
                 ),
                 (
                     "ctrl+r",

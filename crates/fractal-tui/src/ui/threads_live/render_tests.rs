@@ -247,7 +247,8 @@ fn help_lists_thread_keys_in_lowercase_with_the_selection_context() {
         "close the thread, or reopen a closed one",
         "rename the thread",
         "mark the visible replies read",
-        "leave the thread's message box; the letters above work again",
+        "the same in an agent or a thread tab, where a bare letter types",
+        "leave the thread's message box; the keys above work again",
         "in a thread's message box: quote the agent's latest message",
     ] {
         assert!(joined.contains(expected), "{expected:?} missing from help:\n{}", rows.join("\n"));
@@ -258,6 +259,7 @@ fn help_lists_thread_keys_in_lowercase_with_the_selection_context() {
         ("z", "close the thread, or reopen"),
         ("n", "rename the thread"),
         ("v", "mark the visible replies"),
+        ("alt+p z n v r", "the same in an agent"),
         ("ctrl+r", "in a thread's message box"),
     ] {
         let row = rows.iter().find(|row| row.contains(meaning)).unwrap();

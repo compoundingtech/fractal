@@ -90,6 +90,9 @@ pub struct State<'a> {
     pub can_reply: bool,
     pub pending_reply: bool,
     pub hotkeys: bool,
+    /// The host types any bare letter into a message box (an agent's conversation, a thread
+    /// tab), so its thread actions take Alt and their keycaps read `alt+z`, not `z`.
+    pub alt_keys: bool,
     pub can_rename: bool,
     pub can_close: bool,
     pub can_reopen: bool,
@@ -458,10 +461,15 @@ pub fn panel(
     } else {
         ("Close thread", Tap::Close(summary.id.to_owned()))
     };
+    let keycap = |bare: &'static str, chord: &'static str| match (state.hotkeys, state.alt_keys) {
+        (false, _) => "",
+        (true, false) => bare,
+        (true, true) => chord,
+    };
     let mut actions = Vec::new();
     if summary.closed && state.can_reopen || !summary.closed && state.can_close {
         actions.push((
-            if state.hotkeys { "z" } else { "" },
+            keycap("z", "alt+z"),
             label,
             lifecycle,
             theme::OVERLAY1,
@@ -469,7 +477,7 @@ pub fn panel(
     }
     if state.can_rename {
         actions.push((
-            if state.hotkeys { "n" } else { "" },
+            keycap("n", "alt+n"),
             "Rename",
             Tap::Rename(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -477,7 +485,7 @@ pub fn panel(
     }
     if !state.standalone {
         actions.push((
-            if state.hotkeys { "p" } else { "" },
+            keycap("p", "alt+p"),
             "Open in tab",
             Tap::OpenTab(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -485,7 +493,7 @@ pub fn panel(
     }
     if summary.unread && state.can_mark_read {
         actions.push((
-            if state.hotkeys { "v" } else { "" },
+            keycap("v", "alt+v"),
             "Mark visible replies read",
             Tap::MarkVisibleRead(summary.id.to_owned()),
             theme::OVERLAY1,
@@ -854,6 +862,36 @@ mod tests {
             assert!(actions.contains(keycap), "{keycap:?} in {actions:?}");
         }
         for keycap in [" Z ", " N ", " P ", " V "] {
+            assert!(!actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+    }
+
+    #[test]
+    fn thread_action_keycaps_take_alt_where_letters_type() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Worker test",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: true,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                can_mark_read: true,
+                alt_keys: true,
+                ..editable()
+            },
+            120,
+        );
+        let actions = doc.lines.last().unwrap().to_string();
+        for keycap in [" alt+z ", " alt+n ", " alt+p ", " alt+v "] {
+            assert!(actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+        for keycap in [" z ", " n ", " p ", " v "] {
             assert!(!actions.contains(keycap), "{keycap:?} in {actions:?}");
         }
     }

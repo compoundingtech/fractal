@@ -513,7 +513,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     ui.threads.put_summary(client.thread_get(id).await.unwrap());
     capture(&mut ui, &pane, "harness-socket-quoted-reply-after");
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    ui.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    // A thread tab types bare letters into its reply box, so its actions take Alt.
+    ui.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
     ui.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     ui.paste("Worker review complete".into());
     capture(&mut ui, &pane, "harness-socket-rename-before");
@@ -529,8 +530,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert_eq!(client.thread_get(id).await.unwrap().value.title, "Worker review complete");
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     capture(&mut ui, &pane, "harness-socket-reopen-before");
-    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
-    let reopen = ui.threads.writes().pop().expect("native Z reopens selected closed thread");
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+    let reopen = ui.threads.writes().pop().expect("native alt+z reopens the tab's closed thread");
     assert!(matches!(reopen.mutation, Mutation::Reopen));
     let receipt = reopen.perform(client.clone()).await;
     assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real Reopen committed");
@@ -1908,8 +1909,14 @@ fn embedded_thread_disclosures_are_independent_in_agent_mission_and_inbox_hosts(
             thread::Tap::LeaveComposer(first.into()),
             &mut texts,
         );
+        // An agent's conversation types bare letters, so its thread actions take Alt there.
+        let chord = if matches!(pane, Pane::Agent(_)) {
+            KeyModifiers::ALT
+        } else {
+            KeyModifiers::NONE
+        };
         assert!(
-            matches!(threads.shortcut(&pane, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)), Some(thread::Tap::Close(id)) if id == first),
+            matches!(threads.shortcut(&pane, KeyEvent::new(KeyCode::Char('z'), chord)), Some(thread::Tap::Close(id)) if id == first),
             "leaving a composer retains its exact selected thread for shortcuts"
         );
     }
@@ -2003,7 +2010,7 @@ fn expanded_threads_keep_one_honest_keyboard_context_after_escape_and_independen
         &edit::Cursor::default(),
         &mut texts
     ));
-    let close = || KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+    let close = || KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT);
     assert!(
         matches!(threads.shortcut(&pane, close()), Some(thread::Tap::Close(id)) if id == second)
     );
@@ -2017,7 +2024,7 @@ fn expanded_threads_keep_one_honest_keyboard_context_after_escape_and_independen
     for id in [first, second] {
         let target = doc.targets.iter().find(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Close(found)) if found == id)).unwrap();
         assert_eq!(
-            doc.lines[target.line].to_string().contains(" z "),
+            doc.lines[target.line].to_string().contains(" alt+z "),
             id == second,
             "only the selected panel advertises its keyboard shortcut"
         );
@@ -2114,7 +2121,7 @@ fn conversation_find_keeps_selected_thread_shortcut_letters_as_search_text() {
 }
 
 #[test]
-fn selected_thread_shortcuts_still_dispatch_from_agent_list_focus() {
+fn selected_thread_alt_chords_still_dispatch_from_agent_list_focus() {
     for (letter, state) in [('n', ThreadState::Open), ('z', ThreadState::Open), ('z', ThreadState::Closed)] {
         let mut ui = super::super::Ui::new(super::super::demo::test_world());
         let pane = Pane::Agent(Some("agent/example/atlas/builder".into()));
@@ -2124,15 +2131,189 @@ fn selected_thread_shortcuts_still_dispatch_from_agent_list_focus() {
         ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
         ui.threads.selected.insert(pane.key(), "thread/worker".into());
         assert!(!ui.editing);
-        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT));
         if letter == 'n' {
             assert!(matches!(ui.threads.focused, Some((_, Input::Rename(_)))));
         } else {
-            let write = ui.threads.writes().pop().expect("Z lifecycle dispatch from list focus");
+            let write = ui.threads.writes().pop().expect("alt+z lifecycle dispatch from list focus");
             assert!(matches!((was_open, write.mutation),
                 (true, Mutation::Close) | (false, Mutation::Reopen)));
         }
     }
+}
+
+/// A writable thread, open and selected in an agent's conversation or open as its own tab,
+/// in a fresh Ui with nothing being typed.
+fn writable_thread_in(pane: &Pane) -> super::super::Ui {
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    ui.threads = observed_threads(ThreadState::Open);
+    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    if matches!(pane, Pane::Agent(_)) {
+        ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
+        ui.threads.selected.insert(pane.key(), "thread/worker".into());
+    }
+    assert!(!ui.editing && ui.threads.focused.is_none());
+    ui
+}
+
+#[test]
+fn agent_and_thread_tab_bare_action_letters_type_instead_of_acting() {
+    let agent = "agent/example/atlas/builder";
+    let id = "thread/worker";
+    let conversation = Pane::Agent(Some(agent.into()));
+    let mut ui = writable_thread_in(&conversation);
+    for letter in "znvpr".chars() {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+    assert!(ui.threads.writes().is_empty(), "bare letters queue no thread action");
+    assert!(ui.threads.focused.is_none(), "a bare n opens no rename editor");
+    assert_eq!(ui.main_pane(), conversation, "a bare p opens no tab");
+    assert_eq!(ui.conversation_state.drafts[agent], "znvpr", "every letter starts the agent message");
+
+    let tab = Pane::Thread(id.into());
+    let mut ui = writable_thread_in(&tab);
+    for letter in "znvpr".chars() {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+    assert!(ui.threads.writes().is_empty(), "bare letters queue no thread action");
+    assert!(
+        matches!(&ui.threads.focused, Some((host, Input::Reply(thread))) if host == &tab.key() && thread == id),
+        "the first letter opens the tab's reply box, never its rename editor"
+    );
+    assert_eq!(ui.main_pane(), tab);
+    assert_eq!(ui.conversation_state.drafts[&Input::Reply(id.into()).key()], "znvpr");
+}
+
+#[test]
+fn agent_and_thread_tab_thread_actions_dispatch_on_alt_chords() {
+    let id = "thread/worker";
+    let alt = |letter| KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT);
+    for pane in [
+        Pane::Agent(Some("agent/example/atlas/builder".into())),
+        Pane::Thread(id.into()),
+    ] {
+        let mut ui = writable_thread_in(&pane);
+        ui.key(alt('z'));
+        let close = ui.threads.writes().pop().expect("alt+z closes the thread");
+        assert!(matches!(close.mutation, Mutation::Close), "{pane:?}");
+
+        let mut ui = writable_thread_in(&pane);
+        ui.key(alt('n'));
+        assert!(
+            matches!(&ui.threads.focused, Some((host, Input::Rename(thread))) if host == &pane.key() && thread == id),
+            "alt+n opens the rename editor in {pane:?}"
+        );
+
+        let ui = writable_thread_in(&pane);
+        assert_eq!(
+            ui.threads.shortcut(&pane, alt('v')),
+            Some(thread::Tap::MarkVisibleRead(id.into())),
+            "alt+v marks the visible replies read in {pane:?}"
+        );
+
+        // In an agent alt+p opens the thread's tab; in that tab it has nothing to open.
+        let mut ui = writable_thread_in(&pane);
+        ui.key(alt('p'));
+        assert_eq!(ui.main_pane(), Pane::Thread(id.into()), "{pane:?}");
+        assert!(ui.threads.writes().is_empty());
+    }
+}
+
+#[test]
+fn an_active_message_box_keeps_alt_chords_from_thread_actions() {
+    let id = "thread/worker";
+    let conversation = Pane::Agent(Some("agent/example/atlas/builder".into()));
+    let mut ui = writable_thread_in(&conversation);
+    ui.click(Hit::Composer);
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+    assert!(ui.threads.writes().is_empty(), "the agent's message box keeps the keys");
+
+    let tab = Pane::Thread(id.into());
+    let mut ui = writable_thread_in(&tab);
+    ui.click(Hit::Thread(tab.key(), thread::Tap::Compose(id.into())));
+    for letter in ['z', 'n', 'v', 'r'] {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT));
+    }
+    assert!(ui.threads.writes().is_empty(), "the reply box keeps the keys");
+    assert!(matches!(&ui.threads.focused, Some((_, Input::Reply(_)))));
+}
+
+#[test]
+fn inbox_thread_detail_keeps_bare_action_letters() {
+    let id = "thread/worker";
+    let inbox = Pane::Home(Some(id.into()));
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.set_access(ThreadAccess { mark_read: true, ..threads.access });
+    let cases: [(char, fn(String) -> thread::Tap); 4] = [
+        ('z', thread::Tap::Close),
+        ('n', thread::Tap::Rename),
+        ('v', thread::Tap::MarkVisibleRead),
+        ('p', thread::Tap::OpenTab),
+    ];
+    for (letter, tap) in cases {
+        assert_eq!(
+            threads.shortcut(&inbox, KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE)),
+            Some(tap(id.into())),
+            "a bare {letter} acts in an Inbox item"
+        );
+        assert_eq!(
+            threads.shortcut(&inbox, KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT)),
+            None,
+            "alt+{letter} is not an Inbox thread key"
+        );
+    }
+    let close = threads
+        .shortcut(&inbox, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+        .unwrap();
+    threads.tap(&inbox.key(), close, &mut HashMap::new());
+    let write = threads.writes().pop().expect("a bare z closes from the Inbox");
+    assert!(matches!(write.mutation, Mutation::Close));
+}
+
+#[test]
+fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
+    let id = "thread/worker";
+    let agent = Pane::Agent(Some("agent/atlas".into()));
+    let tab = Pane::Thread(id.into());
+    let inbox = Pane::Home(Some(id.into()));
+    let mut threads = observed_threads(ThreadState::Open);
+    let mut texts = HashMap::new();
+    threads.lifecycle(&tab.key(), id.into(), Mutation::Close);
+    let original = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport(
+                "lost acknowledgement".into(),
+            )),
+        },
+        &mut texts,
+    );
+    threads.open.insert(agent.key(), [id.into()].into());
+    threads.selected.insert(agent.key(), id.into());
+    let retry = Some(thread::Tap::Retry(original.key.clone()));
+    let r = |modifiers| KeyEvent::new(KeyCode::Char('r'), modifiers);
+    for pane in [&agent, &tab] {
+        assert_eq!(threads.shortcut(pane, r(KeyModifiers::NONE)), None, "a bare r types in {pane:?}");
+        assert_eq!(threads.shortcut(pane, r(KeyModifiers::ALT)), retry, "alt+r retries in {pane:?}");
+    }
+    assert_eq!(threads.shortcut(&inbox, r(KeyModifiers::NONE)), retry);
+    assert_eq!(threads.shortcut(&inbox, r(KeyModifiers::ALT)), None);
+    let doc = threads.mount(
+        &tab,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    let button = doc
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .find(|line| line.contains("Retry Close thread"))
+        .unwrap();
+    assert!(button.contains(" alt+r "), "{button}");
 }
 
 #[test]
@@ -2691,8 +2872,8 @@ fn thread_preview_evidence() {
     assert!(hovered.contains("2m ago"), "preview message uses the rendering clock: {hovered}");
     ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
     capture(&mut ui, &pane, &dir, "harness-v-before");
-    ui.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-    let read = ui.threads.writes().pop().expect("V dispatches visible-message read");
+    ui.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+    let read = ui.threads.writes().pop().expect("alt+v dispatches visible-message read");
     assert!(matches!(read.mutation, Mutation::MarkRead(_)));
     capture(&mut ui, &pane, &dir, "harness-v-pending");
     // Dispatch-only fixture: settle its retained action before the independent lifecycle

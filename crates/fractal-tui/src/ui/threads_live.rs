@@ -702,15 +702,18 @@ impl Threads {
         })
     }
 
+    /// The thread action a key names for the thread this pane acts on. Where a bare letter
+    /// types into a message box (an agent's conversation, a thread tab) the action takes Alt
+    /// and the bare letter stays text; elsewhere, as in an Inbox item, the bare letter acts.
     pub(super) fn shortcut(&self, pane: &Pane, key: KeyEvent) -> Option<thread::Tap> {
+        let host = pane.key();
         if !self.available
-            || key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            || key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::ALT) != Self::alt_chords(&host)
             || self
                 .focused
                 .as_ref()
-                .is_some_and(|(host, _)| host == &pane.key())
+                .is_some_and(|(place, _)| place == &host)
         {
             return None;
         }
@@ -1287,6 +1290,7 @@ impl Threads {
                     .and_then(|draft| draft.delivery.as_ref())
                     .is_some_and(|delivery| delivery.pending),
                 hotkeys,
+                alt_keys: Self::alt_chords(host),
                 can_rename: self.access.rename,
                 can_close: self.access.close,
                 can_reopen: self.access.reopen,
@@ -1586,6 +1590,12 @@ impl Threads {
         }
     }
 
+    /// Hosts where a bare letter types into a message box: an agent's conversation starts a
+    /// message to the agent, and a thread tab starts a reply. Thread actions there take Alt.
+    fn alt_chords(host: &str) -> bool {
+        matches!(Pane::parse(host), Some(Pane::Agent(_) | Pane::Thread(_)))
+    }
+
     fn hotkeys_for(&self, host: &str, id: &str) -> bool {
         !self
             .focused
@@ -1639,10 +1649,10 @@ impl Threads {
                 width,
             );
             doc.buttons(&[(
-                if self.hotkeys_for(host, &delivery.write.id) {
-                    "r"
-                } else {
-                    ""
+                match (self.hotkeys_for(host, &delivery.write.id), Self::alt_chords(host)) {
+                    (false, _) => "",
+                    (true, false) => "r",
+                    (true, true) => "alt+r",
                 },
                 &format!("Retry {}", delivery.write.label()),
                 Hit::Thread(host.into(), thread::Tap::Retry(delivery.write.key.clone())),
