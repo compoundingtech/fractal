@@ -394,6 +394,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
+    ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
+    ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
+    ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -1228,6 +1231,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/hosts/{host}/agent-workspace",
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
+    get("GET /v1/hosts/holds", "/v1/hosts/holds"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];

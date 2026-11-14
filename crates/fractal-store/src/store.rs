@@ -18,6 +18,7 @@ pub mod attention;
 pub mod delivery;
 pub mod message_expiry;
 pub mod deploy;
+pub mod host_holds;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -67,6 +68,7 @@ pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
 pub mod read_positions;
+pub mod attention_controls;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -2894,6 +2896,7 @@ impl Store {
 
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2919,6 +2922,7 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2949,6 +2953,7 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
@@ -3644,7 +3649,6 @@ impl Store {
                 }
                 validate_documents(transaction, &intent.document_refs)?;
                 attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
-                notice_authority::refuse_second_holder(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -7777,6 +7781,8 @@ impl Store {
                 | "arrangement.edited"
                 | "ordered-membership.edited"
                 | "read-position.advanced"
+                | "person.attention-seen"
+                | "person.attention-snoozed"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -11992,6 +11998,7 @@ fn replicated_work_validation_fields<'a>(
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::attention_controls::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::availability::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
@@ -16704,6 +16711,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::read_positions::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::attention_controls::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::availability::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
@@ -24345,7 +24354,7 @@ pub fn append_claim_with_commit_context(
             {
                 return Ok((existing, false));
             }
-            let mut stored_fields = custom::prepare(transaction, input)?;
+            let mut stored_fields = custom::prepare(transaction, &graph.origin, input)?;
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }
@@ -24524,6 +24533,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::attention_controls::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::availability::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

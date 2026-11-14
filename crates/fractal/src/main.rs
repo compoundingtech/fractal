@@ -96,6 +96,7 @@ mod pairing_qr;
 mod agents_cli;
 mod attention_cli;
 mod claims_cli;
+mod hosts_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -446,6 +447,11 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+    /// Inspect and resolve durable execution-host admission holds.
+    Hosts {
+        #[command(subcommand)]
+        command: hosts_cli::HostsCommand,
     },
     /// Save or restore the signed claim log.
     Backup {
@@ -4261,6 +4267,49 @@ enum AttentionCommand {
     Reject(ReviewArgs),
     /// Ask a feedback-mode step to change its work and rerun.
     RequestChanges(FeedbackReviewArgs),
+    /// Mark one of your alerts seen, on every client of yours.
+    Seen(AttentionControlArgs),
+    /// Put one of your alerts off until later, on every client of yours. It stays open, and an
+    /// ask's deadline does not move: hold the deadline clock for that.
+    Snooze(AttentionSnoozeArgs),
+    /// Set an ask aside without answering it: the asker is told you dismissed it. An update is
+    /// read. Other alerts keep their own actions.
+    Dismiss(AttentionDismissArgs),
+}
+
+#[derive(Args)]
+struct AttentionControlArgs {
+    /// The alert: its `attention/...` ID from `fractal alerts ls`.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
+    subject: String,
+    /// The person whose alert it is: only that person may control it.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+    #[arg(long = "as", value_parser = parse_person_subject)]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct AttentionSnoozeArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// How long to put it off, such as `30m`, `4h` or `1d`.
+    #[arg(long = "for", conflicts_with_all = ["until", "clear"], required_unless_present_any = ["until", "clear"])]
+    duration: Option<String>,
+    /// Put it off until this RFC 3339 instant.
+    #[arg(long, conflicts_with = "clear")]
+    until: Option<String>,
+    /// Bring it back now.
+    #[arg(long)]
+    clear: bool,
+}
+
+#[derive(Args)]
+struct AttentionDismissArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// Why, sent to the asker with the dismissal.
+    #[arg(long)]
+    text: Option<String>,
 }
 
 #[derive(Args)]
@@ -6440,6 +6489,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6546,6 +6596,9 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => args.actor.as_deref(),
+        Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
+            | hosts_cli::HostsCommand::Release { actor, .. }
+            | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
