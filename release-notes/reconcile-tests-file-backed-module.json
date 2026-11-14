@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Move the inline reconcile tests into a file-backed module while preserving test identities and test-support helper paths",
+  "replay": {"status": "none", "detail": "Internal test-only source extraction; replay behavior is unchanged."},
+  "schema": {"status": "none", "detail": "No database schema or stored state changes."},
+  "rules": {"status": "none", "detail": "No runtime code or test logic changes."},
+  "compatibility": {"status": "none", "detail": "Qualified test identities and test-support helper exports retain their existing paths."},
+  "downtime": {"status": "none", "detail": "No deployment or migration required."},
+  "manual": {"status": "none", "detail": "No operator or developer workflow changes required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or recovery action required."}
+}
