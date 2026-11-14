@@ -93,6 +93,17 @@ class CiLocalWeb(unittest.TestCase):
             self.assertEqual(call['umask'], 0o022)
         self.assertEqual(list((self.home / '.cache/ci-local').glob('web.*')), [], 'the scratch is removed afterwards')
 
+    def test_a_long_path_preserves_toolchain_entries_while_scrubbing_account_wrappers(self):
+        toolchains = [f'/toolchain-{index}' for index in range(80)]
+        recorder = self.home / '.local/state/st3/recorder/bin'
+        path = ':'.join([str(recorder), str(self.wrappers), *toolchains, os.environ['PATH']])
+        self.assertGreater(len(path), 512)
+        done, calls = self.run_web(PATH=path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(calls), 2)
+        expected = ':'.join([*toolchains, os.environ['PATH']])
+        self.assertEqual(calls[-1]['env']['PATH'], expected)
+
     def test_on_a_host_with_build_admission_the_plays_wait_for_a_heavy_slot_and_take_their_share_of_the_cores(self):
         admission = self.wrappers / 'build-admission'
         admission.write_text('#!/usr/bin/env bash\nexec "$@"\n')
