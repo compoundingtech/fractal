@@ -151,7 +151,9 @@ fn retained(store: &Store, agent: &str, invocation: &str, kind: &str, hash: &str
             && claim.body["fields"]["kind"] == kind
             && (claim.body["fields"]["sha256"] == hash || claim.body["fields"]["artifact"]["sha256"] == hash))
         .ok_or_else(|| ApiError::not_found("invocation artifact does not exist"))?;
-    if latest.body["fields"]["status"] != "retained" {
+    if latest.body["fields"]["status"] != "retained"
+        || invocation_artifacts::is_deleted(store, invocation, kind, hash).map_err(ApiError::internal)?
+    {
         return Err(ApiError {status:StatusCode::GONE,code:"artifact-deleted".into(),
             message:"the invocation artifact reference was deleted".into(),details:Box::default()});
     }
