@@ -229,7 +229,7 @@ mod tests {
         let retained = store.invocation_receipts("invocation/op").unwrap();
         assert_eq!(retained[0].trace_context, receipt.trace_context);
         assert_ne!(store.start_invocation_trace("invocation/retry", "agent/example/worker",
-            &[correlation.clone()]).trace_id(), correlation.trace_id());
+            std::slice::from_ref(&correlation)).trace_id(), correlation.trace_id());
         let unknown = native_receipt("unknown", "agent/example/worker", &prepared(),
             InvocationPhase::Admitted, None).unwrap().unwrap();
         assert_eq!(unknown.trace_context, None);
