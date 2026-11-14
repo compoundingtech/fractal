@@ -1101,6 +1101,82 @@ fn a_pending_reply_uses_the_existing_action_row_without_a_second_send_target() {
 }
 
 #[test]
+fn enter_that_queues_nothing_says_why_and_keeps_the_draft() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Thread("thread/worker".into());
+    let cursor = edit::Cursor::default();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut texts = HashMap::new();
+    threads.tap(&pane.key(), thread::Tap::Compose("thread/worker".into()), &mut texts);
+    assert!(threads.key(&pane, enter, &cursor, &mut texts));
+    assert!(threads.writes().is_empty());
+    assert_eq!(threads.take_refusal().as_deref(), Some(NOTHING_TO_SEND));
+    assert_eq!(threads.take_refusal(), None, "said once");
+
+    threads.paste(&pane, "First reply", &cursor, &mut texts);
+    assert!(threads.key(&pane, enter, &cursor, &mut texts));
+    assert_eq!(threads.writes().len(), 1);
+    assert_eq!(threads.take_refusal(), None, "a queued reply is not refused");
+    assert!(threads.key(&pane, enter, &cursor, &mut texts));
+    assert!(threads.writes().is_empty());
+    assert_eq!(
+        threads.take_refusal().as_deref(),
+        Some("The original action is still being sent")
+    );
+
+    // Before the thread's summary has loaded, the reply has no context yet.
+    let mut loading = Threads::default();
+    enable_editing(&mut loading);
+    let early = Input::Reply("thread/loading".into());
+    texts.insert(early.key(), "Too early".into());
+    loading.drafts.entry(early.key()).or_default();
+    loading.submit(&pane.key(), early.clone(), &texts);
+    assert!(loading.writes().is_empty());
+    assert_eq!(
+        loading.take_refusal().as_deref(),
+        Some("The thread context is not ready")
+    );
+    assert_eq!(texts[&early.key()], "Too early", "the draft is kept");
+}
+
+#[test]
+fn the_shell_flashes_a_refused_thread_send_as_a_warning() {
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    ui.world.link = super::super::Link::Live;
+    ui.threads = observed_threads(ThreadState::Open);
+    let pane = Pane::Thread("thread/worker".into());
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.key(enter);
+    let said = |ui: &super::super::Ui| ui.flash.as_ref().map(|(text, _)| text.clone());
+    assert_eq!(said(&ui).as_deref(), Some(NOTHING_TO_SEND));
+    assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
+    super::super::flash::capture_shell(&ui, "p1-6-empty-enter-warn");
+
+    ui.flash = None;
+    ui.paste("Please check the worker test.".into());
+    ui.key(enter);
+    assert_eq!(ui.threads.writes().len(), 1);
+    assert_eq!(said(&ui), None, "a queued reply flashes no refusal");
+    ui.key(enter);
+    assert_eq!(
+        said(&ui).as_deref(),
+        Some("The original action is still being sent")
+    );
+    assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
+    super::super::flash::capture_shell(&ui, "p1-6-pending-enter-warn");
+
+    // The Send button reaches the same refusal as Enter.
+    ui.flash = None;
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Send("thread/worker".into())));
+    assert_eq!(
+        said(&ui).as_deref(),
+        Some("The original action is still being sent")
+    );
+}
+
+#[test]
 fn a_closed_summary_keeps_the_active_reply_focus_and_quote() {
     let mut threads = observed_threads(ThreadState::Open);
     let id = "thread/worker";

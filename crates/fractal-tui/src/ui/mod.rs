@@ -1890,6 +1890,13 @@ impl Ui {
         self.flash_severity = severity;
     }
 
+    /// Say why a thread Enter or Send queued nothing; the draft is still in its box.
+    fn flash_thread_refusal(&mut self) {
+        if let Some(refusal) = self.threads.take_refusal() {
+            self.flash_as(Severity::Warn, refusal);
+        }
+    }
+
     /// Put a message st refused back in the box it was sent from, with its images, reply and
     /// dictation mark, so the person can change it and send it again. Only when the box is
     /// empty: what was typed while the send was out is theirs, and the failed message stays in
@@ -4428,7 +4435,10 @@ impl Ui {
                 self.click(Hit::Thread(pane.key(), tap));
                 return;
             }
-            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) { return; }
+            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) {
+                self.flash_thread_refusal();
+                return;
+            }
         }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
@@ -6473,6 +6483,7 @@ impl Ui {
                         self.threads.tap(&key, thread::Tap::Compose(id), &mut self.conversation_state.drafts);
                     }
                 }
+                self.flash_thread_refusal();
             }
             Hit::Link(url) => {
                 copy(&url);

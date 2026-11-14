@@ -23,6 +23,7 @@ use super::{
 const DRAFT_COLLISION: &str = "This item has different saved drafts. Both drafts are kept. Combine saved drafts to edit both together; nothing will be sent.";
 const DRAFT_LOCKED_COLLISION: &str = "Both saved drafts are kept. Settle the original thread delivery before combining them; its request cannot be rewritten.";
 const DRAFT_COMBINED: &str = "Both saved drafts were combined for editing. Nothing has been sent.";
+const NOTHING_TO_SEND: &str = "Write something first; nothing was sent";
 /// One line under a paused thread's own heading; the view explains the pause once.
 const PAUSED_NOTICE: &str = "Paused · collapse a thread to resume live updates";
 
@@ -382,6 +383,8 @@ pub(super) struct Threads {
     writes: Vec<Write>,
     pending_actions: BTreeMap<String, Delivery>,
     hover: Option<String>,
+    /// Why the last Enter or Send queued nothing, until the shell says it (`take_refusal`).
+    refusal: Option<String>,
 }
 
 impl Threads {
@@ -1820,8 +1823,11 @@ impl Threads {
         text: &str,
         draft: &Draft,
     ) -> Result<Write, String> {
-        if !self.available || !self.allowed(input) || text.trim().is_empty() {
+        if !self.available || !self.allowed(input) {
             return Err("The thread is not ready to send".into());
+        }
+        if text.trim().is_empty() {
+            return Err(NOTHING_TO_SEND.into());
         }
         if draft
             .delivery
@@ -1954,11 +1960,23 @@ impl Threads {
 
     fn submit(&mut self, host: &str, input: Input, texts: &HashMap<String, String>) {
         let key = input.key();
-        if let (Some(draft), Some(text)) = (self.drafts.get(&key), texts.get(&key))
-            && let Ok(write) = self.prepare_write(host, &input, text, draft)
-        {
-            self.retain_and_queue(&input, write);
-        }
+        let refusal = match (self.drafts.get(&key), texts.get(&key)) {
+            (Some(draft), Some(text)) => match self.prepare_write(host, &input, text, draft) {
+                Ok(write) => {
+                    self.retain_and_queue(&input, write);
+                    return;
+                }
+                Err(refusal) => refusal,
+            },
+            _ => NOTHING_TO_SEND.into(),
+        };
+        // Nothing was queued and the draft stays: the person hears why instead of a silent Enter.
+        self.refusal = Some(refusal);
+    }
+
+    /// Why the last Enter or Send queued nothing, said once.
+    pub(super) fn take_refusal(&mut self) -> Option<String> {
+        self.refusal.take()
     }
 
     fn has_edit(&self, id: &str) -> bool {
