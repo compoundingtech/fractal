@@ -383,3 +383,14 @@ after main's step-execution and response-evidence fields were regenerated into t
 This includes v27's non-trimming seed 21 and the earlier provisional controls seeds 610 and 1597.
 The exact v28 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
 no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v29.json` adds the `notice-owner` registry entry (docs/st3/schema.md, "Daemon-owned
+notice delivery") on top of v28's person attention controls. Versions 1 through 28 stay frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v29.json`;
+do not hand-edit it. The simulation and audit reports select v29.
+
+Hosted [burst run 43535467419](https://github.com/compoundingtech/fractal/actions/runs/43535467419)
+observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
+The exact v29 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
+no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
