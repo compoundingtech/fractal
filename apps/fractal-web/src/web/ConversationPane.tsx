@@ -1,5 +1,4 @@
 import * as React from 'react'
-import * as stylex from '@stylexjs/stylex'
 import { markStart, measureEnd } from './perfMarks.ts'
 import { useAtomValue } from '@effect/atom-react'
 import { systemEventsPreference } from './conversationPreferences.ts'
@@ -293,10 +292,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         : restStatus === undefined || restLabel === undefined ? null : <SeatAtRest status={restStatus} label={restLabel} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
     {/* Only an agent has threads; a pane for any other ref would ask the daemon for a list it refuses.
-        They share the alerts' reading lane, so the list lines up with the asks and the composer. */}
-    {!readOnly && visible && agentRef.startsWith('agent/') ? <div {...stylex.props(styles.threads)}>
-      <div {...stylex.props(styles.threadsLane)}><LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /></div>
-    </div> : null}
+        The strip places itself in the alerts' reading lane. */}
+    {!readOnly && visible && agentRef.startsWith('agent/') ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
@@ -328,8 +325,3 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const headerStatusHost = sync._tag === 'Failed' || sync._tag === 'Progress' ? headerActionsHost : undefined
   return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerStatusHost} sync={sync} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
-
-const styles = stylex.create({
-  threads: { flexShrink: 0, minWidth: 0, boxSizing: 'border-box', paddingInline: spaceVars.section },
-  threadsLane: { maxWidth: geometryVars.lane, marginInline: 'auto' },
-})

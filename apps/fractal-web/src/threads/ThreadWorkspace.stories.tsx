@@ -208,8 +208,10 @@ function ThreadWorkspace({ placement, connection, scenario, ordering }: Args) {
   </DataSourceProvider>
 }
 
+// A harness around the production workspace, not a module suite: the spaced title keeps it out of the
+// one-module-per-`Fractal/App/<Module>` identity check, like 'Alerts tab' and 'Composer images'.
 const meta = {
-  title: 'Fractal/App/InboxThreads',
+  title: 'Fractal/App/Inbox threads',
   excludeStories: ['scenarioExemptions'],
   component: ThreadWorkspace,
   args: { placement: 'inbox', connection: 'local', scenario: 'existing' },
@@ -282,7 +284,7 @@ export const AgentThreads: Story = {
       return element
     }, { timeout: 60_000 })
     await expect(strip.open).toBe(false)
-    await expect(strip.querySelector('summary')?.textContent).toBe('Threads, 2')
+    await expect(strip.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2')
     await userEvent.click(strip.querySelector('summary')!)
     await waitFor(() => expect(strip.open).toBe(true))
     const row = within(strip).getAllByRole('button', { name: /Worker tests/ })[0]!
@@ -331,7 +333,9 @@ export const UpdatesPaused: Story = {
   play: async context => {
     await AllStates.play?.(context)
     const details = await alertDetails(context.canvasElement)
-    await expect(await details.findByRole('heading', { name: /^Threads, 2.*Updates paused$/ })).toBeTruthy()
+    const heading = await details.findByRole('heading', { name: 'Threads, 2, updates paused' })
+    await expect(heading.textContent).toBe('Threads2· Updates paused')
+    await expect(heading.querySelector('[data-threads-paused]')).not.toBeNull()
     const markers = () => context.canvasElement.querySelectorAll('[data-testid="alert-details"] [data-threads-paused]')
     await expect(markers()).toHaveLength(1)
     await userEvent.click(context.canvasElement.querySelector<HTMLElement>('[data-testid="alert-details"] [data-thread-panel][aria-label="Worker tests"] button[aria-expanded]')!)

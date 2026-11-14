@@ -105,15 +105,18 @@ it.each([
     } else {
       expect(requests.some(url => url.searchParams.has('origin_source'))).toBe(false)
     }
-    const button = Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
+    // Start is offered only once the item's thread list is observed.
+    const findStart = () => Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
     if (!canStart) {
-      expect(button).toBeUndefined()
-      if (!responsible) expect(host.textContent).toContain('No responsible agent is configured')
+      if (!responsible) await vi.waitFor(() => expect(host.textContent).toContain('No responsible agent is configured'))
+      else await act(async () => {})
+      expect(findStart()).toBeUndefined()
       expect(host.querySelector('[aria-label="Message composer, Review PR #42"]')).toBeNull()
       return
     }
-    expect(button).toBeDefined()
-    await vi.waitFor(() => expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask agent/example/atlas about this item without answering it.'))
+    await vi.waitFor(() => expect(findStart()).toBeDefined())
+    const button = findStart()
+    expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask agent/example/atlas about this item without answering it.')
     await act(async () => button?.click())
     const composer = host.querySelector('[data-testid="alert-details"] [aria-label="Message composer, Review PR #42"]')
     expect(composer).not.toBeNull()

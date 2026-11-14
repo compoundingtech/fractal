@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { useAtom, useAtomValue } from '@effect/atom-react'
-import { Button, Input, Label, TextField, VisuallyHidden } from 'react-aria-components'
+import { Button, Input, Label, TextField } from 'react-aria-components'
 import type { ThreadListQuery } from '@fractal/client'
 import type { Attention, ThreadMessageEvent, ThreadSummary } from '@fractal/client/schema/read'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
@@ -25,8 +25,9 @@ const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. You
 /** The same words the alert answer box uses for a device without control access. */
 const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
 
+/** Above the agent's composer the strip takes the alerts' reading lane; it renders nothing, lane included, when empty. */
 export function LiveAgentThreads({ agentId, onOpenThread }: OpenThread & { readonly agentId: string }) {
-  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" placement="pane" onOpenThread={onOpenThread} />
+  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" placement="pane" lane onOpenThread={onOpenThread} />
 }
 
 export function LiveMissionThreads({ missionId, onOpenThread }: OpenThread & { readonly missionId: string }) {
@@ -39,9 +40,9 @@ export function LiveRecentlyClosedThreads({ onOpenThread }: OpenThread) {
 
 type Placement = 'pane' | 'sidebar'
 
-function ThreadGroup({ query, label, placement, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string; readonly placement: Placement }) {
+function ThreadGroup({ query, label, placement, lane = false, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string; readonly placement: Placement; readonly lane?: boolean }) {
   const source = useDataSource().threads
-  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} placement={placement} onOpenThread={onOpenThread} />
+  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} placement={placement} lane={lane} onOpenThread={onOpenThread} />
 }
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
@@ -60,43 +61,51 @@ function useUpdatesPaused(stale: boolean): boolean {
   return stale || holding
 }
 
-/** "Threads 2 · Updates paused"; read as "Threads, 2". */
+/**
+ * "Threads 2 · Updates paused", named "Threads, 2, updates paused". The name is set on the heading or summary:
+ * hidden separators between flex children are read with stray spaces ("Threads , 2").
+ */
 function CountedLabel({ label, count, paused }: { readonly label: string; readonly count: number | undefined; readonly paused: boolean }) {
   return <>
     <span {...stylex.props(styles.label)}>{label}</span>
-    {count === undefined || count === 0 ? null : <span {...stylex.props(styles.count)}><VisuallyHidden elementType="span">, </VisuallyHidden>{count}</span>}
+    {count === undefined || count === 0 ? null : <span {...stylex.props(styles.count)}>{count}</span>}
     {paused ? <span data-threads-paused="" {...stylex.props(styles.paused)}>· Updates paused</span> : null}
   </>
 }
+const countedName = (label: string, count: number | undefined, paused: boolean) =>
+  `${label}${count === undefined || count === 0 ? '' : `, ${count}`}${paused ? ', updates paused' : ''}`
 
 /**
  * The agent and mission views pin a one-line summary, collapsed until opened; it lists collapsed rows only and each
  * opens the thread in its own tab, so no timeline or composer stacks above the agent's own composer.
  */
-function ThreadGroupContent({ source, query, label, placement, onOpenThread }: OpenThread & {
+function ThreadGroupContent({ source, query, label, placement, lane, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly query: ThreadListQuery
   readonly label: string
   readonly placement: Placement
+  readonly lane: boolean
 }) {
   const narrow = React.useContext(NarrowLayoutContext)
   const { read, upgradeRequired } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
   const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
   const [open, setOpen] = React.useState(false)
-  if (upgradeRequired) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
-  if (!read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor))) return null
   // Only a complete first page states how many threads there are.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
-  return <details aria-label={label} onToggle={event => setOpen(event.currentTarget.open)} {...stylex.props(styles.fold, placement === 'pane' && styles.strip)}>
-    <summary {...stylex.props(styles.foldSummary, placement === 'sidebar' && styles.foldSidebar, narrow && styles.foldTouch)}>
-      <span {...stylex.props(styles.foldChevron)}><Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} /></span>
-      <CountedLabel label={label} count={count} paused={paused} />
-    </summary>
-    <div {...stylex.props(styles.foldBody, placement === 'sidebar' && styles.foldBodySidebar)}>
-      <ThreadListPage source={source} query={query} opensInTab onOpenThread={onOpenThread} />
-    </div>
-  </details>
+  const content = upgradeRequired ? <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
+    : !read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor)) ? null
+    : <details aria-label={label} onToggle={event => setOpen(event.currentTarget.open)} {...stylex.props(styles.fold, placement === 'pane' && styles.strip)}>
+      <summary aria-label={countedName(label, count, paused)} {...stylex.props(styles.foldSummary, placement === 'sidebar' && styles.foldSidebar, narrow && styles.foldTouch)}>
+        <span {...stylex.props(styles.foldChevron)}><Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} /></span>
+        <CountedLabel label={label} count={count} paused={paused} />
+      </summary>
+      <div {...stylex.props(styles.foldBody, placement === 'sidebar' && styles.foldBodySidebar)}>
+        <ThreadListPage source={source} query={query} opensInTab onOpenThread={onOpenThread} />
+      </div>
+    </details>
+  return content === null || !lane ? content
+    : <div {...stylex.props(styles.agentLane)}><div {...stylex.props(styles.agentLaneMeasure)}>{content}</div></div>
 }
 
 /** Collapsed rows share one bordered list so their columns line up; later pages join the same list. */
@@ -174,8 +183,8 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   if (!read) return null
   // Only a complete first page states how many threads this item has.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
-  // A start cannot be offered beside a list the source refused to read.
-  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag !== 'Unavailable'
+  // A start waits for the list: while it loads the sibling titles are unknown, and a refused or failed list is not offered one.
+  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag === 'Observed'
   if (count === 0 && focused === undefined && retained.length === 0 && !offerStart) return null
   const askTitle = threadTitleFromAsk(title)
   // Two threads named after the same ask cannot be told apart, so a second one is named after its first line.
@@ -186,7 +195,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   const saved = draft.content.trim() !== ''
   return <section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
     <div {...stylex.props(styles.headingRow)}>
-      <h3 id={headingId} {...stylex.props(styles.inboxHeading)}><CountedLabel label="Threads" count={count} paused={paused} /></h3>
+      <h3 id={headingId} aria-label={countedName('Threads', count, paused)} {...stylex.props(styles.inboxHeading)}><CountedLabel label="Threads" count={count} paused={paused} /></h3>
       {/* The start control keeps one place at the end of the heading, however many threads open below it. */}
       {!offerStart || agent === undefined || starting ? null : <div ref={startArea} {...stylex.props(styles.startArea)}>
         <ActionButton variant="outline" onPress={() => setStarting(true)}>{saved ? 'Continue draft' : <><Icon name="plus" size={12} />Start thread</>}</ActionButton>
@@ -514,6 +523,9 @@ function ReadStatus({ feed, subject, onRetry }: {
 }
 
 const styles = stylex.create({
+  // The agent strip sits in the conversation pane's column, inset and measured like the alerts above it.
+  agentLane: { flexShrink: 0, minWidth: 0, boxSizing: 'border-box', paddingInline: s.section },
+  agentLaneMeasure: { maxWidth: g.lane, marginInline: 'auto' },
   // The pinned strip and its fold follow AgentTodos: a hairline above, one summary line, a chevron slot and a muted count.
   fold: { minWidth: 0, fontSize: t.metaSize },
   strip: { flexShrink: 0, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.border },

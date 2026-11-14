@@ -101,7 +101,8 @@ it('pins agent threads as one collapsed summary whose rows open the thread in it
     reply: url => url.pathname.endsWith('/threads') ? page([row('thread/one', 'Release checklist'), row('thread/two', 'Rollout notes', 'closed')]) : page([]),
   })
   try {
-    await vi.waitFor(() => expect(view.host.querySelector('summary')?.textContent).toBe('Threads, 2'))
+    await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2'))
+    expect(view.host.querySelector('summary')?.textContent).toBe('Threads2')
     const details = view.host.querySelector('details')
     expect(details?.open).toBe(false)
     expect(details?.getAttribute('aria-label')).toBe('Threads')
@@ -119,9 +120,10 @@ it('pins agent threads as one collapsed summary whose rows open the thread in it
 it('marks the section paused once and holds it until the gateway is live again, even after an HTTP read succeeds', async () => {
   const view = await mount(<LiveAgentThreads agentId={agent} />, { reply: () => page([row('thread/one', 'Release checklist')]) })
   try {
-    await vi.waitFor(() => expect(view.host.querySelector('summary')?.textContent).toBe('Threads, 1'))
+    await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 1'))
     await view.setGateway({ status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 1, nextAt: 1_000, issue: 'socket closed' } }, observedAt: 1 })
-    expect(view.host.querySelector('summary')?.textContent).toBe('Threads, 1· Updates paused')
+    expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 1, updates paused')
+    expect(view.host.querySelector('summary [data-threads-paused]')?.textContent).toBe('· Updates paused')
     const reads = view.requests.length
     await act(async () => view.threads.reload?.())
     await vi.waitFor(() => expect(view.requests.length).toBeGreaterThan(reads))

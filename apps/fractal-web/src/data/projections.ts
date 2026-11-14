@@ -65,7 +65,7 @@ const turnOf = (agent: DecodedAgent): Agent['turn'] => {
   const harnessState = Option.getOrUndefined(agent.harness_state)
   if (harnessState === 'working') return 'active'
   if (harnessState === 'idle' || harnessState === 'waiting' || harnessState === 'blocked' || harnessState === 'unauthenticated') return 'inactive'
-  if (typeof agent.state !== 'string' || agent.state === 'running' || agent.state === 'starting') return undefined
+  if (harnessState !== undefined || typeof agent.state !== 'string' || agent.state === 'running' || agent.state === 'starting') return undefined
   return 'inactive'
 }
 

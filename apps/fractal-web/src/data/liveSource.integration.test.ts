@@ -678,7 +678,7 @@ describe('connection loss detection', () => {
 
   it.live('marks grants unread until capabilities answer, keeps the answer while disconnected and reads again on reconnect', () =>
     withBrowser((live, gateway) => Effect.gen(function* () {
-      const release = yield* mountLiveFeeds(live, gateway)
+      // Before any capabilities answer: the client has no discovery to reuse, so the grants wait on the read.
       const capabilities = Promise.withResolvers<void>()
       gateway.capabilityGate = capabilities.promise
       const releaseGrants = live.registry.mount(live.source.grants)
@@ -688,6 +688,7 @@ describe('connection loss detection', () => {
       capabilities.resolve()
       gateway.capabilityGate = undefined
       yield* settle
+      const release = yield* mountLiveFeeds(live, gateway)
       expect(live.registry.get(live.source.grants)).toMatchObject({ actions: 'granted' })
       expect(live.registry.get(live.source.grants)).not.toHaveProperty('unread')
       gateway.capabilityFailure = true
