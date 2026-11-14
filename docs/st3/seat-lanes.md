@@ -6,6 +6,147 @@ built: a command raises its seat's lane for its own run. A host's build slots go
 built there in the trailing seven days runs in a lane and the host has run a day that way without a
 guard trip.
 
+## Durable host holds
+
+A host hold closes admission for named resource-lane operations without acquiring a membership
+or reserving CPU, memory, or executor capacity. The execution host stores the authenticated
+owner, reason, affected operations, revision, originating run and receipt durably. A terminal
+run, owner crash, daemon restart, or answered ask does not resolve quarantine.
+
+Connect to the target host's daemon and use:
+
+```sh
+fractal hosts hold host-a --operation activation --reason "Investigate failed activation" --as person/operator
+fractal hosts ls
+fractal hosts release host-a host-hold/ID --expected-revision 1 --resolution "Repaired and verified" --as person/operator
+fractal hosts recover host-a host-hold/ID --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
+```
+
+Repeat `--operation` to cover several native lane operation names, or use `--operation '*'` for
+all resource admission. Only the target host accepts mutations, and only the authenticated
+hold owner can release the revision they read. A stale revision or different owner is refused.
+The configured owning person authenticates trusted-local operator requests; bound agent/run
+credentials authenticate program requests. Naming an actor in JSON does not confer authority.
+Active holds appear in attention/now and `hosts ls`; their origin run and receipt remain links,
+not lifecycle owners. Released records remain durable for inspection. Resolution commits the
+host predicate transition and wakes queued admission; there is no retry timer or polling lock.
+
+Ordinary release requires the authenticated hold owner, including while its run is
+live. `hosts recover` is a distinct recovery action available only to the execution
+host's configured owning person through the local operator API; bound agents and
+runs cannot borrow that person's identity. Recovery requires the exact observed
+revision and a reason, and only applies to a run-owned hold whose owning mission
+run (directly or through the owner's declaration) is positively terminal. A missing
+or nonterminal run retains custody; other owners must use ordinary release.
+Recovery preserves the original owner and records a separate `host-hold.recovered`
+history fact with the acting operator, original owner, reason and revisions.
+Ordinary release records `host-hold.released`. Neither terminal runs nor answered
+asks automatically resolve a hold.
+
+## Resource lane telemetry
+
+The host authority uses `crate::otel::LaneTelemetry` for finite resource memberships. This observer
+does not grant admission, reconstruct membership state, expire holds, or infer retirement from a
+payload exit. Construct one observer after telemetry initialization and publish authoritative
+`snapshot(lane, occupancy, queued, holds)` counts after reconciliation and on each transition.
+Occupancy includes admitted, launching, running, and retiring generations until confirmed tree
+retirement. Publish zero queue and hold counts too. Lane names are bounded configured policy names;
+never pass run, membership, invocation, or hold identifiers as lane names.
+
+`phase(Admission, identity, links)` opens at queue entry and finishes at the admission/preparation
+decision. `phase(Execution, ...)` opens **only at confirmed payload release** and finishes when
+execution ends. `phase(Release, ...)` measures retirement request through confirmed retirement.
+Finish each guard with the authoritative `LaneOutcome`. Dropping an unfinished guard records
+`uncertain`; it never frees capacity. The host persists wall-clock lifecycle events independently.
+These guards use monotonic elapsed time within one daemon incarnation, not restart-reset budgets.
+
+The store retains phase guards by membership across queue reevaluations. It captures the initial
+request's active trace context once and reuses that link for execution and release; run/step/attempt
+attributes remain the durable correlation references. On recovery, only live segments are recreated.
+`rebase(persisted_age, true)` reports `st.resource.clock_uncertain` and prior elapsed age explicitly,
+then continues with a monotonic clock. It does not issue a fresh timeout budget or replay completed
+histogram samples. `retirementRequestedAt` is persisted before OS teardown, so restart can recover
+the release age too; an absent historical boundary remains explicitly uncertain. `succeeded` means
+the phase boundary was observed, not that an independently journaled payload command succeeded.
+
+Each confirmed finite execution root gets its own execution guard and native generation correlation,
+including concurrent roots within one admitted membership. Its clock opens from the runtime's
+persisted `payload_released_at_unix_ms` gate receipt, never preparation or launch intent. The separate
+host `Clocks` owner enforces queue/payload elapsed time even when all exporters are disabled.
+`resource_execution_elapsed(membership, owner, runtime_id, now_ms)` returns no elapsed time before
+release, a monotonic elapsed value while running, and the persisted end-minus-release duration after
+end. Backwards-time reconstruction that cannot establish elapsed payload age is an explicit error,
+not a fresh timeout budget. Exporter callbacks and span drops do not own these execution clocks.
+
+The existing OTLP exporter emits fresh INTERNAL root spans `st.resource.admission`,
+`st.resource.execution`, and `st.resource.release`, linked to the run/attempt contexts supplied by
+the caller. Each span has a concise `span.label`, run/step/integer-attempt identity, lane,
+membership, execution generation, optional invocation, and terminal `st.resource.outcome`.
+Structured `resource.lane.phase` start/end logs carry the same identity and explicit trace ID.
+Traces, metrics, and logs respect their existing independent exporter switches; there is no new
+exporter stack or private metrics accumulator presented as exported telemetry.
+
+| OTel metric | Unit | Meaning |
+| --- | --- | --- |
+| `st.resource.occupancy` | `{item}` | Authoritative admitted/unretired memberships |
+| `st.resource.queue` | `{item}` | Requests awaiting admission |
+| `st.resource.holds` | `{item}` | Durable holds affecting the lane |
+| `st.resource.wait.duration` | `s` | Queue and admission/preparation duration, excluding payload time |
+| `st.resource.execution.duration` | `s` | Confirmed payload release through execution end |
+| `st.resource.release.duration` | `s` | Retirement request through retirement/uncertain observation |
+| `st.resource.hold.duration` | `s` | Persisted hold age supplied at authenticated resolution |
+
+Counts are SDK observable gauges over the latest host snapshot, including zeros; durations are SDK
+histograms. All have only `st.resource.lane` as a metric dimension, plus bounded
+`st.resource.outcome` on phase durations. Host identity belongs to exporter resource attributes.
+Unbounded execution identifiers remain exclusively on traces/logs. Call
+`hold_resolved(lane, persisted_age)` when a durable hold is resolved; a daemon restart must not
+reset that age or clear the hold. An unresolved hold contributes to `st.resource.holds`, not a
+fabricated completed hold-duration sample.
+
+
+## Finite exec resource lanes
+
+A step with exactly one `exec` declaration may bind that execution to a named host-local resource
+lane. This is the data DSL counterpart of `resources.lane(name, options)` in a program:
+
+```kdl
+step "verify" timeout="20m" {
+  agentless
+  lane "verification" host="worker" max-members=1 coverage="logical" admission-timeout="30m" {
+    capacity cores=4 memory="8G"
+  }
+  exec "verify" {
+    host "worker"
+    command "run-verification"
+  }
+}
+```
+
+The lane name and explicit `host` bind one native admission policy; the exec's actual host must
+match. `max-members` defaults to one; `coverage` defaults to `logical`; `capacity` and
+`admission-timeout` are optional. The spellings map to the program API's `maxMembers`, `coverage`,
+`capacity`, and `admissionTimeout`. Capacity describes each admitted independent root's footprint;
+the shared containment slice accommodates all configured members. Required `enforced` coverage
+refuses unsupported hosts rather than silently launching without enforcement.
+
+Both surfaces use the same host-writer membership transaction, durable host holds, shared seat
+fit inventory, reactive lane wake dependency, fenced payload gate, and exact-generation retirement.
+No graph claim is a permit. `admission-timeout` bounds waiting/preparation separately from the step's
+`timeout`, which starts at confirmed payload release. Cancellation withdraws a queued request or
+retires its exact admitted generation; natural process exit does not free room while descendants
+remain. Child runs started through a program lane inherit its native membership for their actual
+exec roots rather than reserving resources for a process-free child run.
+Only steps that own lane-bound exec payload members defer their execution interval until payload
+release. An inherited membership does not delay a program step, an after-run wait, or an agentless
+gate with no such payload: these enter `working` and consume their normal step timeout.
+
+A step's existing direct `capacity` remains an assigned agent's scoped raise, not an independent
+execution reservation. To add only executor exclusivity beside a seat, omit capacity inside the
+resource lane; physical containment, not environment text, determines any resource inheritance.
+Omitting `lane` leaves stored step JSON and definition hashes unchanged, and old published history
+continues to deserialize without a resource lane.
+
 ## What a seat lane is
 
 A seat lane is a CPU and memory cap around one seat: its harness and every process the harness
@@ -67,8 +208,9 @@ host that runs the step's mission run checks the fit for a seat on that host; a 
 has its lane raised when it holds the step, without the wait. An older member runs a step that
 declares capacity in its seat's own lane, and an older run owner does not hold it for room.
 
-The declaration is `capacity`, not `lane`: the mission's named `lane "NAME" { entries … }` block is
-a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
+An assigned seat's declaration is `capacity`, not `lane`. At mission scope, the named
+`lane "NAME" { entries … }` block remains a merge lane (see [lanes.md](lanes.md)); only a step's
+`lane` block declares the finite execution resource policy above.
 
 ## Linux mechanism
 
@@ -453,41 +595,6 @@ inactive units and absent controllers retain their observed reasons. This fixtur
 policy distinguishes an explicitly configured share from a default share; it does
 not imply that the kernel ignores default scheduler weights.
 
-## Durable host holds
-
-A host hold is a durable admission condition, not a lane reservation. The connected
-execution host alone writes its holds; authenticated ownership and expected revision
-protect resolution. A hold survives the originating run becoming terminal, a daemon
-restart, or an answered ask, and consumes no executor capacity.
-
-```sh
-fractal hosts hold worker --operation activation --reason "Investigate failed activation" --as person/operator
-fractal hosts ls --json
-fractal hosts release worker host-hold/example --expected-revision 1 --resolution "Recovery verified" --as person/operator
-fractal hosts recover worker host-hold/example --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
-```
-
-`--operation` is repeatable; `*` affects every native operation. Placement can retain
-`--originating-run` and `--receipt` references without making the run the hold's
-lifecycle owner. Active holds appear in attention/now. Resolution commits a local
-observation that invalidates registered admission reads; it does not depend on a
-reserve-probe loop.
-
-Ordinary release requires the authenticated hold owner, including while its run is
-live. `hosts recover` is a distinct recovery action available only to the execution
-host's configured owning person through the local operator API; bound agents and
-runs cannot borrow that person's identity. Recovery requires the exact observed
-revision and a reason, and only applies to a run-owned hold whose owning mission
-run (directly or through the owner's declaration) is positively terminal. A missing
-or nonterminal run retains custody; other owners must use ordinary release.
-Recovery preserves the original owner and records a separate `host-hold.recovered`
-history fact with the acting operator, original owner, reason and revisions.
-Ordinary release records `host-hold.released`. Neither terminal runs nor answered
-asks automatically resolve a hold.
-
-These records do not fence arbitrary shell SSH mutations. A target activation
-adapter must check target authority, hold revision and activation generation at
-the actual mutation boundary; executor exclusivity alone is not target authority.
 
 ## Finite execution custody
 

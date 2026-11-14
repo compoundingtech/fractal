@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v30.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v31.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -2070,10 +2070,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v30 adds durable native invocation receipts on top of v29's notice-owner registry
-/// entry. The local fixed sweep observed only seeds 13 and 294 without a trim, carried from
-/// the invocation-receipt corpus schedule before main took v29. Each still trims on every
-/// modern node after excusing the old build and advancing to the next cut.
+/// Corpus v31 captures resource lanes on main's v30 invocation-receipt registry.
+/// The exact snapshot's fixed-seed checkpoint characterization is asserted below.
 const NEVER_TRIMS: &[u64] = &[13, 294];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
@@ -2084,7 +2082,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v30 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v31 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2093,7 +2091,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v30 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v31 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2101,7 +2099,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v30 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v31 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2314,7 +2312,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v30.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v31.json"
         }))
         .unwrap(),
     )

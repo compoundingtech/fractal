@@ -130,13 +130,16 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
 
 fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     let StepSpec { id, path: _, fresh_context, keep_open, queue: _, queue_position: _, title,
-        goals, constraints, agent_constraints, timeout_ms, capacity, retry, finally: _,
+        goals, constraints, agent_constraints, timeout_ms, capacity, resource_lane, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,
         baselines, documents, declarations_kdl, products, produces_mission, uses_mission, after_run,
         program, gates, nested_mission, loop_spec: _, definition_hash: _ } = step;
     let mut root = text("step", id);
     protection(&mut root, *revisions_human_only, revision_reviewer.as_deref(), *timeout_ms);
     annotations(&mut root, declarations_kdl.as_deref(), revision_owners, agent_constraints);
+    if resource_lane.is_some() {
+        comment(&mut root, "display-only resource lane: embedded exec redacted; this step is not republishable source");
+    }
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
@@ -147,6 +150,25 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         if let Some(cores) = capacity.cores { property(&mut capacity_node, "cores", i128::from(cores)); }
         if let Some(memory) = capacity.memory { property(&mut capacity_node, "memory", fractal_runtime::show_lane_memory(memory)); }
         children.push(capacity_node);
+    }
+    if let Some(lane) = resource_lane {
+        let mut lane_node = text("lane", &lane.name);
+        property(&mut lane_node, "host", lane.host.as_str());
+        property(&mut lane_node, "max-members", i128::from(lane.max_members));
+        property(&mut lane_node, "coverage", match lane.coverage {
+            crate::model::ResourceLaneCoverage::Logical => "logical",
+            crate::model::ResourceLaneCoverage::Enforced => "enforced",
+        });
+        if let Some(ms) = lane.admission_timeout_ms {
+            property(&mut lane_node, "admission-timeout", format!("{ms}ms"));
+        }
+        if let Some(capacity) = lane.capacity {
+            let mut capacity_node = node("capacity", []);
+            property(&mut capacity_node, "cores", i128::from(capacity.cores));
+            property(&mut capacity_node, "memory", fractal_runtime::show_lane_memory(capacity.memory));
+            lane_node = block(lane_node, vec![capacity_node]);
+        }
+        children.push(lane_node);
     }
     if !after.is_empty() { children.push(block(node("depends-on", []), dependencies(after)?)); }
     children.extend(documents.iter().map(|document| text("document", document)));
@@ -357,6 +379,82 @@ mod tests {
         let in_finally = format!(r#"mission "test" state="ready" {{ goal "Land."; step "work" {{ agentless; }}
             finally {{ step "program" {{ program "/b.mjs" sha256="{sha}"; }} }} }}"#);
         assert_eq!(crate::mission::parse_missions(&in_finally.parse().unwrap(), "node").unwrap_err().code, "program-step-outcome");
+    }
+
+    #[test]
+    fn finite_exec_lane_displays_redacted_execution_without_changing_seat_capacity() {
+        let source = r#"mission "test" state="ready" {
+            goal "Verify."
+            step "verify" timeout="30s" {
+                agentless
+                lane "verification" host="node" max-members=2 coverage="logical" admission-timeout="2m" {
+                    capacity cores=2 memory="4G"
+                }
+                exec "verify" { command "echo secret"; }
+            }
+        }"#;
+        let mission = parse(source);
+        let step = &mission.steps["verify"];
+        let lane = step.resource_lane.as_ref().unwrap();
+        assert_eq!(lane.name, "verification");
+        assert_eq!(lane.host, "node");
+        assert_eq!(lane.max_members, 2);
+        assert_eq!(lane.capacity, Some(fractal_runtime::Capacity { cores: 2, memory: 4 * 1024 * 1024 * 1024 }));
+        assert_eq!(lane.admission_timeout_ms, Some(120_000));
+        assert_eq!(step.timeout_ms, Some(30_000));
+        assert!(step.capacity.is_none());
+        let rendered = render_mission_kdl(&mission).unwrap();
+        assert!(!rendered.legacy, "resource lanes are not legacy loop syntax");
+        assert!(rendered.text.contains("display-only resource lane"));
+        assert!(!rendered.text.contains("secret"));
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let rendered_step = document.get("mission").unwrap().children().unwrap().get("step").unwrap();
+        let children = rendered_step.children().unwrap();
+        assert!(children.get("exec").is_none());
+        assert!(children.get("capacity").is_none());
+        let rendered_lane = children.get("lane").unwrap();
+        assert_eq!(rendered_lane.get(0).unwrap().as_string(), Some("verification"));
+        assert_eq!(rendered_lane.get("host").unwrap().as_string(), Some("node"));
+        assert_eq!(rendered_lane.get("max-members").unwrap().as_integer(), Some(2));
+        assert_eq!(rendered_lane.get("coverage").unwrap().as_string(), Some("logical"));
+        assert_eq!(rendered_lane.get("admission-timeout").unwrap().as_string(), Some("120000ms"));
+        let rendered_capacity = rendered_lane.children().unwrap().get("capacity").unwrap();
+        assert_eq!(rendered_capacity.get("cores").unwrap().as_integer(), Some(2));
+        assert_eq!(rendered_capacity.get("memory").unwrap().as_string(), Some("4G"));
+        assert_eq!(crate::mission::parse_missions(&document, "node").unwrap_err().code, "invalid-step-lane");
+        let old = parse(r#"mission "test" state="ready" { goal "Verify."; step "verify" { agentless; }; }"#);
+        let stored = serde_json::to_value(&old.steps["verify"]).unwrap();
+        assert!(stored.get("resource_lane").is_none(), "old published step bytes remain unchanged");
+        let reread: StepSpec = serde_json::from_value(stored).unwrap();
+        assert!(reread.resource_lane.is_none());
+        let assigned = parse(r#"mission "test" state="ready" {
+            goal "Verify."
+            step "verify" {
+                assigned-to "agent/node.builder"
+                capacity memory="8G"
+                lane "verification" host="node"
+                exec "verify" { command "true"; }
+            }
+        }"#);
+        assert_eq!(assigned.steps["verify"].capacity.unwrap().memory, Some(8 * 1024 * 1024 * 1024));
+        assert!(assigned.steps["verify"].resource_lane.as_ref().unwrap().capacity.is_none());
+    }
+
+    #[test]
+    fn finite_lane_rejects_ambiguous_or_invalid_policies() {
+        for body in [
+            r#"lane "verify"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" max-members=0; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" max-members=1.5; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" coverage="advisory"; exec "check" { command "true"; }"#,
+            r#"lane "verify" "extra" host="node"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" { capacity cores=2; capacity cores=3; }; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node";"#,
+            r#"lane "verify" host="node"; exec "a" { command "true"; }; exec "b" { command "true"; }"#,
+        ] {
+            let source = format!(r#"mission "test" state="ready" {{ goal "Verify."; step "verify" {{ agentless; {body} }} }}"#);
+            assert!(crate::mission::parse_missions(&source.parse().unwrap(), "node").is_err(), "{body}");
+        }
     }
 
     #[test]
