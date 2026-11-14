@@ -144,6 +144,10 @@
 "operational.recovered" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "ordered-membership.edited" = { class = "durable" }
 "owned-set.revised" = { class = "durable" }
+# A person's controls over one attention row matter only while it is open; claims stay whole until
+# a per-row slot rule exists (seen keeps the earliest, snooze the newest).
+"person.attention-seen" = { class = "current", pending = "needs a per-row keep-earliest rule; newest-per-slot would move seen_at later" }
+"person.attention-snoozed" = { class = "current", pending = "needs a per-row newest-per-slot rule keyed by attention_id" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
 "person.status-set" = { class = "durable" }
