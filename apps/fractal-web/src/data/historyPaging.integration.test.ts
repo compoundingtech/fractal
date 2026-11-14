@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import type { CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry, TimelinePage } from '@fractal/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,7 +12,7 @@ const ref = 'agent/example'
 const sessionId = 'session/example'
 const entry = (sequence: number, text = `Row ${sequence}`, revision = 1): TimelineEntry => ({
   id: `timeline-entry/${sequence}`, sequence, revision, type: 'content', role: 'assistant',
-  final: true, timestamp: snapshot.created_at, body: { text, media_type: 'text/markdown' },
+  final: true, timestamp: snapshot.created_at, body: { text: markdownBlock(text), media_type: 'text/markdown' },
 })
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })

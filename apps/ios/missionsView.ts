@@ -1,4 +1,5 @@
 import type { Mission, MissionStepPresentation, PresentationActor } from '../../clients/typescript/fractal-client';
+import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
@@ -86,7 +87,7 @@ export function missionRows(missions: Mission[], showSystem: boolean, now = Date
       total: progress?.total ?? missionSteps(mission).length,
       system: mission.system === true,
       // What a step in hand last reported: the status of a run in progress.
-      progress: mission.presentation?.last_progress?.split(/\s+/).filter(Boolean).join(' ') || undefined,
+      progress: mission.presentation?.last_progress == null ? undefined : markdownSource(mission.presentation.last_progress).split(/\s+/).filter(Boolean).join(' ') || undefined,
     };
   });
   // A failure ages out of the list after its day, as in the Fractal terminal UI (Nathan, 2026-10-02); showing the

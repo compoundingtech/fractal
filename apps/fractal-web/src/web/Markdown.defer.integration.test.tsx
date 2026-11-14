@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { markdownBlock } from '@fractal/client/markdown'
 import { setTimeout as delay } from 'node:timers/promises'
 import * as React from 'react'
 import { act } from 'react'
@@ -29,15 +30,15 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
   document.body.append(container)
   const root = createRoot(container)
   try {
-    await act(async () => root.render(<Markdown text={'```\nunlabelled <script>\n```'} />))
+    await act(async () => root.render(<Markdown text={markdownBlock('```\nunlabelled <script>\n```')} />))
     await act(async () => { paint(); await vi.dynamicImportSettled() })
     expect(grammar.requested).toBe(false)
     expect(container.querySelector('code')?.textContent).toBe('unlabelled <script>\n')
-    await act(async () => root.render(<Markdown text={'```\nunlabelled update\n```'} />))
+    await act(async () => root.render(<Markdown text={markdownBlock('```\nunlabelled update\n```')} />))
     await act(async () => { paint(); await vi.dynamicImportSettled() })
     expect(grammar.requested).toBe(false)
     expect(container.querySelector('code')?.textContent).toBe('unlabelled update\n')
-    await act(async () => root.render(<Markdown text={'## Ready now\n\nPlain **prose**.\n\n```unknown\nliteral <script>\n```'} />))
+    await act(async () => root.render(<Markdown text={markdownBlock('## Ready now\n\nPlain **prose**.\n\n```unknown\nliteral <script>\n```')} />))
     expect(grammar.requested).toBe(false)
     expect(container.querySelector('h2')?.textContent).toBe('Ready now')
     expect(container.querySelector('strong')?.textContent).toBe('prose')
@@ -53,7 +54,7 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
     await act(async () => root.render(<HighlightedSource code="literal" language="  NOT-A-LANGUAGE  " />))
     expect(paints).toHaveLength(0)
     expect(grammar.requested).toBe(false)
-    await act(async () => root.render(<Markdown text={'## Ready now\n\n```typescript\nconst answer = 42\n```\n\n```unknown\nliteral <script>\n```'} />))
+    await act(async () => root.render(<Markdown text={markdownBlock('## Ready now\n\n```typescript\nconst answer = 42\n```\n\n```unknown\nliteral <script>\n```')} />))
     expect(grammar.requested).toBe(false)
     await act(async () => { paint(); await vi.waitFor(() => expect(grammar.requested).toBe(true)) })
     expect(grammar.requested).toBe(true)

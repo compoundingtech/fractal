@@ -1,3 +1,4 @@
+import { markdownBlock } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
@@ -69,16 +70,15 @@ export function MarkdownCanvas({ scenario = 'rich-text', scheme = 'dark' }: { sc
   return <main data-testid="markdown-story" data-stream-stage={stage} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <div {...stylex.props(styles.lane)}>
       {streaming ? <div {...stylex.props(styles.toolbar)}><Button data-testid="append-stream" onPress={() => setStage(value => value + 1)} isDisabled={stage === stages.length - 1} {...stylex.props(styles.button)}>Append stream chunk</Button><span>{stage === stages.length - 1 ? 'Complete' : 'Streaming'}</span></div> : null}
-      <Markdown text={text} streaming={streaming && stage < stages.length - 1} resources={resources} onOpenResource={openResource} renderInlineReference={renderInlineReference} />
+      <Markdown text={markdownBlock(text)} streaming={streaming && stage < stages.length - 1} resources={resources} onOpenResource={openResource} renderInlineReference={renderInlineReference} />
       {opened ? <output data-testid="opened-resource">Opened {opened}</output> : null}
-      {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={languageText} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={streamChunks[0]} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={value} streaming resources={resources} />)}</> : null}
+      {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={markdownBlock(languageText)} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={markdownBlock(streamChunks[0])} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={markdownBlock(value)} streaming resources={resources} />)}</> : null}
     </div>
   </ThemePortal></main>
 }
 export const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   lane: { width: '100%', maxWidth: g.lane, minWidth: 0, marginInline: 'auto' },
-  inputNarrow: { maxWidth: g.polishNarrow },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md, marginBlockEnd: s.lg },
   button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
   heading: { marginBlock: s.lg, fontSize: t.headingSize, lineHeight: t.headingLeading },

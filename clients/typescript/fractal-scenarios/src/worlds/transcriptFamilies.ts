@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import type { TimelineEntry } from '@fractal/client'
 
 import { scenarioDomainFixture } from '../domain-fixture.ts'
@@ -35,12 +36,12 @@ export const transcriptFamilies: WorldDefinition = {
     const request = (atMs: number, text: string): TimelineEntry[] => [
       { ...next(atMs), role: 'user', type: 'message',
         body: { message_id: scenarioId(ctx, 'message', `request-${sequence}`), from: person.id, to: member.id } },
-      { ...next(atMs), role: 'user', type: 'content', body: { media_type: 'text/plain', text } },
+      { ...next(atMs), role: 'user', type: 'content', body: { media_type: 'text/plain', text: markdownBlock(text) } },
     ]
     const items: TimelineEntry[] = [
       ...request(-120_000, 'Inspect the release report before exporting it.'),
       { ...next(-116_000), role: 'assistant', type: 'content', body: {
-        media_type: 'text/markdown', text: 'I will compare the release scope and report totals before exporting.',
+        media_type: 'text/markdown', text: markdownBlock('I will compare the release scope and report totals before exporting.'),
         blocks: [{ id: 'inspection-reasoning', kind: 'reasoning', source_type: 'reasoning', visibility: 'visible',
           payload: { text: 'Compare the report totals with the release scope before requesting an export.' } }],
       } },
@@ -76,10 +77,10 @@ export const transcriptFamilies: WorldDefinition = {
       ...request(-8_000, 'Summarize what is safe to hand off without an export.'),
     ]
     const partial: TimelineEntry = { ...next(0), role: 'assistant', type: 'content', final: false,
-      body: { media_type: 'text/markdown', text: 'The report totals are retained; checking the handoff summary.' } }
+      body: { media_type: 'text/markdown', text: markdownBlock('The report totals are retained; checking the handoff summary.') } }
     items.push(partial)
     const final: TimelineEntry = { ...partial, revision: 2, timestamp: ctx.t.at(2_000), final: true,
-      body: { media_type: 'text/markdown', text: 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.' } }
+      body: { media_type: 'text/markdown', text: markdownBlock('All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.') } }
     const conversation: Slice<'conversation'> = {
       kind: 'conversation', variant: 'default', source, decode: 'strict', loading: false,
       state: { threads: [{ agent: member.id, session_id: member.session, items, page_size: 100, has_more: false }] },

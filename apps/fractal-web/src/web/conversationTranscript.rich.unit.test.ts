@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import type { CollectionFrame, TimelineEntry } from '@fractal/client'
 import { decodeConversationChunk } from '@fractal/sdk/read'
 import { describe, expect, it } from 'vitest'
@@ -12,7 +13,7 @@ const richProfile = (): Extract<CollectionFrame, { kind: 'conversation' }> => {
     const sequence = items.length
     items.push({ id: `timeline-entry/profile-${sequence}`, sequence, revision: 1, final: true,
       timestamp: '2026-10-03T00:00:00Z', type: 'content', role,
-      body: { media_type: 'text/plain', text: value, ...(internal ? { blocks: [{ id: `block/${sequence}`, kind: 'status', source_type: 'omp', visibility: 'internal', payload: {} }] } : {}) } })
+      body: { media_type: 'text/plain', text: markdownBlock(value), ...(internal ? { blocks: [{ id: `block/${sequence}`, kind: 'status', source_type: 'omp', visibility: 'internal', payload: {} }] } : {}) } })
   }
   for (let index = 0; index < 12; index++) text(`[reasoning]\nThought ${index}`)
   for (let index = 0; index < 36; index++) {
@@ -46,7 +47,8 @@ describe('rich page decode, fold and transcript mapping', () => {
         id: 'timeline-entry/roles', sequence: 0, revision: 1, final: true, role: 'system',
         timestamp: '2026-10-03T00:00:00Z', type: 'content', body: {
           media_type: 'text/plain',
-          text: `[unrecognized omp message role ${quote}${role}${quote}]\n{"raw":{"message":{"role":"${role}","content":"synthetic-role-payload"}}}`,
+          // markdown-template-reviewed: an invented fixture body, not text a person reads
+          text: markdownBlock(`[unrecognized omp message role ${quote}${role}${quote}]\n{"raw":{"message":{"role":"${role}","content":"synthetic-role-payload"}}}`),
         },
       }],
     }

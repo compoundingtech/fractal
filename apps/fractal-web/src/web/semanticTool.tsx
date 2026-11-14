@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import type { ReactNode } from 'react'
 import { Button } from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
@@ -13,7 +14,7 @@ export const SemanticToolDetail = ({ model, onOpenInspector }: { readonly model:
   if (model.type === 'wait') return <div data-testid="wait-row" {...stylex.props(styles.marker)}><div {...stylex.props(styles.headline)}><span>{model.running ? 'Waiting' : model.interrupted ? 'Wait interrupted' : 'Wait finished'}{model.waited === undefined ? '' : ` · waited ${model.waited}`}</span>{onOpenInspector !== undefined && <><span aria-hidden="true">·</span><Button aria-label="Open inspector for wait" onPress={onOpenInspector} {...stylex.props(styles.inspector)}>Open inspector</Button></>}</div>{model.awaited.length > 0 && <p>For {model.awaited.join(', ')}</p>}{model.senders.length > 0 && <p>From {model.senders.join(', ')}</p>}{model.arrived.length > 0 && <p>Arrived: {model.arrived.join(', ')}</p>}{model.stillRunning.length > 0 && <p>Still running: {model.stillRunning.join(', ')}</p>}</div>
   const recipients = model.recipients.filter(recipient => recipient !== 'all')
   const label = model.broadcast ? recipients.length > 0 ? `→ ${recipients.length} seats` : '→ all seats' : `→ ${recipients.join(', ')}`
-  return <article data-testid="outgoing-message-card" {...stylex.props(styles.card)}><header {...stylex.props(styles.header)}>{label}</header>{model.subject !== undefined && <p data-message-subject=""><strong>{model.subject}</strong></p>}{model.body !== '' && <Markdown text={model.body} />}{model.receipts.length > 0 && <ul {...stylex.props(styles.receipts)}>{model.receipts.map((receipt, index) => <li key={`${receipt.to}/${index}`}>{receipt.to} · {receipt.outcome}</li>)}</ul>}{onOpenInspector !== undefined && <Button aria-label="Open inspector for message" onPress={onOpenInspector} {...stylex.props(styles.inspector)}>Open inspector</Button>}</article>
+  return <article data-testid="outgoing-message-card" {...stylex.props(styles.card)}><header {...stylex.props(styles.header)}>{label}</header>{model.subject !== undefined && <p data-message-subject=""><strong>{model.subject}</strong></p>}{model.body !== '' && <Markdown text={markdownBlock(model.body)} />}{model.receipts.length > 0 && <ul {...stylex.props(styles.receipts)}>{model.receipts.map((receipt, index) => <li key={`${receipt.to}/${index}`}>{receipt.to} · {receipt.outcome}</li>)}</ul>}{onOpenInspector !== undefined && <Button aria-label="Open inspector for message" onPress={onOpenInspector} {...stylex.props(styles.inspector)}>Open inspector</Button>}</article>
 }
 
 /** Clean swap point: semantic app projection, existing kit typography and Markdown. */

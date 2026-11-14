@@ -41,6 +41,7 @@ const KEYWORDS: &[&str] = &[
     "uniqueItems",
     "x-st-ref",
     "x-st-brand",
+    "x-st-text",
     "x-st-codec",
     "x-st-conditions",
 ];
@@ -556,6 +557,13 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             js(&json!(pattern)),
             js(&json!(format!("a string not matching {pattern}")))
         );
+    }
+    if let Some(text) = object.get("x-st-text") {
+        schema = match text.as_str().context("x-st-text")? {
+            "markdown-block" => format!("markdownBlockSchema({schema})"),
+            "markdown-inline" => format!("markdownInlineSchema({schema})"),
+            other => bail!("unknown x-st-text `{other}`"),
+        };
     }
     if let Some(brand) = object.get("x-st-brand") {
         schema = format!(
@@ -1336,6 +1344,8 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
         .and_then(Value::as_str)
         .or_else(|| object.contains_key("properties").then_some("object"));
     Ok(match kind {
+        Some("string") if !encoded && object.get("x-st-text") == Some(&json!("markdown-block")) => "MarkdownBlock".into(),
+        Some("string") if !encoded && object.get("x-st-text") == Some(&json!("markdown-inline")) => "MarkdownInline".into(),
         Some("string") if !encoded && codec == Some("timestamp") => "DateTime.Utc".into(),
         Some("string") if !encoded && codec == Some("lossless-timestamp") => {
             "typeof LosslessTimestamp.Type".into()
@@ -1633,13 +1643,18 @@ const epochRange = /*#__PURE__*/ Schema.makeIsBetween({ order: DateTime.Order })
 })
 /** Nullable fields treat missing and `null` alike; `None` encodes as `null`. */
 const NULL_NONE = { onNoneEncoding: null } as const
+import type { MarkdownBlock, MarkdownInline } from "./markdown-text.ts"
+/** Markdown stays the wire string at runtime: only the static type changes, so this adds no decode work. */
+const markdownBlockSchema = (schema: Schema.Top): Schema.Codec<MarkdownBlock, string> => schema as unknown as Schema.Codec<MarkdownBlock, string>
+const markdownInlineSchema = (schema: Schema.Top): Schema.Codec<MarkdownInline, string> => schema as unknown as Schema.Codec<MarkdownInline, string>
 "#;
 
-const SHARED_IMPORT: &str = r#"import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+const SHARED_IMPORT: &str = r#"import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE, markdownBlockSchema, markdownInlineSchema } from "./SchemaSupport.generated.ts"
 import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
 export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.generated.ts"
+export type { MarkdownBlock, MarkdownInline } from "./markdown-text.ts"
 "#;
 
 /// The read closure excludes terminal session/screen operations, not terminal resource metadata.

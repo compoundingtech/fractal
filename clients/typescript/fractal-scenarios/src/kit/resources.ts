@@ -1,3 +1,4 @@
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import type { Attention, Capabilities, Device, Launch, LaunchVariant, Machine, Message, Mission, Session, Work, WorkState } from '@fractal/client'
 
 import type { CastAgent, CastHost, CastMission, CastPerson } from './cast.ts'
@@ -127,8 +128,8 @@ export const work = (ctx: FactoryContext, input: WorkInput): Work => {
     claim_incarnation: input.claimant?.incarnation ?? null,
     blocked_reason: input.blockedReason ?? null,
     blockers: [],
-    goals: input.goals,
-    constraints: ['Keep the public API stable until the docs land'],
+    goals: input.goals.map(markdownInline),
+    constraints: [markdownInline('Keep the public API stable until the docs land')],
   }
 }
 
@@ -157,7 +158,7 @@ export const attention = (ctx: FactoryContext, input: AttentionInput): Attention
   ...(input.requester === undefined ? {} : { requester_id: input.requester.id }),
   ...(input.mission === undefined ? {} : { mission_id: input.mission.id, mission_run_id: input.mission.run }),
   title: input.title,
-  detail: input.detail,
+  detail: markdownBlock(input.detail),
   priority: input.priority,
   state: 'open',
   requested_at: ctx.t.at(input.requestedMs),
@@ -183,7 +184,7 @@ export const message = (ctx: FactoryContext, input: MessageInput): Message => ({
   from: input.from,
   to: input.to,
   title: input.title,
-  content: input.content,
+  content: markdownBlock(input.content),
   state: input.state ?? 'delivered',
   sent_at: ctx.t.at(input.sentMs),
   in_reply_to: null,

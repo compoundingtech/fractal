@@ -1,3 +1,4 @@
+import { optionalSource } from '@fractal/client/markdown'
 import { describe, expect, it } from 'vitest'
 import { catalog, loadWorld } from '../src/index.ts'
 import { foldSlice } from '../src/kit/fold.ts'
@@ -97,7 +98,7 @@ describe('production recording adoption and explicit synthetic splices', () => {
     const imported = recorded.slices.conversation.state.threads[0]!
     const boundary = imported.items.find((item) => item.type === 'content' &&
       typeof item.body === 'object' && item.body !== null && 'text' in item.body &&
-      item.body.text === 'Readiness: 2 of 3 replicas')!
+      optionalSource(item.body.text) === 'Readiness: 2 of 3 replicas')!
     const prefix = imported.items.filter((item) => item.sequence < boundary.sequence)
     const thread = world.slices.conversation.state.threads[0]!
     expect(thread.items.slice(0, -1)).toEqual(prefix)
