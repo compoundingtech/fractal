@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a local ancestor ownership witness for native-session adoption research",
+  "replay": {"status": "none", "detail": "No claims or projections change."},
+  "schema": {"status": "none", "detail": "No persisted or wire formats change."},
+  "rules": {"status": "none", "detail": "No authorization path is added or relaxed. The witness proves same-UID process ancestry, not native-session identity or adoption authority."},
+  "compatibility": {"status": "changed", "detail": "The Rust runtime library adds PeerProcessIdentity::verify_ancestor on Linux and macOS. It pins a caller ancestor and revalidates parent links, effective UIDs and birth tokens. Existing callers and CLI behavior are unchanged; there is no adoption command yet."},
+  "downtime": {"status": "none", "detail": "No service or harness restart is required for existing behavior."},
+  "manual": {"status": "none", "detail": "No operator action. A future adoption integration must independently prove the current native session and authorize binding before using this witness."},
+  "recovery": {"status": "none", "detail": "Revert the library addition; no bindings or durable state are created."}
+}
