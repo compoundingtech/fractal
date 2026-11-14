@@ -6,7 +6,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { Radio, RadioGroup } from 'react-aria-components'
-import { userEvent, waitFor, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { credentialExpiredMessage, observed, unavailable, waiting, type AttachmentPort } from '../data/source.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -219,7 +219,7 @@ const meta = {
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'LatestPreview:contract-fixture'] as const
+export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'LatestPreview:contract-fixture'] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {
@@ -254,6 +254,23 @@ export const Refused: Story = { args: { scenario: 'refused' }, play: AllStates.p
 export const RetryAfterFailure: Story = { args: { scenario: 'failed' }, play: AllStates.play }
 export const UpdatesPaused: Story = { args: { placement: 'tab', scenario: 'offline' } }
 export const UnconfirmedChange: Story = { args: { placement: 'tab', scenario: 'unconfirmed' } }
+/** Close acts at once; the confirmed result names the thread and offers Reopen in place of a dialog. */
+export const CloseConfirmation: Story = {
+  args: { placement: 'tab' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: 'Close thread' }))
+    const confirmed = await waitFor(() => {
+      const status = canvasElement.querySelector('[data-thread-confirmed]')
+      if (status === null) throw new Error('no confirmation yet')
+      return status as HTMLElement
+    })
+    await expect(confirmed.textContent).toMatch(/^Closed “.+”\./)
+    await userEvent.click(within(confirmed).getByRole('button', { name: 'Reopen' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-confirmed]')?.textContent).toMatch(/^Reopened “.+”\./))
+    await expect(canvas.getByRole('button', { name: 'Close thread' })).toBeTruthy()
+  },
+}
 
 /** Local review controls inject fixtures into the production workspace. */
 function LatestPreviewHarness() {

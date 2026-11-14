@@ -52,9 +52,17 @@ export function ThreadPanel({
   }, [rename])
   const [error, setError] = React.useState<string>()
   const [pending, setPending] = React.useState(false)
+  // Changes act at once; this names the confirmed result, so the reader sees what happened without a dialog.
+  const [flash, setFlash] = React.useState<{ readonly text: string; readonly reopen: boolean }>()
+  React.useEffect(() => {
+    if (flash === undefined) return
+    const timer = setTimeout(() => setFlash(undefined), FLASH_MS)
+    return () => clearTimeout(timer)
+  }, [flash])
   const run = async (action: () => Promise<string | undefined>, onSuccess?: () => void) => {
     setPending(true)
     setError(undefined)
+    setFlash(undefined)
     try {
       const failure = await action()
       if (failure === undefined) onSuccess?.()
@@ -64,6 +72,12 @@ export function ThreadPanel({
     } finally {
       setPending(false)
     }
+  }
+  const changeState = (onChange: NonNullable<typeof onChangeState>, next: ThreadPanelSummary['state']) => {
+    const name = thread.title
+    void run(() => onChange(next), () => setFlash(next === 'closed'
+      ? { text: `Closed “${name}”.`, reopen: true }
+      : { text: `Reopened “${name}”.`, reopen: false }))
   }
   const titleRevision = thread.title_revision
   const metadata = <span {...stylex.props(styles.metadata)}>
@@ -76,11 +90,12 @@ export function ThreadPanel({
   </span>
   const feedback = error === undefined ? null : <p role="alert" {...stylex.props(styles.error)}>{error}</p>
   const title = <span {...stylex.props(styles.title)} title={thread.title}>{thread.title}</span>
-  const unreadDot = unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null
+  // The dot keeps its column when read, so titles stay aligned down a list.
+  const unreadDot = <span {...stylex.props(styles.unread)}>{unread ? <span aria-label="Unread">●</span> : null}</span>
   const heading = embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
-      {title}{metadata}{unreadDot}
-    </Button> : <h2 {...stylex.props(styles.header)}>{title}{metadata}{unreadDot}</h2>
+      {unreadDot}{title}{metadata}
+    </Button> : <h2 {...stylex.props(styles.header)}>{unreadDot}{title}{metadata}</h2>
   return <section data-thread-panel="" role="group" aria-label={thread.title} {...stylex.props(styles.panel)}>
     {open && onMarkRead !== undefined ? <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
       <div {...stylex.props(styles.readHeadingRow)}>
@@ -97,12 +112,17 @@ export function ThreadPanel({
       {children}
       <div ref={actions} {...stylex.props(styles.actions)}>
         {onRename === undefined || titleRevision === undefined ? null : <ActionButton data-thread-rename="" variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</ActionButton>}
-        {onChangeState === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => {
-          void run(() => onChangeState(thread.state === 'open' ? 'closed' : 'open'))
-        }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</ActionButton>}
+        {onChangeState === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined}
+          onPress={() => changeState(onChangeState, thread.state === 'open' ? 'closed' : 'open')}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</ActionButton>}
         {onHideDraft === undefined ? null : <ActionButton onPress={onHideDraft}>Hide draft</ActionButton>}
         {embedded && onOpenInTab !== undefined ? <ActionButton onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
+      {flash === undefined ? null : <div role="status" data-thread-confirmed="" {...stylex.props(styles.actions, styles.flash)}>
+        <span>{flash.text}</span>
+        {flash.reopen && onChangeState !== undefined && thread.state === 'closed'
+          ? <ActionButton variant="ghost" isDisabled={pending || pendingChange !== undefined} onPress={() => changeState(onChangeState, 'open')}>Reopen</ActionButton>
+          : null}
+      </div>}
       {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status" {...stylex.props(styles.actions, styles.pending)}>
         {retryPending ? 'Sending…' : `Fractal has not confirmed the previous ${pendingChange}.`}
         <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, closeRename) }}>Retry {pendingChange}</ActionButton>
@@ -110,7 +130,7 @@ export function ThreadPanel({
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()
         const title = rename.title.trim()
-        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), closeRename)
+        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => { closeRename(); setFlash({ text: `Renamed to “${title}”.`, reopen: false }) })
       }} {...stylex.props(styles.actions)}>
         <label {...stylex.props(styles.field)}>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })}
           onKeyDown={event => { if (event.key === 'Escape' && !pending) { event.preventDefault(); closeRename() } }} {...stylex.props(styles.input)} /></label>
@@ -133,15 +153,18 @@ const styles = stylex.create({
     ':disabled': { opacity: 0.5, cursor: 'default' } },
   wideLabel: { display: { default: 'inline', '@container thread-panel (max-width: 360px)': 'none' } },
   compactLabel: { display: { default: 'none', '@container thread-panel (max-width: 360px)': 'inline' } },
-  title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  metadata: { flexShrink: 0, color: c.fgMuted },
-  unread: { flexShrink: 0, color: c.primary },
+  title: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  metadata: { flexShrink: 0, marginInlineStart: 'auto', color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end' },
+  unread: { flexShrink: 0, width: '0.75em', color: c.primary },
   body: { display: 'flex', minWidth: 0, flexDirection: 'column', gap: s.sm, padding: s.sm },
   actions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.sm },
   pending: { color: c.fgMuted, fontSize: t.metaSize },
+  flash: { color: c.fgMuted, fontSize: t.metaSize },
   error: { margin: 0, color: c.dangerFg, fontSize: t.metaSize },
   field: { display: 'flex', alignItems: 'center', gap: s.sm, flex: '1 1 16rem', minWidth: 0, color: c.fgMuted, fontSize: t.metaSize },
   input: { flex: '1 1 0', minWidth: 0, height: 24, boxSizing: 'border-box', paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid',
     borderColor: { default: c.borderStrong, ':focus-visible': c.primary }, borderRadius: 6, outline: 'none', backgroundColor: c.controlFill,
     color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize },
 })
+
+const FLASH_MS = 8000
