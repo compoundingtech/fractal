@@ -15,17 +15,18 @@ fn fixture(policy: &str) -> (Clock, Arc<Store>, Reconciler<FakeRuntime>, Mission
     smallclaims::store::set_thread_clock(Some(START));
     let store = Arc::new(Store::open_memory("node").unwrap());
     at(&store, START);
+    let hash = store.put_blob(b"export default {}").unwrap();
     apply_source(&store, &format!(r#"version 2
 mission "retry-policy" state="ready" {{
   goal "Exercise native retry policy."
   step "program" {{
-    program "program.mjs" sha256="{}"
+    program "/tmp/program.mjs" sha256="{hash}"
     retry {{ {policy} }}
   }}
-}}"#, "a".repeat(64)), "retry-policy");
+}}"#), "retry-policy");
     let run = store.create_mission_run(&MissionRunRequest {
         mission: "retry-policy".into(), revision: None, workspace: "/tmp".into(),
-        requester: None, mode: None, inputs: BTreeMap::new(), idempotency_key: "retry-policy".into(),
+        requester: None, mode: None, inputs: BTreeMap::new(), idempotency_key: "retry-policy-run".into(),
     }).unwrap();
     store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
     let (run, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
