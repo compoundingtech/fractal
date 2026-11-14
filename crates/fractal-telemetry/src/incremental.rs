@@ -138,6 +138,7 @@ pub fn change_keys(change: &Change) -> Vec<String> {
             .map(str::to_owned)
     };
     match change.kind.as_str() {
+        "resource-membership.changed" => keys.push("seat-admission".into()),
         "message.sent" => keys.extend(field("to").map(|to| format!("mailbox:{to}"))),
         "mission-run.report-to" => {
             keys.extend(field("report_to").map(|agent| format!("reports-to:{agent}")));

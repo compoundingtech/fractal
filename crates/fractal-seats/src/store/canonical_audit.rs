@@ -192,6 +192,13 @@ fn every_persistent_table_has_a_projection_scope() {
         // Person read positions: an order-free max register refolded from replicated claims on
         // open, repair and replay; the claims carry the shared digest coverage.
         "read_positions",
+        // Host-authoritative admission state is local, not a replicated projection.
+        "local_host_holds",
+        // Host-local execution authority, immutable lane policies and membership custody;
+        // these are authoritative local records, not replicated claim projections.
+        "resource_authorities_v1",
+        "resource_lane_policies_v1",
+        "resource_memberships_v1",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.

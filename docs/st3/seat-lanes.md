@@ -452,3 +452,64 @@ A default scheduler weight is declared `not-enforced` with reason `default weigh
 inactive units and absent controllers retain their observed reasons. This fixture
 policy distinguishes an explicitly configured share from a default share; it does
 not imply that the kernel ignores default scheduler weights.
+
+## Durable host holds
+
+A host hold is a durable admission condition, not a lane reservation. The connected
+execution host alone writes its holds; authenticated ownership and expected revision
+protect resolution. A hold survives the originating run becoming terminal, a daemon
+restart, or an answered ask, and consumes no executor capacity.
+
+```sh
+fractal hosts hold worker --operation activation --reason "Investigate failed activation" --as person/operator
+fractal hosts ls --json
+fractal hosts release worker host-hold/example --expected-revision 1 --resolution "Recovery verified" --as person/operator
+fractal hosts recover worker host-hold/example --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
+```
+
+`--operation` is repeatable; `*` affects every native operation. Placement can retain
+`--originating-run` and `--receipt` references without making the run the hold's
+lifecycle owner. Active holds appear in attention/now. Resolution commits a local
+observation that invalidates registered admission reads; it does not depend on a
+reserve-probe loop.
+
+Ordinary release requires the authenticated hold owner, including while its run is
+live. `hosts recover` is a distinct recovery action available only to the execution
+host's configured owning person through the local operator API; bound agents and
+runs cannot borrow that person's identity. Recovery requires the exact observed
+revision and a reason, and only applies to a run-owned hold whose owning mission
+run (directly or through the owner's declaration) is positively terminal. A missing
+or nonterminal run retains custody; other owners must use ordinary release.
+Recovery preserves the original owner and records a separate `host-hold.recovered`
+history fact with the acting operator, original owner, reason and revisions.
+Ordinary release records `host-hold.released`. Neither terminal runs nor answered
+asks automatically resolve a hold.
+
+These records do not fence arbitrary shell SSH mutations. A target activation
+adapter must check target authority, hold revision and activation generation at
+the actual mutation boundary; executor exclusivity alone is not target authority.
+
+## Finite execution custody
+
+The native finite-execution backend generalizes the existing Linux lane hierarchy
+without enabling the jobs scheduler. Host-owned memberships bind a named immutable
+policy, an authority epoch, and exact run/step/attempt identity. Holds close admission
+without occupying capacity; FIFO membership admission accounts independent roots
+once alongside seats, scoped raises and bursts.
+
+Admission, payload release, execution end and retirement have separate persisted
+timestamps. In-boot elapsed clocks are monotonic; uncertain recovered clocks do not
+grant a fresh execution budget. A process-generation record references membership
+identity before the payload gate opens. Cancellation and natural parent exit retain
+custody until the native runtime proves whole-tree retirement; failed cleanup and
+unknown authority survivors do not free capacity.
+
+The telemetry adapter records queue, execution and release phases, correlated
+membership/generation identities, occupancy and hold observations. These observations
+do not grant launch authority. Required Linux enforcement is checked before release;
+Darwin remains explicit about logical-only coverage and uncertain escaped descendants.
+
+Known-live linked children remain `retiring` while cancellation completes, retaining
+custody and a reactive child-state dependency. A missing child record or unprovable
+process cleanup remains `uncertain`; neither condition releases a successor early.
+

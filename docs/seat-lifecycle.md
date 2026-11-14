@@ -110,6 +110,42 @@ Physical preflight does not release the failed operation. With the launch lock h
 
 A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
 
+### Native launch invocation receipts
+
+Every admitted native agent launch has a stable `invocation/<launch-operation UUID>`
+identity supplied through `FRACTAL_INVOCATION_ID` before process creation.
+System-only `harness.invocation` claims retain immutable lifecycle receipts,
+independently of sampled traces, local runtime observations and timeline retention.
+The immutable slot is `(agent, invocation_id, phase, event_key)`; recovery appends
+new evidence rather than rewriting admission or conflating sibling launches.
+
+Admission, launch inputs, acceptance, startup failure, cancellation, revocation,
+producer closure, verified starts and runtime endings reuse the existing native
+operation writer fences. An incarnation binds only after exact launch-operation
+provenance verifies it; candidate processes and absent runtimes are not proof.
+Receipts preserve known run, step, attempt, parent invocation and requested
+model/harness selection. Startup failures retain their identity without inventing
+claim-backed work or spend.
+
+`launch_input_digest` and `provider_binary_digest` reuse the launch contract
+measurements. An instruction/configuration/argv fingerprint is not an exact
+provider `prompt_digest`. The already measured `producer_version` in a native
+admission diagnostic may establish harness release; no new executable probe runs.
+Missing harness releases, transcripts, provider prompts, actual context freshness
+and explicit fallback reasons remain unknown. Resume selection expresses intent,
+not proof of fresh context; model drift does not establish fallback.
+
+Invocation roots reuse the shared `AttemptTrace` W3C context, linked to the durable
+mission run root when available. The admitted operation retains the exact context
+and supplies `TRACEPARENT`/`TRACESTATE` to the provider. Inherited environment does
+not establish receipt context. Live owners remain through exact ending evidence;
+daemon replacement ends a host segment without deleting durable correlation.
+Environment delivery is not proof that a provider emitted child spans.
+
+`Store::invocation_receipts(id)` and `Store::agent_invocation_receipts(agent)`
+return the durable phase history. Join preclaim failures by invocation or
+operation ID and runtime evidence only by verified incarnation.
+
 The graph retains claimed work and pending mail.
 
 On relaunch, Fractal tries to continue the harness's last native session: `fractal agents restart`, a
@@ -697,3 +733,29 @@ FROM local_runtime_starts;
 Compare two timestamped samples: `delta(operations)/elapsed` is the admission rate and `delta(payload_bytes)/elapsed` is the measured payload growth rate. Include SQLite row/index/page overhead and other tables by separately tracking the database plus WAL disk allocation. Begin with the first deployment member and add the other member-specific manifests; do not infer an unmeasured fleet-wide rate. Evidence pins can be released, but this retained ledger continues to grow.
 
 Operations rolls forward-only storage changes separately: deploy the first merged storage upgrade alone, verify it and settle that cut, then deploy the other as its own cut. Do not combine the version-19/version-20 upgrades in one roll. Operations confirmed that production members never ran these unreleased draft builds; if a draft-opened store is discovered, preserve it and roll forward only.
+
+## Finite execution containment
+
+Finite resource executions use `ExecRuntime::spawn_in_lane_checked`, not an
+ambient environment variable that claims a parent lane. A named host policy
+selects a shared slice; each execution generation has its own scope. Numeric
+capacity is optional and describes the aggregate policy envelope. The runtime
+verifies effective limits and physical placement before opening an inherited
+stdin payload gate, then persists `payloadReleasedAtUnixMs` as the execution
+clock boundary. A launch error after producer creation retains custody until
+exact-generation cleanup is proved.
+
+`wait_for_exit` uses Linux pidfd or Darwin kqueue process notifications, without
+holding the shared child-map lock. Finite stdout and stderr are retained
+separately and read only for the matching execution generation. Leader exit is
+not retirement: `retire_if` fences the generation, requests termination, waits
+for the leader and uses the systemd whole-scope empty proof before acknowledging
+release. An old cancellation cannot stop a replacement, including when the old
+leader already exited but descendants remain.
+
+Darwin reports logical-only coverage. Requests requiring whole-tree resource
+enforcement receive `UnsupportedCoverage` before payload release. Detached
+process groups cannot prove escaped descendants absent; uncertain retirement
+retains custody instead of automatically releasing a logical permit. These
+cooperative same-user controls are not a security sandbox.
+

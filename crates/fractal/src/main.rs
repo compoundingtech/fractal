@@ -96,6 +96,7 @@ mod pairing_qr;
 mod agents_cli;
 mod attention_cli;
 mod claims_cli;
+mod hosts_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -446,6 +447,11 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+    /// Inspect and resolve durable execution-host admission holds.
+    Hosts {
+        #[command(subcommand)]
+        command: hosts_cli::HostsCommand,
     },
     /// Save or restore the signed claim log.
     Backup {
@@ -6483,6 +6489,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6589,6 +6596,9 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => args.actor.as_deref(),
+        Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
+            | hosts_cli::HostsCommand::Release { actor, .. }
+            | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -19516,7 +19526,8 @@ fn admission_diagnostic(
         subject: subject.into(),
         kind: "harness.diagnostic".into(),
         actor: Some(subject.into()),
-        fields: BTreeMap::from([
+        fields: {
+            let mut fields = BTreeMap::from([
             (
                 "severity".into(),
                 json!(if failure.driver == Driver::Omp {
@@ -19536,7 +19547,16 @@ fn admission_diagnostic(
             ("code".into(), json!("harness-admission-failed")),
             ("reason".into(), json!(reason)),
             ("incarnation_id".into(), json!(incarnation)),
-        ]),
+            ]);
+            fields.insert("driver".into(), json!(failure.driver.as_str()));
+            if let Some(version) = &failure.producer_version {
+                fields.insert("producer_version".into(), json!(version));
+            }
+            if let Ok(invocation) = std::env::var(fractal_schema::invocation::ENV) {
+                fields.insert("invocation_id".into(), json!(invocation));
+            }
+            fields
+        },
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some(format!(
