@@ -162,6 +162,7 @@ impl Store {
         transaction.commit().map_err(internal)?;
         drop(writer);
         self.host_holds_changed();
+        self.observe_resource_holds(&hold.host, &hold.operations, None);
         Ok(hold)
     }
 
@@ -240,6 +241,8 @@ impl Store {
         transaction.commit().map_err(internal)?;
         drop(writer);
         self.host_holds_changed();
+        self.observe_resource_holds(&hold.host, &hold.operations, Some(std::time::Duration::from_millis(
+            hold.released_at_unix_ms.unwrap_or(hold.created_at_unix_ms).saturating_sub(hold.created_at_unix_ms))));
         Ok(hold)
     }
 }

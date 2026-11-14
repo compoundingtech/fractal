@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add generation-fenced finite execution containment and event-backed retirement",
+  "replay": {"status": "changed", "detail": "Finite generation records retain the confirmed payload-release boundary; replayed records are not execution grants."},
+  "schema": {"status": "changed", "detail": "ExecGeneration adds an optional payloadReleasedAtUnixMs receipt. Existing records without it remain readable; finite stdout and stderr are retained separately."},
+  "rules": {"status": "changed", "detail": "Finite launches verify their Linux lane slice and scope before releasing the payload gate. Exact-generation retirement waits for whole-scope empty evidence, not merely parent exit."},
+  "compatibility": {"status": "changed", "detail": "Darwin reports logical-only coverage and refuses required whole-tree resource enforcement. Unprovable escaped-descendant retirement retains custody."},
+  "downtime": {"status": "none", "detail": "Existing seat launch paths retain their behavior; finite containment is selected explicitly."},
+  "manual": {"status": "none", "detail": "No host policy, systemd unit or production workload is enabled automatically."},
+  "recovery": {"status": "changed", "detail": "Kernel pidfd or kqueue notifications support exact-generation completion without polling. Cancellation of an exited old leader cannot stop a replacement generation."}
+}

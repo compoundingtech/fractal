@@ -75,6 +75,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install resource authority, lane policy and membership schema before returning the store; these startup-only writers make no run admission or payload-release decision",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "repair_operation_projection_drift_from_audit and rebuild_claim_projections are internal projection/replay maintenance",
             counts: [2, 0, 0, 2, 0],
         },
