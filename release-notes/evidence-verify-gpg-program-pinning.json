@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Harden evidence-verify Git subprocesses against repository-configured OpenPGP and X.509 verifier programs while preserving SSH signature verification.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Evidence verification continues to use SSH signatures and the explicitly supplied allowed-signers and revocation files. The Git helper ignores global and system configuration and refuses OpenPGP and X.509 verifier execution." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

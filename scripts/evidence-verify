@@ -66,11 +66,14 @@ class Failure(Exception):
 
 def git(repo, *args, stdin=None, config=(), env=None):
     command = ['git', '-C', repo, '-c', 'gpg.format=ssh', '-c', 'gpg.ssh.program=ssh-keygen',
-               '-c', 'commit.gpgSign=false']
+               '-c', 'gpg.program=/bin/false', '-c', 'gpg.openpgp.program=/bin/false',
+               '-c', 'gpg.x509.program=/bin/false', '-c', 'commit.gpgSign=false']
     for item in config:
         command += ['-c', item]
     command += list(args)
-    environment = dict(os.environ, GIT_NO_REPLACE_OBJECTS='1', LC_ALL='C', **(env or {}))
+    environment = dict(os.environ, **(env or {}))
+    environment.update(GIT_NO_REPLACE_OBJECTS='1', LC_ALL='C',
+                       GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
     try:
         done = subprocess.run(command, input=stdin, capture_output=True, env=environment, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as error:
