@@ -287,6 +287,7 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     let completed = json!({
         "run": child.as_str(),
         "status": "completed",
+        "executions": [],
         "products": {
             (format!("resource/{child}/published")): {"kind": "custom.st3.program-test", "head": "h1"},
         },
@@ -413,7 +414,8 @@ fn children_are_cancelled_with_their_run_or_their_step_and_a_retry_starts_a_new_
     assert_eq!(error["run"], attempt_two.as_str());
     assert_eq!(error["status"], "failed");
     assert!(error["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{error}");
-    assert_eq!(error.as_object().unwrap().len(), 4, "{error}");
+    assert_eq!(error["executions"], json!([]), "the unclaimed child has no executions");
+    assert_eq!(error.as_object().unwrap().len(), 5, "{error}");
 }
 
 #[test]

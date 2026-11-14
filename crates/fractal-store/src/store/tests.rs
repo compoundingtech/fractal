@@ -3627,6 +3627,96 @@ fn declaration_restart_observation_waits_on_an_older_registry() {
 }
 
 #[test]
+fn traced_program_journals_remain_readable_with_an_older_registry() {
+    use super::fleet_admission_tests_shared_seats::{admit, key, node, sync};
+
+    let mut older_registry = fractal_schema::registry().clone();
+    older_registry.claims.remove("mission.run.trace").unwrap();
+    older_registry.claims.remove("program.attempt.trace").unwrap();
+    older_registry.claims.get_mut("program.step").unwrap().fields.remove("trace");
+    assert!(
+        !fractal_schema::registry().claims["program.step"].fields.contains_key("trace"),
+        "trace correlation belongs in evidence, not a new field on the existing journal kind"
+    );
+
+    let anchor = key();
+    let older_key = key();
+    let current = node("current", Some(&anchor), Some(&anchor));
+    admit(&current, "current", &anchor, "anchor", None);
+    admit(&current, "older", &older_key, "invite", None);
+    let older = node("older", Some(&older_key), Some(&anchor));
+    older.set_claim_registry(older_registry.clone());
+    sync(&current, &older);
+
+    let step = "step-run/example/build";
+    let trace = current.append_claim(&ClaimInput {
+        subject: step.into(),
+        kind: "program.attempt.trace".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "attempt": 1,
+            "trace": {
+                "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            }
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(matches!(
+        classify_replicated_claim_with_registry(&trace, &older_registry).unwrap(),
+        ReplicatedClaimAdmission::UnknownKind
+    ));
+    assert!(matches!(
+        classify_replicated_claim_with_registry(&trace, fractal_schema::registry()).unwrap(),
+        ReplicatedClaimAdmission::Valid
+    ));
+
+    let mut journals = Vec::new();
+    for (key, status, result) in [
+        ("build", "started", json!({})),
+        ("build", "completed", json!({"value": {"built": true}, "ms": 3})),
+        ("check", "failed", json!({"error": {"message": "check failed"}, "ms": 2})),
+        ("$result", "completed", json!({"value": {"ok": true, "value": "done"}})),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("key".into(), json!(key)),
+            ("status".into(), json!(status)),
+            ("attempt".into(), json!(1)),
+            ("program".into(), json!("example")),
+        ]);
+        fields.extend(result.as_object().unwrap().iter().map(|(key, value)| (key.clone(), value.clone())));
+        let journal = current.append_claim(&ClaimInput {
+            subject: step.into(),
+            kind: "program.step".into(),
+            actor: None,
+            fields,
+            evidence: vec![trace.id.clone()],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(journal.body["evidence"], json!([trace.id]));
+        assert!(journal.body["fields"].get("trace").is_none());
+        assert!(matches!(
+            classify_replicated_claim_with_registry(&journal, &older_registry).unwrap(),
+            ReplicatedClaimAdmission::Valid
+        ), "{key} {status} must remain known despite its unknown trace evidence");
+        journals.push(journal);
+    }
+
+    // Real admission must not withhold a known journal because its evidence kind is newer.
+    let admission = sync(&current, &older);
+    assert_eq!((admission.unknown, admission.invalid), (1, 0));
+    assert!(older.claim_by_id(&trace.id).unwrap().is_none());
+    let received = older.claims_for(step, Some("program.step")).unwrap();
+    assert_eq!(received.len(), journals.len());
+    for journal in journals {
+        assert_eq!(older.claim_by_id(&journal.id).unwrap().unwrap().body, journal.body);
+        assert!(received.iter().any(|record| record.id == journal.id && record.body == journal.body));
+    }
+}
+
+#[test]
 fn a_subject_with_no_actual_or_desired_state_has_unknown_reachability() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/diagnostic-run/sig.hub";
@@ -8341,6 +8431,92 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     // Replayed later, a response from before the step began is not charged to it.
     let before = respond("before", activated - 1);
     assert!(before["step_id"].is_null(), "{before}");
+}
+
+#[test]
+fn metadata_only_response_is_evidence_not_zero_spend() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    let mut claim = timeline_observation(subject, "inc-one", "metadata-only");
+    claim.fields.insert("entry_type".into(), json!("usage"));
+    claim.fields.insert("body".into(), json!({
+        "semantics":"response", "model":"claude-opus-5-5", "provider":"anthropic",
+        "response_id":"response-metadata-only", "duration_ms":12.5
+    }));
+    let stored = store.append_claim_outcome(&claim).unwrap().0;
+    assert_eq!(stored.body["fields"]["body"]["response_id"], "response-metadata-only");
+    assert_eq!(stored.body["fields"]["body"]["duration_ms"], 12.5);
+    assert!(stored.body["fields"].get("spend").is_none());
+    let connection = store.connection.lock().unwrap();
+    for table in ["local_usage_responses", "local_usage_spend", "local_usage_provenance"] {
+        let count: u64 = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h94f5986a16ef owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */
+            &format!("SELECT COUNT(*) FROM {table} WHERE subject=?1"),
+            [subject],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "{table} must not count unknown usage as spend");
+    }
+}
+
+#[test]
+fn incomplete_response_counters_are_unpriced_not_zero_filled_estimates() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage) in [
+        ("missing-buckets", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "input_tokens":10, "total_tokens":20
+        })),
+        ("unknown-write-ttl", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":1, "output_tokens":1, "cached_tokens":0,
+            "cache_write_tokens":10, "total_tokens":12
+        })),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], "unpriced");
+    }
+    let connection = store.connection.lock().unwrap();
+    let (cost, unpriced): (u64, u64) = connection.query_row(
+        "SELECT SUM(cost_microusd), SUM(unpriced_tokens) FROM local_usage_spend WHERE subject=?1",
+        [subject],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cost, 0);
+    assert_eq!(unpriced, 32);
+}
+
+#[test]
+fn observed_zero_cost_or_complete_zero_counters_are_accounting_evidence() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage, basis) in [
+        ("reported-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "cost":0
+        }), "reported"),
+        ("complete-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":0, "output_tokens":0, "cached_tokens":0,
+            "cache_write_tokens":0, "total_tokens":0
+        }), "estimated"),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], basis);
+        assert_eq!(stored.body["fields"]["spend"]["cost_microusd"], 0);
+    }
+    let connection = store.connection.lock().unwrap();
+    let count: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM local_usage_responses WHERE subject=?1",
+        [subject],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]

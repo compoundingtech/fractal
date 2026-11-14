@@ -14,17 +14,18 @@ import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
+import { AvailabilitySection } from './Availability';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
 // Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
-  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
+  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
   useDebugScroll(list as never);
-  const refresh = useRefresh();
+  const refresh = useRefresh([], readAvailability);
   const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
   const requesterOf = (row: HomeRow) => {
@@ -86,7 +87,7 @@ export function NowScreen() {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
-      ListHeaderComponent={<View><StatusLine />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
+      ListHeaderComponent={<View><StatusLine /><AvailabilitySection />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
