@@ -291,9 +291,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
             }
-            if result["error"].is_string() && result["producer_closed"] == true {
-                store.finish_invocation_trace(&format!("invocation/{id}"), true);
-            }
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
             incremental.touch(&format!("local-runtime-start:{subject}"));
