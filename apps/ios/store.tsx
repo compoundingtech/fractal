@@ -563,13 +563,17 @@ function useAppStore(proof?: FabricProfile) {
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
   // While a connection is live and its pairing may report presence, this phone reports its raw state
-  // (see presence.ts); each answer's availability replaces what Now shows.
+  // (see presence.ts); each answer's availability replaces what Now shows, fenced against edits.
   useEffect(() => {
     if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/') || !caps.capabilities.some(capability => capability.id === 'write.presence' && capability.state === 'granted')) return;
     const reporter = new PresenceReporter({
       report: async report => {
+        const generation = availabilityRead.current;
         const result = (await client.presenceReport(report)).value;
-        if (capsRef.current === caps) setAvailability(previous => ({ ...previous, person: result.availability }));
+        // A presence answer carries the person as the server sees it, which may predate an edit in
+        // flight or just finished: it applies only between writes, at the same read generation, on
+        // the same connection, so it never overwrites what an editor write is applying or applied.
+        if (capsRef.current === caps && !availabilityWriting.current && availabilityRead.current === generation) setAvailability(previous => ({ ...previous, person: result.availability }));
         return result;
       },
       lastInput: () => lastInput.current,

@@ -54,7 +54,7 @@ export class PresenceReporter {
   // A refusal (a pairing without `write.presence`, or a session that is not a person) ends reporting
   // for this connection. Any other failure leaves the next change of state or input to report.
   private send(): void {
-    if (!this.state) return;
+    if (this.ended || !this.state) return;
     this.clear();
     const sent = ++this.sent;
     const now = this.ports.now(), input = this.ports.lastInput();

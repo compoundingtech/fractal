@@ -156,3 +156,13 @@ test('an older answer never schedules over a newer report', async () => {
   await settle();
   assert.equal(timers.size, 0, 'the active answer arrived after the inactive report was sent');
 });
+
+test('a send already requested when the connection stops sends nothing', async () => {
+  const { reporter, reports } = harness(() => null);
+  reporter.foreground(true);
+  await settle();
+  reporter.stop();
+  reporter.send(); // private only to TypeScript: pin that a stopped reporter sends nothing
+  await settle();
+  assert.equal(reports.length, 1);
+});
