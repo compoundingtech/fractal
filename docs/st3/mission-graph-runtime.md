@@ -1262,6 +1262,32 @@ because the step may already have resumed on the default. A `--new-run` asker, w
 answers by message, then has three: "Timed out" from the ask's member, the person's answer from
 the member they answered on, and that notice, which says the answer replaced the default.
 
+After a deadline resolution the asked person can explicitly re-answer with
+`fractal work override ASK --as person/operator --answer ID` (and `--text` when the answer requires words), or
+`POST /v1/work/override` with the same person-step response fields: `subject`, `actor`,
+`episode` (the exact asking claim ID), and required `answer`. Only that ask's person may
+override, within seven days of the deadline resolution claim's accepted time. The CLI
+recovers the current episode unless `--episode` is supplied. An ordinary late `work done`
+still fails its cutoff fence; this is a separate explicit action.
+
+The append-only `work.person-override` claim records `answer`, `summary`, `episode`,
+`overrides` (the deadline resolution claim ID), and
+`key: person-override:{ask.id}:{answer.id}`. Every member admits a valid override past the
+cutoff and shows it instead of the default. Repeating that answer is idempotent; a later
+different answer is allowed within the same seven-day window, and the latest override
+in canonical claim order stands. Duplicate keys admitted independently on offline members
+use their first canonical receipt. Retrying an earlier answer's key after a later override
+succeeds without selecting the earlier answer again, including after the window closes.
+Claims with a mismatching episode, deadline link, or person
+do not stand. The ask's origin member notifies the asker once per override key, including
+overrides submitted on another member and replicated later. Disabling new deadlines does
+not stop notifications for already-resolved asks.
+
+An override does not reopen the origin step or roll back effects already taken on the
+default. The asker decides whether and how to compensate those effects. The explicit CLI
+and endpoint operation does not require a digest or client revert control, and does not
+change the off-by-default deadline setting.
+
 An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
 the fleet default counted from the first reconcile pass on this member that saw deadlines on (the
 `person_ask_deadlines_since_unix_ms` key in its `meta` table; a pass that sees deadlines off
@@ -2598,7 +2624,7 @@ Mission execution uses these important claim kinds:
 - `step-run.carried`, `step-run.state`, and `step-run.retried` record generation-specific step history.
 - `mission.produced` binds a generated mission to one producing attempt.
 - `gate.requested` and `gate.result` record gate operations and evidence.
-- `work.person-asked`, `work.person-done`, and `work.person-cancelled` record person work.
+- `work.person-asked`, `work.person-done`, `work.person-override`, and `work.person-cancelled` record person work.
 - `operational.failure` and `operational.recovered` record observed source failure episodes.
 
 Evidence is a list of claim IDs or immutable graph references that support a result. The evidence does not replace the gate. The gate definition says what must be decided; evidence records why the result is trustworthy.

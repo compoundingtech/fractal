@@ -2049,6 +2049,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-override",
+            &["step-run"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-cancelled",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -3713,6 +3722,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("answer", object()),
             ("resolved_by", string()),
         ],
+        "work.person-override" => &[
+            ("answer", object()),
+            ("summary", string()),
+            ("episode", string()),
+            ("overrides", string()),
+            ("key", string()),
+        ],
         "work.person-reassigned" => &[
             ("previous_person", reference()),
             ("person", reference()),
@@ -5296,6 +5312,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
@@ -5546,6 +5563,7 @@ mod tests {
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",
+                "work.person-override",
                 "work.progress",
                 "work.released",
                 "work.renewed",
