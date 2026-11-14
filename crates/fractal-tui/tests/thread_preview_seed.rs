@@ -14,9 +14,10 @@ use std::sync::Arc;
 use fractal_daemon::store::{self, Store};
 use fractal_daemon::SeatsStoreCore as _;
 
-fn input(kind: &str, actor: &str, key: &str, fields: serde_json::Value) -> smallclaims::ClaimInput {
+fn input(kind: &str, actor: &str, key: &str, mut fields: serde_json::Value) -> smallclaims::ClaimInput {
+    fields["status"] = serde_json::json!("sent");
     serde_json::from_value(serde_json::json!({
-        "subject": format!("preview/{key}"),
+        "subject": format!("message/preview/{key}"),
         "kind": kind,
         "actor": actor,
         "idempotency_key": key,
@@ -50,19 +51,21 @@ fn seed_scratch_threads() {
     )
     .unwrap();
     let observed = store::thread_metadata::summary(&store, person, open_thread).unwrap();
-    let base = store::thread_metadata::apply(
-        &store,
-        person,
-        open_thread,
-        "preview-humidity-calibration-rename",
-        store::thread_metadata::Edit::Rename {
-            title: "Humidity calibration before the frost",
-            title_revision: &observed.title_revision,
-            revision: &observed.revision,
-        },
-    )
-    .unwrap();
-    let rename_claim = base.0.id.clone();
+    let rename_claim = if observed.title == "Humidity calibration before the frost" {
+        observed.title_revision
+    } else {
+        store::thread_metadata::apply(
+            &store,
+            person,
+            open_thread,
+            "preview-humidity-calibration-rename",
+            store::thread_metadata::Edit::Rename {
+                title: "Humidity calibration before the frost",
+                title_revision: &observed.title_revision,
+                revision: &observed.revision,
+            },
+        ).unwrap().0.id
+    };
     let first = store::thread_delivery::append_reply(
         &store,
         &input("message.sent", person, "seed/calib-1", serde_json::json!({
