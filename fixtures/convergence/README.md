@@ -388,6 +388,9 @@ no untrimmed seeds requiring old-build excusal and next-cut continuation in this
 notice delivery") on top of v28's person attention controls. Versions 1 through 28 stay frozen.
 Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v29.json`;
-do not hand-edit it. The simulation and audit reports select v29. Hosted characterization of the
-v29 fixed seeds is pending; the `NEVER_TRIMS` set is provisional until that burst run is recorded
-here. Every fixed seed must still converge.
+do not hand-edit it. The simulation and audit reports select v29.
+
+Hosted [burst run 43535467419](https://github.com/compoundingtech/fractal/actions/runs/43535467419)
+observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
+The exact v29 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
+no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.

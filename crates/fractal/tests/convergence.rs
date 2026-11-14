@@ -2071,7 +2071,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 }
 
 /// Corpus v29 adds the notice-owner registry entry on top of v28's person attention controls.
-/// Hosted characterization of v29 is pending; NEVER_TRIMS is provisional until that burst lands.
+/// Hosted burst 43535467419 observed all 32 fixed seeds trim (33 tests including real-disk seed 1).
 /// No prior corpus's schedule-specific exception carries forward.
 const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
@@ -2083,7 +2083,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v28 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v29 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
