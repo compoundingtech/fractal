@@ -804,3 +804,38 @@ For the stale-fence negative control, replace the SDK retry's `readTerminalRunti
 with `Effect.succeed(observation)`: the stale-attach test must fail because no fresh runtime
 is read and the replacement terminal cannot be subscribed.
 
+
+## Fractal web availability
+
+The Settings dialog's **Availability** section shows the paired person's own effective
+availability and directive note, as `GET /v1/client/availability` (without a person, so the
+session person's own row with its presence) and `GET /v1/client/notes` return them. Status
+names its source: set by the person, with its end, or following presence, with the folded
+presence and its age. When no device has reported for a day (`status_source: unreported`) the
+status reads Available and says that no device is reporting, so agents ask as usual; it never
+reads as away. Interruptions and the deadline clock show their bounds; `urgent` interruptions
+let through only asks with priority `critical`, and a `hold-routine` clock says that those
+urgent asks keep running. A response word this build does not know shows as itself.
+The note shows its text and expiry, or that there is none.
+
+Availability is not a followed collection, so the section reads it when Settings opens, when
+the page regains focus or becomes visible, and when the connection returns; a later answer
+replaces an earlier one only if it was requested later. Fixture sources have no availability
+port, and a replay page drops the live source's port, so neither shows the section. A refused
+read explains itself: a rejected credential asks for pairing again, a missing grant says that
+reading was not granted, and a session that is no person says so.
+
+Below the summary the person sets or clears each axis and the note. **Changes last** bounds the
+next change: until changed, 30 minutes, 1 hour, 2 hours, tomorrow at 9:00 local time (the next
+calendar day, even before 9:00 today), or a custom local time that must lie in the future. The
+presets count from the source's clock. Status is Available, Away or **Follow presence** (a
+null status, which clears the override); interruptions are all asks, urgent asks only, or none;
+the deadline clock runs, holds routine asks, or holds every ask. Following presence, all asks
+and a running clock are the defaults and carry no end. **Save note** sets the note with the
+chosen end as its expiry; **Clear note** removes it. Writes go one at a time. Each write
+(`PUT /v1/client/availability`, `PUT /v1/client/notes`) shows the state Fractal answers with,
+never a local guess, and drops any read requested before it. A read requested while the write
+was in flight (focus, visibility or reconnection) may have been answered before or after the
+write took effect, so neither it nor the write's answer is shown: the section reads again and the
+editor stays pending until that read lands. A refused write keeps the summary and explains itself:
+a pairing without the `write.availability` or `write.notes` scope must be paired again.
