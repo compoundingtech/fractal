@@ -234,7 +234,7 @@ async fn seed_scratch_read_only_pairing() {
             session,
         }],
     };
-    let path = root.join("paired-config/fractal/stui-devices.json");
+    let path = root.join("paired-config/st3/stui-devices.json");
     profile.save(&path).unwrap();
     use std::os::unix::fs::PermissionsExt as _;
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
