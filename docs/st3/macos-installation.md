@@ -111,8 +111,9 @@ rewrites the default install's plists. See [Instances](instances.md).
 
 ## Protected-operation helper contract
 
-The Nix-managed host integration uses the following target contract; this is not
-a claim that the installer or `service permissions` guidance implements it yet.
+The Nix-managed host integration must obey this protected-operation contract.
+The production operation allowlist is empty. Candidate operations and the
+disposable probe read are not authorized for production.
 
 - Keep only named protected operations in a small signed helper, rather than
   granting the daemon's agents broad Full Disk Access or Developer Tools.
