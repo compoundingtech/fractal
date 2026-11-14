@@ -152,12 +152,53 @@ pub fn record_claim_tx(tx: &Transaction<'_>, origin: &str, claim: &ClaimRecord,
     append_receipt_tx(tx, origin, &receipt)
 }
 
+/// Resolve the ownership episode from immutable history, including revision carries.
+/// Each hop precedes its carry, so later claims on a predecessor cannot replace it.
+fn terminal_owner_tx(tx: &Transaction<'_>, terminal: &ClaimRecord) -> Result<Option<ClaimRecord>> {
+    let mut subject = terminal.subject.clone();
+    let mut boundary = terminal.id.clone();
+    let mut incarnation = terminal.body["fields"]["claim_incarnation"].as_str()
+        .or_else(|| terminal.body["fields"]["submitted_incarnation"].as_str())
+        .map(str::to_owned);
+    let query = canonical_sql(&format!(
+        "SELECT claims.id FROM claims JOIN claims AS boundary ON boundary.id=?2
+         WHERE claims.subject=?1 AND claims.kind IN ('work.claimed','step-run.carried')
+         AND {} ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        canonical::after_sql("boundary", "claims")));
+    loop {
+        let id: Option<String> = tx.query_row(&query, params![subject, boundary],
+            |row| row.get(0)).optional()?;
+        let Some(owner) = id.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten()
+            else { return Ok(None); };
+        let fields = &owner.body["fields"];
+        if fields["attempt"] != terminal.body["fields"]["attempt"]
+            || incarnation.as_deref().is_some_and(|value| fields["claim_incarnation"] != value)
+        { return Ok(None); }
+        if owner.kind == "work.claimed" {
+            return Ok((owner.actor == terminal.actor).then_some(owner));
+        }
+        // A ready/dropped carry is not ownership. The revising actor is not the
+        // worker: the carried claimant and incarnation are the ownership fence.
+        if !matches!(fields["status"].as_str(), Some("claimed" | "working" | "verifying" | "blocked"))
+            || fields["claimant"].as_str() != terminal.actor.as_deref()
+        { return Ok(None); }
+        let Some(carried_incarnation) = fields["claim_incarnation"].as_str()
+            .filter(|value| !value.is_empty()) else { return Ok(None); };
+        if incarnation.is_none() {
+            incarnation = Some(carried_incarnation.to_owned());
+        }
+        let Some(source) = fields["source_step_run"].as_str() else { return Ok(None); };
+        subject = source.to_owned();
+        boundary = owner.id;
+    }
+}
+
 /// A turn ends at its fenced work receipt, not when the standing provider process exits.
 pub fn record_terminal_tx(tx: &Transaction<'_>, origin: &str, claim: &ClaimRecord) -> Result<()> {
     if !matches!(claim.kind.as_str(), "work.submitted" | "work.failed" | "work.released") {
         return Ok(());
     }
-    let Some(start) = latest_claim_of_kind_tx(tx, &claim.subject, "work.claimed")? else { return Ok(()); };
+    let Some(start) = terminal_owner_tx(tx, claim)? else { return Ok(()); };
     let fields = &start.body["fields"];
     // The native work writer has already fenced the actor's exact incarnation.
     // Terminal bodies clear lease fields; submission additionally names its incarnation.
@@ -274,6 +315,73 @@ mod tests {
         assert_eq!(end.incarnation.as_deref(), Some("one"));
         assert_eq!(end.error.as_deref(), Some("stopped"));
         assert_eq!(end.evidence.len(), 1);
+    }
+
+    #[test]
+    fn carried_successor_terminal_ends_the_original_turn_with_ownership_fences() {
+        for kind in ["work.submitted", "work.failed", "work.released"] {
+            for mismatch in ["none", "actor", "attempt", "incarnation", "dropped",
+                "terminal-actor", "terminal-attempt", "terminal-incarnation"] {
+                let store = Store::open_memory("node").unwrap();
+                store.set_write_clock_at(100_000).unwrap();
+                let agent = "agent/node.worker";
+                let original = "step-run/r/g/build";
+                let middle = "step-run/r/g2/build";
+                let successor = "step-run/r/g3/build";
+                let (invocation, terminal) = store.connection.batched(|tx| -> Result<_> {
+                    let mut receipt = receipt_tx(tx, "run", original, 1, 0, agent, "one")?;
+                    receipt.phase = InvocationPhase::Started;
+                    append_receipt_tx(tx, "node", &receipt)?;
+                    append_claim_tx(tx, "node", original, "work.claimed", Some(agent),
+                        &json!({"fields":{"attempt":1,"claimant":agent,"claim_incarnation":"one",
+                            "invocation_id":receipt.invocation_id}}), &[], None)?;
+                    let mut carried = json!({"fields":{"source_step_run":original,
+                        "status":"working","attempt":1,"claimant":agent,"claim_incarnation":"one"}});
+                    match mismatch {
+                        "actor" => carried["fields"]["claimant"] = json!("agent/node.other"),
+                        "attempt" => carried["fields"]["attempt"] = json!(2),
+                        "incarnation" => carried["fields"]["claim_incarnation"] = json!("other"),
+                        "dropped" => carried["fields"]["status"] = json!("ready"),
+                        _ => {}
+                    }
+                    append_claim_tx(tx, "node", middle, "step-run.carried", Some("person/test"),
+                        &carried, &[], None)?;
+                    append_claim_tx(tx, "node", successor, "step-run.carried", Some("person/test"),
+                        &json!({"fields":{"source_step_run":middle,"status":"working",
+                            "attempt":1,"claimant":agent,"claim_incarnation":"one"}}), &[], None)?;
+                    // Later predecessor history must not replace the immutable carried episode.
+                    append_claim_tx(tx, "node", original, "work.claimed", Some("agent/node.other"),
+                        &json!({"fields":{"attempt":2,"claimant":"agent/node.other",
+                            "claim_incarnation":"other","invocation_id":"invocation/not-this-turn"}}),
+                        &[], None)?;
+                    let mut fields = json!({"attempt":1,"claim_incarnation":null,"reason":"stopped"});
+                    if kind == "work.submitted" {
+                        fields["submitted_incarnation"] = json!("one");
+                    }
+                    if mismatch == "terminal-attempt" { fields["attempt"] = json!(2); }
+                    if mismatch == "terminal-incarnation" {
+                        fields["claim_incarnation"] = json!("other");
+                    }
+                    let actor = if mismatch == "terminal-actor" { "agent/node.other" } else { agent };
+                    let terminal = append_claim_tx(tx, "node", successor, kind, Some(actor),
+                        &json!({"fields":fields}), &[], None)?;
+                    record_terminal_tx(tx, "node", &terminal)?;
+                    record_terminal_tx(tx, "node", &terminal)?;
+                    Ok((receipt.invocation_id, terminal.id))
+                }).unwrap().unwrap();
+                let receipts = store.invocation_receipts(&invocation).unwrap();
+                let ends = receipts.iter().filter(|receipt| receipt.phase == InvocationPhase::Ended)
+                    .collect::<Vec<_>>();
+                assert_eq!(ends.len(), usize::from(mismatch == "none"), "{kind}: {mismatch}");
+                if let Some(end) = ends.first() {
+                    assert_eq!(end.owner_step.as_deref(), Some(original));
+                    assert_eq!(end.incarnation.as_deref(), Some("one"));
+                    assert_eq!(end.event_key.as_deref(), Some(terminal.as_str()));
+                    assert_eq!(end.evidence, vec![terminal]);
+                    assert_eq!(end.error.as_deref(), (kind == "work.failed").then_some("stopped"));
+                }
+            }
+        }
     }
 
     #[test]
