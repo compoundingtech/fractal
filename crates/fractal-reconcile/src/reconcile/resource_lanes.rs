@@ -400,7 +400,11 @@ mod tests {
                 idempotency_key: mission.into(),
             }).unwrap();
             let upstream = start("upstream");
+            // Resource context must exist before the child becomes runnable.
+            let child_subject = store.mission_run_subject_for_idempotency_key("child");
+            store.attach_resource_child(&grant, &owner, &child_subject).unwrap();
             let child = start("child");
+            assert_eq!(child.subject, child_subject);
             // Use the real awaited subject, independent of the store's run-id allocation.
             let mut mission = store.mission_spec("child", Some(&child.revision)).unwrap().unwrap();
             if kind == "after-run" {
@@ -419,7 +423,6 @@ mod tests {
             let Admission::Admitted(grant) = store.request_resource_membership(
                 &parent, Fit::default(), START as u64,
             ).unwrap() else { panic!("parent must be admitted"); };
-            store.attach_resource_child(&grant, &owner, &child.subject).unwrap();
             assert!(store.resource_context_for_run(&child.subject).unwrap().is_some());
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
