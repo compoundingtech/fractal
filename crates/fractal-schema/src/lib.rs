@@ -17,6 +17,7 @@ pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod invocation;
+pub mod effects;
 pub mod provenance;
 pub mod read_positions;
 pub mod source_map;
@@ -802,6 +803,7 @@ impl Registry {
         if kind == invocation::KIND {
             invocation::validate(subject, fields)?;
         }
+        effects::validate(kind, subject, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -1304,6 +1306,12 @@ fn build_registry() -> Registry {
             "sekret",
             "sekret/HOST or sekret/HOST/OWNER/NAME",
             "A host's sekrets gateway, or one of its profiles: calls run with a credential the caller never reads.",
+            false,
+        ),
+        (
+            "effect",
+            "effect/OPERATION_ID",
+            "A durable native effect bound to one operation.",
             false,
         ),
         (
@@ -2672,6 +2680,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (invocation::KIND, &["agent"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_INTENDED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_IN_FLIGHT, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_CONFIRMED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_UNRESOLVED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -4507,6 +4519,23 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("prompt_digest", any()), ("transcript_ref", any()), ("trace_context", any()),
             ("freshness", object()), ("fallback", any()), ("error", any()), ("evidence", any()),
         ],
+        effects::KIND_INTENDED | effects::KIND_IN_FLIGHT | effects::KIND_CONFIRMED | effects::KIND_UNRESOLVED => &[
+            ("effect_id", required_reference_to(&["effect"])),
+            ("operation_id", required_string()),
+            ("provider", required_string()),
+            ("target", required_string()),
+            ("payload_digest", required_string()),
+            ("class", required_enum(&["native-coordinated", "provider-idempotent", "fail-closed"])),
+            ("bound_step_run", required_reference_to(&["step-run"])),
+            ("bound_attempt", required_integer()),
+            ("lease_owner", required_string()),
+            ("lease_incarnation", required_string()),
+            ("recovering_actor", string()),
+            ("provider_ref", string()),
+            ("result_digest", string()),
+            ("error", string()),
+            ("evidence", array()),
+        ],
         "harness.timeline" => &[
             (
                 "operation",
@@ -5312,6 +5341,10 @@ mod tests {
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
+            current.claims.remove(kind).unwrap();
+        }
+        current.subjects.remove("effect").unwrap();
         for field in ["producer_version", "invocation_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
