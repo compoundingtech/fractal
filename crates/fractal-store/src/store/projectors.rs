@@ -57,6 +57,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "read-positions", run: read_positions::open },
+    Hook { name: "attention-controls", run: attention_controls::open },
     Hook { name: "limits", run: limits::open_limits },
     Hook { name: "usage-credits", run: usage_credits::open },
     Hook { name: "run-eta", run: run_eta::open },
@@ -129,6 +130,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: read_positions::project,
     },
     AppendProjector {
+        name: "attention-controls",
+        takes: Takes::Kinds(&fractal_schema::attention_controls::KINDS),
+        project: attention_controls::project,
+    },
+    AppendProjector {
         name: "ordered-membership",
         takes: Takes::Kinds(&["ordered-membership.edited"]),
         project: ordered_membership::project,
@@ -157,6 +163,11 @@ pub const REPLICATED: &[AppendProjector] = &[
         name: "read-position-project",
         takes: Takes::Kinds(&[read_positions::KIND]),
         project: read_positions::project,
+    },
+    AppendProjector {
+        name: "attention-control-project",
+        takes: Takes::Kinds(&fractal_schema::attention_controls::KINDS),
+        project: attention_controls::project,
     },
     AppendProjector {
         name: "ordered-membership-project",
@@ -194,6 +205,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
     Hook { name: "read-positions", run: read_positions::rebuild },
+    Hook { name: "attention-controls", run: attention_controls::rebuild },
     Hook { name: "usage-credits", run: usage_credits::rebuild },
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
@@ -212,6 +224,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
     ReplayStage { phase: "full-replay/read-positions", run: read_positions::rebuild },
+    ReplayStage { phase: "full-replay/attention-controls", run: attention_controls::rebuild },
     ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },

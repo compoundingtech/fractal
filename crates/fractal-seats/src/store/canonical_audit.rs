@@ -149,6 +149,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
         "local_usage_spend",
+        "local_step_execution_spend",
         "local_usage_provenance",
         "local_usage_responses",
         "local_limit_stops",
@@ -191,6 +192,10 @@ fn every_persistent_table_has_a_projection_scope() {
         // Person read positions: an order-free max register refolded from replicated claims on
         // open, repair and replay; the claims carry the shared digest coverage.
         "read_positions",
+        // Person attention controls: order-free earliest-seen and newest-snooze registers
+        // refolded from replicated claims on open, repair and replay; the claims carry the
+        // shared digest coverage.
+        "person_attention_controls",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",
@@ -931,6 +936,7 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

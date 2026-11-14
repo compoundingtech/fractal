@@ -163,6 +163,68 @@ publication by local arrival time, so after the clock steps back they stay hidde
 until it catches up; they still replicate. A configured OpenTelemetry collector
 receives every response.
 
+Response evidence uses the existing timeline usage body, independently of any review or
+invocation result. OMP/pi terminal `message_end` assistant messages supply actual
+`model`, `provider`, `api`, `response_id` and `stop_reason`. The response's `timestamp`
+and `completedAt` become `started_at_unix_ms` and `completed_at_unix_ms`; `duration`
+and `ttft` become fractional `duration_ms` and `ttft_ms`. These are harness observations,
+not step wall duration, and duration need not equal completion minus start. Requested
+launch models are not evidence of the actual response model.
+
+The shipped driver and daemon OMP/pi channel hooks explicitly allowlist this response
+metadata, numeric token/cost/quota observations, and the one-hour cache subset before
+emitting terminal timeline frames. String bounds and tool payload redaction still
+apply; raw request/response objects and unrecognized usage fields are not forwarded.
+The hook smoke check drives the real extensions through a channel recorder using the
+response-evidence fixture, including missing, zero, partial and invalid observations.
+
+OMP/pi input, output, cache-read (`cached_tokens`) and cache-write buckets are disjoint.
+`reasoning_tokens` is a subset of output; `cache_write_1h_tokens` (OMP
+`usage.cttl.ephemeral1h`, Claude `cache_creation.ephemeral_1h_input_tokens`) is a subset
+of cache writes. Neither subset is added to `total_tokens`. Preserve a reported total;
+without one, sum only when all four disjoint OMP/pi buckets were observed. Missing
+fields are explicitly unknown by omission in the public schema and `None` in typed
+clients, never synthesized zeros. This includes unsupported reasoning/TTL fields.
+Codex's inclusive input is normalized to uncached input by subtracting its reported
+cache reads and any exposed cache writes; absent cache-write counters remain unknown.
+
+OpenCode retains its observed response creation/completion timestamps and finish
+reason in the same fields. Its reasoning counter is disjoint from visible output,
+so normalization includes it in `output_tokens` while retaining `reasoning_tokens`
+as a subset. Without both observations, normalized output stays unknown. A reported
+zero cost is a known USD observation, not a missing price. OpenCode message IDs remain
+event-source identities, not invented provider response IDs; unavailable API,
+provider response ID, measured duration and TTFT stay unknown.
+
+OMP `usage.cost.total` populates the existing scalar USD `cost` field. Numeric scalar
+`usage.cost` from other real channel inputs remains supported. Optional
+`cost_components.{input,output,cache_read,cache_write}` retains the object components;
+it is evidence of that same cost, not additional spend. Partial objects do not invent
+a reported total. Existing reported/estimated/unpriced accounting and price-table
+provenance remain authoritative; this adds no ledger or rate card. Optional
+`provider_quota:{unit:"premium_requests",quantity}` retains `usage.premiumRequests`,
+including zero and fractional quantities, separately from tokens and money.
+
+The accounting boundary admits a spend response only when at least one primary
+token count/total or a valid reported scalar cost was observed. Metadata-only
+terminal evidence stays in the timeline without a spend record or deduplication
+receipt. Rate-card estimates require all four disjoint token buckets and, when
+writes are nonzero, their one-hour subset; incomplete counters remain unpriced
+rather than being zero-filled for pricing. A reported cost, including zero, remains
+authoritative even when token counters are unavailable. This does not recompute
+historical spend.
+
+Only terminal assistant response messages contribute usage. A provider `responseId`
+is the channel event identity when present, ahead of a local message ID, so repeated
+terminal snapshots with that response ID do not add spend. Without a provider ID,
+the existing local ID or deterministic event-source key remains the identity;
+`response_id` itself stays unknown. Streaming deltas and `agent_end` copies are not
+additional response observations. Older observations remain readable with their
+original omissions; this change does not backfill information discarded at capture.
+The metadata-only OMP response fixtures preserve observed GPT and Opus field shapes
+and measurements with replaced IDs and without prompts, output, credentials, request
+controls or local paths.
+
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
 the counter recorded at the shared hook's actual application point, bounded warning/error logs,
 operation times and the hook exit code. No collector or SDK exporter runs in a hook. Submission
@@ -391,6 +453,7 @@ order from the same admitted claims.
 | `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
 | `projection_digest_state` | Local | Maintained shared projection digest state; the logical digest is shared, these rows are local maintenance. |
 | `projection_health` | Local | Local admission/projection/quarantine status, frontier, errors and observation timestamps. Deterministic shared degraded-state summaries must be separate from receipt health. |
+| `person_attention_controls` | Rebuildable projection | Each person's own controls per attention row: the earliest `person.attention-seen` and the newest `person.attention-snoozed` by canonical claim key, projected on append and replication and refolded from the claims on first open, repair and replay. Order-free, so outside projection digests; the claims carry the shared coverage. |
 | `read_positions` | Rebuildable projection | Each person's largest `read-position.advanced` time per conversation (ties by canonical claim key), projected on append and replication and refolded from the claims on first open, repair and replay. Order-free, so outside projection digests; the claims carry the shared coverage. changed_index is a local arrival cursor. |
 | `replica_envelope_holds` | Local | Local validation/fencing hold state and observation time. |
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |

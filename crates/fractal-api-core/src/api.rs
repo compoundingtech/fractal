@@ -154,6 +154,7 @@ pub use published_attention::{
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
     refresh_agent_roster(store, false)
 }
+mod availability;
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -661,8 +662,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(client_diagnostics::ingest)
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
-        .route("/v1/client/notes", get(directive_notes::read))
-        .route("/v1/notes", axum::routing::put(directive_notes::write))
+        .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/observations", post(client_observations::report)
@@ -2066,6 +2068,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "set-managed-subject"
         | "not-found"
         | "forbidden"
+        | "directive-note-feature-barrier"
         | "pairing-origin-required"
         | "pairing-restart-required"
         | "attention-migrated"
@@ -2075,6 +2078,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
+        | "attention-dismiss-unsupported"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -5018,6 +5022,7 @@ fn client_attention_resources_from_items(
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
         let alert = item.is_alert();
+        let urgent = item.is_urgent();
         let conversations = item.conversations();
         let mut resource = json!({
             "id": id, "kind": "attention", "attention_kind": item.kind,
@@ -5029,6 +5034,7 @@ fn client_attention_resources_from_items(
             "targets": item.targets, "actions": client_attention_actions(&item.kind, item.review_mode.as_deref()),
             "operational": {"layer": "current", "actionable": true, "reasons": []},
             "alert": alert,
+            "urgent": urgent,
         });
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
@@ -5105,6 +5111,10 @@ fn client_attention_resources_from_items(
         }
         resources.push(resource);
     }
+    // Each row's person's own controls: when they first saw it and until when they put it off.
+    // A control claim folds the list again like any other claim attention reads, so watchers
+    // see it.
+    store.overlay_attention_controls(&mut resources)?;
     Ok(resources)
 }
 

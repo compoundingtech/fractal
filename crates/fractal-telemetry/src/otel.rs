@@ -8,6 +8,8 @@
 //! respect per-signal opt-outs and retain correlation attributes, but always use
 //! the st unit's service name and explicit resource identity.
 
+pub use crate::attempt_trace::{AttemptTrace, AttemptTraceContext};
+
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};

@@ -173,6 +173,7 @@ describe('fixture-free native Details projection', () => {
     expect(project({ selectedPeriod: observed({ value: zero }) }).trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 0 })
     expect(project({ selectedPeriod: observed({ value: { ...period, rows: [] } }) }).trace.meters.spend.mainUsd._tag).toBe('Unknown')
     expect(project({ selectedPeriod: observed({ value: { ...zero, rows: [{ ...zero.rows[0]!, unpriced_tokens: 5 }] } }) }).trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-covered' })
+    expect(project({ selectedPeriod: observed({ value: { ...zero, rows: [{ ...zero.rows[0]!, unpriced_responses: 1 }] } }) }).trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-covered' })
   })
   it('maps selected native refusal to non-retryable sync causes and preserves real codes', () => {
     const refused = (feed: Feed<never>) => projectNativeDetails({ agentRef: row.id, row: feed, agent: feed, period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined, reads }).syncStatus

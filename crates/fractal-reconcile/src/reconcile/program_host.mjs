@@ -126,7 +126,11 @@ const main = () => {
   const start = (message) => {
     const previous = runs.get(message.step)
     if (previous !== undefined) end(previous)
-    const worker = new Worker(fileURLToPath(import.meta.url), { workerData: message })
+    // Context is per attempt, never a mutation of the shared host's environment.
+    const worker = new Worker(fileURLToPath(import.meta.url), {
+      workerData: message,
+      env: { ...process.env, ...message.env },
+    })
     const run = {
       step: message.step,
       attempt: message.attempt,
