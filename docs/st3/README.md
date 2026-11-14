@@ -12,6 +12,8 @@ Use these documents for implementation details:
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Program engine](program-engine.md) is the accepted design for missions whose body is a program: where
   it runs, its journal, versioning by bundle hash, authority, child runs and visibility.
+- [Data-DSL missions as programs](program-engine-data-dsl.md) is the proposed design for compiling
+  data-DSL missions into programs: orchestrated missions, released steps, parity tests and slices.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Native driver contracts](native-driver-contracts.md) retains launch, scope, helper, harness-state and context obligations after catalog-runner retirement.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.

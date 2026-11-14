@@ -548,21 +548,13 @@ evaluation the active run's end triggers.
 
 ### 9. One execution model
 
-The data DSL lowers into a program instead of a step graph. A data-DSL mission becomes a generated
-program body whose bundle the publisher pins; the KDL a person reads stays a projection.
-
-| Data DSL construct | Lowers to |
-|---|---|
-| `depends-on { step "x" completed }` | `yield*` order |
-| sibling steps without mutual dependencies | `Effect.all([...], { concurrency: 'unbounded' })` |
-| agentless `exec` step + `exit_code is 0` gate | `Fractal.step({ id }, Fractal.command(argv))` failing on a non-zero exit |
-| `assigned-to` worker step, products | worker turn (§6); products are its success schema |
-| field / exists / exec gate | a step that reads through the host contract and fails typed |
-| human gate | `Fractal.ask` |
-| `retry { attempts n }` | `Effect.retry(Schedule.recurs(n - 1))` |
-| `finally { revert }` | `Effect.onError` / `catchTag` with the failed key in scope |
-| `uses-mission` | `Fractal.run` (§6) |
-| run-data side channels | step values |
+The data DSL compiles into programs ([data-DSL missions as programs](program-engine-data-dsl.md)).
+A data-DSL mission becomes an orchestrated mission: its native steps as the data DSL renders them,
+plus one generated `program` step, `orchestrator`, that decides when each of them starts and is not
+normal work for the run's outcome. The native step graph stays the substrate for worker claims,
+gates, products, retries, completion and the final phase; ordering, parallelism (`Effect.all`),
+settled local execs and decisions over step values run in the program body. The KDL a person reads
+is the native rendering plus `orchestrated-by` and the orchestrator.
 
 Native graph execution remains for published KDL missions until each is republished from the DSL.
 The `Fractal.steps.*` catalogue (classify, check, merge, publish, verify, revert, review) is one set
@@ -645,7 +637,7 @@ on a scratch instance at each.
 |---|---|
 | M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash`, `fractal apply` carries and validates the bundle and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
 | M2 Publication | The `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
-| M3 One model | The data DSL compiles into programs (§9), with byte and behaviour parity for existing data-DSL missions; published KDL missions keep running on the native graph until they are republished. |
+| M3 One model | The data DSL compiles into programs (§9, [data-DSL missions as programs](program-engine-data-dsl.md)), with byte and behaviour parity for existing data-DSL missions; published KDL missions keep running on the native graph until they are republished. |
 
 ## Spike results (scratch, macOS, load 80–280)
 
