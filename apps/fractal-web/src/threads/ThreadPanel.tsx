@@ -53,7 +53,7 @@ export function ThreadPanel({
   const [error, setError] = React.useState<string>()
   const [pending, setPending] = React.useState(false)
   // Changes act at once; this names the confirmed result, so the reader sees what happened without a dialog.
-  const [flash, setFlash] = React.useState<{ readonly text: string; readonly reopen: boolean }>()
+  const [flash, setFlash] = React.useState<string>()
   React.useEffect(() => {
     if (flash === undefined) return
     const timer = setTimeout(() => setFlash(undefined), FLASH_MS)
@@ -73,11 +73,19 @@ export function ThreadPanel({
       setPending(false)
     }
   }
+  // A pressed Close or Reopen is disabled while the change is pending, which drops focus to the
+  // document; once the change settles, focus returns to the lifecycle button that now names the next step.
+  const restoreState = React.useRef(false)
+  React.useLayoutEffect(() => {
+    if (!restoreState.current || pending || pendingChange !== undefined) return
+    restoreState.current = false
+    if (document.activeElement === null || document.activeElement === document.body)
+      actions.current?.querySelector<HTMLElement>('[data-thread-state]')?.focus()
+  }, [pending, pendingChange, thread.state])
   const changeState = (onChange: NonNullable<typeof onChangeState>, next: ThreadPanelSummary['state']) => {
     const name = thread.title
-    void run(() => onChange(next), () => setFlash(next === 'closed'
-      ? { text: `Closed “${name}”.`, reopen: true }
-      : { text: `Reopened “${name}”.`, reopen: false }))
+    restoreState.current = true
+    void run(() => onChange(next), () => setFlash(next === 'closed' ? `Closed “${name}”.` : `Reopened “${name}”.`))
   }
   const titleRevision = thread.title_revision
   const metadata = <span {...stylex.props(styles.metadata)}>
@@ -96,7 +104,8 @@ export function ThreadPanel({
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
       {unreadDot}{title}{metadata}
     </Button> : <h2 {...stylex.props(styles.header)}>{unreadDot}{title}{metadata}</h2>
-  return <section data-thread-panel="" role="group" aria-label={thread.title} {...stylex.props(styles.panel)}>
+  // A thread in its own tab keeps the Inbox detail's reading measure instead of spanning the pane.
+  return <section data-thread-panel="" role="group" aria-label={thread.title} {...stylex.props(styles.panel, !embedded && styles.dedicated)}>
     {open && onMarkRead !== undefined ? <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
       <div {...stylex.props(styles.readHeadingRow)}>
         {heading}
@@ -111,18 +120,13 @@ export function ThreadPanel({
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div ref={actions} {...stylex.props(styles.actions)}>
-        {onRename === undefined || titleRevision === undefined ? null : <ActionButton data-thread-rename="" variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</ActionButton>}
-        {onChangeState === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined}
+        {onRename === undefined || titleRevision === undefined ? null : <ActionButton data-thread-rename="" variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => { setFlash(undefined); setRename({ title: thread.title, revision: titleRevision }) }}>Rename</ActionButton>}
+        {onChangeState === undefined ? null : <ActionButton data-thread-state="" variant="outline" isDisabled={pending || pendingChange !== undefined}
           onPress={() => changeState(onChangeState, thread.state === 'open' ? 'closed' : 'open')}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</ActionButton>}
         {onHideDraft === undefined ? null : <ActionButton onPress={onHideDraft}>Hide draft</ActionButton>}
         {embedded && onOpenInTab !== undefined ? <ActionButton onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
-      {flash === undefined ? null : <div role="status" data-thread-confirmed="" {...stylex.props(styles.actions, styles.flash)}>
-        <span>{flash.text}</span>
-        {flash.reopen && onChangeState !== undefined && thread.state === 'closed'
-          ? <ActionButton variant="ghost" isDisabled={pending || pendingChange !== undefined} onPress={() => changeState(onChangeState, 'open')}>Reopen</ActionButton>
-          : null}
-      </div>}
+      {flash === undefined ? null : <div role="status" data-thread-confirmed="" {...stylex.props(styles.actions, styles.flash)}>{flash}</div>}
       {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status" {...stylex.props(styles.actions, styles.pending)}>
         {retryPending ? 'Sending…' : `Fractal has not confirmed the previous ${pendingChange}.`}
         <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, closeRename) }}>Retry {pendingChange}</ActionButton>
@@ -130,7 +134,7 @@ export function ThreadPanel({
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()
         const title = rename.title.trim()
-        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => { closeRename(); setFlash({ text: `Renamed to “${title}”.`, reopen: false }) })
+        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => { closeRename(); setFlash(`Renamed to “${title}”.`) })
       }} {...stylex.props(styles.actions)}>
         <label {...stylex.props(styles.field)}>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })}
           onKeyDown={event => { if (event.key === 'Escape' && !pending) { event.preventDefault(); closeRename() } }} {...stylex.props(styles.input)} /></label>
@@ -144,6 +148,7 @@ export function ThreadPanel({
 
 const styles = stylex.create({
   panel: { containerName: 'thread-panel', containerType: 'inline-size', minWidth: 0, borderColor: c.border, borderWidth: 1, borderStyle: 'solid', borderRadius: 6 },
+  dedicated: { boxSizing: 'border-box', width: '100%', maxInlineSize: '46rem', marginInline: 'auto' },
   header: { display: 'flex', alignItems: 'baseline', gap: s.sm, width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize },
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
   readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },

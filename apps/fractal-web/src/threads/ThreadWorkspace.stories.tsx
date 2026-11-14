@@ -254,7 +254,7 @@ export const Refused: Story = { args: { scenario: 'refused' }, play: AllStates.p
 export const RetryAfterFailure: Story = { args: { scenario: 'failed' }, play: AllStates.play }
 export const UpdatesPaused: Story = { args: { placement: 'tab', scenario: 'offline' } }
 export const UnconfirmedChange: Story = { args: { placement: 'tab', scenario: 'unconfirmed' } }
-/** Close acts at once; the confirmed result names the thread and offers Reopen in place of a dialog. */
+/** Close acts at once; the confirmed result names the thread, and the lifecycle button beside it now reads Reopen. */
 export const CloseConfirmation: Story = {
   args: { placement: 'tab' },
   play: async ({ canvasElement }) => {
@@ -265,10 +265,10 @@ export const CloseConfirmation: Story = {
       if (status === null) throw new Error('no confirmation yet')
       return status as HTMLElement
     })
-    await expect(confirmed.textContent).toMatch(/^Closed “.+”\./)
-    await userEvent.click(within(confirmed).getByRole('button', { name: 'Reopen' }))
-    await waitFor(() => expect(canvasElement.querySelector('[data-thread-confirmed]')?.textContent).toMatch(/^Reopened “.+”\./))
-    await expect(canvas.getByRole('button', { name: 'Close thread' })).toBeTruthy()
+    await expect(confirmed.textContent).toMatch(/^Closed “.+”\.$/)
+    await userEvent.click(canvas.getByRole('button', { name: 'Reopen thread' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-confirmed]')?.textContent).toMatch(/^Reopened “.+”\.$/))
+    await expect(await canvas.findByRole('button', { name: 'Close thread' })).toBeTruthy()
   },
 }
 

@@ -272,7 +272,11 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
-    {!readOnly && visible ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
+    {/* Only an agent has threads; a pane for any other ref would ask the daemon for a list it refuses.
+        They share the alerts' reading lane, so the list lines up with the asks and the composer. */}
+    {!readOnly && visible && agentRef.startsWith('agent/') ? <div style={{ flexShrink: 0, minWidth: 0, boxSizing: 'border-box', paddingInline: spaceVars.section }}>
+      <div style={{ maxWidth: geometryVars.lane, marginInline: 'auto' }}><LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /></div>
+    </div> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return

@@ -412,7 +412,8 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
 function EventText({ event, excerpt }: { readonly event: ThreadTimelineEvent; readonly excerpt: string | undefined }) {
   switch (event.kind) {
     case 'message': return <>
-      {Option.isNone(event.thread_quote_id) ? null : <span title={event.thread_quote_id.value}>{excerpt ?? 'Reply to an earlier message'}</span>}
+      {Option.isNone(event.thread_quote_id) ? null
+        : <blockquote {...stylex.props(styles.quote)}>{excerpt ?? 'Reply to an earlier message'}</blockquote>}
       <div {...stylex.props(styles.message)}>{event.content}</div>
     </>
     case 'thread.renamed': return <span>Renamed “{event.previous_title}” to “{event.title}”</span>
@@ -446,5 +447,7 @@ const styles = stylex.create({
   eventHeader: { display: 'flex', alignItems: 'baseline', gap: s.sm },
   reply: { opacity: { default: 0, ':focus-visible': 1, [stylex.when.ancestor(':hover')]: 1, '@media (hover: none)': 1 } },
   message: { color: c.fg, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  quote: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.border,
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   note: { margin: 0, color: c.fgMuted, fontSize: t.metaSize },
 })

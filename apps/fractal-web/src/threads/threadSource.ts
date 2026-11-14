@@ -164,7 +164,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
             // A revoked read cannot be revived by a later frame from this demand.
             if (error instanceof ClientError && (error.status === 401 || error.status === 403)) active = false
             settings?.onFailure?.(error)
-            get.setSelf(previous = refused(error))
+            // A lost connection keeps what was observed, marked paused; only a refusal replaces it.
+            const failure = refused(error)
+            get.setSelf(previous = previous._tag === 'Observed' && failure._tag === 'Unavailable' && failure.reason === 'failed'
+              ? { ...previous, freshness: 'stale' } : failure)
           }
         })
       }
@@ -338,9 +341,12 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           return reject('Fractal has not confirmed this action. Retry to check the same action.')
         }
         attempts.delete(destination)
-        return outcome.how === 'sent'
-          ? { _tag: 'Sent', threadId: attempt.target }
-          : reject(outcome.error instanceof ClientError ? outcome.error.response.message : outcome.error instanceof Error ? outcome.error.message : 'Fractal could not perform this action.')
+        if (outcome.how === 'sent') return { _tag: 'Sent', threadId: attempt.target }
+        // A failed outcome applied nothing. A gateway or network failure says so in words; a daemon refusal keeps its own reason.
+        const error = outcome.error
+        return reject(error instanceof ClientError && error.status < 500 ? error.response.message
+          : error instanceof ClientError || error instanceof TypeError ? 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
+            : error instanceof Error ? error.message : 'Fractal could not perform this action.')
       } finally {
         delete attempt.pending
         invalidate()

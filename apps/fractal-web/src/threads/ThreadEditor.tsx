@@ -1,5 +1,7 @@
 import * as React from 'react'
+import * as stylex from '@stylexjs/stylex'
 import { useAtom } from '@effect/atom-react'
+import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DraftMessageComposer } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DraftMessageComposer.tsx'
 import type { ThreadSendResult, ThreadSource } from './threadSource.ts'
 
@@ -34,8 +36,8 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
     }
   }
   return <>
-    {pending ? <p role="status">Sending…</p> : null}
-    {error === undefined ? null : <p role="alert">{error}</p>}
+    {pending ? <p role="status" {...stylex.props(styles.note)}>Sending…</p> : null}
+    {error === undefined ? null : <p role="alert" {...stylex.props(styles.note, styles.error)}>{error}</p>}
     <DraftMessageComposer label={label} draft={draft.content} onDraftChange={content => setDraft(current => ({ ...current, content }))}
       onSubmit={() => { void submit() }} pending={pending} maxContentBytes={8192}
       {...(inputRef === undefined ? {} : { inputRef })}
@@ -45,4 +47,9 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
       })} />
   </>
 }
+
+const styles = stylex.create({
+  note: { margin: 0, color: c.fgMuted, fontSize: t.metaSize },
+  error: { color: c.dangerFg },
+})
 
