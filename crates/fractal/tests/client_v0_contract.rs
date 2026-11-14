@@ -557,6 +557,7 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1000,6 +1001,96 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
     let mut invalid = fixture["value"].clone();
     invalid["notes"][0]["author"] = serde_json::json!("agent/worker");
     assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
+}
+
+#[test]
+fn availability_fixtures_conform_and_refuse_identity_and_unknown_values() {
+    let read = json(asset_root().join("fixtures/person-availability.json"));
+    assert_conforms(&contract_validator("Envelope"), "availability read", &read);
+    assert_conforms(&contract_validator("PersonAvailabilities"), "availability people", &read["value"]);
+    let written = json(asset_root().join("fixtures/availability-set-result.json"));
+    assert_conforms(&contract_validator("Envelope"), "availability write", &written);
+    assert_conforms(&contract_validator("PersonAvailability"), "availability own view", &written["value"]);
+    let person = contract_validator("PersonAvailability");
+    let mut agent = written["value"].clone();
+    agent["person"] = serde_json::json!("agent/worker");
+    assert!(!person.is_valid(&agent));
+    let mut missing = written["value"].clone();
+    missing.as_object_mut().unwrap().remove("presence");
+    assert!(!person.is_valid(&missing), "every key is always present");
+
+    let set = contract_validator("AvailabilitySet");
+    assert!(set.is_valid(&json(asset_root().join("fixtures/availability-set.json"))));
+    assert!(set.is_valid(&serde_json::json!({"status": {"value": null}})));
+    for invalid in [
+        serde_json::json!({"person": "person/avery", "status": {"value": "away"}}),
+        serde_json::json!({"status": {"until": "2026-11-12T12:00:00Z"}}),
+        serde_json::json!({"interruptions": {"value": "focus"}}),
+    ] {
+        assert!(!set.is_valid(&invalid), "{invalid}");
+    }
+    let report = contract_validator("PresenceReport");
+    assert!(report.is_valid(&json(asset_root().join("fixtures/presence-report.json"))));
+    for invalid in [
+        serde_json::json!({"state": "idle", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"presence": "present", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"state": "active", "observed_at": "2026-11-12T09:58:00Z", "source": "custom/client/forged"}),
+    ] {
+        assert!(!report.is_valid(&invalid), "{invalid}");
+    }
+    let reported = json(asset_root().join("fixtures/presence-report-result.json"));
+    assert_conforms(&contract_validator("Envelope"), "presence result", &reported);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence result", &reported["value"]);
+    // Response words are open: a word a later daemon adds still conforms for a consumer, while
+    // this daemon may emit only the declared words.
+    let mut future = written["value"].clone();
+    future["status_source"] = serde_json::json!("calendar");
+    future["presence"] = serde_json::json!("in-call");
+    assert!(consumer_validator("PersonAvailability").is_valid(&future));
+    assert!(!person.is_valid(&future));
+}
+
+#[tokio::test]
+async fn daemon_availability_routes_conform_to_client_v0() {
+    let root = tempfile::tempdir().unwrap();
+    let app = fractal_daemon::api::router(test_state(root.path()));
+    let send = |method: &'static str, uri: &'static str, person: &'static str, body: Option<Value>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().method(method).uri(uri).header("x-st3-person", person);
+            if body.is_some() {
+                request = request.header("content-type", "application/json");
+            }
+            let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
+            let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            (status, serde_json::from_slice::<Value>(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap())
+        }
+    };
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (status, reported) = send("POST", "/v1/client/presence", "person/ada", Some(serde_json::json!({
+        "state": "active", "last_input_at": observed_at, "observed_at": observed_at,
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{reported}");
+    assert_conforms(&contract_validator("Envelope"), "presence report", &reported);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence report", &reported["value"]);
+    assert!(reported["value"]["report_again_at"].is_string(), "{reported}");
+    // The fixture's change, with an expiry still in the future whenever the test runs.
+    let mut body = json(asset_root().join("fixtures/availability-set.json"));
+    body["status"]["until"] = serde_json::json!("2999-01-01T00:00:00Z");
+    let (status, set) = send("PUT", "/v1/client/availability", "person/ada", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_conforms(&contract_validator("PersonAvailability"), "availability set", &set["value"]);
+    let typed: fractal_client::Envelope<fractal_client::PersonAvailability> = serde_json::from_value(set.clone()).unwrap();
+    assert_eq!((typed.value.status, typed.value.presence), (fractal_client::AvailabilityStatus::Away, Some(fractal_client::AvailabilityPresence::Present)));
+    for (reader, presence) in [("person/ada", serde_json::json!("present")), ("person/avery", Value::Null)] {
+        let uri = if reader == "person/ada" { "/v1/client/availability" } else { "/v1/client/availability?person=person/ada" };
+        let (status, read) = send("GET", uri, reader, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_conforms(&contract_validator("Envelope"), "availability read", &read);
+        assert_conforms(&contract_validator("PersonAvailabilities"), "availability read", &read["value"]);
+        assert_eq!(read["value"]["people"][0]["presence"], presence, "{reader}");
+    }
 }
 
 /// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
@@ -1604,6 +1695,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -2610,6 +2702,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -3014,6 +3107,7 @@ async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_acti
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -3933,6 +4027,7 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -4052,6 +4147,7 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

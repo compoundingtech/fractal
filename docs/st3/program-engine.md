@@ -446,8 +446,30 @@ again and the start is retried then. When the child ends, the program receives:
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
 input, product })))`, is a child run of `mission` with `input`. Its value is the child's product
 `resource/RUN/PRODUCT`, decoded with `success`; the worker mission declares the agent, goal and
-product (for example a run-scoped one-shot reviewer `agent/${ST_MISSION_RUN}/reviewer`, so
-independence holds as in LandingMission).
+product. For an independent turn, use a distinct run-owned subject such as
+`agent/${ST_MISSION_RUN}/worker` and `fresh-context` on its assigned step; optionally use `one-shot`
+to retire it on exit. `Fractal.Worker.layer` does not fork the program caller's conversation,
+mailbox or handoff into the child. A standing worker selected by the child retains its own
+mailbox, and `one-shot` alone does not request a fresh session. See
+[step context isolation](mission-graph-runtime.md#step-syntax).
+
+Worker turns can request `Fractal.step({ id, success, execution: true })` to return
+`{ value, executions }` instead of the decoded product alone. `value` remains domain data;
+`executions` contains the child's claim-backed agent invocations, across its steps and attempts.
+The child result and `ChildFailed` also carry `executions`, so failed execution can still report
+spend. Older journal entries omit it: `undefined` means unknown, not zero. Mission output
+schemas must allow an absent `executions` key when replaying those entries. Replay returns the
+journaled execution snapshot without consulting a seat's current model or running the child again.
+Each execution identifies its work claim, step, attempt, actor and harness incarnation, with the
+declared model captured at claim time, observed models, nullable fallback evidence, response token
+and micro-USD totals, timing, trace correlation and an incarnation-matched runtime exit receipt.
+No usage observation is `usage: null`, not a zero-token observation. Either `unpriced_tokens`
+or `unpriced_responses` distinguishes unknown price from free execution: responses without a
+reported total still carry the response counter without inventing tokens. Exit evidence recorded after the child result was journaled is
+available on mission detail reads, not retroactively inserted into the replayed snapshot.
+An effect-form step is not an agent invocation; it retains its ordinary typed result and journal
+duration. A process that fails before claiming work has runtime evidence but no claim-backed
+execution record. These generic records do not contain domain decisions, review bindings or consent.
 
 **Asks.** `Fractal.ask({ id, for, title, request, deadline, default })` opens a native person ask on
 the program step, with `work ask --step` semantics: the same structured requests, deadlines and

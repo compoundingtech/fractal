@@ -207,16 +207,86 @@ even when its immutable claim row remains retained. Incremental reads and full
 replay both select the latest unrepaired revision.
 The text is advisory only: no approval, gate, ask or assignment reads it as evidence.
 
-The trusted local CLI writes with `PUT /v1/notes`, using a concrete person identity
-and a body containing that same `person` and `actor`, nullable `text`, and optional
-`expires_at`. Agents and paired-client delegated writes are refused. Text is
-nonblank and bounded to 4096 UTF-8 bytes. The replicated claim
+A person writes their own note with `PUT /v1/client/notes` (`notes.set`, scope
+`write.notes`), from the local CLI or from a paired device granted `write.notes`. The
+`DirectiveNoteSet` body holds a required nullable `text`, where `null` clears the note, and
+an optional `expires_at`; it never names the person, which is always the session's own.
+Like every person-state write, the claim records the daemon-assigned `source`: the pairing
+grant for a paired device, otherwise `host/<member>`; the body never names it. Agent sessions are refused with `403` even though a local agent session holds every scope.
+The response `DirectiveNoteSetResult` holds the current `note`, or `null` once cleared or
+already expired. Text is nonblank and bounded to 4096 UTF-8 bytes; invalid input is
+`validation-failed`. The generated Rust `notes_set` and Swift and TypeScript `notesSet`
+methods use this route; see the [write fixture](fixtures/directive-note-set.json). The replicated claim
 `person.directive-note-set` is admitted only with its person as author. Publication
 requires anchored fleet membership and `person_directive_note` version 1
 advertisement from every active member. Pending unsigned local membership changes
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 
+### Person availability
+
+A person's availability informs agents; it never grants authority. It has three axes and a
+derived status, all folded when read from claims on `person/NAME`, so expiry needs no writes:
+
+- `status`: an `available` or `away` override with optional `until`. With no override in
+  force, status is `available` while some device is `present`, `away` while devices report but
+  none is present, and `available` with `status_source: "unreported"` when no device's state
+  counts (nobody runs a reporter, or every report is over 24 hours old). An unreported person
+  is not treated as away: agents ask as usual.
+- `interruptions`: `all`, `urgent` or `none`, with optional `until`; `all` when unset.
+- `deadline_clock`: `run`, `hold-routine` or `hold-all`, with optional `until`; `run` when
+  unset. A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of
+  every ask (`hold-all`). An ask is urgent exactly when its priority is `critical`.
+- `presence`: derived by the daemon, the same way for every device, from each device's newest
+  raw state. An `active` device is `present` until 10 minutes after its last input, then
+  `idle`; `inactive` is `idle`; `locked` and `sleeping` are `locked`. A device's state counts
+  for 24 hours after it was observed (the earlier of `observed_at` and acceptance). `present`
+  anywhere wins, then `idle`, then `locked`; with no counting device presence is `unreported`.
+
+The response words (`status`, `status_source`, `presence`, `interruptions`, `deadline_clock`)
+are open: readers keep a word they do not know as Unknown (`AvailabilityStatus` and siblings
+in Rust and Swift; open string unions in TypeScript), so a later daemon can add one.
+
+`GET /v1/client/availability` (`availability.list`) requires `read.projections` and a person
+or agent session. It answers `PersonAvailabilities`. With `?person=person/NAME` it reads that
+person. Without it, a person reads themselves and an agent reads the people whose directive
+notes it reads. Only the person sees `presence` and `presence_observed_at`; every other reader
+gets them as `null` and sees only the effective status with `status_until`, the interruptions
+and the deadline clock. A local harness or peer (an agent harness or its descendant, a bound
+run, a native delivery peer) is another reader even when it names the person.
+
+Writes act as the session's own person, which the body never names; agent sessions are refused
+with `403` even though a local agent session holds every scope, and so is a local harness or
+peer that names the person. The daemon records the source
+of every write on its claim: the exact pairing grant for a paired device, otherwise
+`host/<member>`; a body never names it. `PUT /v1/client/availability` (`availability.set`,
+scope `write.availability`) takes an `AvailabilitySet`: each present axis names its `value`
+and optional future `until`, and an absent axis is unchanged. A status `value` of `null`
+clears the override and takes no `until`; it answers the person's full `PersonAvailability`.
+
+`POST /v1/client/presence` (`presence.report`, scope `write.presence`) takes a
+`PresenceReport`: the device's raw `state` (`active`, `inactive`, `locked` or `sleeping`), its
+optional `last_input_at` and its `observed_at`, which must be within the last 15 minutes and at
+most 2 minutes ahead of this member's clock; `last_input_at` may not be later than
+`observed_at`. Devices apply no idle threshold and send no heartbeat. A device reports on every
+state change, and again at the `report_again_at` of its last `PresenceReportResult` with its
+current `last_input_at`: while it is present, that is the instant it would turn idle without
+newer input. A null `report_again_at` means: report on the next state change, or on the next
+input after an idle stretch. Reporting more often is harmless: the daemon records a device's
+report only when it changes the device's state or derived presence, or moves an active
+device's last input forward by at least 5 minutes. The answer is a `PresenceReportResult`:
+the person's full `availability` and `report_again_at`. Invalid input is `validation-failed`.
+The generated Rust `availability_list`, `availability_set` and `presence_report`, and Swift
+and TypeScript `availabilityList`, `availabilitySet` and `presenceReport` methods use these
+routes. See the [read fixture](fixtures/person-availability.json), the
+[write fixture](fixtures/availability-set.json) and the
+[presence fixture](fixtures/presence-report.json) with its
+[result](fixtures/presence-report-result.json).
+
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
 
 ### Phone observations
 
@@ -320,6 +390,15 @@ and lifts the timing and enrichment bound for that one run only (its `started_at
 (Rust `missions_get_run`); `missionsGet(id)` keeps its signature and never sends `run`. Lists,
 pages and collection windows never carry these fields, and other runs' steps omit them: absence is
 not proof of a single attempt or no waits.
+
+Detail steps also expose `executions[]`, the generic claim-backed agent invocation records.
+They distinguish an invocation from its logical attempt (a reclaim can create another invocation).
+The record joins historical declared/observed models, nullable fallback evidence, response-attributed
+token and micro-USD usage, elapsed time, trace correlation and an incarnation-matched exit receipt.
+Missing usage is unknown, not zero; a changed model does not by itself prove fallback. Older records
+can lack captured metadata. See [the execution contract](../program-engine.md#6-linked-child-runs-worker-turns-and-asks).
+The native `GET /v1/mission-runs/{run}` detail and `fractal missions show mission-run/... --json`
+carry the same per-step `executions` projection; lean work reads omit it.
 
 - `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
   opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
@@ -624,6 +703,36 @@ Request bodies never select an actor. Device credentials are scoped, individuall
 different from fleet replication secrets. A remote client is always online: v0 has no offline
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
+
+### A person's desktop app on the local socket
+
+A native app the person runs on the member's own host, such as a menu-bar tray, calls this API over
+the trusted local `fractal.sock`, as `fractal note set` does: no pairing and no bearer credential.
+Each request names the person with `x-st3-person: person/NAME` (`x-fractal-person` is also
+accepted). That session acts as the person and holds every scope; without the header the session is
+the read-only `client/local/read-only`. Every `/v1/client/` route is served, WebSocket streams
+included. The daemon ignores the HTTP `Host`; send `localhost`.
+
+Trust comes from the host, not from a credential:
+
+- The socket is mode 0600, owned by the daemon's Unix user, so only that user (or root) can connect.
+- For each connection the daemon asks the kernel for the peer process (`LOCAL_PEERPID` on macOS,
+  `SO_PEERCRED` on Linux) and reads the exec-time environment of it and each same-user ancestor. An
+  ancestor with `ST_AGENT` or `FRACTAL_AGENT` binds the connection to that agent: it keeps the
+  agent's free-mode reads, so ordinary GETs and stream upgrades are still served, but a write or an
+  owner-administration read whose person header names anyone but that agent is refused with code
+  `forbidden`. A run credential binds its mission run the same way. An ancestry the daemon cannot
+  read refuses every request that carries a person header. An app launched by launchd (a login
+  item, Finder, `open`) has launchd as its parent, binds to no agent, and is taken for the person.
+- This is cooperative attribution between processes of one Unix user
+  ([replication.md](../replication.md)), not a boundary against code already running as that user.
+  Never forward this socket to TCP. A device on another host pairs and uses `fractal-client.sock`.
+
+The socket is `run/fractal.sock` in the daemon's state directory
+(`~/.local/state/st3/run/fractal.sock` on a default install); the daemon links it there even when
+it binds under `XDG_RUNTIME_DIR`. The Swift client connects with
+`FractalClient(localSocketPath:person:client:)`, which carries every request and stream over that
+socket; the Rust client's `Client::unix_as` does the same.
 
 ### Native Fabric carrier
 
@@ -966,7 +1075,7 @@ snapshot's retained sends directly instead of writing or observing a later commi
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
 `until_ms`, `messages`, `calibrated_messages`, `low_microusd`, `high_microusd`,
-`usage_cost_microusd`, `unpriced_tokens` and nullable `low_percent`/`high_percent`.
+`usage_cost_microusd`, `unpriced_tokens`, optional `unpriced_responses` and nullable `low_percent`/`high_percent`.
 Usage costs use the same cumulative snapshots and baseline/reset rules as period rows, in the
 same pass. A zero priced denominator makes the percentages unknown; unpriced coverage remains
 visible. The range can exceed 100% and is never capped. This is a planning allowance that
@@ -1004,8 +1113,10 @@ value is `UsagePeriod { since_ms, until_ms, rows }`, with one `UsageRow` per age
 step, model, paying account and host, largest first. A row carries the token counts (`total`,
 `input`, `output`, `cache_write`, `cache_write_1h`, `cached`), `cost_microusd` (API-equivalent
 cost: the harness's own figure when it reports one, else Fractal's pricing table, named by `pricing`),
-`reported_cost_microusd` (the part the harness reported) and `unpriced_tokens` (tokens neither
-could price, which a client shows as unknown cost, never as free). An identity Fractal does not know,
+`reported_cost_microusd` (the part the harness reported), `unpriced_tokens` (observed total tokens
+neither could price) and optional `unpriced_responses` (responses without any price, even when
+their total tokens are absent). Either nonzero unpriced counter means the known cost is only a
+lower bound, never a known free bill. Reported zero cost remains a known price. An identity Fractal does not know,
 such as the mission run of a standing seat, is absent from the row. A period whose start is after
 its end is `validation-failed`. `limits` lists each account's selected limits reading: `account`
 (a label such as `claude/<digest>`, or `DRIVER/unknown`), `driver`, optional `account_ref`,
@@ -1033,7 +1144,10 @@ See [account limits](../accounts.md#at-the-limit) for the policy and external ba
 Rows also carry optional `native_session_id` (the provider's session UUID, fenced by incarnation)
 and `pricing_provenance`. The legacy `pricing` label remains readable. Each provenance entry
 names `cost_source` (`provider_reported`, `computed`, or `unpriced`), disjoint token buckets,
-`cost_microusd`, `reported_cost_microusd` and `unpriced_tokens`. Computed entries name
+`cost_microusd`, `reported_cost_microusd`, `unpriced_tokens` and optional `unpriced_responses`. The
+response counter shares the existing cumulative provenance store and rollup, not another ledger.
+Older rows without the counter retain their original token-based coverage; no historical response
+counts or token totals are inferred. Computed entries name
 `price_table_id` (`st.api-list`), `price_table_version` (date plus SHA-256 of the complete table),
 and `rates_usd_per_million_tokens` (`input`, `output`, `cache_read`, `cache_write_5m`,
 `cache_write_1h`), with long-context multipliers already applied. Provider-reported entries
@@ -1222,7 +1336,9 @@ person-step attention card then includes the same `request`; a card without one 
 ask, and clients should not infer answers from its title. A card with `update` instead brings
 information the person asked for and asks nothing: show it, and send `work.done` with
 `answer: {"id": "read"}` (its `action_parameters` already carry it) when the person opens it
-or presses read. Agents post updates with `fractal work update`.
+or presses read. Agents post updates with `fractal work update`. An update's optional `speech`
+(1 to 300 characters) is set only when the person asked to be told that outcome: a client that
+speaks reads `update.speech` aloud, and speaks no update without it.
 
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
@@ -1276,6 +1392,11 @@ It is absent when no agent is behind the item. `conversation_ids` lists every co
 shows in, starting with `conversation_id`: a harness login alert is one alert per login directory
 and host, naming every seat that shares it, since one sign-in answers them all. Daemons that
 predate alerts omit these fields.
+
+`urgent` is the one server rule for urgency: an ask whose asker gave it priority `critical`
+(`work ask --priority critical`); every other row is not urgent. A client that honours
+interruptions `urgent`, speaks, or raises a banner decides from this field alone, never from a
+deadline. Daemons that predate it omit it, which reads as not urgent.
 
 A `model-drift` item tells a person that agents they own run on another model than they
 declare, usually because a harness fell back after provider rate limits. There is one per person,
@@ -1916,10 +2037,11 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-client diagnostics writes, glasses reads and control, terminal reads, attention control,
+client diagnostics writes, availability, presence and note writes for the paired person, glasses
+reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`read.glasses`, `control.glasses`, `terminal.read`,
+`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
@@ -2042,6 +2164,16 @@ filtering before offset selection and byte packing. Continuations bind the exact
 grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
+
+`availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
+It returns `{kind: "person-availability", availability, directive_note, directive_note_truncated}`: the grant
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
+another person. The availability fields are never cut. The note text (up to 4096 UTF-8
+bytes) is cut on a character boundary to what `max_response_bytes` leaves after the whole
+envelope, measured with the delivery codec, so the read never fails its budget for the note;
+`directive_note_truncated` is then true (false when the note is whole or absent). Read again
+with a larger `max_response_bytes`, up to 16384, for the whole note. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,

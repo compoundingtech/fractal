@@ -6,7 +6,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
@@ -43,6 +43,7 @@ import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
 import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
+import { ownAvailability, servesAvailability } from './availability';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -75,6 +76,7 @@ const PUSH_KEY = 'st3.push.enabled';
 // which an older app build reads.
 const OBSERVATIONS_KEY = 'st3.observations';
 const CARRIER_KEY = 'st3.carrier', FABRIC_TARGET_KEY = 'st3.fabric.target', FABRIC_MEMBERS_KEY = 'st3.fabric.members', FABRIC_FALLBACK_KEY = 'st3.fabric.fallback';
+const NO_AVAILABILITY = { person: null, note: null, issue: '' };
 
 /** An error as a person reads it: Fractal's errors in plain words (the SDK's plainError). */
 export function errorText(error: unknown): string {
@@ -147,6 +149,7 @@ function useAppStore(proof?: FabricProfile) {
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
+  const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
   const [status, setStatus] = useState<Status>('setup');
   const [hasSynced, setHasSynced] = useState(false);
   // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
@@ -515,7 +518,7 @@ function useAppStore(proof?: FabricProfile) {
     draftsOwner.current = '';
     if (!proofRef.current) void localDrafts.clear();
     setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
-    setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
+    setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null); setAvailability(NO_AVAILABILITY);
   }
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
@@ -538,6 +541,19 @@ function useAppStore(proof?: FabricProfile) {
     if (!client || status !== 'online' || proofRef.current) return;
     return watchSync(async () => (await client.attentionList({ limit: 1 })).value.sync ?? null, (value, stale) => { setSync(value); setSyncStale(stale); });
   }, [client, status]);
+
+  // Availability is not on the collections socket: it is read each time a connection goes live (opening,
+  // returning to the foreground, reconnecting) and on pull to refresh, and a write's answer replaces it.
+  const availabilityRead = useRef(0);
+  const readAvailability = useCallback(async () => {
+    const read = ++availabilityRead.current;
+    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) { setAvailability(NO_AVAILABILITY); return; }
+    try {
+      const [people, notes] = await Promise.all([client.availabilityList(), client.notesList()]);
+      if (availabilityRead.current === read && capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes), issue: '' });
+    } catch (e) { if (availabilityRead.current === read && capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
+  }, [client, status, caps]);
+  useEffect(() => { void readAvailability(); }, [readAvailability]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
@@ -1302,7 +1318,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
