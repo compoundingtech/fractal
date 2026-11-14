@@ -642,6 +642,117 @@ provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
 
+## Operation-conflict bounded refold (#9101)
+
+Reviewed for [dotfiles#9101](https://github.com/schickling/dotfiles/issues/9101):
+`fractal_store::store` owns `lv-hdacd188e0574` and `lv-h3b9353d94be0`,
+which retain operation/claim identifiers and typed conflict/refold diagnostics in
+the existing `projection_health` text columns. These are metadata, not claim bodies;
+the remaining debt is bounding every identifier and diagnostic representation and
+keyed reclamation when conflicts are repaired. `lv-h58880ffb5371`,
+`lv-h53bf80630f0f` and `lv-hc33c6f16bf1d` are fixed savepoint-control strings,
+with no payload binds; their conservative sink classification is retained.
+Conflict-dirty run trees/parts execute their bounded savepoint wrapper during the
+receipt chunk, before ordinary run work enters the final-drain queue. When a dirty
+tree covers a dirty part, its conflict diagnostics move to the tree so the same cap
+and rollback boundary apply to the widened rebuild.
+`smallclaims::store` owns `lv-h60fdf4c7a583`, updating one operation's existing
+digest/canonical-claim/state columns from the canonical reducer. Its next storage
+step is the same bounded-identifier representation as the other operation sites.
+Fixture-only `lv-hed1452e59184` and `lv-hf161f602d783` retain synthetic checkpoint
+metadata and stale-health setup to prove the no-replay fence. Their owners are
+`fractal_store::store::operation_conflict_tests`; no production population is added.
+
+The atomic-degradation correction also owns `lv-ha8b524108446` and
+`lv-he57da1ef4545`: the former retains the independent replay reason while receipt
+advances, and the latter clears only the successfully refolded subject's stale
+diagnostic. Both retain metadata, never claim bodies, with the same bounding debt.
+`lv-hf0bbe1f00bc2` is the second-chunk stale-health regression fixture.
+
+`smallclaims::store` owns `lv-hb7532db3c65d` (full operation/claim identity evidence),
+`lv-hb0e4de996f4f` (the generation-qualified incremental reader scan watermark), `lv-hcc82e02fe20f`
+(graph health that retains deferred-repair visibility), and `lv-h362e35c78646`
+(clearing that deferred row after explicit full repair succeeds). The same owner's
+`lv-h15d4a1d1ce13` consumes the row after a successful automatic full repair,
+authorized only by complete discovery and the graph-conflict fence.
+Evidence contains identifiers, not claim bodies; identifier representation remains
+the same bounding debt. Discovery reads only the newly admitted target range on
+readers; writer metadata pages are capped at the projection chunk size.
+
+`smallclaims::store::operation_conflict_fence` owns `lv-hdd122545f0d0` and
+`lv-h12783970e005`, installing checkpoint/restored-prefix invalidation triggers
+and the partial stale-exclusion index. They mutate integer generation metadata;
+the index retains existing operation/subject keys, with the same bounded-identity
+debt rather than a new body population. `lv-h386f61abc319` and `lv-h69417713b2cb`
+are synthetic checkpoint-adoption/stale-health regression sites owned by
+`fractal_store::store::operation_conflict_tests`.
+`lv-h0cfeef50b49a` is the same owner's stale-health fixture proving that neutral
+operation conflicts do not suppress an unrelated legitimate replay.
+The same owner's `lv-h792cc1f9b935` models an interrupted generation rediscovery
+page using only a synthetic integer watermark/generation and existing health
+metadata; no production value population is added.
+
+Naming invalidations use the existing canonical domain reducer only through 64
+naming/declaration claims. The ignored writer-held benchmark measured p50/p99
+15.324/42.054 ms at 64 claims versus 575.031/802.102 ms at 4096 (100 samples after
+10 warmups, unoptimized); this is sampled work, not a latency guarantee.
+`fractal_store::store::identities` owns `lv-h4a0e92262358`
+(the integer dirty mark), `lv-hf50ecf2614c0` and `lv-hac2615d40a38` (typed naming
+degradation and deferred-repair health), and `lv-h2f8124d35909` and
+`lv-h5b8d52acffb1` (cleanup after bounded or explicit repair). Health details retain
+operation/claim identifiers, not payloads; their variable identifier representation
+remains the owner's `bound-or-reference-values-and-reclamation` debt. Degraded naming
+reads fail closed for the claim-derived affected-name component until repair; unrelated
+names retain the last fold with the degradation visible in store health and doctor.
+Ordinary flushes cannot bypass the cap.
+`fractal_store::store::identities_tests` owns `lv-h18f8ad5b42e2`, the ignored
+writer-held fold measurement's synthetic operation-state update; it adds no production
+data population or size proof.
+
+The naming schema site `lv-h5aebafde05b8` replaces `lv-h40ca3df48b16` and adds
+forward-only partial `claims_naming_from_index` and `claims_naming_to_index` indexes.
+They retain variable name keys from signed claims, not cached aliases.
+`fractal_store::store::identities_conflict_scope` owns `lv-h522af0cfffad`, selecting
+only the fixed operation/subject/from/to indexed query templates. Scope derivation counts
+all hydrated rows, including repeats, against the 64-row cap; unavailable proof or
+checkpoint-only naming evidence falls back to global fencing. Outstanding operation IDs
+are retained and scoped proofs refresh after new claims, so later competing identities
+cannot escape the fence. Nested typed references use the same fail-closed boundary.
+Health details list affected names and instruct: run `fractal replication replay --confirm`
+in a planned window. These name/operation bindings remain variable inline values, not
+byte-size proofs; the owning maintainer retains the trace/reference-representation debt.
+Follow-up: [#6371](https://github.com/compoundingtech/fractal/issues/6371).
+
+`lv-h05bf16937ee4` and `lv-h864348ae5781` retain and reclaim the same component
+as at most 64 keyed `meta` entries. Healthy reads stop at the absent keyed health
+row; degraded membership uses primary-key probes, never a JSON-array scan on the
+message-body hot path. Refresh replaces these rows in the same transaction and
+explicit repair clears them. Variable name-key representation remains the scope
+module owner's `bound-or-reference-values-and-reclamation` debt.
+
+Failed bounded run refolds persist a keyed owning-root exclusion (`lv-h26d5c1ee3d02`).
+Later receipt chunks and both public tree/part rebuild entrypoints consult it before
+hydrating history, including local decision drains and pending-work dispatch. A failed
+part conservatively excludes its owning tree because a tree fold also rebuilds that part.
+Only a successful authorized full replay retires this exclusion (`lv-hf04badb6d7a2`);
+transaction rollback restores it on repair failure. These root keys remain variable
+inline metadata owned by `fractal_store::store`, not a byte-size bound.
+
+`smallclaims::store::operation_conflict_fence` owns `lv-h64314192329c` and
+`lv-he4949cef00f3`: successful authorized full repair deletes the accounted
+`projection:operation-conflict-fence:*` rows and publishes the repaired current
+store index/source generation in `projection:operation-conflict-scan`, atomically
+with restored graph health. Canonical operation conflict rows remain intact.
+New admissions may produce fresh fence evidence; the repaired prefix does not
+immediately rediscover itself. `lv-h02c178e28e3f` and `lv-h7772a8dd1107` are
+fixture-only late-claim and stale-health mutations proving these boundaries.
+
+Pending-work drains settle an excluded run's queue entry without rebuilding it,
+then continue with independent roots. Startup projection migrations likewise skip
+only the typed degraded-run result; other errors still propagate and degraded
+health/membership remains until explicit repair. Fixture-only `lv-hec42c211f7cb`
+and `lv-hf851bfc39d1f` force startup migration and out-of-order sibling work to
+prove that exclusion does not strand the queue.
 ### GitHub plugin read fixture includes (PR #6396)
 
 The `fractal_api_client_v0::api::client_v0::github_plugin_reads::tests` maintainer
@@ -684,4 +795,3 @@ The schema TODO is to chunk or reference variable columns and keys; the mutation
 TODO is to bound or reference bodies and account for their cleanup without
 weakening fencing or releasing uncertain execution custody. Neither queue order,
 capacity counts nor the host-local authority proves value sizes.
-

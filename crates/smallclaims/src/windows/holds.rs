@@ -93,11 +93,17 @@ impl Holder {
     }
 
     fn json(&self) -> Value {
-        json!({
+        let mut row = json!({
             "holder": &*self.0.label,
             "client": self.0.client.as_deref(),
             "at": format!("{}:{}", self.0.at.file(), self.0.at.line()),
-        })
+        });
+        if let Some(clock) = &self.0.stages
+            && let Some((processed, total)) = clock.lock().unwrap_or_else(PoisonError::into_inner).progress {
+            row["processed"] = json!(processed);
+            row["total"] = json!(total);
+        }
+        row
     }
 }
 
@@ -612,6 +618,7 @@ struct StageClock {
     spent: Vec<(&'static str, Duration)>,
     rebuilt: Vec<(&'static str, Rebuilt)>,
     closed: bool,
+    progress: Option<(u64, u64)>,
 }
 
 impl StageClock {
@@ -754,6 +761,16 @@ pub fn rebuilt(claims: usize) {
         let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
         if !clock.closed {
             clock.rebuilt(claims as u64);
+        }
+    }
+}
+
+/// Publish the current fold's progress on its live and completed writer-hold row.
+pub fn fold_progress(processed: usize, total: usize) {
+    if let Some(clock) = STAGES.with(|stages| stages.borrow().clone()) {
+        let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+        if !clock.closed {
+            clock.progress = Some((processed as u64, total as u64));
         }
     }
 }
@@ -1246,5 +1263,15 @@ mod tests {
         // Once the writer has closed the lend, a late rebuild is not counted.
         rebuilt(9);
         assert_eq!(stages.clock.lock().unwrap().rebuilt.len(), 2);
+    }
+
+    #[test]
+    fn fold_progress_is_visible_on_the_writer_hold_row() {
+        let _stages = Stages::begin();
+        let holder = Holder::current();
+        fold_progress(17, 42);
+        let row = holder.json();
+        assert_eq!(row["processed"], 17);
+        assert_eq!(row["total"], 42);
     }
 }
