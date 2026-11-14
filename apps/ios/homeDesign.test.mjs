@@ -262,8 +262,8 @@ test('availability writes invalidate old reads, serialize edits and discard old 
 
 test('presence answers apply only between writes at the same read generation on the same connection', async () => {
   const store = source('./store.tsx');
-  const reportProperty = nodes(store, ts.isPropertyAssignment).find(node => node.name.getText() === 'report'
-    && nodes(node.parent, child => ts.isIdentifier(child) && child.text === 'PresenceReporter').length > 0);
+  const construction = nodes(store, ts.isNewExpression).find(node => node.expression.getText().includes('PresenceReporter'));
+  const reportProperty = nodes(construction, ts.isPropertyAssignment).find(node => node.name.getText() === 'report');
   assert.ok(reportProperty, 'the PresenceReporter report callback is found');
   const javascript = ts.transpileModule(`const report = ${reportProperty.initializer.getText()};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
