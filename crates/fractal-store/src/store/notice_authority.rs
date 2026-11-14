@@ -1,78 +1,74 @@
-//! Notice admission policy. B2 supplies replicated admission cuts and revocation ordering;
-//! payload timestamps and declaration hashes are deliberately never authority evidence here.
+//! Notice admission policy. The fleet's singleton `notice-owner` declaration binds one admitted
+//! member incarnation; only that member's daemon, writing as `daemon/runtime`, writes snapshots.
+//! Every daemon writes as `daemon/runtime`, so the actor alone proves nothing: the authority is
+//! the claim's origin member and writer sequence checked against the binding. A missing,
+//! conflicted, invalid or ended binding fails closed, with no election. Sources and their
+//! lineage never depend on the binding, so a handover rebuilds snapshots and keeps sources.
+//! Payload timestamps and declaration hashes are deliberately never authority evidence here.
 use super::*;
+use crate::fleet::MemberState;
+use crate::notice_owner::{self, NoticeOwner};
 use fractal_schema::{custom::Manifest, notice};
 
-/// Watch the projection tables used by declaration_live, not only newly authored claims.
-/// Retirement, owned declarations and ancestor-run liveness can change without intent.desired.
+/// Where a fact was written: its origin member and that writer's sequence. A local write is
+/// judged at the sequence its batch takes in the writing transaction.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Position<'a> {
+    origin: &'a str,
+    sequence: u64,
+}
+
+impl<'a> Position<'a> {
+    pub(super) fn next(tx: &Transaction<'_>, origin: &'a str) -> Result<Self> {
+        Ok(Self { origin, sequence: next_replica_sequence(tx, origin)? })
+    }
+
+    pub(super) fn written(connection: &Connection, claim: &'a ClaimRecord) -> Result<Self> {
+        let sequence = connection.prepare_cached("SELECT replica_sequence FROM batches WHERE id=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hd59eb9d34a64 owner=fractal_store::store::notice_authority TODO=trace-statement-and-value-representation */ [&claim.batch_id], |row| row.get(0))?;
+        Ok(Self { origin: &claim.origin, sequence })
+    }
+}
+
+/// Revalidate snapshots when the owner declaration, a rival leaf of it, or the fleet membership
+/// it binds against changes. Membership already counts every change in `fleet_generation`.
 pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()> {
-    let run_id = |column: &str| format!(
-        "CASE WHEN {column} LIKE 'mission-run/%' THEN substr({column},13) ELSE {column} END"
+    let dirty = format!(
+        /* sqlite-large-value: allow-for-now lv-hfd8be8e12073 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
+        "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources WHERE subject LIKE '{}%'
+         ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;",
+        notice::SNAPSHOT_PREFIX,
     );
-    // Keep missing dependencies in the traversal: their later insertion can restore liveness.
-    // BEFORE triggers retain the old chain when deleting or replacing one of its links.
-    let chain = format!(
-        "WITH RECURSIVE notice_runs(id) AS (
-         SELECT {owner} FROM desired WHERE kind='agent' AND owner_run IS NOT NULL AND EXISTS(
-          SELECT 1 FROM json_each(CASE WHEN json_valid(desired.body) THEN desired.body ELSE '{{}}' END,'$.children') WHERE json_extract(value,'$.name')='notice-runtime')
-         UNION SELECT {parent} FROM notice_runs n JOIN mission_runs r ON r.id=n.id
-          LEFT JOIN step_runs s ON s.subject=r.parent_step_run
-          LEFT JOIN desired d ON d.subject=substr(r.parent_step_run,10)
-          WHERE r.parent_step_run IS NOT NULL AND coalesce(s.run_id,d.owner_run) IS NOT NULL
-         UNION SELECT {root} FROM notice_runs n JOIN mission_runs r ON r.id=n.id
-          WHERE r.parent_step_run IS NULL AND r.root_run_id IS NOT NULL)",
-        owner=run_id("owner_run"), parent=run_id("coalesce(s.run_id,d.owner_run)"),
-        root=run_id("r.root_run_id"),
-    );
-    for (table, columns) in [
-        ("desired", &["subject", "kind", "body", "owner_run", "owner_generation"][..]),
-        ("mission_runs", &["id", "status", "current_generation_id", "parent_step_run", "root_run_id"][..]),
-        ("step_runs", &["subject", "status", "run_id", "generation_id"][..]),
-        ("run_generations", &["id"][..]),
+    let owner = notice_owner::SUBJECT;
+    let mut triggers = Vec::new();
+    for (table, action, rows) in [
+        ("desired", "INSERT", &["NEW"][..]),
+        ("desired", "UPDATE", &["OLD", "NEW"][..]),
+        ("desired", "DELETE", &["OLD"][..]),
+        ("claims", "INSERT", &["NEW"][..]),
+        ("claims", "DELETE", &["OLD"][..]),
     ] {
-        for action in ["INSERT", "UPDATE", "DELETE"] {
-            let references = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
-            let relevant = references.iter().map(|row| {
-                let dependency = match table {
-                    "desired" => format!(
-                        "EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid({row}.body) THEN {row}.body ELSE '{{}}' END,'$.children')
-                          WHERE json_extract(value,'$.name')='notice-runtime')
-                         OR EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
-                          WHERE r.parent_step_run='step-run/'||{row}.subject)"
-                    ),
-                    "mission_runs" => format!("EXISTS({chain} SELECT 1 FROM notice_runs WHERE id={row}.id)"),
-                    "step_runs" => format!(
-                        "EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
-                         WHERE r.parent_step_run={row}.subject)"
-                    ),
-                    _ => format!(
-                        "EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
-                         WHERE r.current_generation_id={row}.id)"
-                    ),
-                };
-                format!("({dependency})")
-            }).collect::<Vec<_>>().join(" OR ");
-            let changed = if action == "UPDATE" {
-                columns.iter().map(|column| format!("OLD.{column} IS NOT NEW.{column}"))
-                    .collect::<Vec<_>>().join(" OR ")
-            } else { "1".into() };
-            let name = format!("notice_authority_{table}_{action}");
-            let sql = format!(
-                /* sqlite-large-value: allow-for-now lv-h649e90500eca owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
-                "CREATE TRIGGER {name} BEFORE {action} ON {table}
-                 WHEN ({relevant}) AND ({changed}) BEGIN
-                 INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
-                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject; END"
-            );
-            let installed: Option<String> = connection.query_row(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
-                [&name], |row| row.get(0),
-            ).optional()?;
-            if installed.as_deref() != Some(sql.as_str()) {
-                connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-ha3325e0e8f6d owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS {name}; {sql};"))?;
-            }
+        let when = rows.iter().map(|row| format!("{row}.subject='{owner}'")).collect::<Vec<_>>().join(" OR ");
+        triggers.push((format!("notice_owner_{table}_{action}"), format!("{action} ON {table} WHEN {when}")));
+    }
+    triggers.push(("notice_owner_fleet_generation".into(), "UPDATE OF value ON fleet_generation".into()));
+    for (name, event) in triggers {
+        let sql = format!(/* sqlite-large-value: allow-for-now lv-h83dafab234e8 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER {name} AFTER {event} BEGIN {dirty} END");
+        let installed: Option<String> = connection.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+            [&name], |row| row.get(0),
+        ).optional()?;
+        if installed.as_deref() != Some(sql.as_str()) {
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-ha3325e0e8f6d owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS {name}; {sql};"))?;
         }
     }
+    // The agent notice-runtime designation is gone: drop its liveness triggers and cached outcome.
+    for table in ["desired", "mission_runs", "step_runs", "run_generations"] {
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-ha5e41f8312ee owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS notice_authority_{table}_{action};"))?;
+        }
+    }
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h53d4e0f7d3be owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='notice_runtime_binding'", [])?;
     Ok(())
 }
 
@@ -80,7 +76,7 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
 /// Retain links from all facts, including unpinned, pending and invalid facts, so a later
 /// source arrival, repair or competing creation revalidates every linked row.
 pub(super) fn record_dependencies(tx: &Transaction<'_>, subject: &str, history: &[ClaimRecord]) -> Result<()> {
-    if !subject.starts_with(notice::SNAPSHOT_PREFIX) && !subject.starts_with(notice::CONTROL_PREFIX) {
+    if !subject.starts_with(notice::SNAPSHOT_PREFIX) {
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
@@ -102,93 +98,49 @@ fn unavailable(reason: impl Into<String>) -> FractalError {
     FractalError::new("notices-unavailable", format!("notices unavailable: {}", reason.into()))
 }
 
-fn holders(connection: &Connection) -> Result<Vec<String>> {
-    let mut query = connection.prepare(
-        "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
-         SELECT 1 FROM json_each(CASE WHEN json_valid(desired.body) THEN desired.body ELSE '{}' END, '$.children')
-         WHERE json_extract(value, '$.name')='notice-runtime') ORDER BY subject",
-    )?;
-    let candidates = query.query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut live = Vec::new();
-    for candidate in candidates {
-        if person_work::declaration_live(connection, &candidate)? { live.push(candidate); }
+/// The bound notice owner, with the membership it was resolved against.
+pub(super) fn owner(connection: &Connection) -> Result<(NoticeOwner, crate::fleet::Membership), FractalError> {
+    let desired = current_desired_row_tx(connection, notice_owner::SUBJECT).map_err(internal)?
+        .ok_or_else(|| unavailable("missing notice-owner declaration"))?;
+    if !desired_conflicts_at(connection, notice_owner::SUBJECT, Some(&desired.claim_id), None).map_err(internal)?.is_empty() {
+        return Err(unavailable("conflicting notice-owner declarations"));
     }
-    Ok(live)
+    let declared = serde_json::from_str(&desired.body).map_err(|error| FractalError::new("invalid-notice-owner", error.to_string()))
+        .and_then(|body| notice_owner::parse(&body))
+        .map_err(|error| unavailable(format!("invalid notice-owner declaration: {}", error.message)))?;
+    let membership = fleet_membership_tx(connection).map_err(internal)?;
+    match membership.state(&declared.member) {
+        MemberState::Current(incarnation) if incarnation.member_key == declared.member_key => {}
+        MemberState::Current(_) | MemberState::Ended(_) | MemberState::LegacyRemoved(_) => {
+            return Err(unavailable("the notice owner's bound incarnation has ended"));
+        }
+        MemberState::Conflicted(_) => return Err(unavailable("the notice owner's membership is conflicted")),
+        MemberState::NotMember => return Err(unavailable("the notice owner is not an admitted fleet member")),
+    }
+    Ok((declared, membership))
 }
 
-fn runtime(connection: &Connection) -> Result<String, FractalError> {
-    let live = holders(connection).map_err(internal)?;
-    match live.as_slice() {
-        [actor] => Ok(actor.clone()),
-        [] => Err(unavailable("missing notice-runtime designation")),
-        _ => Err(unavailable("duplicate notice-runtime designations")),
-    }
-}
-
-/// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
-/// Identity heads and pending records can fence a holder without changing desired at all.
-pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
-    let outcome = match runtime(tx) {
-        Ok(actor) => json!({"runtime":actor}),
-        Err(error) => json!({"unavailable":{"code":error.code,"message":error.message,"details":error.details}}),
-    };
-    let current = canonical_json_text(&outcome)?;
-    let previous: Option<String> = tx.query_row(
-        "SELECT value FROM meta WHERE key='notice_runtime_binding'", [], |row| row.get(0),
-    ).optional()?;
-    if previous.as_deref() != Some(current.as_str()) {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h1b62cdb0c2d2 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
-            WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject", [])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h9d1a487a758c owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('notice_runtime_binding',?1)", [&current])?;
-    }
-    Ok(())
-}
-
-pub(super) fn refuse_second_holder(
-    connection: &Connection, intent: &crate::model::NormalizedIntent,
-) -> Result<(), FractalError> {
-    let declares = |desired: &crate::model::DesiredSubject| {
-        let children = desired.desired["children"].as_array().map(Vec::as_slice).unwrap_or_default();
-        desired.kind == "agent" && !matches!(children, [only] if only["name"] == "stop")
-            && children.iter().any(|child| child["name"] == "notice-runtime")
-    };
-    let declared = intent.subjects.values().filter(|d| declares(d)).count();
-    if declared == 0 { return Ok(()); }
-    let retained = holders(connection).map_err(internal)?.iter()
-        .filter(|holder| !intent.subjects.contains_key(*holder)).count();
-    if declared + retained > 1 {
-        return Err(unavailable("only one live agent may declare notice-runtime"));
-    }
-    Ok(())
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(super) fn validate(
     connection: &Connection, subject: &str, manifest: &Manifest, kind: &str,
-    actor: &str, fields: &BTreeMap<String, Value>, creation: Option<&ClaimRecord>,
+    actor: &str, fields: &BTreeMap<String, Value>, creation: Option<&ClaimRecord>, position: Option<Position<'_>>,
 ) -> Result<()> {
     if !notice::is_reserved_subject(subject) && !notice::is_reserved_kind(kind) { return Ok(()); }
     let hash = fields.get("_registration").and_then(Value::as_str)
         .ok_or_else(|| unavailable("missing registration pin"))?;
     notice::validate_registration(manifest, hash)?;
     anyhow::ensure!(subject.starts_with(&manifest.subject_prefix), "notices unavailable: claim/prefix mismatch");
-    let runtime = runtime(connection)?;
-    if subject.starts_with("custom/attention/source/") {
+    if subject.starts_with(notice::SOURCE_PREFIX) {
         anyhow::ensure!(kind == manifest.creation_kind, "notices unavailable: producer input is immutable");
         if let Some(prior) = creation {
             anyhow::ensure!(prior.actor.as_deref() == Some(actor) && custom::fields(prior) == *fields,
                 "notices unavailable: source creation conflict");
         }
-        for (field, expected) in [("producer", actor), ("runtime", runtime.as_str())] {
-            anyhow::ensure!(fields.get(field).is_none_or(|value| value.as_str() == Some(expected)),
-                "notices unavailable: forged {field}");
-        }
-        anyhow::ensure!(fields.get("recipient").and_then(Value::as_str).is_some_and(|p| p.starts_with("person/")),
-            "notices unavailable: source recipient must be a person");
-        return Ok(());
+        return validate_source(actor, fields);
     }
+    anyhow::ensure!(subject.starts_with(notice::SNAPSHOT_PREFIX), "notices unavailable: not a notice family");
     let source_id = fields.get("source_id").and_then(Value::as_str)
-        .filter(|s| s.starts_with("custom/attention/source/"))
+        .filter(|s| s.starts_with(notice::SOURCE_PREFIX))
         .ok_or_else(|| unavailable("missing source link"))?;
     let claim_id = fields.get("creation_claim").and_then(Value::as_str)
         .ok_or_else(|| unavailable("missing pinned source creation"))?;
@@ -211,7 +163,9 @@ pub(super) fn validate(
         .ok_or_else(|| unavailable("invalid source recipient"))?;
     let producer = source.actor.as_deref().ok_or_else(|| unavailable("missing source author"))?;
     fractal_schema::custom::validate_fields(&source_manifest.claims[&source.kind], &source_fields)?;
-    validate(connection, source_id, &source_manifest, &source.kind, producer, &source_fields, None)?;
+    validate_source(producer, &source_fields)?;
+    let (owner, membership) = owner(connection)?;
+    let runtime = format!("host/{}", owner.member);
     for (field, expected) in [("recipient", recipient), ("producer", producer), ("runtime", runtime.as_str())] {
         anyhow::ensure!(fields.get(field).and_then(Value::as_str) == Some(expected),
             "notices unavailable: forged {field}");
@@ -222,12 +176,26 @@ pub(super) fn validate(
             anyhow::ensure!(prior_fields.get(field) == fields.get(field), "notices unavailable: immutable {field} changed");
         }
     }
-    if subject.starts_with("custom/attention/snapshot/") {
-        anyhow::ensure!(actor == runtime, "notices unavailable: only the designated runtime may write snapshots");
-    } else {
-        anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor.starts_with("person/") && actor == recipient,
-            "notices unavailable: only the source recipient may write person controls");
-    }
+    anyhow::ensure!(actor == notice::RUNTIME_ACTOR,
+        "notices unavailable: only {} writes snapshots", notice::RUNTIME_ACTOR);
+    let position = position.ok_or_else(|| unavailable("a snapshot needs its writer position"))?;
+    anyhow::ensure!(
+        position.origin == owner.member
+            && membership.keys_for(position.origin, position.sequence).contains(&owner.member_key),
+        "notices unavailable: only the bound notice owner's daemon writes snapshots"
+    );
+    Ok(())
+}
+
+/// A source is a producer's own input: an agent or person, never a daemon, and never pinning
+/// the runtime, so its lineage survives an owner handover.
+fn validate_source(producer: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+    anyhow::ensure!(producer.starts_with("agent/") || producer.starts_with("person/"),
+        "notices unavailable: a source producer is an agent or person");
+    anyhow::ensure!(fields.get("producer").is_none_or(|value| value.as_str() == Some(producer)),
+        "notices unavailable: forged producer");
+    anyhow::ensure!(fields.get("recipient").and_then(Value::as_str).is_some_and(|p| p.starts_with("person/")),
+        "notices unavailable: source recipient must be a person");
     Ok(())
 }
 

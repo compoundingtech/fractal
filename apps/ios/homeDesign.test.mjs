@@ -176,7 +176,8 @@ test('grouped rows expose readable wrapping button labels and shared buttons exp
   const pressable = elements(row, 'Pressable')[0];
   assert.equal(prop(pressable, 'accessibilityRole').expression.getText(), "onPress ? 'button' : 'text'", 'a row without a destination only reads');
   assert.equal(prop(pressable, 'accessibilityLabel').expression.getText(), '`${title}. ${context}`');
-  assert.equal(prop(pressable, 'accessibilityHint').expression.getText(), "onPress ? 'Opens alert details' : undefined");
+  assert.equal(prop(pressable, 'accessibilityHint').expression.getText(), 'onPress ? hint : undefined');
+  assert.match(row.getText(), /hint = 'Opens alert details'/, 'an alert row still says where it goes');
   assert.equal(prop(pressable, 'onPress').expression.getText(), 'onPress', 'taps retain the detail destination');
   assert.equal(prop(pressable, 'onLongPress').expression.getText(), 'onLongPress', 'ContextMenu can inject the existing action sheet');
   assert.ok(elements(row, 'T').every(element => !prop(element, 'numberOfLines')), 'titles and context wrap rather than truncate');
@@ -225,4 +226,36 @@ test('paired availability renders the server person and clears unsupported recon
   assert.equal(calls(read, 'ownAvailability')[0].arguments.length, 2, 'the server resolves the paired person; do not filter by session actor');
   const publish = nodes(read, ts.isIfStatement).filter(node => calls(node.thenStatement, 'setAvailability').length);
   assert.ok(publish.filter(node => node !== guard).every(node => node.expression.getText().includes('availabilityRead.current === read')), 'late reads cannot restore availability after reconnect invalidated it');
+});
+
+test('availability writes invalidate old reads, serialize edits and discard old connection replies', async () => {
+  const write = namedFunction(source('./store.tsx'), 'runAvailabilityWrite');
+  const javascript = ts.transpileModule(write.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const caps = { session_actor: actor };
+  const capsRef = { current: caps }, availabilityRead = { current: 1 }, availabilityWriting = { current: null };
+  let value = { person: { person: 'person/demo', status: 'available' }, note: null, issue: '' };
+  const run = new Function('caps', 'capsRef', 'availabilityRead', 'availabilityWriting', 'setAvailability', 'runAction', 'notApplied', 'writeRefusal',
+    `${javascript}; return runAvailabilityWrite;`)(caps, capsRef, availabilityRead, availabilityWriting, update => { value = update(value); }, async action => { await action(); return true; }, () => false, String);
+  let finish;
+  const pending = run(() => new Promise(resolve => { finish = resolve; }));
+  assert.equal(availabilityRead.current, 2, 'starting a write invalidates a previously issued read');
+  assert.equal(await run(async () => { assert.fail('a second edit must not race'); }), false);
+  finish({ person: { person: 'person/demo', status: 'away' } });
+  assert.equal(await pending, true);
+  assert.equal(value.person.status, 'away');
+  assert.equal(availabilityWriting.current, null);
+  const oldConnection = run(() => new Promise(resolve => { finish = resolve; }));
+  capsRef.current = { session_actor: 'person/other/session/phone' };
+  value = { person: { person: 'person/other', status: 'available' }, note: null, issue: '' };
+  finish({ person: { person: 'person/demo', status: 'away' }, note: { text: 'old connection' } });
+  await oldConnection;
+  assert.equal(value.person.person, 'person/other');
+  assert.equal(value.note, null);
+  capsRef.current = caps;
+  const disconnected = run(() => new Promise(resolve => { finish = resolve; }));
+  ++availabilityRead.current;
+  value = { person: null, note: null, issue: '' };
+  finish({ note: { text: 'old connection' } });
+  await disconnected;
+  assert.equal(value.note, null, 'disconnect invalidation fences a late write even before capabilities change');
 });
