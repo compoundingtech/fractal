@@ -5858,20 +5858,31 @@ impl Store {
         self.status_for_subject_names_at(subjects, index, history, claims)
     }
 
+    const GENERIC_RESERVED_SUBJECTS_SQL: &str =
+        "SELECT selected.value FROM json_each(?1) selected WHERE EXISTS (
+         SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='custom.attention' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='custom.attention.' AND kind<'custom.attention/' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='attention.notice' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='attention.notice-' AND kind<'attention.notice.' AND store_index<=?2)";
+
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
         subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(
-            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
-             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
-        )?;
+        // Probe only the reserved namespace in the existing (subject, kind, index)
+        // index. Enumerating DISTINCT kinds reads every runtime observation and
+        // builds a temporary btree even when none of the subjects is reserved.
+        // Separate UNION arms keep each exact/prefix probe independently indexed.
+        let mut query = connection.prepare_cached(Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
-            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
-            let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            row.get::<_,String>(0))? {
+            subjects.remove(&row?);
         }
         Ok(subjects)
     }
