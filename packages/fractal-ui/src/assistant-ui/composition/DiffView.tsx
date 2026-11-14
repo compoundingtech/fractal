@@ -1,9 +1,10 @@
 /**
  * The kit's one diff renderer: @pierre/diffs (diffs.com) behind a lazy chunk, themed by
- * `syntaxVars` and the surface tokens. Before the chunk arrives, or if it fails, the same lines
- * render as plain monospace text at the same line height, so nothing shifts. Each file swaps to
- * Pierre only when Pierre's post-render notification shows it drew diff lines; a renderer error
- * is reported and shown, never replaced silently. `data-diff-state` on the host says which.
+ * `syntaxVars` and the surface tokens. Before the chunk arrives the same lines render as plain
+ * monospace text at the same line height, so nothing shifts; if the chunk fails to load, the plain
+ * lines stay under a visible notice and the load error is reported. Each file swaps to Pierre only
+ * when Pierre's post-render notification shows it drew diff lines; a renderer error is reported and
+ * shown, never replaced silently. `data-diff-state` on the host says which.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -41,7 +42,7 @@ export interface DiffViewProps {
 
 type PierreModule = { readonly default: React.ComponentType<PierrePatchProps> }
 let pierreModule: PierreModule | undefined
-let pierreFailed = false
+let pierreLoadError: Error | undefined
 const pierreChunk = createLazyChunk({
   // fractal-ui targets ES2022, before Promise.withResolvers. Defer past the plain first paint.
   load: () => new Promise<PierreModule>((resolve, reject) => {
@@ -52,10 +53,13 @@ const listeners = new Set<() => void>()
 let request: Promise<void> | undefined
 const subscribe = (notify: () => void) => {
   listeners.add(notify)
-  request ??= pierreChunk.load().then(module => { pierreModule = module }, () => { pierreFailed = true }).finally(() => { for (const listener of listeners) listener() })
+  request ??= pierreChunk.load().then(module => { pierreModule = module }, (error: unknown) => {
+    // A rejected module import stays rejected for this document; keep the cause for the report.
+    pierreLoadError = new Error(`The diff renderer could not load: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }).finally(() => { for (const listener of listeners) listener() })
   return () => { listeners.delete(notify) }
 }
-const snapshot = () => pierreFailed ? 'failed' as const : pierreModule
+const snapshot = () => pierreLoadError ?? pierreModule
 const serverSnapshot = () => undefined
 
 /** Preload ahead of a likely diff (hover, opening the Changes panel). */
@@ -104,6 +108,21 @@ class RenderBoundary extends React.Component<BoundaryProps, BoundaryState> {
       <p role="alert" data-diff-error {...stylex.props(styles.failure)}>Diff highlighting failed: {error.message}. Showing plain lines.</p>
       {this.props.plain}
     </>
+  }
+}
+
+function Rethrow({ error }: { readonly error: Error }): never { throw error }
+
+/**
+ * The renderer chunk failed to load. Its error is thrown once into this boundary, so React reports
+ * it like any caught render error (the root's onCaughtError, console.error by default), and the
+ * notice stays above the plain lines for the life of the view; a new patch neither re-reports nor retries.
+ */
+class LoadFailure extends React.Component<{ readonly error: Error }, { readonly caught: boolean }> {
+  override state = { caught: false }
+  static getDerivedStateFromError() { return { caught: true } }
+  override render() {
+    return this.state.caught ? <p role="alert" data-diff-error {...stylex.props(styles.failure)}>{this.props.error.message}. Showing plain lines.</p> : <Rethrow error={this.props.error} />
   }
 }
 
@@ -213,12 +232,14 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   }, [suppliedFiles, deferredPatch, path, hideWhitespace, maxLines])
   const added = prepared.files.reduce((sum, file) => sum + file.added, 0)
   const removed = prepared.files.reduce((sum, file) => sum + file.removed, 0)
-  const Renderer = substitute ?? (pierre === 'failed' || pierre === undefined ? undefined : pierre.default)
+  const Renderer = substitute ?? (pierre instanceof Error || pierre === undefined ? undefined : pierre.default)
+  const loadError = Renderer === undefined && pierre instanceof Error ? pierre : undefined
   const keys = prepared.files.map((file, index) => `${file.path}:${index}`)
-  const state = Renderer === undefined ? (pierre === 'failed' ? 'plain-failed' : 'plain')
+  const state = Renderer === undefined ? (loadError ? 'plain-failed' : 'plain')
     : keys.some(key => outcomes.get(key) === 'failed') ? 'render-failed'
     : keys.every(key => outcomes.get(key) === 'rendered') ? 'rendered' : 'rendering'
   return <div ref={host} role={density === 'compact' ? undefined : 'region'} aria-label={density === 'compact' ? undefined : label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} aria-busy={state === 'plain' || state === 'rendering' ? true : undefined} tabIndex={density === 'compact' ? undefined : 0} data-testid={testId} data-diff-state={state} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
+    {loadError ? <LoadFailure error={loadError} /> : null}
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
       const key = keys[index]!
       const plain = <PlainDiff file={file} wrap={wrap} focusable={density !== 'compact'} />
