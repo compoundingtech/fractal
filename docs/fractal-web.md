@@ -824,3 +824,18 @@ replaces an earlier one only if it was requested later. Fixture sources have no 
 port, and a replay page drops the live source's port, so neither shows the section. A refused
 read explains itself: a rejected credential asks for pairing again, a missing grant says that
 reading was not granted, and a session that is no person says so.
+
+Below the summary the person sets or clears each axis and the note. **Changes last** bounds the
+next change: until changed, 30 minutes, 1 hour, 2 hours, tomorrow at 9:00 local time (the next
+calendar day, even before 9:00 today), or a custom local time that must lie in the future. The
+presets count from the source's clock. Status is Available, Away or **Follow presence** (a
+null status, which clears the override); interruptions are all asks, urgent asks only, or none;
+the deadline clock runs, holds routine asks, or holds every ask. Following presence, all asks
+and a running clock are the defaults and carry no end. **Save note** sets the note with the
+chosen end as its expiry; **Clear note** removes it. Writes go one at a time. Each write
+(`PUT /v1/client/availability`, `PUT /v1/client/notes`) shows the state Fractal answers with,
+never a local guess, and drops any read requested before it. A read requested while the write
+was in flight (focus, visibility or reconnection) may have been answered before or after the
+write took effect, so neither it nor the write's answer is shown: the section reads again and the
+editor stays pending until that read lands. A refused write keeps the summary and explains itself:
+a pairing without the `write.availability` or `write.notes` scope must be paired again.
