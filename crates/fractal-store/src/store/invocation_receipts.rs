@@ -87,8 +87,12 @@ pub fn append_receipt_tx(tx: &Transaction<'_>, origin: &str, receipt: &Invocatio
          AND json_extract(body,'$.fields.event_key') IS ?4)",
         params![receipt.agent, receipt.invocation_id, fields["phase"].as_str(), receipt.event_key], |row| row.get(0))?;
     if !exists {
+        // Receipts are ordinary claims on the agent's timeline: keep the subject's causal
+        // chain connected so acknowledgement walks through a receipt reach its predecessors.
+        let predecessors: Vec<String> = latest_claim_id_tx(tx, &receipt.agent)?
+            .into_iter().collect();
         append_claim_tx(tx, origin, &receipt.agent, fractal_schema::invocation::KIND, None,
-            &json!({"fields":fields,"evidence":receipt.evidence}), &[], None)?;
+            &json!({"fields":fields,"evidence":receipt.evidence}), &predecessors, None)?;
     }
     Ok(())
 }
