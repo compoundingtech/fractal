@@ -3,22 +3,22 @@
 appId: com.compoundingtech.fractal.starter
 ---
 - extendedWaitUntil:
-    visible: '^cancel re-pairing$'
+    visible: "^cancel re-pairing$"
     timeout: 30000
-- tapOn: '^cancel re-pairing$'
-- assertNotVisible: '^Pair this device$'
+- tapOn: "^cancel re-pairing$"
+- assertNotVisible: "^Pair this device$"
 - openLink:
-    link: 'com.compoundingtech.fractal.starter://tab/Fleet'
+    link: "com.compoundingtech.fractal.starter://tab/Fleet"
 - runFlow:
     when:
-      visible: 'Open in.*Fractal Dev.*'
+      visible: "Open in.*Fractal Dev.*"
     commands:
-      - tapOn: 'Open'
+      - tapOn: "Open"
 - scrollUntilVisible:
     element:
-      text: '^forget this device$'
+      text: "^forget this device$"
     direction: DOWN
     timeout: 30000
-- assertVisible: '^re-pair this device$'
-- assertVisible: '^forget this device$'
-- assertNotVisible: '^cancel re-pairing$'
+- assertVisible: "^re-pair this device$"
+- assertVisible: "^forget this device$"
+- assertNotVisible: "^cancel re-pairing$"

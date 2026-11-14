@@ -5,28 +5,28 @@
 appId: com.compoundingtech.fractal.starter
 ---
 - openLink:
-    link: 'com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder'
+    link: "com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder"
 - runFlow:
     when:
-      visible: 'Open in.*Fractal Dev.*'
+      visible: "Open in.*Fractal Dev.*"
     commands:
-      - tapOn: 'Open'
+      - tapOn: "Open"
 - extendedWaitUntil:
-    visible: '.*Atlas Builder.*'
+    visible: ".*Atlas Builder.*"
     timeout: 30000
-- assertNotVisible: '.*Open debugger to view warnings.*'
+- assertNotVisible: ".*Open debugger to view warnings.*"
 - extendedWaitUntil:
-    visible: '^Threads, [0-9]+( or more)?$'
+    visible: "^Threads, [0-9]+( or more)?$"
     timeout: 30000
 - runFlow:
     when:
-      notVisible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+      notVisible: "Worker tests — clock-skew fixture, 1 message.*open.*unread"
     commands:
-      - tapOn: '^Threads, [0-9]+( or more)?$'
+      - tapOn: "^Threads, [0-9]+( or more)?$"
 - extendedWaitUntil:
-    visible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+    visible: "Worker tests — clock-skew fixture, 1 message.*open.*unread"
     timeout: 30000
 # PREVIEW_FINAL_ASSERTIONS
-- assertVisible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
-- assertVisible: 'Rollout notes, 1 message.*closed'
-- assertVisible: 'Cancellation behavior, 1 message.*open'
+- assertVisible: "Worker tests — clock-skew fixture, 1 message.*open.*unread"
+- assertVisible: "Rollout notes, 1 message.*closed"
+- assertVisible: "Cancellation behavior, 1 message.*open"

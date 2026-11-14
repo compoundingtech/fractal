@@ -1,10 +1,10 @@
 # Fixture/preliminary source preparation; NOT RUN against the revised UI.
 appId: com.compoundingtech.fractal.starter
 ---
-- {"runScript": {"file": "${CONTROL_SCRIPT}", "env": {"CONTROL_JSON": "{\"state\":\"empty\"}"}}}
-- {"openLink": {"link": "com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder"}}
-- {"extendedWaitUntil": {"visible": ".*Atlas Builder.*", "timeout": 30000}}
+- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"state":"empty"}' } } }
+- { "openLink": { "link": "com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder" } }
+- { "extendedWaitUntil": { "visible": ".*Atlas Builder.*", "timeout": 30000 } }
 # PREVIEW_FINAL_ASSERTIONS
-- {"assertVisible": ".*Atlas Builder.*"}
-- {"assertNotVisible": "^Threads, [0-9]+( or more)?$"}
-- {"assertNotVisible": ".*Fixture thread read failed.*"}
+- { "assertVisible": ".*Atlas Builder.*" }
+- { "assertNotVisible": "^Threads, [0-9]+( or more)?$" }
+- { "assertNotVisible": ".*Fixture thread read failed.*" }

@@ -5,23 +5,23 @@
 appId: com.compoundingtech.fractal.starter
 ---
 - runFlow: threads-preview-list.yaml
-- tapOn: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+- tapOn: "Worker tests — clock-skew fixture, 1 message.*open.*unread"
 - scrollUntilVisible:
     element:
-      text: 'Open thread'
+      text: "Open thread"
     direction: DOWN
     timeout: 30000
-- tapOn: 'Open thread'
+- tapOn: "Open thread"
 - extendedWaitUntil:
-    visible: '.*Fixture/preliminary: Close at 12:59, then Reopen at 12:58.*'
+    visible: ".*Fixture/preliminary: Close at 12:59, then Reopen at 12:58.*"
     timeout: 30000
 # PREVIEW_FINAL_ASSERTIONS
-- assertVisible: '.*Worker tests — clock-skew fixture.*'
-- assertVisible: '.*1 message.*open.*unread.*'
-- assertVisible: '.*reopened the thread.*'
-- assertVisible: '.*closed the thread.*'
+- assertVisible: ".*Worker tests — clock-skew fixture.*"
+- assertVisible: ".*1 message.*open.*unread.*"
+- assertVisible: ".*reopened the thread.*"
+- assertVisible: ".*closed the thread.*"
 # The superset thread-actions fixture grants disposable mutations.
-- assertVisible: '^Rename$'
-- assertVisible: '^Close thread$'
-- assertVisible: '^Message thread$'
-- assertVisible: '^Send$'
+- assertVisible: "^Rename$"
+- assertVisible: "^Close thread$"
+- assertVisible: "^Message thread$"
+- assertVisible: "^Send$"

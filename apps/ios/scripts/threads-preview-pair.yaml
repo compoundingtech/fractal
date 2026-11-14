@@ -6,36 +6,36 @@ appId: com.compoundingtech.fractal.starter
 ---
 - assertTrue: ${GATEWAY_URL.startsWith('http://') && GATEWAY_URL.endsWith(':8792')}
 - extendedWaitUntil:
-    visible: 'Pairing with ${GATEWAY_URL}'
+    visible: "Pairing with ${GATEWAY_URL}"
     timeout: 30000
-- assertVisible: 'demo'
-- assertNotVisible: '.*Open debugger to view warnings.*'
+- assertVisible: "demo"
+- assertNotVisible: ".*Open debugger to view warnings.*"
 # Only the pre-confirmation control is repeatable, never the Pair submission.
 - repeat:
     times: 3
     while:
       visible:
-        text: 'pair without a trusted fingerprint…'
+        text: "pair without a trusted fingerprint…"
         enabled: true
       notVisible: 'Pair without identity verification\?|Use unpinned pairing'
     commands:
       - tapOn:
-          text: 'pair without a trusted fingerprint…'
+          text: "pair without a trusted fingerprint…"
           enabled: true
       - waitForAnimationToEnd
 - extendedWaitUntil:
     visible: 'Pair without identity verification\?'
     timeout: 10000
-- assertVisible: 'Use unpinned pairing'
-- tapOn: 'Use unpinned pairing'
-- assertVisible: 'require fingerprint again'
+- assertVisible: "Use unpinned pairing"
+- tapOn: "Use unpinned pairing"
+- assertVisible: "require fingerprint again"
 - tapOn:
-    text: '^Pair this device$'
+    text: "^Pair this device$"
     enabled: true
-    below: '^UNPINNED PAIRING:.*'
+    below: "^UNPINNED PAIRING:.*"
 - extendedWaitUntil:
-    visible: '.*Review the loadUser rename.*'
+    visible: ".*Review the loadUser rename.*"
     timeout: 30000
 # PREVIEW_FINAL_ASSERTIONS
-- assertVisible: '.*Review the loadUser rename.*'
-- assertNotVisible: '.*Open debugger to view warnings.*'
+- assertVisible: ".*Review the loadUser rename.*"
+- assertNotVisible: ".*Open debugger to view warnings.*"
