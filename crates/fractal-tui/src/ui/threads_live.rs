@@ -9,7 +9,7 @@ use fractal_client::{
     ThreadRenameParameters, ThreadReplyParameters, ThreadStartParameters, ThreadState,
     ThreadSummary, ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
-use fractal_feed::{ThreadAccess, ThreadInterest, model::Model};
+use fractal_feed::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest, model::Model};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -23,6 +23,8 @@ use super::{
 const DRAFT_COLLISION: &str = "This item has different saved drafts. Both drafts are kept. Combine saved drafts to edit both together; nothing will be sent.";
 const DRAFT_LOCKED_COLLISION: &str = "Both saved drafts are kept. Settle the original thread delivery before combining them; its request cannot be rewritten.";
 const DRAFT_COMBINED: &str = "Both saved drafts were combined for editing. Nothing has been sent.";
+/// One line under a paused thread's own heading; the view explains the pause once.
+const PAUSED_NOTICE: &str = "Paused · collapse a thread to resume live updates";
 
 fn start_draft_text<'a>(
     texts: &'a HashMap<String, String>,
@@ -1084,6 +1086,7 @@ impl Threads {
         let host = pane.key();
         if let Pane::Thread(id) = pane {
             self.panel(&mut doc, &host, id, true, true, width, cursor, world, texts);
+            self.explain_pause(&mut doc, self.paused(id), width);
             return doc;
         }
         if let Pane::Home(Some(id)) = pane
@@ -1092,6 +1095,7 @@ impl Threads {
             self.panel(
                 &mut doc, &host, id, true, false, width, cursor, world, texts,
             );
+            self.explain_pause(&mut doc, self.paused(id), width);
             return doc;
         }
         if let Some(context) = self.context(pane) {
@@ -1153,21 +1157,18 @@ impl Threads {
                 .into_iter()
                 .flatten()
                 .filter(|id| Some(*id) != pinned && Some(*id) != submitted);
+            let mut paused = false;
             for id in pinned.into_iter().chain(siblings) {
+                let open = self
+                    .open
+                    .get(&host)
+                    .is_some_and(|expanded| expanded.contains(id));
+                paused |= open && self.paused(id);
                 self.panel(
-                    &mut doc,
-                    &host,
-                    id,
-                    self.open
-                        .get(&host)
-                        .is_some_and(|expanded| expanded.contains(id)),
-                    false,
-                    width,
-                    cursor,
-                    world,
-                    texts,
+                    &mut doc, &host, id, open, false, width, cursor, world, texts,
                 );
             }
+            self.explain_pause(&mut doc, paused, width);
             if let Some(message) = self.failures.get(&context) {
                 doc.wrap(&[text::run(message, theme::dim())], width);
                 if message == DRAFT_COLLISION
@@ -1209,27 +1210,27 @@ impl Threads {
         world: &super::view::World,
         texts: &HashMap<String, String>,
     ) {
-        let timeline = ThreadInterest::Timeline(id.into());
         let summary = self.summary(id);
-        let panel_open = open && self.histories.contains_key(id);
+        let loaded = self.histories.contains_key(id);
+        let panel_open = open && loaded;
         let reply_editor_visible = panel_open && self.access.reply;
         let rename_editor_visible =
             self.focused.as_ref() == Some(&(host.into(), Input::Rename(id.into())));
-        if open {
-            let missing = summary.is_none() || !self.histories.contains_key(id);
-            if let Some(reason) = self.failures.get(&timeline) {
-                // A paused live window keeps its cached body/draft, but must not pretend
-                // those rows are current or remain an unexplained loading placeholder.
-                doc.wrap(&[text::run(reason, theme::dim())], width);
-            } else if missing {
-                doc.wrap(&[text::run("Loading thread…", theme::dim())], width);
-            }
-            if missing && (standalone || summary.is_none()) {
-                self.panel_feedback(doc, host, id, false, false, width);
-                return;
-            }
-        }
+        // A paused live window keeps its cached body/draft, but must not pretend those rows
+        // are current or remain an unexplained loading placeholder. The status sits under
+        // this thread's own heading; the view explains a pause once, below its threads.
+        let notice = open
+            .then(|| match self.failures.get(&ThreadInterest::Timeline(id.into())) {
+                Some(_) if self.paused(id) => Some(PAUSED_NOTICE),
+                Some(reason) => Some(reason.as_str()),
+                None => (!loaded || summary.is_none()).then_some("Loading thread…"),
+            })
+            .flatten();
         let Some(summary) = summary else {
+            if let Some(notice) = notice {
+                doc.wrap(&[text::run(notice, theme::dim())], width);
+                self.panel_feedback(doc, host, id, false, false, width);
+            }
             return;
         };
         let source = self.histories.get(id);
@@ -1261,7 +1262,9 @@ impl Threads {
             summary,
             &history,
             &thread::State {
-                open: panel_open,
+                open,
+                awaiting_history: !loaded,
+                notice,
                 standalone,
                 draft: draft_text,
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
@@ -1323,6 +1326,19 @@ impl Threads {
                 width,
                 texts,
             );
+        }
+    }
+
+    fn paused(&self, id: &str) -> bool {
+        self.failures
+            .get(&ThreadInterest::Timeline(id.into()))
+            .is_some_and(|reason| reason == THREAD_UPDATES_PAUSED)
+    }
+
+    /// Each paused thread carries a one-line notice; the full reason appears once per view.
+    fn explain_pause(&self, doc: &mut Doc, paused: bool, width: usize) {
+        if paused {
+            doc.wrap(&[text::run(THREAD_UPDATES_PAUSED, theme::dim())], width);
         }
     }
 
@@ -2236,3 +2252,5 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod render_tests;
