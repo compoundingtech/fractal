@@ -25,6 +25,7 @@ pub mod doc;
 mod documents;
 pub mod checklist;
 mod edit;
+mod flash;
 mod glass;
 mod hover;
 mod hyperlinks;
@@ -83,6 +84,7 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode,
     },
 };
+use flash::Severity;
 use doc::{AlertTap, Doc, DocExt, Hit};
 use pane::Pane;
 use ratatui::{
@@ -435,6 +437,8 @@ pub struct Ui {
     /// What an agent's actions menu will do once y confirms it.
     pending_control: Option<(String, AgentControl)>,
     flash: Option<(String, Instant)>,
+    /// How `flash` reads, when its call site said; otherwise read from its words.
+    flash_severity: Option<Severity>,
     tick: u64,
     help: bool,
     resource_sidebar: resource_sidebar::Sidebar,
@@ -883,6 +887,7 @@ impl Ui {
             confirm: None,
             pending_control: None,
             flash: None,
+            flash_severity: None,
             tick: 0,
             help: false,
             resource_sidebar,
@@ -1867,12 +1872,22 @@ impl Ui {
     }
 
     fn flash(&mut self, message: impl Into<String>) {
-        self.flash = Some((message.into(), Instant::now()));
+        self.show_flash(None, message.into(), Duration::ZERO);
     }
 
     /// A note that stays up `extra` longer than the usual flash.
     fn flash_for(&mut self, message: impl Into<String>, extra: Duration) {
-        self.flash = Some((message.into(), Instant::now() + extra));
+        self.show_flash(None, message.into(), extra);
+    }
+
+    /// A note whose call site says how it reads: a failure or refusal is never shown as success.
+    fn flash_as(&mut self, severity: Severity, message: impl Into<String>) {
+        self.show_flash(Some(severity), message.into(), Duration::ZERO);
+    }
+
+    fn show_flash(&mut self, severity: Option<Severity>, message: String, extra: Duration) {
+        self.flash = Some((message, Instant::now() + extra));
+        self.flash_severity = severity;
     }
 
     /// Put a message st refused back in the box it was sent from, with its images, reply and
@@ -2052,6 +2067,11 @@ impl Ui {
     }
 
     fn footer(&self, buf: &mut Buffer, area: Rect) {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buf[(x, y)].reset();
+            }
+        }
         buf.set_style(area, Style::default().bg(theme::CRUST));
         if let Link::Offline(message) = &self.world.link {
             buf.set_stringn(
@@ -2133,21 +2153,28 @@ impl Ui {
         let reserved = build
             .as_deref()
             .map_or(0, |build| text::width(build) as u16 + 1);
-        let mut x = area.x + 1;
-        buf.set_stringn(
-            x,
-            area.y,
-            "Keys: ",
-            area.width.saturating_sub(2) as usize,
-            theme::dim().bg(theme::CRUST),
-        );
-        x += 6;
+        let sending = (!self.pending_answers.is_empty())
+            .then(|| format!("Sending {} answer(s)…", self.pending_answers.len()));
+        // A message wins over the key hints: on a narrow window it must still show.
+        let pill = self
+            .flash
+            .as_ref()
+            .map(|(message, _)| (message.as_str(), self.flash_severity))
+            .or(sending.as_deref().map(|message| (message, None)))
+            .map(|(message, severity)| {
+                flash::Pill::new(message, severity.unwrap_or_else(|| Severity::guess(message)), area)
+            });
+        // The hints end where the note or the build begins; none is drawn in part.
+        let end = pill
+            .as_ref()
+            .map_or((area.x + area.width).saturating_sub(reserved), flash::Pill::start);
+        let keys = area.x + 1;
+        let mut x = keys + 6;
+        let mut shown = 0;
         for (key, label) in hints {
             let key_text = format!("{key} ");
             let label_text = format!("{label}   ");
-            if x + (text::width(&key_text) + text::width(&label_text)) as u16 + reserved
-                > area.x + area.width
-            {
+            if x + (text::width(&key_text) + text::width(&label_text)) as u16 > end {
                 break;
             }
             buf.set_stringn(
@@ -2166,8 +2193,21 @@ impl Ui {
                 Style::default().fg(theme::OVERLAY1).bg(theme::CRUST),
             );
             x += text::width(&label_text) as u16;
+            shown += 1;
         }
-        if let Some(build) = &build
+        // Beside a note, "Keys:" with no key after it says nothing.
+        if pill.is_none() || shown > 0 {
+            buf.set_stringn(
+                keys,
+                area.y,
+                "Keys: ",
+                area.width.saturating_sub(2) as usize,
+                theme::dim().bg(theme::CRUST),
+            );
+        }
+        if let Some(pill) = &pill {
+            pill.draw(buf, area);
+        } else if let Some(build) = &build
             && x + reserved <= area.x + area.width
         {
             buf.set_stringn(
@@ -2178,33 +2218,7 @@ impl Ui {
                 Style::default().fg(theme::OVERLAY0).bg(theme::CRUST),
             );
         }
-        let sending = (!self.pending_answers.is_empty())
-            .then(|| format!("Sending {} answer(s)…", self.pending_answers.len()));
-        if let Some(message) = self.flash.as_ref().map(|(message, _)| message).or(sending.as_ref()) {
-            let message = format!(" {message} ");
-            let width = text::width(&message) as u16;
-            // A message wins over the key hints: on a narrow window it must still show.
-            let start = (area.x + area.width).saturating_sub(width + 1).max(area.x);
-            let trouble = [
-                "Failed",
-                "Could not",
-                "not sent",
-                "Detach failed",
-                "Key not sent",
-            ]
-            .iter()
-            .any(|word| message.contains(word));
-            buf.set_stringn(
-                start,
-                area.y,
-                &message,
-                (area.x + area.width - start) as usize,
-                Style::default()
-                    .fg(theme::CRUST)
-                    .bg(if trouble { theme::RED } else { theme::GREEN })
-                    .add_modifier(Modifier::BOLD),
-            );
-        } else if self.demo.is_some() {
+        if pill.is_none() && self.demo.is_some() {
             let label = " demo · invented data · nothing is sent ";
             let width = text::width(label) as u16;
             if x + width < area.x + area.width {
@@ -5509,7 +5523,7 @@ impl Ui {
     fn start_inbox_thread(&mut self) {
         let Some(item) = self.current_item() else { return };
         if !self.threads.can_start(&item.id) {
-            self.flash("This item has no available thread context. Your draft is kept.");
+            self.flash_as(Severity::Error, "This item has no available thread context. Your draft is kept.");
             return;
         }
         let id = item.id.clone();
@@ -5591,9 +5605,9 @@ impl Ui {
                     self.answering = None;
                     self.confirm = None;
                     self.follow_latest();
-                    self.flash("Sending…");
+                    self.flash_as(Severity::Info, "Sending…");
                 }
-                Err(message) => self.flash(message),
+                Err(message) => self.flash_as(Severity::Warn, message),
             }
             return;
         }
@@ -6442,7 +6456,7 @@ impl Ui {
                 if self.confirmation_open() { return; }
                 let visible = self.frame.borrow().visible_thread_messages(&host, &id);
                 if !self.threads.mark_visible_read(&host, id, &visible) {
-                    self.flash("No visible replies to mark read");
+                    self.flash_as(Severity::Info, "No visible replies to mark read");
                 }
             }
             Hit::Thread(host, tap) => {

@@ -765,7 +765,7 @@ pub fn run(context: Context) -> Result<()> {
                     ui.threads.enable(available);
                     ui.threads.set_access(access);
                     if upgrade_required {
-                        ui.flash("Upgrade the connected Fractal to use threads. Your pairing is kept.");
+                        ui.flash_as(super::Severity::Warn, "Upgrade the connected Fractal to use threads. Your pairing is kept.");
                     }
                     if available { ui.threads.model(&model); }
                     changed = true;
@@ -1158,13 +1158,13 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::ThreadEarlier(generation, id, page) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.earlier_loaded(&id, page) {
-                        ui.flash(error);
+                        ui.flash_as(super::Severity::Error, error);
                     }
                 }
                 Fetched::ThreadWrite(generation, receipt) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.complete(receipt, &mut ui.conversation_state.drafts) {
-                        ui.flash(error);
+                        ui.flash_as(super::Severity::Error, error);
                     }
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
@@ -1532,12 +1532,12 @@ pub fn run(context: Context) -> Result<()> {
         }
         for mut write in ui.threads.writes() {
             if !extras.live {
-                if let Some(error) = ui.threads.complete(write.offline(), &mut ui.conversation_state.drafts) { ui.flash(error); }
+                if let Some(error) = ui.threads.complete(write.offline(), &mut ui.conversation_state.drafts) { ui.flash_as(super::Severity::Error, error); }
                 continue;
             }
             let writer = client.clone();
             if let Err(error) = ui.threads.bind(&mut write, writer.clone()) {
-                if let Some(error) = ui.threads.complete(write.not_sent(error), &mut ui.conversation_state.drafts) { ui.flash(error); }
+                if let Some(error) = ui.threads.complete(write.not_sent(error), &mut ui.conversation_state.drafts) { ui.flash_as(super::Severity::Error, error); }
                 continue;
             }
             let tx = fetched_tx.clone();
