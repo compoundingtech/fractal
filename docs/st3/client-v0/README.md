@@ -1340,6 +1340,10 @@ or presses read. Agents post updates with `fractal work update`. An update's opt
 (1 to 300 characters) is set only when the person asked to be told that outcome: a client that
 speaks reads `update.speech` aloud, and speaks no update without it.
 
+The draft [rich content block contract](../content-blocks.md) specifies shared text-change and
+image blocks, daemon checks, content-bound approval, compatibility and per-client rendering.
+Its capabilities are a design contract, not available merely because a request uses version 1.
+
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
 (`step`), what it is for (`goal`) and its `attempt`. A standalone ask (`--new-run`) and an update
