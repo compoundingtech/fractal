@@ -44,12 +44,16 @@ fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: 
 impl Store {
     pub fn finish_work_turn_traces(&self, step: &str, incarnation: &str) -> Result<()> {
         let connection = self.readers.get();
+        // The terminal event names the current successor, while the invocation's
+        // immutable owner_step stays on its original generation across carries.
         let mut statement = connection.prepare(
-            "SELECT json_extract(body,'$.fields.invocation_id'),json_extract(body,'$.fields.error')
-             FROM claims WHERE kind='harness.invocation'
-             AND json_extract(body,'$.fields.owner_step')=?1
-             AND json_extract(body,'$.fields.incarnation')=?2
-             AND json_extract(body,'$.fields.phase')='ended'")?;
+            "SELECT json_extract(ended.body,'$.fields.invocation_id'),json_extract(ended.body,'$.fields.error')
+             FROM claims ended JOIN claims terminal
+             ON terminal.id=json_extract(ended.body,'$.fields.event_key')
+             WHERE ended.kind='harness.invocation' AND terminal.subject=?1
+             AND terminal.kind IN ('work.submitted','work.failed','work.released')
+             AND json_extract(ended.body,'$.fields.incarnation')=?2
+             AND json_extract(ended.body,'$.fields.phase')='ended'")?;
         for row in statement.query_map(params![step, incarnation],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))? {
             let (invocation, error) = row?;
@@ -373,6 +377,19 @@ mod tests {
                 let ends = receipts.iter().filter(|receipt| receipt.phase == InvocationPhase::Ended)
                     .collect::<Vec<_>>();
                 assert_eq!(ends.len(), usize::from(mismatch == "none"), "{kind}: {mismatch}");
+                // Exercise the real postcommit consumer, not just the ended receipt.
+                let trace = store.start_invocation_trace(&invocation, agent, &[]);
+                store.finish_work_turn_traces("step-run/r/unrelated/build", "one").unwrap();
+                store.finish_work_turn_traces(successor, "other").unwrap();
+                assert_eq!(store.start_invocation_trace(&invocation, agent, &[]), trace);
+                store.finish_work_turn_traces(successor, "one").unwrap();
+                let after = store.start_invocation_trace(&invocation, agent, &[]);
+                if mismatch == "none" {
+                    assert_ne!(after.trace_id(), trace.trace_id(), "{kind}: carried trace leaked");
+                } else {
+                    assert_eq!(after, trace, "{kind}: {mismatch} ended a foreign trace");
+                }
+                store.finish_invocation_trace(&invocation, false);
                 if let Some(end) = ends.first() {
                     assert_eq!(end.owner_step.as_deref(), Some(original));
                     assert_eq!(end.incarnation.as_deref(), Some("one"));

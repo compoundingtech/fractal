@@ -155,6 +155,8 @@ The fenced `work.claimed` receipt retains `invocation_id`; later response joins
 can use that immutable claim instead of a mutable current lease. Same-owner
 unexpired repeated claims retain their original identity. Work completion,
 failure or release ends the exact turn, not the standing provider process.
+Compatible revision carries preserve that original turn and close its trace when
+the current successor's fenced completion, failure or release commits.
 Verified launch lineage supplies a parent link; inherited environment never
 labels a later turn or proves fresh context.
 
@@ -170,9 +172,10 @@ envelopes remain unknown; failed capture does not block real input delivery.
 Redacted bytes are held in protected content-addressed storage for seven days,
 independently of sampled traces. Metadata is durable; bytes are not replicated
 into claims. Private reads are restricted to the invocation agent and configured
-owning person; deletion revokes an individual reference without invalidating a
-shared content hash still retained elsewhere. Expired or unavailable content is
-not replaced with invented evidence.
+owning person; deletion permanently revokes the invocation/kind/hash reference,
+including later reminder captures of the same redacted bytes, without invalidating
+a shared content hash retained by another invocation. Expired or unavailable
+content is not replaced with invented evidence.
 
 The graph retains claimed work and pending mail.
 
