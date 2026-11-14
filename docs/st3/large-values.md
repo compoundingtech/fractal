@@ -670,3 +670,18 @@ authenticated ownership, exact-revision release and the committed local
 observation in the same writer transaction. Terminal run status cannot reclaim
 an unresolved hold; reclamation needs a separate explicit retention policy.
 
+### Finite membership storage
+
+`fractal_store::store::resource_membership` owns schema site
+`lv-hb7bab5eb8be2` and mutation sites `lv-h15191adeac97`,
+`lv-h32081bb17f3d`, `lv-hbb24831194f3`, `lv-h466c8225b3a9` and
+`lv-hacf1fd1c6d10`. Host/epoch and host/lane/policy TEXT record the authority
+fence and installed policy; membership identifier, host, lane, state and JSON body
+record execution custody, grants, child runs and runtime roots. The queue index
+retains host, lane, state and membership identifier keys. Inline updates preserve
+one transaction for policy, admission, child attachment and retirement decisions.
+The schema TODO is to chunk or reference variable columns and keys; the mutation
+TODO is to bound or reference bodies and account for their cleanup without
+weakening fencing or releasing uncertain execution custody. Neither queue order,
+capacity counts nor the host-local authority proves value sizes.
+
