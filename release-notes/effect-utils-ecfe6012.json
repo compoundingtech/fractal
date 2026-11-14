@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bump the effect-utils flake input to 92766f37 for the dotfiles single-SHA rule",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Build input only: flake.lock, flake.nix and the TypeScript client dependency hash."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or recovery steps."}
+}
