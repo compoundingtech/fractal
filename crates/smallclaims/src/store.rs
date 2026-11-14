@@ -866,9 +866,9 @@ pub struct Store {
     /// Held while one thread builds the next replication snapshot, so concurrent callers reuse
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
-    pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
     /// Serializes endpoint refreshes and signed Fabric rekey transitions.
     fleet_endpoints_publication: Mutex<()>,
+    pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
     /// Whether exchanges compare projections with a peer at all, keeping what a reproduction
     /// needs when they differ. Off unless the daemon's divergence check is on: a default
     /// install never compares, reports no divergence, and settles sync on claims alone.
@@ -1337,8 +1337,8 @@ impl Store {
             replica_generation: AtomicU64::new(0),
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
-            replication_sync: Mutex::new(BTreeMap::new()),
             fleet_endpoints_publication: Mutex::new(()),
+            replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
             trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
@@ -2828,10 +2828,11 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, true)?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build, None)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, attribution)
     }
 
     fn publish_fleet_endpoints_locked(

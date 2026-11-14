@@ -13,6 +13,25 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
         assert!(guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_err());
     }
 }
+
+#[test]
+fn harness_fabric_rekey_requires_person_before_journal_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("run/api.sock");
+    let cli = Cli::try_parse_from([
+        "fractal", "--endpoint", socket.to_str().unwrap(),
+        "fleet", "transports", "rekey", "fabric",
+    ]).unwrap();
+    let journal = root.path().join("fleet/fabric-rekey.json");
+    let error = guard_mutating_cli_actor(&cli.command, Some("agent/example"), None)
+        .unwrap_err();
+    assert!(error.to_string().contains("Fabric rekey requires a person"), "{error}");
+    assert!(!journal.exists(), "refusal must precede rekey journal creation");
+    assert!(!socket.exists(), "refusal must not require a daemon");
+    assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    assert!(guard_mutating_cli_actor(&cli.command, Some("person/example"), None).is_ok());
+}
+
 #[tokio::test]
 async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
     use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};

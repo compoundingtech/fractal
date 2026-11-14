@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Re-key a Fabric fleet member in one command with signed policy receipts and bounded overlap",
+  "replay": {"status": "none", "detail": "Existing signed member-endpoint claims carry rotation and receipt metadata; no claim replay is required."},
+  "schema": {"status": "none", "detail": "No database schema change; fleet member endpoints include non-routing Fabric rotation and receipt metadata."},
+  "rules": {"status": "changed", "detail": "Adapters stage an expiring next NodeID, confirm installed policy, and commit the new endpoint before guarded local activation."},
+  "compatibility": {"status": "changed", "detail": "Re-key requires Fabric v0.9.4 identity and runtime expiry APIs and updated Fractal adapters on confirming peers."},
+  "downtime": {"status": "changed", "detail": "Fabric activation restarts its local endpoint; existing Fabric tunnels reconnect. Offline peers may need membership recovery."},
+  "manual": {"status": "changed", "detail": "Run fractal fleet transports rekey fabric on the rotating member. At least one remote member must confirm both phases within ten minutes."},
+  "recovery": {"status": "changed", "detail": "Rerun the same command after interruption to resume its durable journal without extending the deadline. No confirmation aborts with the old identity active; uncertain activation retries guarded reconciliation. Static and other-owner grants remain operator-owned."}
+}

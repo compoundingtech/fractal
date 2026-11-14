@@ -1,6 +1,7 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
+mod rekey;
 
 // Some fleet commands historically print prose even with --json. Keep those bytes
 // stable for callers; only the human rendering uses the installed fractal command.
@@ -534,6 +535,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             FleetTransportsCommand::Add { no_service, .. }
             | FleetTransportsCommand::Remove { no_service, .. }
             | FleetTransportsCommand::Prefer { no_service, .. } => !*no_service,
+            FleetTransportsCommand::Rekey { .. } => false,
         },
         _ => false,
     };
@@ -1095,8 +1097,9 @@ async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
 }
 
 /// Transport changes use mode's atomic settings write and service refresh. They also
-/// publish immediately, so removal is announced before unexposure. The caller holds the
-/// settings lock until publication and unexposure end.
+/// publish immediately, so removal is announced before unexposure. Explicit withdrawal
+/// clears local rekey state in that same publication, including attributed changes.
+/// The caller holds the settings lock until publication and unexposure end.
 async fn save_and_publish_fleet_settings(
     client: &Client,
     config: &Config,
@@ -1121,7 +1124,12 @@ async fn save_and_publish_fleet_settings(
         });
     }
     let pending = actor.map(|_| fractal_daemon::config::FleetFile::path(&config.state_dir).with_extension("transport-change.json"));
-    let mut announcement = json!({"mode": file.mode.as_str(), "endpoints": endpoints});
+    let mut announcement = json!({
+        "mode": file.mode.as_str(),
+        "endpoints": endpoints,
+        "clear_fabric_rekey": file.mode == fractal_daemon::config::FleetMode::DialOut
+            || !file.transports.iter().any(|transport| transport == "fabric"),
+    });
     let published: Result<Value> = if let Some(path) = &pending {
         let settings = serde_json::to_value(file)?;
         let base = serde_json::to_value(fractal_daemon::config::FleetFile::load(&config.state_dir)?)?;
@@ -1165,10 +1173,14 @@ pub(super) async fn run_fleet_transports(
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    if matches!(command, FleetTransportsCommand::Rekey { .. }) {
+        return rekey::run(client, config, json_output).await;
+    }
     let actor = match &mut command {
         FleetTransportsCommand::Add { actor, .. }
         | FleetTransportsCommand::Remove { actor, .. }
         | FleetTransportsCommand::Prefer { actor, .. } => actor.take(),
+        FleetTransportsCommand::Rekey { .. } => unreachable!("rekey dispatched before actor authorization"),
     };
     if let Some(actor) = actor.as_deref() {
         let _: Value = client.post("/v1/fleet/transports", &json!({
@@ -1186,7 +1198,8 @@ pub(super) async fn run_fleet_transports(
     let transport = match &command {
         FleetTransportsCommand::Add { transport, .. }
         | FleetTransportsCommand::Remove { transport, .. }
-        | FleetTransportsCommand::Prefer { transport, .. } => transport,
+        | FleetTransportsCommand::Prefer { transport, .. }
+        | FleetTransportsCommand::Rekey { transport } => transport,
     };
     let enabled = file
         .transports
@@ -1235,6 +1248,7 @@ pub(super) async fn run_fleet_transports(
         .clone()
         .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
     let no_service = match command {
+        FleetTransportsCommand::Rekey { .. } => unreachable!("rekey dispatched before settings edits"),
         FleetTransportsCommand::Prefer {
             transport,
             no_service,

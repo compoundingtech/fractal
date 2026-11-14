@@ -10,7 +10,7 @@
     pty.url = "github:compoundingtech/pty/d0e816ac4129c97f39473855bb4fe527701ea07c";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
-    fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
+    fabric.url = "github:compoundingtech/fabric/v0.9.4";
     fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.

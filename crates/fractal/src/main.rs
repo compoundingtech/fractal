@@ -1119,6 +1119,11 @@ struct FleetModeArgs {
 
 #[derive(Subcommand)]
 enum FleetTransportsCommand {
+    /// Re-key this member in place after peers install its prepared Fabric identity.
+    Rekey {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+    },
     /// Expose Fabric, then announce it. Requires a listening member with a port.
     Add {
         /// The person or agent applying this change.
@@ -6606,9 +6611,14 @@ fn guard_mutating_cli_actor(
         } => actor.as_deref(),
         Command::Fleet { command: FleetCommand::AdmitWithout { actor, .. } } => Some(actor.as_str()),
         Command::Fleet { command: FleetCommand::Transports { command } } => {
-            let (FleetTransportsCommand::Add { actor, .. }
+            let actor = match command {
+                FleetTransportsCommand::Add { actor, .. }
                 | FleetTransportsCommand::Remove { actor, .. }
-                | FleetTransportsCommand::Prefer { actor, .. }) = command;
+                | FleetTransportsCommand::Prefer { actor, .. } => actor,
+                FleetTransportsCommand::Rekey { .. } => {
+                    anyhow::bail!("Fabric rekey requires a person; a harness cannot rekey fleet transport identity")
+                }
+            };
             Some(actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness transport change needs explicit --as {own}")
             })?)
