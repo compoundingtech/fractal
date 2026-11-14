@@ -26,7 +26,7 @@ mission "retry-policy" state="ready" {{
 }}"#), "retry-policy");
     let run = store.create_mission_run(&MissionRunRequest {
         mission: "retry-policy".into(), revision: None, workspace: "/tmp".into(),
-        requester: None, mode: None, inputs: BTreeMap::new(), idempotency_key: "retry-policy".into(),
+        requester: None, mode: None, inputs: BTreeMap::new(), idempotency_key: "retry-policy-run".into(),
     }).unwrap();
     store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
     let (run, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
