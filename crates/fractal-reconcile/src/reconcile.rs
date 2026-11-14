@@ -3023,6 +3023,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             read("deadline/subscription-retries", &|| {
                 self.store.next_subscription_mission_retry_deadline()
             }),
+            read("deadline/step-retries", &|| {
+                self.store.next_step_retry_deadline(&self.host)
+            }),
             self.delayed_restarts
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -11941,7 +11944,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             changed |= self.store.retry_step(
                                 &view.subject,
                                 "the step repeat policy permits another attempt",
-                                step.spec.retry.backoff_ms,
+                                step.spec.retry.delay_ms(view.attempt),
                             )?;
                         }
                         return Ok(changed);
@@ -12048,10 +12051,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                         || lane_blocked
                         || ready_missing_agent
                     {
-                        if view
-                            .not_before_unix_ms
-                            .is_some_and(|not_before| not_before > now_ms())
+                        if let Some(not_before) = view.not_before_unix_ms
+                            && not_before > now_ms()
                         {
+                            smallclaims::touched::note_due(not_before);
+                            return Ok(changed);
+                        }
+                        if view.attempt > 1 && self.step_retry_window_expired(step.spec, view)? {
+                            changed |= self.store.set_step_state(
+                                &view.subject,
+                                "failed",
+                                Some("the retry policy window expired before the attempt could start"),
+                            )?;
                             return Ok(changed);
                         }
                         if !self.step_dependencies_hold(run, &step, &views)? {
@@ -12730,9 +12741,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
-    /// A failed step has no attempt left when it used its retries, or when it is a loop that
-    /// stopped: a loop that ends on a stop rule or at its exhaustion has said it is finished,
-    /// and another attempt would only run the rounds the rule just ended.
+    fn step_retry_window_expired(
+        &self,
+        spec: &StepSpec,
+        view: &crate::model::StepRunView,
+    ) -> Result<bool> {
+        let Some(window) = spec.retry.window_ms else { return Ok(false) };
+        Ok(self.store.first_step_attempt_started_at(&view.subject)?
+            .is_some_and(|anchor| now_ms() > anchor.saturating_add(u128::from(window))))
+    }
+
+    /// A failed step has no attempt left when its policy is exhausted, or its loop
+    /// stopped: another attempt would only run the rounds the rule just ended.
     fn failed_step_is_final(
         &self,
         run: &MissionRunView,
@@ -12744,6 +12764,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if view.attempt >= spec.retry.attempts {
             return Ok(true);
+        }
+        if self.step_retry_window_expired(spec, view)? {
+            return Ok(true);
+        }
+        if spec.program.is_some() && !spec.retry.on_error_tags.is_empty() {
+            let mut before = None;
+            loop {
+                let journal = self.store.claims_for_subject_kind_at(
+                    &view.subject, program::JOURNAL_KIND, before, true, 64,
+                )?;
+                // Only a durable program exit is subject to the tag allowlist. Engine
+                // failures (including a host dying before reporting an exit) remain eligible.
+                if let Some(failure) = journal.claims.iter().find(|claim| {
+                    let fields = &claim.body["fields"];
+                    fields["attempt"].as_u64() == Some(u64::from(view.attempt))
+                        && fields["key"] == program::RESULT_KEY
+                        && fields["status"] == "failed"
+                }) {
+                    let tag = failure.body.pointer("/fields/error/_tag").and_then(Value::as_str);
+                    if !tag.is_some_and(|tag| spec.retry.on_error_tags.iter().any(|allowed| allowed == tag)) {
+                        return Ok(true);
+                    }
+                    break;
+                }
+                let Some(cursor) = journal.next_cursor else { break };
+                before = Some(cursor);
+            }
         }
         if spec.loop_spec.is_none() {
             return Ok(false);

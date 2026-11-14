@@ -172,7 +172,15 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     }
     if !after.is_empty() { children.push(block(node("depends-on", []), dependencies(after)?)); }
     children.extend(documents.iter().map(|document| text("document", document)));
-    children.push(block(node("retry", []), vec![node("attempts", [i128::from(retry.attempts).into()]), duration("backoff", retry.backoff_ms)]));
+    let mut retry_children = vec![node("attempts", [i128::from(retry.attempts).into()]), duration("backoff", retry.backoff_ms)];
+    if !retry.schedule_ms.is_empty() {
+        retry_children.push(node("delays", retry.schedule_ms.iter().map(|ms| format!("{ms}ms").into())));
+    }
+    if let Some(ms) = retry.window_ms { retry_children.push(duration("within", ms)); }
+    if !retry.on_error_tags.is_empty() {
+        retry_children.push(node("on", retry.on_error_tags.iter().map(|tag| tag.as_str().into())));
+    }
+    children.push(block(node("retry", []), retry_children));
     if let Some(produced) = produces_mission { children.push(text("produces-mission", produced)); }
     if let Some(used) = uses_mission {
         children.push(match used {
@@ -228,6 +236,95 @@ mod tests {
         let reread = parse(&rendered.text);
         assert_eq!(visible(serde_json::to_value(&spec).unwrap()), visible(serde_json::to_value(&reread).unwrap()));
         assert_eq!(render_mission_kdl(&spec).unwrap().text, rendered.text);
+    }
+
+    #[test]
+    fn native_retry_policy_round_trip_and_hash_identity() {
+        let source = r#"mission "test" state="ready" {
+            goal "Retry transient failures.";
+            step "work" { agentless; retry {
+                attempts 4; backoff "1s"; delays "2m" "10m" "30m";
+                within "2h"; on "HostUnavailable" "SlotLost";
+            }; }
+        }"#;
+        round_trip(source);
+        let original = parse(source);
+        let rendered = render_mission_kdl(&original).unwrap().text;
+        let reread = parse(&rendered);
+        assert_eq!(original.revision, reread.revision);
+        assert_eq!(original.steps["work"].definition_hash, reread.steps["work"].definition_hash);
+        let retry = &original.steps["work"].retry;
+        assert_eq!(retry.schedule_ms, [120_000, 600_000, 1_800_000]);
+        assert_eq!(retry.window_ms, Some(7_200_000));
+        assert_eq!(retry.on_error_tags, ["HostUnavailable", "SlotLost"]);
+        for (attempt, delay) in [(1, 120_000), (2, 600_000), (3, 1_800_000), (99, 1_800_000)] {
+            assert_eq!(retry.delay_ms(attempt), delay);
+        }
+        for (from, to) in [
+            ("attempts 4", "attempts 3"),
+            (r#"delays "2m" "10m" "30m""#, r#"delays "1s""#),
+            (r#"within "2h""#, r#"within "1s""#),
+            (r#"on "HostUnavailable" "SlotLost""#, r#"on "OtherFailure""#),
+        ] {
+            let changed = parse(&source.replace(from, to));
+            assert_ne!(original.revision, changed.revision);
+            assert_ne!(original.steps["work"].definition_hash, changed.steps["work"].definition_hash);
+        }
+    }
+
+    #[test]
+    fn legacy_retry_preserves_serialized_and_rendered_bytes() {
+        let retry: crate::model::RetrySpec =
+            serde_json::from_str(r#"{"attempts":3,"backoff_ms":250}"#).unwrap();
+        assert_eq!(serde_json::to_string(&retry).unwrap(), r#"{"attempts":3,"backoff_ms":250}"#);
+        assert_eq!(retry.delay_ms(1), 250);
+        assert_eq!(retry.delay_ms(99), 250);
+        assert!(retry.on_error_tags.is_empty());
+        assert_eq!(retry.window_ms, None);
+        let mission = parse(r#"mission "test" state="ready" {
+            goal "Legacy."; step "work" { agentless; retry { attempts 3; backoff "250ms"; }; }
+        }"#);
+        let rendered = step_node(&mission.steps["work"]).unwrap();
+        let actual = rendered.children().unwrap().get("retry").unwrap();
+        let expected = block(node("retry", []), vec![
+            node("attempts", [3_i128.into()]), duration("backoff", 250),
+        ]);
+        assert_eq!(actual.to_string(), expected.to_string());
+        round_trip(r#"mission "test" state="ready" {
+            goal "Legacy."; step "work" { agentless; retry { attempts 3; backoff "250ms"; }; }
+        }"#);
+    }
+
+    #[test]
+    fn retry_rejects_invalid_policy_fields_without_requiring_window_to_cover_schedule() {
+        let error = |body: &str| {
+            let source = format!(r#"mission "test" state="ready" {{
+                goal "Validate."; step "work" {{ agentless; retry {{ {body} }}; }}
+            }}"#);
+            crate::mission::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code
+        };
+        for body in ["attempts 0;", "attempts 101;", "attempts -1;"] {
+            assert_eq!(error(body), "invalid-retry-attempts");
+        }
+        for body in [r#"delays "0ms";"#, r#"within "0s";"#] {
+            assert_eq!(error(body), "invalid-retry-duration");
+        }
+        for body in [r#"delays "1s"; delays "2s";"#, r#"within "1s"; within "2s";"#, r#"on "A"; on "B";"#] {
+            assert_eq!(error(body), "duplicate-field");
+        }
+        for body in ["delays;", "on;"] {
+            assert_eq!(error(body), "invalid-value-count");
+        }
+        for body in ["delays 1;", "on 1;"] {
+            assert_eq!(error(body), "invalid-value");
+        }
+        let mission = parse(r#"mission "test" state="ready" {
+            goal "Window is a runtime budget."; step "work" { agentless; retry {
+                attempts 100; delays "10m"; within "1ms";
+            }; }
+        }"#);
+        assert_eq!(mission.steps["work"].retry.window_ms, Some(1));
+        assert_eq!(mission.steps["work"].retry.delay_ms(99), 600_000);
     }
 
     #[test]
