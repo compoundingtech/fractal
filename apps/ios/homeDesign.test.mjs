@@ -174,12 +174,14 @@ test('Home and detail opt into grouped system presentation without a glyph legen
 test('grouped rows expose readable wrapping button labels and shared buttons expose disabled state', () => {
   const row = namedFunction(uiSource, 'GroupedRow');
   const pressable = elements(row, 'Pressable')[0];
-  assert.equal(prop(pressable, 'accessibilityRole').text, 'button');
+  assert.equal(prop(pressable, 'accessibilityRole').expression.getText(), "onPress ? 'button' : 'text'", 'a row without a destination only reads');
   assert.equal(prop(pressable, 'accessibilityLabel').expression.getText(), '`${title}. ${context}`');
-  assert.equal(prop(pressable, 'accessibilityHint').text, 'Opens alert details');
+  assert.equal(prop(pressable, 'accessibilityHint').expression.getText(), "onPress ? 'Opens alert details' : undefined");
   assert.equal(prop(pressable, 'onPress').expression.getText(), 'onPress', 'taps retain the detail destination');
   assert.equal(prop(pressable, 'onLongPress').expression.getText(), 'onLongPress', 'ContextMenu can inject the existing action sheet');
   assert.ok(elements(row, 'T').every(element => !prop(element, 'numberOfLines')), 'titles and context wrap rather than truncate');
+  assert.equal(prop(pressable, 'disabled'), undefined, 'a read-only row reads as text, not as a dimmed control');
+  assert.equal(prop(pressable, 'accessibilityState'), undefined);
   const header = elements(namedFunction(uiSource, 'GroupedHeader'), 'View')[0];
   assert.equal(prop(header, 'accessibilityRole').text, 'header');
   const button = elements(namedFunction(uiSource, 'Button'), 'Pressable')[0];
@@ -209,4 +211,18 @@ test('Now draws its background, text and native chrome from the live system appe
     assert.match(prop(screen, 'options').expression.getText(), /^\{ \.\.\.systemOptions,/, name);
   }
   assert.equal(calls(namedFunction(appSource, 'Main'), 'useScheme').length, 1, 'the navigation theme and tab tint follow the appearance');
+});
+
+test('paired availability renders the server person and clears unsupported reconnects', () => {
+  const section = namedFunction(source('./screens/Availability.tsx'), 'AvailabilitySection');
+  assert.equal(nodes(section, node => ts.isIdentifier(node) && node.text === 'actor').length, 0, 'a device session actor is not a concrete person ID');
+  const store = source('./store.tsx');
+  const read = nodes(store, node => ts.isVariableDeclaration(node) && node.name.getText() === 'readAvailability')[0];
+  assert.ok(read);
+  const guard = nodes(read, ts.isIfStatement).find(node => node.expression.getText().includes('!servesAvailability(caps)'));
+  assert.ok(guard);
+  assert.equal(calls(guard.thenStatement, 'setAvailability')[0].arguments[0].getText(), 'NO_AVAILABILITY', 'a daemon without availability must not retain the previous daemon person');
+  assert.equal(calls(read, 'ownAvailability')[0].arguments.length, 2, 'the server resolves the paired person; do not filter by session actor');
+  const publish = nodes(read, ts.isIfStatement).filter(node => calls(node.thenStatement, 'setAvailability').length);
+  assert.ok(publish.filter(node => node !== guard).every(node => node.expression.getText().includes('availabilityRead.current === read')), 'late reads cannot restore availability after reconnect invalidated it');
 });

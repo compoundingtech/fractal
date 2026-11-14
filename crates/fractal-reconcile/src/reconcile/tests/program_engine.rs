@@ -23,6 +23,13 @@ export default {
     const first = await step(ctx, 'first', async () => ({ attempt: ctx.attempt }))
     if (ctx.payload.mode === 'retry-failure') return { _tag: 'Failure', error: { _tag: 'Broken' } }
     if (ctx.payload.mode === 'idle') await new Promise(() => {})
+    if (ctx.payload.mode === 'trace') {
+      const worker = process.env.TRACEPARENT
+      const child = await ctx.spawn(['sh', '-c', 'printf %s \"$TRACEPARENT\"'], {
+        env: { TRACEPARENT: 'must-not-override-attempt-context' },
+      })
+      return { _tag: 'Success', value: { worker, child: child.stdout } }
+    }
     if (ctx.payload.mode === 'credential') {
       await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
     }
@@ -219,6 +226,32 @@ fn alive(pid: i32) -> bool {
 
 fn entries(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs.iter().map(|(key, status)| ((*key).to_owned(), (*status).to_owned())).collect()
+}
+
+#[test]
+fn trace_context_crosses_host_worker_and_exec_and_is_retained_with_result() {
+    let fixture = fixture(Liveness::default());
+    let first = fixture.start("trace-first", "trace");
+    let second = fixture.start("trace-second", "trace");
+    fixture.until("both trace attempts complete", || fixture.status(&first.step) == "completed"
+        && fixture.status(&second.step) == "completed");
+    let read = |step: &str| {
+        let claims = fixture.store.claims_for(step, Some(JOURNAL_KIND)).unwrap();
+        let result = claims.iter().find(|claim| claim.body["fields"]["key"] == RESULT_KEY).unwrap();
+        let fields = &result.body["fields"];
+        assert!(fields.get("trace").is_none(), "journal fields must stay readable by older peers");
+        let evidence = result.body["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 1);
+        let traces = fixture.store.claims_for(step, Some("program.attempt.trace")).unwrap();
+        let trace = traces.iter().find(|trace| Some(trace.id.as_str()) == evidence[0].as_str()).unwrap();
+        let trace: crate::otel::AttemptTraceContext = serde_json::from_value(trace.body["fields"]["trace"].clone()).unwrap();
+        assert_eq!(fields["value"]["worker"], trace.traceparent);
+        assert_eq!(fields["value"]["child"], trace.traceparent);
+        assert_eq!(trace.traceparent.len(), 55);
+        trace
+    };
+    assert_ne!(read(&first.step).trace_id(), read(&second.step).trace_id(),
+        "the shared host must not leak context between concurrent attempts");
 }
 
 #[test]

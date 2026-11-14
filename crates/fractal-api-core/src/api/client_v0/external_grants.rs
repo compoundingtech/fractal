@@ -3,6 +3,7 @@ use super::*;
 use rusqlite::OptionalExtension as _;
 pub const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
+    ("availability", "read.assistant.availability"),
     ("attention-content", "read.assistant.attention"),
     ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
     ("agents-rich", "read.assistant.agents"),
@@ -144,6 +145,7 @@ pub const SCOPES: &[&str] = &[
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
     "read.assistant.slo",
     "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
+    "read.assistant.availability",
 ];
 // Serializes code consumption and grant policy transitions. Subject fences also protect
 // against concurrent writers in the authoritative store.

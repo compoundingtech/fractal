@@ -394,6 +394,51 @@ fn age(ms: u128) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn run_scoped_subject_does_not_inherit_author_handoff_or_mail() {
+        let store = Store::open_memory("node").unwrap();
+        let author = "agent/example/author";
+        store
+            .put_document(
+                &document_name(author).unwrap(),
+                b"The author's private conversation summary.",
+                &None,
+                "author-handoff",
+            )
+            .unwrap();
+        crate::store::message_routing::send(
+            &store,
+            &crate::model::ClaimInput {
+                subject: "message/author-mail".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/requester".into()),
+                fields: std::collections::BTreeMap::from([
+                    ("from".into(), serde_json::json!("person/requester")),
+                    ("to".into(), serde_json::json!(author)),
+                    ("content".into(), serde_json::json!("Only for the author.")),
+                    ("title".into(), serde_json::json!("Author context")),
+                    ("status".into(), serde_json::json!("sent")),
+                    ("in_reply_to".into(), serde_json::Value::Null),
+                    ("tags".into(), serde_json::json!([])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("author-mail".into()),
+            },
+        )
+        .unwrap();
+        let author_context = gather(&store, author).unwrap();
+        assert!(author_context.handoff.is_some());
+        assert_eq!(author_context.mail.len(), 1);
+        for worker in ["agent/mission-run/first/worker", "agent/mission-run/second/worker"] {
+            let context = gather(&store, worker).unwrap();
+            assert!(context.handoff.is_none());
+            assert!(context.mail.is_empty());
+            assert!(context.work.is_empty());
+            assert!(render(&context, 0).is_none());
+        }
+    }
+
     fn step(status: &str) -> StepRunView {
         serde_json::from_value(serde_json::json!({
             "subject": "step-run/abc/build",
