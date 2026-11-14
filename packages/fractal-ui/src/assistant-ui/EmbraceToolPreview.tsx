@@ -1,3 +1,4 @@
+import { markdownBlock } from './composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Markdown, type MarkdownProps, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
@@ -42,7 +43,7 @@ export const EmbraceDiffPreview = ({ diffs }: { readonly diffs: readonly ToolDif
 
 /** Shared consent-gated Markdown rendering for tool output. */
 export const EmbraceMarkdownPreview = ({ markdown, tone, resolveImage, onLoadImage }: { readonly markdown: string; readonly tone?: MarkdownProps['tone']; readonly resolveImage?: MarkdownImageResolver; readonly onLoadImage?: MarkdownImageOpener }) => (
-  <Markdown text={markdown} tone={tone} resolveImage={resolveImage} onLoadImage={onLoadImage} />
+  <Markdown text={markdownBlock(markdown)} tone={tone} resolveImage={resolveImage} onLoadImage={onLoadImage} />
 )
 
 const styles = stylex.create({

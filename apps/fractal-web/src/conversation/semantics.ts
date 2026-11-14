@@ -45,6 +45,23 @@ export const deliverySender = (from: string | undefined): Sender =>
       ? { kind: 'human', label: from.slice(from.indexOf('/') + 1), via: 'wf / st' }
       : { kind: 'system', label: from ?? 'Fractal', via: 'st' }
 
+/** Undo `xml_escape` in fractal-drivers' ding. `&amp;` goes last, so an authored `&amp;lt;` stays `&lt;`. */
+const unescapeDelivered = (text: string): string =>
+  text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+
+/**
+ * A delivery's words as the sender wrote them. A body cannot forge an `<attachment/>`, whose `<` it would have escaped. The
+ * element becomes a note until web reads a delivery's images by message, as `deliveredImages` in fractal-views does.
+ */
+const deliveredBody = (body: string): string =>
+  unescapeDelivered(body.replace(/<attachment\s[^>]*?\/>/g, (element) => {
+    const attribute = (name: string): string | undefined => {
+      const value = new RegExp(` ${name}="([^"]*)"`).exec(element)?.[1]
+      return value === undefined ? undefined : unescapeDelivered(value)
+    }
+    return `[${attribute('name') ?? 'attachment'} · ${attribute('unavailable') === 'expired' ? 'expired' : attribute('media_type') ?? 'not available here'}]`
+  })).trimEnd()
+
 /** Fractal's native injection is an explicit envelope, not a human message merely because role=user. */
 export const proseItem = (item: TextItem): TextItem => {
   if (item.role !== 'user' && item.role !== 'system') return item
@@ -53,8 +70,8 @@ export const proseItem = (item: TextItem): TextItem => {
   )
   const from = envelope !== null ? /\bfrom="([^"]+)"/.exec(envelope[1]!)?.[1] : undefined
   if (envelope === null || from === undefined) return item
-  const sender = deliverySender(from)
-  return { ...item, text: envelope[2]!, sender, role: sender.kind === 'human' ? 'user' : 'system' }
+  const sender = deliverySender(unescapeDelivered(from))
+  return { ...item, text: deliveredBody(envelope[2]!), sender, role: sender.kind === 'human' ? 'user' : 'system' }
 }
 
 /** Lines drivers write around a delivery; they are not anyone's prose once the delivery is gone. */

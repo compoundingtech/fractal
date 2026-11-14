@@ -15,7 +15,7 @@ const themes = { neutral: baselineTheme, composition: [], embrace: [...baselineT
 function DiffTintCanvas({ theme = 'neutral', scheme = 'dark', captured = false }: { theme?: keyof typeof themes; scheme?: 'dark' | 'light'; captured?: boolean }) {
   return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width={captured ? 440 : '100%'} diff={diff} path="sample/rows.ts" added={1} removed={1} scopeLabel={captured ? 'Captured' : undefined} showSurfaceTabs={!captured} info={captured ? <p>Successful-tool captures · loaded transcript window. Reported sender unknown · Tool: Edit · Call: call/edit. Counts cover captured lines, not current repository contents.</p> : undefined} onOpenFile={captured ? () => document.querySelector<HTMLElement>('[data-testid="diff-code"]')?.focus() : undefined} /></div>
 }
-const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { scenario: { _tag: 'primitive', reason: "Measures diff token contrast and captured diff presentation independently of domain state." }, layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
+const meta = { excludeStories: ['scenarioExemptions'], id: 'fractal-ui-diff-tint', title: 'Components/Diff tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { scenario: { _tag: 'primitive', reason: "Measures diff token contrast and captured diff presentation independently of domain state." }, layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
   await waitFor(() => expect(canvasElement.querySelector('[data-syntax-token="keyword"]')).not.toBeNull())
   const receipt = assertDiffTint(canvasElement)
   canvasElement.dataset.diffTintReceipt = JSON.stringify(receipt)
@@ -100,21 +100,14 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'Captured:primitive',
-  'CapturedLight:primitive',
   'Composition:primitive',
-  'CompositionLight:primitive',
   'Embrace:primitive',
-  'EmbraceLight:primitive',
   'Neutral:primitive',
-  'NeutralLight:primitive',
 ]
 type Story = StoryObj<typeof meta>
 export const Neutral: Story = {}
-export const NeutralLight: Story = { args: { scheme: 'light' } }
 export const Composition: Story = { args: { theme: 'composition' } }
-export const CompositionLight: Story = { args: { theme: 'composition', scheme: 'light' } }
 export const Embrace: Story = { args: { theme: 'embrace' } }
-export const EmbraceLight: Story = { args: { theme: 'embrace', scheme: 'light' } }
 export const Captured: Story = { args: { captured: true }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const header = canvasElement.querySelector('[data-testid="diff-panel-header"]')!
@@ -137,5 +130,4 @@ export const Captured: Story = { args: { captured: true }, play: async ({ canvas
   await userEvent.click(canvas.getByRole('button', { name: /^Open$/ }))
   await expect(code).toHaveFocus()
 } }
-export const CapturedLight: Story = { ...Captured, args: { captured: true, scheme: 'light' } }
 const styles = stylex.create({ canvas: { height: '100vh', backgroundColor: surface.canvas, color: text.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading } })

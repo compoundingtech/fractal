@@ -1,4 +1,5 @@
 import type { Agent, Mission } from '../../clients/typescript/fractal-client';
+import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { ago } from './presentation';
 import type { SessionView } from '@fractal/views';
 import { harnessColor, theme } from './theme';
@@ -150,7 +151,7 @@ export function stepProgress(missions: Mission[], stepId: string): string | unde
   for (const mission of missions) {
     for (const run of mission.run_details ?? []) {
       const step = (run.steps ?? []).find(candidate => candidate.id === stepId);
-      const line = step?.last_progress?.split(/\s+/).filter(Boolean).join(' ');
+      const line = step?.last_progress == null ? undefined : markdownSource(step.last_progress).split(/\s+/).filter(Boolean).join(' ');
       if (step) return line || undefined;
     }
   }

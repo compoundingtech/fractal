@@ -9,7 +9,7 @@ import { lightTheme } from './assistant-ui/composition-theme'
 import { MarkdownCanvas, styles } from './markdown.story-canvas'
 
 const meta = {
-  title: 'Fractal UI/Markdown', component: MarkdownCanvas,
+  id: 'fractal-ui-markdown', title: 'Components/Markdown', component: MarkdownCanvas,
   parameters: { layout: 'fullscreen' },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },

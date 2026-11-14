@@ -4,6 +4,7 @@
  * Cold mounting and switching agents follow through the real SDK and live source
  * (scripted gateway, real socket commands). Nothing here mocks the data hooks.
  */
+import { markdownBlock } from '@fractal/client/markdown'
 import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@fractal/client'
 import { webcrypto } from 'node:crypto'
 import { setTimeout as yieldIo } from 'node:timers/promises'
@@ -47,7 +48,7 @@ const entry = (sequence: number, text: string, role: 'user' | 'assistant' = 'ass
   role,
   final: true,
   timestamp: snapshot.created_at,
-  body: { text, media_type: 'text/markdown' },
+  body: { text: markdownBlock(text), media_type: 'text/markdown' },
 })
 
 /** The kit composition groups turns at user prompts, so scenarios pair prompts with replies. */
@@ -69,7 +70,7 @@ const nativeScenario = (): TimelineEntry[] => [
   {
     id: 'timeline-entry/5', sequence: 5, revision: 1, type: 'content', role: 'system', final: true,
     timestamp: snapshot.created_at,
-    body: { text: '[unrecognized omp entry `credential_pin`]\n{"kind":"credential_pin"}', media_type: 'text/plain' },
+    body: { text: markdownBlock('[unrecognized omp entry `credential_pin`]\n{"kind":"credential_pin"}'), media_type: 'text/plain' },
   },
   {
     id: 'timeline-entry/6', sequence: 6, revision: 1, type: 'truncation', role: 'system', final: true,
@@ -689,7 +690,7 @@ describe('ConversationPane composer/send binding', () => {
     if (echoId === undefined) throw new Error('the send action returned no message id to echo')
     gateway!.conversationFrame(scratchSeat, [
       { ...entry(1, ''), id: 'timeline-entry/echo/0123456789abcdef-message', type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
-      { ...entry(2, 'Acknowledged hello'), id: 'timeline-entry/echo/0123456789abcdef-content', type: 'content', role: 'user', body: { text: 'Acknowledged hello', media_type: 'text/plain' } },
+      { ...entry(2, 'Acknowledged hello'), id: 'timeline-entry/echo/0123456789abcdef-content', type: 'content', role: 'user', body: { text: markdownBlock('Acknowledged hello'), media_type: 'text/plain' } },
     ])
     await until(() => userRows()[0]?.textContent === 'Acknowledged hello')
     expect(userRows()[0]).toBe(pendingRow)

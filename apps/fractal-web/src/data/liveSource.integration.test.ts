@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import { it } from '@effect/vitest'
 import type {
   Agent,
@@ -332,7 +333,7 @@ class Gateway {
           body: { message_id: this.echoMessageId, from: 'person/operator', to: agent.id } },
         { id: 'timeline-entry/echo/0123456789abcdef-content', sequence: 2, revision: 1,
           type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-          body: { media_type: 'text/plain', text: 'hello' } },
+          body: { media_type: 'text/plain', text: markdownBlock('hello') } },
       ],
     })
   }
@@ -1866,7 +1867,7 @@ describe('optimistic conversation sends', () => {
         yield* settle
         const content = (id: string, sequence: number, timestamp: string) => ({
           id, sequence, revision: 1, type: 'content' as const, role: 'assistant' as const,
-          final: true, timestamp, body: { media_type: 'text/plain', text: id },
+          final: true, timestamp, body: { media_type: 'text/plain', text: markdownBlock(id) },
         })
         const page = (replace: boolean) => gateway.send({
           kind: 'conversation', id: gateway.subscription('conversation').id,
@@ -2070,7 +2071,7 @@ describe('optimistic conversation sends', () => {
               body: { message_id: 'message/secret', from: 'person/operator', to: agent.id } },
             { id: 'timeline-entry/secret/content', sequence: 2, revision: 1,
               type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'authorized rows' } },
+              body: { media_type: 'text/plain', text: markdownBlock('authorized rows') } },
           ],
         })
         yield* settle
@@ -2114,7 +2115,7 @@ describe('optimistic conversation sends', () => {
               body: { message_id: resent, from: 'person/operator', to: agent.id } },
             { id: 'timeline-entry/resent/content', sequence: 2, revision: 1,
               type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'hello' } },
+              body: { media_type: 'text/plain', text: markdownBlock('hello') } },
           ],
         })
         yield* settle
@@ -2301,7 +2302,7 @@ describe('optimistic conversation sends', () => {
           items: [
             { id: 'timeline-entry/resumed/content', sequence: 1, revision: 1,
               type: 'content', role: 'assistant', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'resumed' } },
+              body: { media_type: 'text/plain', text: markdownBlock('resumed') } },
           ],
         })
         yield* settle
