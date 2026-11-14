@@ -1495,6 +1495,11 @@ impl SeatsStore for Store {
                 Value::String(crate::pricing::PRICING_REVISION.into()),
             ),
         ]);
+        for key in ["invocation_id", "attempt"] {
+            if let Some(value) = observation.body["fields"]["attribution"].get(key).filter(|value| !value.is_null()) {
+                fields.insert(key.into(), value.clone());
+            }
+        }
         if let Some(execution) = execution {
             fields.insert("execution_id".into(), Value::String(execution.into()));
         }
@@ -2041,13 +2046,15 @@ impl SeatsStore for Store {
             pricing: String,
             native_session_id: Option<String>,
             provenance: Option<Vec<Value>>,
+            invocation_id: Option<String>,
+            attempt: Option<u32>,
         }
         #[derive(Clone, Copy, Default)]
         struct DailySnapshot {
             at: u64,
             buckets: [u64; USAGE_BUCKETS.len()],
         }
-        type Key = (String, String, String, String, String, String, String);
+        type Key = (String, String, String, String, String, String, String, String);
         let mut days = agent_messages::windows(since_ms, until_ms)
             .into_iter()
             .map(|(since, until)| agent_messages::DailyUsage {
@@ -2087,6 +2094,8 @@ impl SeatsStore for Store {
             if fields.get("cost_microusd").is_none() {
                 snapshot.buckets[8] = snapshot.buckets[0];
             }
+            snapshot.invocation_id = fields["invocation_id"].as_str().map(str::to_owned);
+            snapshot.attempt = fields["attempt"].as_u64().and_then(|n| u32::try_from(n).ok());
             let text = |name| fields[name].as_str().unwrap_or("").to_owned();
             let key = (
                 subject,
@@ -2096,6 +2105,7 @@ impl SeatsStore for Store {
                 text("owner_run"),
                 text("owner_step"),
                 text("host"),
+                text("execution_id"),
             );
             let group = groups.entry(key).or_insert_with(|| Group {
                 days: vec![(None, None); days.len()],
@@ -2123,7 +2133,7 @@ impl SeatsStore for Store {
             }
         }
         let mut result = Vec::new();
-        for ((agent, _incarnation, model, account, mission_run, step, host), group) in groups {
+        for ((agent, _incarnation, model, account, mission_run, step, host, execution), group) in groups {
             for (day, (baseline, latest)) in days.iter_mut().zip(group.days) {
                 let Some(latest) = latest else {
                     continue;
@@ -2156,6 +2166,9 @@ impl SeatsStore for Store {
                 "model": model, "account": account, "host": host,
                 "pricing": latest.pricing,
             });
+            if !execution.is_empty() { row["execution_id"] = json!(execution); }
+            if let Some(invocation) = latest.invocation_id { row["invocation_id"] = json!(invocation); }
+            if let Some(attempt) = latest.attempt { row["attempt"] = json!(attempt); }
             if let Some(session) = latest.native_session_id {
                 row["native_session_id"] = json!(session);
             }
