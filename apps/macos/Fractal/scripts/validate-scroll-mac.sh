@@ -11,10 +11,12 @@ out=${TRAY_PERF_OUT:-"$PWD/tmp/perf-scroll-mac/$(date -u +%Y%m%dT%H%M%SZ)"}
 mkdir -p "$out"
 case "$mode" in
   check)
-    : "${FRACTAL_CLIENT_PATH:?Use the attention-tray Nix development shell with the compatible FractalClient package}"
-    # The flake-pinned package at the V4 base may lack AvailabilityRule.word; do not
-    # silently patch Swift here. Record the exact compatible client SHA at the gate.
-    git -C "$FRACTAL_CLIENT_PATH" rev-parse HEAD | tee "$out/fractal-client-head.txt"
+    : "${FRACTAL_CLIENT_PATH:?Use the attention-tray Nix development shell with the pinned FractalClient package}"
+    # Nix source closures have no .git directory. Record the locked revision and
+    # the actual package path rather than requiring an external client checkout.
+    printf '%s\n' "$FRACTAL_CLIENT_PATH" | tee "$out/fractal-client-path.txt"
+    nix eval --raw --expr '(builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.fractal.locked.rev' \
+      | tee "$out/fractal-client-head.txt"
     /usr/bin/swift build --product AttentionTray 2>&1 | tee "$out/build-tray.txt"
     /usr/bin/swift build --product TrayGallery 2>&1 | tee "$out/build-gallery.txt"
     /usr/bin/swift test 2>&1 | tee "$out/tests.txt"
