@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare native step retry schedules, policy windows and typed failure filters",
+  "replay": {"status": "none", "detail": "Existing published retry policies retain their serialized bytes and revision hashes. No claim replay migration is required."},
+  "schema": {"status": "none", "detail": "No database schema changes. RetrySpec gains optional schedule_ms, window_ms and on_error_tags fields; empty or absent values are omitted from serialized revisions."},
+  "rules": {"status": "changed", "detail": "Retry policies can declare positive per-retry delays, a positive window anchored at the first attempt's activation and eligible typed program failure tags. Unlisted typed failures are final; engine faults remain eligible. An empty tag list preserves any-failure behavior. A schedule overrides uniform backoff and repeats its final delay. Attempts include the first, bounded to 1 through 100. The policy window need not cover the sum of delays. Pending retries wake reconciliation at not_before without polling, and program retries start a fresh attempt journal."},
+  "compatibility": {"status": "changed", "detail": "KDL retry blocks accept delays, within and on children. Existing attempts/backoff policies preserve their canonical rendering and legacy any-failure behavior. Readers must understand the new fields before publishing policies that use them."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required for existing policies."},
+  "manual": {"status": "changed", "detail": "Declare retry { attempts 4; delays \"2m\" \"10m\" \"30m\"; within \"2h\"; on \"HostUnavailable\" \"SlotLost\"; } on the outer step to select the extended policy fields."},
+  "recovery": {"status": "none", "detail": "Existing revisions require no recovery action. Before reverting to a reader without these policy fields, republish affected missions without the extended policy."}
+}

@@ -175,6 +175,21 @@ engine which of the run's program attempts left their step (ended, failed, timed
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
 
+The outer step's native `retry` policy has these KDL fields:
+
+| Field | Meaning |
+|---|---|
+| `attempts 4` | Total attempts, including the first; an integer from 1 through 100. Defaults to 1. |
+| `backoff "2m"` | Existing uniform retry delay; defaults to zero. |
+| `delays "2m" "10m" "30m"` | Positive per-retry durations, overriding `backoff`; the final entry repeats when more retries remain. |
+| `within "2h"` | Optional positive whole-policy window from the first attempt's start, not a per-attempt timeout. The window need not cover the sum of scheduled delays. |
+| `on "HostUnavailable" "SlotLost"` | Typed failure tags eligible for retry. An absent list preserves the legacy any-failure policy. |
+
+The stored `RetrySpec` names these fields `attempts`, `backoff_ms`, `schedule_ms`,
+`window_ms`, and `on_error_tags`. Empty schedules/tag lists and an absent window are
+omitted from serialization, preserving existing revision hashes and canonical KDL
+for policies that use only `attempts` and `backoff`.
+
 For publication supersession, sending `cancel` is not sufficient to admit the replacement.
 The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
 fences recorded leftover effect groups by verified boot/process-start identity. A failed
@@ -600,7 +615,9 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
 value. The success value is encoded with `intent.output` and journaled under the reserved key
-`$result`; a typed failure is encoded with its `_tag` and fields and fails the step with it.
+`$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
+a failed result, and fails the step with it. Retry classification reads this attempt's durable
+failure rather than an inner effect's possibly caught error.
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.

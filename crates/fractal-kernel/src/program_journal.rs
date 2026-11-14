@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 /// The claim kind of a program journal entry, on the program's `step-run` subject.
 pub const JOURNAL_KIND: &str = "program.step";
-/// The reserved journal key the daemon writes on `done` with the program's encoded success value.
+/// The reserved journal key the daemon writes on `done` with the encoded success value or error.
 /// It is the program's result, not an inner step: replay and views skip it.
 pub const RESULT_KEY: &str = "$result";
 /// The fault on a program step whose journal shows no new entry within its `stalled-after`.
