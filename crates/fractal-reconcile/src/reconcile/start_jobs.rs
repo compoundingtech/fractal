@@ -244,7 +244,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     contract = Some(measured);
                 }
                 backend_entered = true;
-                runtime.start_guarded(&prepared.launch_member, &guard)?;
+                if resource_lanes::request(&prepared.launch_member)?.is_some() {
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
+                } else {
+                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),
                     Err(error) => (None, Some(format!("{error:#}"))),
@@ -290,9 +294,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["control_request"] = serde_json::json!(prepared.control_request);
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
-            }
-            if result["error"].is_string() && result["producer_closed"] == true {
-                store.finish_invocation_trace(&format!("invocation/{id}"), true);
             }
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);

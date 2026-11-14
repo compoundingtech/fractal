@@ -115,12 +115,18 @@ pub fn matches_input(artifact: &InvocationArtifact, input: &str) -> bool {
 
 /// The first capture owns this immutable reference. Concurrent retries return its original
 /// metadata; a different source or identity returns None instead of replacing it.
+/// Deletion owns the invocation/kind/hash URL, even when a later message captures the same bytes.
 pub fn record_exact(store: &Store, agent: &str, artifact: &InvocationArtifact) -> Result<Option<InvocationArtifact>> {
     let key = format!("invocation-artifact:{}:{}:{}", artifact.invocation_id,
         artifact.kind, artifact.message_id.as_deref().unwrap_or(""));
+    let status = if is_deleted(store, &artifact.invocation_id, &artifact.kind, &artifact.sha256)? {
+        "deleted"
+    } else {
+        "retained"
+    };
     let input = ClaimInput { subject: agent.into(), kind: "harness.invocation-artifact".into(),
         actor: None, fields: serde_json::from_value(serde_json::json!({"invocation_id":artifact.invocation_id,
-            "kind":artifact.kind,"status":"retained","artifact":artifact}))?, evidence: vec![],
+            "kind":artifact.kind,"status":status,"artifact":artifact}))?, evidence: vec![],
         expected_subject: None, idempotency_key: Some(key.clone()) };
     let claim = match store.append_claim(&input) {
         Ok(claim) => claim,
@@ -167,13 +173,20 @@ pub fn read(state: &Path, artifact: &InvocationArtifact, at: u128) -> Result<Opt
     Ok(bytes)
 }
 
+/// The URL's tombstone is permanent: a newer retained claim cannot restore read authority.
+/// Readers must check this receipt independently of the latest capture's status.
+pub fn is_deleted(store: &Store, invocation: &str, kind: &str, hash: &str) -> Result<bool> {
+    let key = format!("invocation-artifact-delete:{invocation}:{kind}:{hash}");
+    Ok(store.operation_claim(&key)?.is_some())
+}
+
 pub fn delete(state: &Path, store: &Store, agent: &str, artifact: &InvocationArtifact, at: u128) -> Result<()> {
     anyhow::ensure!(artifact.sha256.len()==64 && artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "invalid invocation artifact digest");
     let key = format!("invocation-artifact-delete:{}:{}:{}",artifact.invocation_id,artifact.kind,artifact.sha256);
     if store.operation_claim(&key)?.is_some() { return Ok(()); }
     // A content hash may be referenced by other invocations; physical retention handles shared
-    // bytes. Revocation is per reference, with a durable deletion receipt checked by the reader.
+    // bytes. This invocation/kind/hash URL stays revoked across later message captures.
     store.append_claim(&ClaimInput { subject:agent.into(),kind:"harness.invocation-artifact".into(),actor:None,
         fields:serde_json::from_value(serde_json::json!({"invocation_id":artifact.invocation_id,
             "kind":artifact.kind,"status":"deleted","sha256":artifact.sha256,"deleted_at_unix_ms":at}))?,
@@ -216,6 +229,52 @@ mod tests {
         retry.incarnation = Some("other".into());
         assert!(record_exact(&store, "agent/example", &retry).unwrap().is_none());
         assert_eq!(store.claims_for("agent/example", Some("harness.invocation-artifact")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deletion_stays_authoritative_when_a_later_message_captures_the_same_redacted_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/example";
+        let mut first = capture_input(root.path(), "invocation/example", "hello token=first-secret", 100).unwrap();
+        first.message_id = Some("message/a".into());
+        record(&store, agent, &first).unwrap();
+        delete(root.path(), &store, agent, &first, 200).unwrap();
+
+        let mut second = capture_input(root.path(), "invocation/example", "hello token=second-secret", 300).unwrap();
+        second.message_id = Some("message/b".into());
+        assert_eq!(first.sha256, second.sha256);
+        assert_ne!(first.source_sha256, second.source_sha256);
+        assert_eq!(record_exact(&store, agent, &second).unwrap(), Some(second.clone()));
+        // Shared bytes still exist; denial must come from the durable reference, not unlinking.
+        assert!(read(root.path(), &second, 301).unwrap().is_some());
+        let assert_url_revoked = || {
+            // Match the API's invocation/kind/hash lookup, including its newest-reference ordering.
+            let latest = store.claims_for(agent, Some("harness.invocation-artifact")).unwrap()
+                .into_iter().rev().find(|claim| {
+                    let fields = &claim.body["fields"];
+                    fields["invocation_id"] == second.invocation_id && fields["kind"] == second.kind
+                        && (fields["sha256"] == second.sha256 || fields["artifact"]["sha256"] == second.sha256)
+                }).unwrap();
+            assert_eq!(latest.body["fields"]["status"], "deleted");
+        };
+        assert_url_revoked();
+        delete(root.path(), &store, agent, &second, 400).unwrap();
+        assert_url_revoked();
+        assert_eq!(record_exact(&store, agent, &second).unwrap(), Some(second.clone()));
+        assert_url_revoked();
+        // Simulate a capture that read "not deleted" before deletion but committed afterward.
+        store.append_claim(&ClaimInput {
+            subject: agent.into(), kind: "harness.invocation-artifact".into(), actor: None,
+            fields: serde_json::from_value(serde_json::json!({
+                "invocation_id":second.invocation_id,"kind":second.kind,
+                "status":"retained","artifact":second,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(is_deleted(&store, &second.invocation_id, &second.kind, &second.sha256).unwrap());
+        delete(root.path(), &store, agent, &second, 500).unwrap();
+        assert!(is_deleted(&store, &second.invocation_id, &second.kind, &second.sha256).unwrap());
     }
 
     #[test]

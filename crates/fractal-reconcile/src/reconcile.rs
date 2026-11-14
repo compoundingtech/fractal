@@ -70,6 +70,8 @@ mod program_faults;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
+mod resource_lanes;
+mod program_resources;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -578,6 +580,28 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
+    /// A finite resource grant must never silently fall back to an ordinary detached start.
+    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        anyhow::bail!("runtime does not support finite resource memberships")
+    }
+    fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+        anyhow::bail!("runtime does not support finite resource retirement")
+    }
+    fn recover_resource_lanes(&self, _store: &Store, _host: &str, _now_ms: u64) -> Result<usize> {
+        anyhow::bail!("runtime does not support finite resource recovery")
+    }
+    fn watch_resource_exec(&self, _id: &str, _generation: &str, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+        anyhow::bail!("runtime does not support reactive resource execution")
+    }
+    fn resource_exec_output(&self, _id: &str, _generation: &str) -> Result<(String, String)> {
+        anyhow::bail!("runtime does not support generation-fenced execution output")
+    }
+    fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
+        anyhow::bail!("runtime does not support generation-fenced execution status")
+    }
+    fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support exact resource execution cancellation")
+    }
     fn launch_contract(
         &self,
         store: &Store,
@@ -963,6 +987,59 @@ impl RuntimeControl for NativeRuntime {
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
     }
+    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
+        let mut backend_entered = false;
+        self.start_checked_inner(member, Some(guard), &mut backend_entered, Some((store, &request)))
+    }
+    fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+        let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        match record.state.as_str() {
+            "queued" => {
+                store.withdraw_resource_membership(&request.id, &request.owner, now)?;
+                Ok(true)
+            }
+            "retired" | "refused" | "withdrawn" => Ok(true),
+            "admitted" | "launched" | "retiring" | "uncertain" => {
+                let grant = record.grant.context("active resource custody has no grant")?;
+                store.cancel_resource_membership(&grant, &request.owner, now)?;
+                store.retire_resource_membership(&grant, &request.owner, &self.exec, now)
+            }
+            state => anyhow::bail!("unknown resource membership state {state}"),
+        }
+    }
+    fn recover_resource_lanes(&self, store: &Store, host: &str, now_ms: u64) -> Result<usize> {
+        store.recover_resource_memberships(host, &self.exec, now_ms)
+    }
+    fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+        let runtime = self.exec.clone();
+        let id = id.to_owned();
+        let generation = generation.to_owned();
+        std::thread::Builder::new().name("fractal-resource-exit".into()).spawn(move || {
+            if let Err(error) = runtime.wait_for_exit(&id, &generation) {
+                eprintln!("fractal: resource execution {id} completion: {error:#}");
+            }
+            wake();
+        })?;
+        Ok(())
+    }
+    fn resource_exec_output(&self, id: &str, generation: &str) -> Result<(String, String)> {
+        self.exec.read_output(id, generation)
+    }
+    fn resource_exec_signal(&self, id: &str, generation: &str) -> Result<Option<i32>> {
+        match self.exec.observe(id)? {
+            Some(fractal_runtime::ExecObservation::Exited(current)) if current.generation_id == generation => Ok(current.exit_signal),
+            _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
+        }
+    }
+    fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
+        let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
+        self.exec.retire_if(id, &generation.generation_id)?;
+        store.end_resource_execution(record.grant.as_ref().context("resource generation missing")?, id, u64::try_from(now_ms()).unwrap_or(u64::MAX))
+    }
     fn launch_contract(
         &self,
         store: &Store,
@@ -1090,7 +1167,7 @@ impl NativeRuntime {
         // The backend owns its launch boundary and returns an exact StartRejected
         // witness when it can prove that no producer was created.
         let mut backend_entered = false;
-        self.start_checked_inner(member, guard, &mut backend_entered)
+        self.start_checked_inner(member, guard, &mut backend_entered, None)
             .map_err(|error| {
                 if backend_entered {
                     error
@@ -1107,6 +1184,7 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
+        resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let mut environment =
@@ -1210,6 +1288,55 @@ impl NativeRuntime {
                 )
             }
         } else {
+            if let Some((store, request)) = resource {
+                use crate::store::resource_membership::{Admission, Coverage};
+                let now = || u64::try_from(now_ms()).unwrap_or(u64::MAX);
+                let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
+                    anyhow::bail!("finite execution membership is not admitted");
+                };
+                let aggregate = request.capacity.map(|capacity| -> Result<fractal_runtime::Capacity> {
+                    Ok(fractal_runtime::Capacity {
+                        cores: capacity.cores.checked_mul(request.max_members).context("aggregate lane cores overflow")?,
+                        memory: capacity.memory.checked_mul(u64::from(request.max_members)).context("aggregate lane memory overflow")?,
+                    })
+                }).transpose()?;
+                let lane = fractal_runtime::FiniteLane {
+                    name: request.name.clone(), capacity: aggregate,
+                    require_enforced: request.coverage == Coverage::Enforced,
+                };
+                lane.coverage()?;
+                store.prepare_resource_membership(&grant, &member.runtime_id)?;
+                let guarded = || -> Result<()> {
+                    if let Some(guard) = guard { guard()?; }
+                    anyhow::ensure!(matches!(store.resource_membership(&request.id, &request.owner, now())?,
+                        Admission::Admitted(current) if current == grant), "finite membership was fenced before payload release");
+                    Ok(())
+                };
+                *backend_entered = true;
+                let binding = fractal_runtime::ResourceExecutionBinding {
+                    membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                    authority_epoch: grant.authority_epoch.clone(),
+                };
+                let authorize = |execution: &fractal_runtime::ExecGeneration, release: &mut dyn FnMut() -> Result<u64>| {
+                    store.release_resource_payload(&grant, &member.runtime_id, execution, &mut || {
+                        guarded()?;
+                        release()
+                    })
+                };
+                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
+                }) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        if let Some(proof) = error.downcast_ref::<fractal_runtime::StartRejected>() {
+                            store.reject_resource_preparation(&grant, &member.runtime_id, proof)?;
+                        }
+                        return Err(error);
+                    }
+                };
+                store.launch_resource_membership(&grant, &member.runtime_id, &execution, now())?;
+                return Ok(());
+            }
             if let Some(guard) = guard {
                 *backend_entered = true;
                 return self
@@ -1463,6 +1590,7 @@ pub struct Reconciler<R = NativeRuntime> {
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
+    resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1689,6 +1817,7 @@ impl Reconciler<NativeRuntime> {
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            resource_authority: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1911,6 +2040,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            resource_authority: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -10547,6 +10677,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         adopted: bool,
     ) -> Result<()> {
+        if !self.observe_resource_retirement(subject, member, observation)? {
+            return Ok(());
+        }
         // An end is recorded only once the member knows the seat is still placed here; a
         // runtime that is alive is recorded wherever the seat is placed.
         if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
@@ -12063,12 +12196,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     {
                         return Ok(true);
                     }
-                    // Agentless work has no worker claim to open its execution interval. Admit every
-                    // eligible agentless step automatically before materializing declarations or waiting
-                    // on gates, so its timeout and lifecycle are real instead of remaining `ready`
-                    // forever. Nested missions need the persisted parent transition before their children
-                    // can be evaluated; other agentless work can materialize in this same pass.
-                    if view.status == "ready" && view.agentless {
+                    // Materialize first so only a step's actual lane-bound payload members defer
+                    // execution until release. Inheriting a run's lane does not turn programs,
+                    // after-run waits, or agentless gates into queued payload work.
+                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
+                    // Agentless work has no worker claim to open its execution interval. Nested
+                    // missions need the persisted parent transition before evaluating their children.
+                    if view.status == "ready" && view.agentless && !self.resource_step_has_lane(view)?
+                    {
                         let reason = awaited_run(run, &step, view)?
                             .map(|after| format!("waiting for `{after}` to complete"));
                         changed |= self.store.set_step_state_unless_terminal(
@@ -12080,7 +12215,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
-                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
+                    if view.status == "ready" && self.resource_step_has_lane(view)?
+                        && self.resource_step_elapsed(view)?.is_some()
+                    {
+                        changed |= self.store.set_step_state_unless_terminal(&view.subject, "working", None)?;
+                    }
                     if let Some(reason) = self.step_declaration_failure(&view.subject)? {
                         changed |=
                             self.store
@@ -12790,6 +12929,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             } else {
                 self.note_mission_capacity_holders(&mission)?;
                 let selector = step_run_selector(view);
+                let idempotency_key = format!(
+                    "uses-mission:{}:{}:mission/{mission}@{revision}", view.subject, view.attempt,
+                );
+                let child_subject = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+                let context = self.store.resource_context_for_run(&run.subject)?;
+                if let Some(context) = &context {
+                    let grant = context.grant.as_ref().context("inherited resource context lacks grant")?;
+                    self.store.attach_resource_child(grant, &context.request.owner, &child_subject)?;
+                }
                 let child = match self.store.create_child_mission_run(
                     &MissionRunRequest {
                         mission: mission.clone(),
@@ -12798,10 +12946,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         requester: Some(run.requester.clone()),
                         mode: Some(run.mode.clone()),
                         inputs: BTreeMap::new(),
-                        idempotency_key: format!(
-                            "uses-mission:{}:{}:mission/{mission}@{revision}",
-                            view.subject, view.attempt
-                        ),
+                        idempotency_key,
                     },
                     run,
                     &view.subject,
@@ -12813,11 +12958,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                         smallclaims::touched::note_read(|| child.subject.clone());
                         child
                     }
-                    Err(error) if error.code == "mission-run-capacity" => {
-                        self.note_mission_capacity_holders(&mission)?;
-                        return Ok((false, UsedMissionOutcome::Pending));
+                    Err(error) => {
+                        if let Some(context) = &context {
+                            let grant = context.grant.as_ref().context("inherited resource context lacks grant")?;
+                            self.store.reject_resource_child(grant, &context.request.owner, &child_subject, &error)?;
+                        }
+                        if error.code == "mission-run-capacity" {
+                            self.note_mission_capacity_holders(&mission)?;
+                            return Ok((false, UsedMissionOutcome::Pending));
+                        }
+                        return Err(error.into());
                     }
-                    Err(error) => return Err(error.into()),
                 };
                 (child, true)
             };
@@ -15104,6 +15255,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+                program::Wait::Resource { operation, payload, cancelled } =>
+                    self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
         }
         Ok(changed)
@@ -15125,7 +15278,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
             self.note_mission_capacity_holders(mission)?;
-            return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
@@ -15164,8 +15317,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         mission: &str,
         input: &BTreeMap<String, String>,
         idempotency_key: String,
+        resource: Option<&crate::store::resource_membership::Membership>,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
-        self.store.create_program_child_mission_run(
+        let inherited = if resource.is_none() {
+            self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?
+        } else { None };
+        let context = resource.or(inherited.as_ref());
+        let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        if let Some(context) = context {
+            let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
+            self.store.attach_resource_child(grant, &context.request.owner, &child).map_err(smallclaims::error::typed)?;
+        }
+        let result = self.store.create_program_child_mission_run(
             &MissionRunRequest {
                 mission: mission.to_owned(),
                 revision: None,
@@ -15177,7 +15340,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             run,
             step,
-        )
+        );
+        if let (Some(context), Err(error)) = (context, &result) {
+            let grant = context.grant.as_ref().expect("context grant checked before child creation");
+            self.store.reject_resource_child(grant, &context.request.owner, &child, error).map_err(smallclaims::error::typed)?;
+        }
+        result
     }
 
     /// A child run's end as its program receives it: `{run, status: 'completed', products?}`
@@ -15337,6 +15505,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = Some(view.subject.clone());
             if let Some(member) = subject.member.as_mut() {
+                self.bind_resource_lane(run, step, view, member, &subject.subject)?;
                 let workspace = PathBuf::from(&member.workspace);
                 if workspace.is_relative() {
                     member.workspace = Path::new(&run.workspace)
@@ -16441,6 +16610,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         let timeout = timeout.saturating_add(view.timeout_extension_ms);
+        if self.resource_step_has_lane(view)? {
+            let Some(elapsed) = self.resource_step_elapsed(view)? else { return Ok(false); };
+            if elapsed >= u128::from(timeout) { return Ok(true); }
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                self.arm_step_deadline(&handle, &view.subject, (u128::from(timeout) - elapsed).max(1) as u64);
+            }
+            return Ok(false);
+        }
         let elapsed = view.execution_elapsed_ms;
         if elapsed >= timeout as u128 {
             return Ok(true);
@@ -51714,7 +51891,9 @@ mission "work-alert" state="ready" {
                 harness_incarnation_key("worker-one")
             )
         );
-        assert_eq!(messages[0].tags[1], format!("mission-run:{}", run.subject));
+        assert!(messages[0].tags.contains(&format!("mission-run:{}", run.subject)));
+        assert_eq!(messages[0].tags.iter()
+            .filter(|tag| tag.starts_with("fractal-invocation:")).count(), 1);
         assert!(messages[0].tags.contains(&"st3-wake-attempt:1".into()));
         assert!(
             messages[0]

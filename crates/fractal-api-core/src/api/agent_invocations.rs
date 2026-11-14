@@ -23,6 +23,7 @@ pub async fn input(
     bound: Option<BoundActor>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     session: Option<Extension<ClientSession>>,
+    local_peer: Option<Extension<LocalPeer>>,
     Json(request): Json<InputRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = bound.as_ref().map(BoundActor::actor)
@@ -51,6 +52,22 @@ pub async fn input(
     {
         return Err(ApiError { status: StatusCode::CONFLICT, code: "invocation-input-mismatch".into(),
             message: "input must match an exact invocation receipt's agent, incarnation and message".into(),
+            details: Box::default() });
+    }
+    // Agent identity alone survives restarts. Reuse the kernel-generation and
+    // daemon-owned runtime provenance guard used for helper launch authority;
+    // never accept the requested incarnation as proof of the caller's process.
+    let process = local_peer.as_ref().and_then(|Extension(peer)| peer.peer_process.as_ref())
+        .or_else(|| session.as_ref().and_then(|Extension(session)| session.peer_process.as_ref()));
+    let incarnation = state.store.verify_helper_launcher_peer(&request.agent, process)
+        .map_err(|_| ApiError { status: StatusCode::FORBIDDEN,
+            code: "invocation-input-caller-incarnation".into(),
+            message: "native input requires the exact live invocation process".into(),
+            details: Box::default() })?;
+    if incarnation != request.incarnation {
+        return Err(ApiError { status: StatusCode::FORBIDDEN,
+            code: "invocation-input-caller-incarnation".into(),
+            message: "native input requires the exact live invocation process".into(),
             details: Box::default() });
     }
     // Retry the original immutable capture rather than replacing it with a later envelope.
@@ -134,7 +151,9 @@ fn retained(store: &Store, agent: &str, invocation: &str, kind: &str, hash: &str
             && claim.body["fields"]["kind"] == kind
             && (claim.body["fields"]["sha256"] == hash || claim.body["fields"]["artifact"]["sha256"] == hash))
         .ok_or_else(|| ApiError::not_found("invocation artifact does not exist"))?;
-    if latest.body["fields"]["status"] != "retained" {
+    if latest.body["fields"]["status"] != "retained"
+        || invocation_artifacts::is_deleted(store, invocation, kind, hash).map_err(ApiError::internal)?
+    {
         return Err(ApiError {status:StatusCode::GONE,code:"artifact-deleted".into(),
             message:"the invocation artifact reference was deleted".into(),details:Box::default()});
     }

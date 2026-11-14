@@ -969,9 +969,9 @@ impl RuntimeStartsStore for Store {
     }
 
     fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()> {
-        self.connection.batched(|tx| -> Result<()> {
+        let failed = self.connection.batched(|tx| -> Result<bool> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if operation.finished { return Ok(()); }
+            if operation.finished { return Ok(false); }
             let mut result = result.clone();
             closed_runtime_start_result(&operation, self.origin(), &mut result)?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-h7ab00a9247a2 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,result=?2,
@@ -986,8 +986,13 @@ impl RuntimeStartsStore for Store {
                 append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
                     &operation.body, InvocationPhase::ProducerClosed, Some(&result))?;
             }
-            Ok(())
+            Ok(result["error"].is_string())
         }).map_err(|error| anyhow::anyhow!("{error}"))??;
+        // Any failed launch ends its invocation span, including a producer left open:
+        // the owner map is daemon-local and would otherwise leak the entry.
+        if failed {
+            self.finish_invocation_trace(&format!("invocation/{id}"), true);
+        }
         Ok(())
     }
 
@@ -1237,6 +1242,27 @@ mod tests {
             assert_eq!(receipt.error.as_deref(), Some("producer closed without a verified launch"));
             assert_eq!(receipt.trace_context, Some(serde_json::to_value(&trace).unwrap()));
         }
+        assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
+
+    #[test]
+    fn a_failed_launch_with_an_open_producer_still_ends_its_invocation_trace() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/open-producer-failure";
+        let mut start = operation("open-producer-failure", agent, None);
+        let invocation = format!("invocation/{}", start.id);
+        let trace = store.start_invocation_trace(&invocation, agent, &[]);
+        start.body["trace_context"] = serde_json::to_value(&trace).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "error": "launch entered the backend and failed", "producer_closed": false
+        })).unwrap();
+        let receipts = store.invocation_receipts(&invocation).unwrap();
+        let failed = receipts.iter().find(|receipt| receipt.phase == InvocationPhase::StartupFailed).unwrap();
+        assert_eq!(failed.error.as_deref(), Some("launch entered the backend and failed"));
+        assert!(receipts.iter().all(|receipt| receipt.phase != InvocationPhase::ProducerClosed));
+        // The daemon-local span owner is gone: a later start of the same invocation identity
+        // would begin a fresh trace instead of reusing the leaked entry.
         assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
     }
 

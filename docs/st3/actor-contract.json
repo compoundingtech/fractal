@@ -1254,6 +1254,42 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st hosts hold": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st hosts ls": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st hosts recover": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st hosts release": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st import ls": {
         "actor": "none",
         "accepts_person": false,

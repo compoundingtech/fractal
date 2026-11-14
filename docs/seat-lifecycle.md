@@ -159,6 +159,8 @@ live span owners through their exact ending evidence; daemon replacement ends th
 host segment without deleting the durable correlation. Missing exporters or
 sampling do not remove invocation records. Environment delivery is not proof that
 an unsupported provider emitted child spans.
+Compatible revision carries preserve the original turn and close its trace when
+the current successor's fenced completion, failure or release commits.
 
 A process invocation is not a later work turn on a standing seat. The native
 wake boundary persists a separate `invocation/turn-<identity digest>` before
@@ -217,6 +219,9 @@ Non-message lifecycle keys, a tag alone, candidate incarnations, current session
 and owning-person identities cannot authorize capture.
 Retries preserve the first capture's metadata; a different envelope for the same
 invocation message conflicts.
+Capture also requires a live kernel connector-generation witness descending from
+that incarnation's daemon-recorded runtime process; historical receipt fields
+alone do not attest to another incarnation's envelope.
 
 Terminal transcript capture runs at the reconciler's runtime observation writer.
 An `exited` or `stopped` observation is necessary but insufficient: the admitted
@@ -250,6 +255,8 @@ as person authority.
 reference, not another invocation's shared bytes. Reads are private/no-store;
 deleted or expired references return Gone.
 
+Deletion permanently revokes the invocation/kind/hash reference, including later
+reminder captures of the same redacted bytes.
 
 The graph retains claimed work and pending mail.
 
@@ -838,3 +845,29 @@ FROM local_runtime_starts;
 Compare two timestamped samples: `delta(operations)/elapsed` is the admission rate and `delta(payload_bytes)/elapsed` is the measured payload growth rate. Include SQLite row/index/page overhead and other tables by separately tracking the database plus WAL disk allocation. Begin with the first deployment member and add the other member-specific manifests; do not infer an unmeasured fleet-wide rate. Evidence pins can be released, but this retained ledger continues to grow.
 
 Operations rolls forward-only storage changes separately: deploy the first merged storage upgrade alone, verify it and settle that cut, then deploy the other as its own cut. Do not combine the version-19/version-20 upgrades in one roll. Operations confirmed that production members never ran these unreleased draft builds; if a draft-opened store is discovered, preserve it and roll forward only.
+
+## Finite execution containment
+
+Finite resource executions use `ExecRuntime::spawn_in_lane_checked`, not an
+ambient environment variable that claims a parent lane. A named host policy
+selects a shared slice; each execution generation has its own scope. Numeric
+capacity is optional and describes the aggregate policy envelope. The runtime
+verifies effective limits and physical placement before opening an inherited
+stdin payload gate, then persists `payloadReleasedAtUnixMs` as the execution
+clock boundary. A launch error after producer creation retains custody until
+exact-generation cleanup is proved.
+
+`wait_for_exit` uses Linux pidfd or Darwin kqueue process notifications, without
+holding the shared child-map lock. Finite stdout and stderr are retained
+separately and read only for the matching execution generation. Leader exit is
+not retirement: `retire_if` fences the generation, requests termination, waits
+for the leader and uses the systemd whole-scope empty proof before acknowledging
+release. An old cancellation cannot stop a replacement, including when the old
+leader already exited but descendants remain.
+
+Darwin reports logical-only coverage. Requests requiring whole-tree resource
+enforcement receive `UnsupportedCoverage` before payload release. Detached
+process groups cannot prove escaped descendants absent; uncertain retirement
+retains custody instead of automatically releasing a logical permit. These
+cooperative same-user controls are not a security sandbox.
+
