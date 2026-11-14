@@ -2006,7 +2006,7 @@ async fn legacy_attention_mutation_requires_source_migration() {
     let withdrawn = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "withdraw",
             &request.subject,
             "--reason",
@@ -2018,7 +2018,7 @@ async fn legacy_attention_mutation_requires_source_migration() {
     .await;
     assert!(!withdrawn.status.success());
     assert!(String::from_utf8_lossy(&withdrawn.stderr).contains("attention-migrated"));
-    let current = value(&run_cli(&socket, &["attention", "ls", "--as", "person/alex"]).await);
+    let current = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/alex"]).await);
     assert!(current["value"]["items"].as_array().unwrap().is_empty());
     server.abort();
 }
@@ -2069,24 +2069,24 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
         value(&run_cli(&socket, &ask_args).await)["subject"],
         subject
     );
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     assert_eq!(listed["value"]["items"][0]["source_id"], subject);
     assert_eq!(listed["value"]["items"][0]["attention_kind"], "person-step");
     let attention_id = listed["value"]["items"][0]["id"].as_str().unwrap();
-    let printed = run_cli_human(&socket, &["attention", "ls", "--as", "person/avery"]).await;
+    let printed = run_cli_human(&socket, &["alerts", "ls", "--as", "person/avery"]).await;
     assert!(printed.status.success(), "{printed:?}");
     assert!(String::from_utf8_lossy(&printed.stdout).contains(attention_id));
     let canonical = value(
         &run_cli(
             &socket,
-            &["attention", "show", subject, "--as", "person/avery"],
+            &["alerts", "show", subject, "--as", "person/avery"],
         )
         .await,
     );
     let aliased = value(
         &run_cli(
             &socket,
-            &["attention", "show", attention_id, "--as", "person/avery"],
+            &["alerts", "show", attention_id, "--as", "person/avery"],
         )
         .await,
     );
@@ -2095,7 +2095,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
     for target in [attention_id, subject] {
         let refused = run_cli(
             &socket,
-            &["attention", "show", target, "--as", "person/robin"],
+            &["alerts", "show", target, "--as", "person/robin"],
         )
         .await;
         assert!(!refused.status.success(), "{refused:?}");
@@ -2131,13 +2131,13 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
     for target in [attention_id, subject] {
         let refused = run_cli(
             &socket,
-            &["attention", "show", target, "--as", "person/avery"],
+            &["alerts", "show", target, "--as", "person/avery"],
         )
         .await;
         assert!(!refused.status.success(), "{refused:?}");
         assert!(String::from_utf8_lossy(&refused.stderr).contains("not currently actionable"));
     }
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     assert!(listed["value"]["items"].as_array().unwrap().is_empty());
     assert!(
         !store
@@ -2195,12 +2195,12 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
         )
         .await,
     );
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     let attention_id = listed["value"]["items"][0]["id"].as_str().unwrap();
     let sent = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "discuss",
             attention_id,
             "--as",
@@ -2230,7 +2230,7 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let nobody = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "discuss",
             attention_id,
             "--as",
@@ -2316,7 +2316,7 @@ async fn cli_structured_choice_returns_the_selected_option_as_data() {
         ask["goals"][0],
         "How should an oversized missions tree load?"
     );
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     let item = &listed["value"]["items"][0];
     assert_eq!(item["source_id"], subject);
     assert_eq!(item["request"]["type"], "choice");
@@ -2454,7 +2454,7 @@ mission "release-report" state="ready" {
     let posted = value(&update("person/avery").await);
     let subject = posted["subject"].as_str().unwrap().to_owned();
 
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     let item = &listed["value"]["items"][0];
     assert_eq!(item["source_id"], subject);
     assert_eq!(item["attention_kind"], "person-step");
@@ -2477,7 +2477,7 @@ mission "release-report" state="ready" {
             &run_cli_with_agent_env(
                 &socket,
                 &actor,
-                &["attention", "show", target, "--as", "person/avery"],
+                &["alerts", "show", target, "--as", "person/avery"],
             )
             .await,
         );
@@ -2498,7 +2498,7 @@ mission "release-report" state="ready" {
     let opened = run_cli_human(
         &socket,
         &[
-            "attention",
+            "alerts",
             "show",
             if public_id { attention_id } else { &subject },
             "--as",
@@ -2517,12 +2517,12 @@ mission "release-report" state="ready" {
         text.contains("Read: this update has left your home."),
         "{text}"
     );
-    let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
+    let listed = value(&run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await);
     assert_eq!(listed["value"]["items"], serde_json::json!([]));
     for target in [attention_id, subject.as_str()] {
         let refused = run_cli(
             &socket,
-            &["attention", "show", target, "--as", "person/avery"],
+            &["alerts", "show", target, "--as", "person/avery"],
         )
         .await;
         assert!(!refused.status.success(), "{refused:?}");
@@ -2700,7 +2700,6 @@ mission "cli/child" state="ready" {
 
     for arguments in [
         vec!["alerts", "ls", "--as", "person/alex"],
-        vec!["attention", "ls", "--as", "person/alex"],
         vec!["agents", "ls"],
         vec!["agents", "tree"],
         vec!["work", "ls"],
@@ -2879,8 +2878,6 @@ mission "cli/child" state="ready" {
         (vec!["activity", "--limit", "10"], "ACTIVITY"),
         (vec!["devices", "--as", "person/alex", "--all"], "DEVICES"),
         (vec!["alerts", "ls", "--as", "person/alex"], "ALERTS FOR"),
-        // The older name still works.
-        (vec!["attention", "ls", "--as", "person/alex"], "ALERTS FOR"),
         (vec!["agents", "ls"], "AGENTS"),
         (vec!["agents", "tree"], "AGENT TREE"),
         (vec!["work", "ls"], "WORK"),

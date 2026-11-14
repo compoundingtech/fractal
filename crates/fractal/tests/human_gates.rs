@@ -219,7 +219,7 @@ async fn act(
     .await
 }
 
-/// `POST /v1/reviews/{target}`, the route `st attention approve|reject` uses.
+/// `POST /v1/reviews/{target}`, the route `st alerts approve|reject` uses.
 async fn review(
     app: &axum::Router,
     target: &str,
@@ -498,7 +498,7 @@ async fn a_gate_asked_again_refuses_the_old_card_and_takes_the_current_one() {
     let current_id = current.0["id"].as_str().unwrap();
     let stale = run_cli(
         &socket,
-        &["attention", "show", old_id, "--as", "person/avery"],
+        &["alerts", "show", old_id, "--as", "person/avery"],
     )
     .await;
     assert!(!stale.status.success(), "{stale:?}");
@@ -508,7 +508,7 @@ async fn a_gate_asked_again_refuses_the_old_card_and_takes_the_current_one() {
             &socket,
             &[
                 "--json",
-                "attention",
+                "alerts",
                 "show",
                 target,
                 "--as",
@@ -587,8 +587,8 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
 
-    // `st attention ls` leads each card with its attention ID; that is what a person copies.
-    let listed = run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await;
+    // `st alerts ls` leads each card with its attention ID; that is what a person copies.
+    let listed = run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await;
     assert!(listed.status.success(), "{listed:?}");
     let listed = String::from_utf8(listed.stdout).unwrap();
     let (seen, _) = card(&app, "person/avery", &step).await.expect("no card");
@@ -597,7 +597,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
 
     let approved = run_cli(
         &socket,
-        &["attention", "approve", id, "--as", "person/someone-else"],
+        &["alerts", "approve", id, "--as", "person/someone-else"],
     )
     .await;
     assert!(!approved.status.success());
@@ -610,7 +610,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
         &socket,
         &[
             "--json",
-            "attention",
+            "alerts",
             "approve",
             id,
             "--as",
@@ -636,7 +636,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     let unknown = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "approve",
             "mission/release",
             "--as",
@@ -655,7 +655,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     let again = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "reject",
             id,
             "--as",
@@ -671,7 +671,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     let again = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "reject",
             &step,
             "--as",
@@ -795,7 +795,7 @@ async fn loop_human_gates_are_listed_approved_and_rejected_like_step_gates() {
     let rejected = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "reject",
             &round_owner,
             "--as",
@@ -976,7 +976,7 @@ async fn each_item_of_a_for_each_loop_takes_its_own_answer() {
     let approved = run_cli(
         &socket,
         &[
-            "attention",
+            "alerts",
             "approve",
             seen["id"].as_str().unwrap(),
             "--as",

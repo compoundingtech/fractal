@@ -12,42 +12,38 @@ it is not the request or its lifecycle.
 
 Do not stop unrelated work while waiting for an answer.
 
-## Supported recovery: publish one explicit attention request
+## Supported recovery: ask through person work
 
 The agent names what it needs, what the answer unblocks, and what it did instead:
 
 ```sh
 blocked_step=step-run/GENERATION_ID/publish
-st attention request \
+fractal work ask \
   --for person/operator \
   --title 'Choose the catalog export format' \
   --reason 'CSV or JSON is needed to unblock the publish step. Input validation is complete, and I am continuing the independent checksum report meanwhile.' \
-  --severity warning \
-  --target "$blocked_step" \
+  --step "$blocked_step" \
   --as agent/example/worker \
   --idempotency-key example-catalog-export-format
 ```
 
-Replace `GENERATION_ID` with the exact value printed by `st work ls`; it is a placeholder, not a
+Replace `GENERATION_ID` with the exact value printed by `fractal work ls`; it is a placeholder, not a
 literal graph ID.
 
-The stable idempotency key makes retries return the same attention request instead of creating a
-pile of duplicates. The request appears in `person/operator`'s attention inbox; it is not a modal
-prompt and it does not automatically block other graph work.
+The stable idempotency key makes retries return the same ask instead of creating duplicates.
+The ask appears in `person/operator`'s alerts and blocks only the named publish step until answered.
+Independent work can continue.
 
-Record the material status and continue everything that does not depend on the choice:
+Inspect the waiting step and continue everything that does not depend on the choice:
 
 ```sh
-st work progress "$blocked_step" \
-  --as agent/example/worker \
-  --summary 'Requested the export-format decision; validation is complete and checksum work continues.'
-st work ls --as agent/example/worker
+fractal work ls --as agent/example/worker
 ```
 
-When the person resolves the request, the agent reads the durable outcome and resumes only the
-dependent publish work. The attention item, its target, and its resolution remain graph history.
+When the person answers the ask, the agent reads the durable outcome and resumes only the
+dependent publish work. The ask and its answer remain graph history.
 
 When the mission author already knows a person must decide, declare a human gate in the mission
 instead, as [`human-review.kdl`](human-review.kdl) does. The decision then appears in the same
 attention inbox without any agent asking for it. An attention request is for a need that the plan
-did not foresee.
+alerts without any agent asking for it. An ask is for a need that the plan did not foresee.

@@ -1995,7 +1995,7 @@ mod tests {
                 label: "resolve".into(),
                 argv: vec![
                     "st3".into(),
-                    "attention".into(),
+                    "alerts".into(),
                     "resolve".into(),
                     "attention/fabric".into(),
                     "--reason".into(),
@@ -2020,7 +2020,7 @@ mod tests {
         assert!(
             rendered.contains("inspect: fractal alerts show attention/fabric --as person/alex")
         );
-        assert!(rendered.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert!(rendered.contains("resolve: fractal alerts resolve attention/fabric --reason 'It is fixed'"));
         assert_eq!(item.actions[0].argv[0], "st3");
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
@@ -2030,7 +2030,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&item).unwrap()["detail"],
             "The queue did not recover. Inspect `st subject show daemon/node`.");
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
-        assert!(shown.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert!(shown.contains("resolve: fractal alerts resolve attention/fabric --reason 'It is fixed'"));
     }
 
     #[test]
