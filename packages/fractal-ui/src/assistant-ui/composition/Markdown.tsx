@@ -1,21 +1,24 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Link, VisuallyHidden } from 'react-aria-components'
+import { Button, Link, Menu, MenuItem, MenuTrigger, Popover, VisuallyHidden } from 'react-aria-components'
 import { HoverCard } from '../entity/HoverCard'
 import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
-import type { Components, ExtraProps } from 'react-markdown'
+import type { Components, ExtraProps, Options as MarkdownOptions } from 'react-markdown'
 import type { Root } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
+import { MarkdownLinkPreviewContext } from './markdownLinkPreview.ts'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
+import { codeFenceLabel, diffStats, isDiffLanguage } from './markdown-code'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
 import { filteredMarkdownText, markdownTreeText, remarkCaptureTree, remarkHtmlPolicy, safeLinkHref, type MarkdownParsedTree } from './markdown-html-policy'
+import { loadPulldown, pulldownReady, remarkLinearAutolinks, remarkPulldown } from './markdown-pulldown'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
@@ -31,6 +34,7 @@ export interface MarkdownImageOptions {
   readonly renderInlineReference?: InlineReferenceRenderer
 }
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
+export { MarkdownLinkPreviewContext, type MarkdownLinkPreview } from './markdownLinkPreview.ts'
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
 /**
  * `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes.
@@ -38,8 +42,12 @@ export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_
  */
 export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
-const REMARK_PLUGINS = [remarkGfm, remarkHtmlPolicy]
-const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkHtmlPolicy, remarkHardBreaks]
+const REMARK_PLUGINS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy]
+const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy, remarkHardBreaks]
+// pulldown-cmark replaces only the parse step; GFM tables, task lists, strikethrough and footnotes are its own options.
+type RemarkPlugins = NonNullable<MarkdownOptions['remarkPlugins']>
+const PULLDOWN_PLUGINS = [remarkPulldown, remarkHtmlPolicy] as RemarkPlugins
+const PULLDOWN_PLUGINS_HARD_BREAKS = [remarkPulldown, remarkHtmlPolicy, remarkHardBreaks] as RemarkPlugins
 const STREAMING_PLUGINS = [markStreamingTail]
 type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone' | 'hardBreaks'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
@@ -91,9 +99,9 @@ export function markdownNeedsFallback(source: string): boolean {
   }
   return count > DELIMITER_LIMIT
 }
-const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
+const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks, pulldown }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean; readonly pulldown: boolean }) {
   const parsed = React.useMemo<MarkdownParsedTree>(() => ({}), [source])
-  const plugins: NonNullable<React.ComponentProps<typeof ReactMarkdown>['remarkPlugins']> = [...(hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS), [remarkCaptureTree, parsed]]
+  const plugins: RemarkPlugins = [...(pulldown ? (hardBreaks ? PULLDOWN_PLUGINS_HARD_BREAKS : PULLDOWN_PLUGINS) : hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS), [remarkCaptureTree, parsed]]
   if (markdownNeedsFallback(source)) return <PlainBlock text={filteredMarkdownText(source)} />
   return <BlockFallback source={source} parsed={parsed}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={plugins} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
 })
@@ -105,8 +113,11 @@ export const Markdown = React.memo(function Markdown({ text: markdown, streaming
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const text = React.useMemo(() => limitNesting(markdownSource(markdown)), [markdown])
   const blocks = React.useMemo(() => splitMarkdownBlocks(text), [text])
+  // One parser for this mount's life: the WebAssembly one only once it is ready, so nothing re-renders when it arrives.
+  const [pulldown] = React.useState(pulldownReady)
+  React.useEffect(() => { void loadPulldown() }, [])
   const tail = blocks.length - 1
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} data-parser={pulldown ? 'pulldown' : 'remark'} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} pulldown={pulldown} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -123,10 +134,15 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 }
 
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
-  if (href === undefined || href === '') return <>{children}</>
+  // Hooks first, every render; then an empty or unsafe href (the URL transform empties those) renders as its words.
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
+  const preview = React.useContext(MarkdownLinkPreviewContext)
+  if (href === undefined || href === '') return <>{children}</>
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const linkWith = (linkTitle: string | undefined) => <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={linkTitle} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const previewed = !imageLink && href !== undefined && preview !== undefined ? preview(href, linkWith(undefined)) : undefined
+  if (previewed !== undefined) return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{previewed}</ReferenceContext.Provider>
+  const link = linkWith(title)
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -142,15 +158,41 @@ function renderReference(path: string, options: ReferenceOptions): React.ReactNo
   return resource === undefined ? undefined : <ResourceChip resource={resource} onOpen={options.onOpenResource} />
 }
 
+/** Maximal path-shaped tokens have no ambiguous slash partition: each source character is scanned once. */
+const PATH_TOKEN = /[\w.-]+(?:\/[\w.-]+)*/g
 /** Only text leaves are substituted: parsed emphasis, links, and list structure stay intact. */
 function InlineText({ children }: { children: React.ReactNode }) {
   const references = React.useContext(ReferenceContext)
   return React.Children.map(children, child => {
-    if (typeof child !== 'string') return child
-    return child.split(/(\b(?:[\w.-]+\/)+[\w.-]+\.[\w]+\b)/g).map((part, index) => {
-      const rendered = renderReference(part, references)
-      return <React.Fragment key={index}>{rendered === undefined ? part : rendered}</React.Fragment>
-    })
+    if (typeof child !== 'string' || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
+    const parts: React.ReactNode[] = []
+    let at = 0
+    for (const match of child.matchAll(PATH_TOKEN)) {
+      const token = match[0]
+      const firstSlash = token.indexOf('/')
+      if (firstSlash === -1) continue
+      let segmentStart = firstSlash + 1
+      let end = -1
+      for (let index = segmentStart; index < token.length; index++) {
+        if (token[index] === '/') { segmentStart = index + 1; continue }
+        if (token[index] !== '.' || index === segmentStart || !/\w/.test(token[index + 1] ?? '')) continue
+        let wordEnd = index + 1
+        while (wordEnd < token.length && /\w/.test(token[wordEnd]!)) wordEnd++
+        end = wordEnd
+        index = wordEnd - 1
+      }
+      const start = token.search(/\w/)
+      const pathSlash = token.indexOf('/', start)
+      if (end === -1 || start === -1 || pathSlash === -1 || pathSlash >= end) continue
+      const index = match.index + start
+      if (index > at) parts.push(child.slice(at, index))
+      const path = token.slice(start, end)
+      const rendered = renderReference(path, references)
+      parts.push(<React.Fragment key={index}>{rendered === undefined ? path : rendered}</React.Fragment>)
+      at = match.index + end
+    }
+    if (at < child.length) parts.push(child.slice(at))
+    return parts
   })
 }
 
@@ -247,17 +289,47 @@ export function HighlightedSource({ code, language }: { code: string; language: 
   })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
-const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
+/** A diff's body. The kit DiffView (@pierre/diffs) takes over here once it lands; until then the highlighter draws it. */
+function DiffBody({ code }: { readonly code: string }) {
+  return <HighlightedSource code={code} language="diff" />
+}
+
+/**
+ * A fenced block: a header naming the file (with Copy path) and the language, a diff's +added −removed counts, a Copy
+ * button shown on hover or focus, and one ⋯ menu holding Wrap, Copy and, when a host opens files, Open.
+ */
+const CodeBlock = React.memo(function CodeBlock({ code, language: info, meta }: { code: string; language: string; meta?: string | null }) {
+  const { language, path } = codeFenceLabel(info, meta)
+  const diff = isDiffLanguage(language)
+  const stats = diff ? diffStats(code) : undefined
   const [wrap, setWrap] = React.useState(false)
+  const [hovered, setHovered] = React.useState(false)
+  const { onOpenResource } = React.useContext(ReferenceContext)
   const { state: copy, copied: copiedCurrentCode, copy: copyCode, tooltip, announcement } = useCopyFeedback(code, () => navigator.clipboard.writeText(code))
-  return <div data-testid="markdown-code-block" data-language={language || 'text'} data-wrap={wrap} data-copy-state={copy.tag} {...stylex.props(styles.codeBlock, React.useContext(InListItem) && styles.itemBlock)}>
+  const pathCopy = useCopyFeedback(path ?? '', () => navigator.clipboard.writeText(path ?? ''))
+  return <div data-testid="markdown-code-block" data-language={language} data-wrap={wrap} data-copy-state={copy.tag} onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)} onFocus={() => setHovered(true)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHovered(false) }} {...stylex.props(styles.codeBlock, React.useContext(InListItem) && styles.itemBlock)}>
     <div {...stylex.props(styles.codeToolbar)}>
-      <span data-testid="markdown-code-language" {...stylex.props(styles.codeLanguage)}>{language || 'text'}</span>
-      <Button aria-label="Wrap code" aria-pressed={wrap} onPress={() => setWrap(value => !value)} {...stylex.props(styles.codeButton, wrap && styles.codeButtonSelected)}>Wrap</Button>
+      {path !== undefined && <span {...stylex.props(styles.codePathGroup)}>
+        <span data-testid="markdown-code-path" title={path} {...stylex.props(styles.codePath)}>{path}</span>
+        <CopyTooltip {...pathCopy.tooltip('Copy path')}><Button aria-label={pathCopy.copied ? 'Copy path: Copied' : 'Copy path'} onPress={pathCopy.copy} {...stylex.props(styles.codeIconButton)}><Icon name={pathCopy.copied ? 'check' : 'copy'} size={12} /></Button></CopyTooltip>
+      </span>}
+      <span data-testid="markdown-code-language" {...stylex.props(styles.codeLanguage)}>{language}</span>
+      {stats !== undefined && <span data-testid="markdown-code-diffstat" aria-label={`${stats.added} lines added, ${stats.removed} removed`} {...stylex.props(styles.diffStat)}><span aria-hidden="true" {...stylex.props(styles.diffMark, styles.diffAdded)} />+{stats.added} <span aria-hidden="true" {...stylex.props(styles.diffMark, styles.diffRemoved)} />−{stats.removed}</span>}
+      <span {...stylex.props(styles.codeSpacer)} />
       {/* No isDisabled while copying: a disabled button drops keyboard focus; the hook already ignores repeat presses. */}
-      <CopyTooltip {...tooltip('Copy code')}><Button aria-label={copiedCurrentCode ? 'Copy code: Copied' : copy.tag === 'copying' ? 'Copy code: Copying…' : 'Copy code'} onPress={copyCode} {...stylex.props(styles.codeButton)}><Icon name={copiedCurrentCode ? 'check' : 'copy'} size={14} /><span>{copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'}</span></Button></CopyTooltip>
+      <CopyTooltip {...tooltip('Copy code')}><Button aria-label={copiedCurrentCode ? 'Copy code: Copied' : copy.tag === 'copying' ? 'Copy code: Copying…' : 'Copy code'} onPress={copyCode} {...stylex.props(styles.codeButton, !(hovered || copiedCurrentCode || copy.tag === 'copying') && styles.codeHidden)}><Icon name={copiedCurrentCode ? 'check' : 'copy'} size={14} /><span>{copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'}</span></Button></CopyTooltip>
+      <MenuTrigger>
+        <Button aria-label="Code actions" {...stylex.props(styles.codeIconButton)}><Icon name="more" size={12} /></Button>
+        <Popover placement="bottom end" {...stylex.props(styles.codeMenuPopover)}>
+          <Menu aria-label="Code actions" onAction={key => { if (key === 'wrap') setWrap(value => !value); else if (key === 'copy') copyCode(); else if (key === 'open' && path !== undefined) onOpenResource?.(path) }} {...stylex.props(styles.codeMenu)}>
+            <MenuItem id="wrap" {...stylex.props(styles.codeMenuItem)}>{wrap ? 'Don\u2019t wrap lines' : 'Wrap lines'}</MenuItem>
+            <MenuItem id="copy" {...stylex.props(styles.codeMenuItem)}>Copy code</MenuItem>
+            {path !== undefined && onOpenResource !== undefined && <MenuItem id="open" {...stylex.props(styles.codeMenuItem)}>Open {path}</MenuItem>}
+          </Menu>
+        </Popover>
+      </MenuTrigger>
     </div>
-    <pre data-testid="markdown-code" role="group" aria-label={`Code, ${language || 'text'}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}><HighlightedSource code={code} language={language} /></code></pre>
+    <pre data-testid="markdown-code" role="group" aria-label={`Code, ${path ?? language}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}>{diff ? <DiffBody code={code} /> : <HighlightedSource code={code} language={info === '' && path === undefined ? '' : language} />}</code></pre>
     <span role="status" aria-live="polite" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden>{copy.tag === 'copied' && !copiedCurrentCode ? 'Code has changed since the last copy.' : announcement}</VisuallyHidden>}</span>
   </div>
 })
@@ -268,7 +340,8 @@ function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
   const code = codeNode.children.map(child => child.type === 'text' ? child.value : '').join('')
   const classes = codeNode.properties.className
   const language = /(?:^|\s)language-([^\s]+)/.exec(Array.isArray(classes) ? classes.join(' ') : String(classes ?? ''))?.[1] ?? ''
-  return <CodeBlock code={code} language={language} />
+  const meta = (codeNode.data as { meta?: string | null } | undefined)?.meta
+  return <CodeBlock code={code} language={language} meta={meta} />
 }
 
 const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => function Heading({ children }: React.ComponentProps<'h3'>) {
@@ -450,7 +523,8 @@ const styles = stylex.create({
   heading: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
   list: { margin: 0, paddingInlineStart: g.textColumn, listStylePosition: 'outside' },
   unorderedList: { listStyleType: 'disc' }, orderedList: { listStyleType: 'decimal' },
-  nestedList: { marginBlockStart: s.xs2, paddingInlineStart: s.xxl, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.rail },
+  // Nesting is indentation only: no guide line beside nested lists (R8).
+  nestedList: { marginBlockStart: s.xs2, paddingInlineStart: s.xxl },
   nestedUnordered: { listStyleType: 'circle' },
   listItem: { display: 'list-item', marginBlockStart: { default: s.xs2, ':first-child': 0 }, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', '::marker': { color: textColor.fgMuted } },
   // Loose items hold sibling blocks: 8px between them, none before the first, so items keep their 2px pitch.
@@ -472,7 +546,20 @@ const styles = stylex.create({
   tableHeading: { backgroundColor: surface.raised, fontWeight: t.weightSemibold, color: textColor.fg },
   alignLeft: { textAlign: 'left' }, alignCenter: { textAlign: 'center' }, alignRight: { textAlign: 'right' },
   codeToolbar: { display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.md, paddingBlock: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  codeLanguage: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
+  codeSpacer: { flexGrow: 1 },
+  codePathGroup: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, flexShrink: 1 },
+  codePath: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg },
+  codeIconButton: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, color: textColor.fgMuted, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  codeHidden: { opacity: 0 },
+  diffStat: { flexShrink: 0, marginInlineStart: s.sm, fontFamily: t.fontMono, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums', color: textColor.fgSoft },
+  // The counts read in the soft ink, which holds 4.5:1 in both themes; a mark in the diff inks (blue additions, as the
+  // palette keeps green out, and red removals) carries the color, as GitHub's squares do.
+  diffMark: { display: 'inline-block', width: '6px', height: '6px', marginInlineEnd: s.xs2, borderRadius: r.sm, verticalAlign: 'middle' },
+  diffAdded: { backgroundColor: status.diffAddTint }, diffRemoved: { backgroundColor: status.diffRemoved },
+  codeMenuPopover: { minWidth: g.menuMin, padding: s.xs, backgroundColor: surface.raised, color: textColor.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, fontFamily: t.fontSans, fontSize: t.metaSize },
+  codeMenu: { outlineStyle: 'none' },
+  codeMenuItem: { display: 'flex', alignItems: 'center', minHeight: g.controlSm, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive } },
+  codeLanguage: { flexShrink: 0, fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
   codeButton: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
   codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
@@ -486,6 +573,8 @@ const styles = stylex.create({
   details: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   summary: { cursor: 'pointer', color: textColor.fg, fontWeight: t.weightMedium, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
-  link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  // Blue on light prose is about 2:1 against the words around it, so colour alone cannot mark a link (WCAG 1.4.1):
+  // a quiet underline does, and turns full strength on hover.
+  link: { color: status.runningFg, textDecorationLine: 'underline', textDecorationThickness: '1px', textUnderlineOffset: '0.2em', textDecorationColor: { default: 'color-mix(in srgb, currentColor 45%, transparent)', ':hover': 'currentColor' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
 })
