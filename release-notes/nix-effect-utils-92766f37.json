@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
-  "compatibility": {"status": "none", "detail": "Build input only: flake.lock, flake.nix and the TypeScript client dependency hash."},
+  "compatibility": {"status": "none", "detail": "Build input only: flake.lock, flake.nix, the TypeScript client dependency hash and the web-shell toolchain expectation: effect-utils 92766f37's nixpkgs pin supplies Node 24.22.2 (was 24.20.0), so scripts/ci-fractal-web and the fractal-web cache keys expect v24.22.2; pnpm stays 12.17.0."},
   "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
   "manual": {"status": "none", "detail": "No manual steps."},
   "recovery": {"status": "none", "detail": "No persistent state changes or recovery steps."}
