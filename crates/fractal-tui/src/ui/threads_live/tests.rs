@@ -313,11 +313,25 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     ui.threads.put_summary(client.thread_get(id).await.unwrap());
     apply_window(&mut ui, &mut stream, id).await;
 
+    fn capture(ui: &mut super::super::Ui, pane: &Pane, name: &str) {
+        let Ok(dir) = std::env::var("THREAD_PREVIEW_CAPTURE_DIR") else { return };
+        let area = Rect::new(0, 0, 120, 40);
+        let mut screen = Buffer::empty(area);
+        ui.draw_pane(&mut screen, area, pane);
+        let mut text = String::from("HARNESS — production Ui::draw_pane + disposable real daemon socket, not the installed TUI binary\n");
+        for row in screen.content.chunks(120) {
+            text.push_str(&row.iter().map(|cell| cell.symbol()).collect::<String>());
+            text.push('\n');
+        }
+        std::fs::write(std::path::Path::new(&dir).join(format!("{name}.txt")), text).unwrap();
+    }
     let pane = Pane::Thread(id.into());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     let host = pane.key();
+    capture(&mut ui, &pane, "harness-socket-reply-before");
     ui.click(Hit::Thread(host.clone(), thread::Tap::Compose(id.into())));
     ui.paste("Please check the worker test.".into());
+    capture(&mut ui, &pane, "harness-socket-compose-before-send");
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let write = ui.threads.writes().pop().expect("native reply action");
     let receipt = write.perform(client.clone()).await;
@@ -327,6 +341,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         None,
     );
     apply_window(&mut ui, &mut stream, id).await;
+    capture(&mut ui, &pane, "harness-socket-reply-after");
 
     let area = Rect::new(0, 0, 100, 24);
     let mut screen = Buffer::empty(area);
@@ -338,6 +353,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     );
     assert!(visible.contains("You"), "{visible}");
 
+    capture(&mut ui, &pane, "harness-socket-close-before");
     ui.click(Hit::Thread(host.clone(), thread::Tap::Close(id.into())));
     let mut close = ui.threads.writes().pop().expect("native close action");
     ui.threads.bind(&mut close, client.clone()).unwrap();
@@ -398,6 +414,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         "{visible}"
     );
     assert!(visible.contains("Reopen thread"), "{visible}");
+    capture(&mut ui, &pane, "harness-socket-close-after");
     assert!(
         matches!(ui.threads.focused.as_ref(), Some((where_, Input::Reply(thread))) if where_ == &host && thread == id),
         "closing must preserve the active ordinary reply composer"
@@ -421,6 +438,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         },
     ));
     ui.paste("A person can follow up while closed.".into());
+    capture(&mut ui, &pane, "harness-socket-quoted-reply-before");
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let reply = ui
         .threads
@@ -451,6 +469,37 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
             .iter()
             .any(|event| matches!(event.change, ThreadTimelineChange::Reopened))
     );
+    // Refresh the closed reply before renaming so every mutation uses its observed revision.
+    apply_window(&mut ui, &mut stream, id).await;
+    ui.threads.put_summary(client.thread_get(id).await.unwrap());
+    capture(&mut ui, &pane, "harness-socket-quoted-reply-after");
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    ui.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    ui.paste("Worker review complete".into());
+    capture(&mut ui, &pane, "harness-socket-rename-before");
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let rename = ui.threads.writes().pop().expect("native rename action");
+    assert!(matches!(rename.mutation, Mutation::Rename(_)));
+    let receipt = rename.perform(client.clone()).await;
+    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real Rename committed");
+    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    apply_window(&mut ui, &mut stream, id).await;
+    ui.threads.put_summary(client.thread_get(id).await.unwrap());
+    capture(&mut ui, &pane, "harness-socket-rename-after");
+    assert_eq!(client.thread_get(id).await.unwrap().value.title, "Worker review complete");
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    capture(&mut ui, &pane, "harness-socket-reopen-before");
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    let reopen = ui.threads.writes().pop().expect("native Z reopens selected closed thread");
+    assert!(matches!(reopen.mutation, Mutation::Reopen));
+    let receipt = reopen.perform(client.clone()).await;
+    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real Reopen committed");
+    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    apply_window(&mut ui, &mut stream, id).await;
+    ui.threads.put_summary(client.thread_get(id).await.unwrap());
+    capture(&mut ui, &pane, "harness-socket-reopen-after");
+    assert_eq!(client.thread_get(id).await.unwrap().value.state, ThreadState::Open);
     server.abort();
 }
 
@@ -2438,6 +2487,12 @@ fn thread_preview_evidence() {
     let hovered = capture(&mut ui, &pane, &dir, "harness-hover-reply");
     assert!(hovered.contains("↩ Reply"));
     assert!(hovered.contains("2m ago"), "preview message uses the rendering clock: {hovered}");
+    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    capture(&mut ui, &pane, &dir, "harness-v-before");
+    ui.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    let read = ui.threads.writes().pop().expect("V dispatches visible-message read");
+    assert!(matches!(read.mutation, Mutation::MarkRead(_)));
+    capture(&mut ui, &pane, &dir, "harness-v-pending");
     ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
     ui.paste("Keep this unsent draft.".into());
     let focused = capture(&mut ui, &pane, &dir, "harness-focused-composer");
@@ -2460,6 +2515,7 @@ fn thread_preview_evidence() {
     });
     ui.threads.lists.insert(context.clone(), Vec::new());
     ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
+    capture(&mut ui, &inbox, &dir, "harness-start-before");
     ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
     ui.paste("First message stays inline before sending.".into());
     assert!(capture(&mut ui, &inbox, &dir, "harness-inline-first-message").contains("First message stays inline"));
@@ -2475,5 +2531,11 @@ fn thread_preview_evidence() {
     assert!(ui.conversation_state.drafts[&canonical].contains("First message stays inline"));
     capture(&mut ui, &inbox, &dir, "harness-draft-recovered");
     assert!(ui.threads.writes().is_empty(), "draft recovery never sends");
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let start = ui.threads.writes().pop().expect("first-message start dispatch");
+    let Mutation::Start(parameters) = start.mutation else { panic!("start mutation") };
+    assert!(parameters.content.contains("Different recovered draft"));
+    assert!(parameters.content.contains("First message stays inline"));
+    capture(&mut ui, &inbox, &dir, "harness-start-pending");
     println!("HARNESS evidence: {}", dir.display());
 }
