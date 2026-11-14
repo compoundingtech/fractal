@@ -52,7 +52,7 @@ async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
     daemon.restart().await;
     configure_operator(&mut daemon).await;
     let active = cli_value(daemon.cli(PERSON, &["hosts", "ls"]).await);
-    assert_eq!(active.as_array().unwrap(), &[placed.clone()]);
+    assert_eq!(active.as_array().unwrap(), std::slice::from_ref(&placed));
     assert!(!daemon.cli(PERSON, &[
         "hosts", "release", NODE, id, "--expected-revision", "0",
         "--resolution", "stale", "--as", PERSON,
