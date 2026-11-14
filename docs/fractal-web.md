@@ -804,3 +804,23 @@ For the stale-fence negative control, replace the SDK retry's `readTerminalRunti
 with `Effect.succeed(observation)`: the stale-attach test must fail because no fresh runtime
 is read and the replacement terminal cannot be subscribed.
 
+
+## Fractal web availability
+
+The Settings dialog's **Availability** section shows the paired person's own effective
+availability and directive note, as `GET /v1/client/availability` (without a person, so the
+session person's own row with its presence) and `GET /v1/client/notes` return them. Status
+names its source: set by the person, with its end, or following presence, with the folded
+presence and its age. When no device has reported for a day (`status_source: unreported`) the
+status reads Available and says that no device is reporting, so agents ask as usual; it never
+reads as away. Interruptions and the deadline clock show their bounds; `urgent` interruptions
+let through only asks with priority `critical`, and a `hold-routine` clock says that those
+urgent asks keep running. A response word this build does not know shows as itself.
+The note shows its text and expiry, or that there is none.
+
+Availability is not a followed collection, so the section reads it when Settings opens, when
+the page regains focus or becomes visible, and when the connection returns; a later answer
+replaces an earlier one only if it was requested later. Fixture sources have no availability
+port, and a replay page drops the live source's port, so neither shows the section. A refused
+read explains itself: a rejected credential asks for pairing again, a missing grant says that
+reading was not granted, and a session that is no person says so.
