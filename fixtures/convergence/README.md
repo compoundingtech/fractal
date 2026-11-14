@@ -388,6 +388,8 @@ no untrimmed seeds requiring old-build excusal and next-cut continuation in this
 registry on top of main's v28. Versions 1 through 28 remain byte-identical historical
 inputs. Generate v29 with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v29.json`;
-do not hand-edit it. The simulation and audit reports select v29. Its fixed-seed
-checkpoint behavior must be measured independently; v28's empty never-trim set is
-not evidence for this new schedule.
+do not hand-edit it. The simulation and audit reports select v29.
+The local v29 audit passed all 47 enabled tests (three opt-in exploratory tests
+remain ignored), independently observing all 32 fixed seeds converge and trim,
+including seed 1 on a real disk. Its exact `NEVER_TRIMS` set is empty; no older
+corpus's schedule-specific exception carries forward.

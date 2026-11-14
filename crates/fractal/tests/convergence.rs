@@ -2070,8 +2070,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v28 adds the person attention-control kinds on top of v27's trace kinds.
-/// Hosted burst 43519468054 observed all 32 fixed seeds trim (33 tests including real-disk seed 1).
+/// Corpus v29 captures the combined resource-lane, runtime and host-hold registry.
+/// The local v29 audit observed all 32 fixed seeds trim (including real-disk seed 1).
 /// No prior corpus's schedule-specific exception carries forward.
 const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
@@ -2083,7 +2083,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v28 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v29 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2092,7 +2092,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v28 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v29 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
