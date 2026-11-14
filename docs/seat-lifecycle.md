@@ -758,3 +758,29 @@ FROM local_runtime_starts;
 Compare two timestamped samples: `delta(operations)/elapsed` is the admission rate and `delta(payload_bytes)/elapsed` is the measured payload growth rate. Include SQLite row/index/page overhead and other tables by separately tracking the database plus WAL disk allocation. Begin with the first deployment member and add the other member-specific manifests; do not infer an unmeasured fleet-wide rate. Evidence pins can be released, but this retained ledger continues to grow.
 
 Operations rolls forward-only storage changes separately: deploy the first merged storage upgrade alone, verify it and settle that cut, then deploy the other as its own cut. Do not combine the version-19/version-20 upgrades in one roll. Operations confirmed that production members never ran these unreleased draft builds; if a draft-opened store is discovered, preserve it and roll forward only.
+
+## Finite execution containment
+
+Finite resource executions use `ExecRuntime::spawn_in_lane_checked`, not an
+ambient environment variable that claims a parent lane. A named host policy
+selects a shared slice; each execution generation has its own scope. Numeric
+capacity is optional and describes the aggregate policy envelope. The runtime
+verifies effective limits and physical placement before opening an inherited
+stdin payload gate, then persists `payloadReleasedAtUnixMs` as the execution
+clock boundary. A launch error after producer creation retains custody until
+exact-generation cleanup is proved.
+
+`wait_for_exit` uses Linux pidfd or Darwin kqueue process notifications, without
+holding the shared child-map lock. Finite stdout and stderr are retained
+separately and read only for the matching execution generation. Leader exit is
+not retirement: `retire_if` fences the generation, requests termination, waits
+for the leader and uses the systemd whole-scope empty proof before acknowledging
+release. An old cancellation cannot stop a replacement, including when the old
+leader already exited but descendants remain.
+
+Darwin reports logical-only coverage. Requests requiring whole-tree resource
+enforcement receive `UnsupportedCoverage` before payload release. Detached
+process groups cannot prove escaped descendants absent; uncertain retirement
+retains custody instead of automatically releasing a logical permit. These
+cooperative same-user controls are not a security sandbox.
+
