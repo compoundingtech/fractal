@@ -41,6 +41,12 @@ test('one changed source byte rejects a stale wasm manifest without changing the
   }
 })
 
+test('the committed pulldown-cmark module embeds no builder home paths', async () => {
+  const bytes = await readFile(new URL('markdown-pulldown.generated.wasm', composition))
+  for (const home of ['/home/', '/Users/', '/root/'])
+    assert.ok(!bytes.includes(Buffer.from(home)), `the module embeds ${home}: rebuild with the generator's path remapping`)
+})
+
 test('the committed pulldown-cmark module is the one its manifest records', async () => {
   const bytes = await readFile(new URL('markdown-pulldown.generated.wasm', composition))
   const manifest = JSON.parse(await readFile(new URL('markdown-pulldown.generated.json', composition), 'utf8'))
