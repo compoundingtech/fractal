@@ -322,3 +322,52 @@ fn an_expanded_empty_thread_says_it_has_no_messages_under_its_heading() {
     );
     capture_mount("p1-5-empty-expanded-100", &threads, &pane, 100);
 }
+
+#[test]
+fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
+    let item = "attention/ask";
+    let context = ThreadInterest::Inbox {
+        source: "step-run/example/ask".into(),
+        episode: "claim/ask".into(),
+    };
+    let inbox = Pane::Home(Some(item.into()));
+    for key in [
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+    ] {
+        let mut threads = Threads::default();
+        threads.enable(true);
+        threads.set_access(ThreadAccess {
+            start: true,
+            ..ThreadAccess::default()
+        });
+        threads.origins.insert(
+            item.into(),
+            Origin {
+                context: context.clone(),
+                agent: "agent/atlas".into(),
+                title: "Worker test".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        threads.lists.insert(context.clone(), Vec::new());
+        let before = render(&threads, &inbox, 100);
+        let start = before
+            .iter()
+            .find(|line| line.contains("Start thread"))
+            .unwrap_or_else(|| panic!("{before:#?}"));
+        assert!(
+            start.contains(" t ") && !start.contains(" T "),
+            "the keycap matches the footer and help: {start:?}"
+        );
+        capture_mount("p1-7-start-thread-keycap-100", &threads, &inbox, 100);
+        let mut ui = super::super::Ui::new(super::super::demo::test_world());
+        ui.threads = threads;
+        ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
+        ui.key(key);
+        assert!(
+            matches!(&ui.threads.focused, Some((_, Input::Start { .. }))),
+            "{key:?} reaches the first-message composer through Ui::key"
+        );
+    }
+}

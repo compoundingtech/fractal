@@ -1941,7 +1941,7 @@ fn expanded_threads_keep_one_honest_keyboard_context_after_escape_and_independen
     for id in [first, second] {
         let target = doc.targets.iter().find(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Close(found)) if found == id)).unwrap();
         assert_eq!(
-            doc.lines[target.line].to_string().contains(" Z "),
+            doc.lines[target.line].to_string().contains(" z "),
             id == second,
             "only the selected panel advertises its keyboard shortcut"
         );

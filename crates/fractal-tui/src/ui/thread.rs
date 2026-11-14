@@ -461,7 +461,7 @@ pub fn panel(
     let mut actions = Vec::new();
     if summary.closed && state.can_reopen || !summary.closed && state.can_close {
         actions.push((
-            if state.hotkeys { "Z" } else { "" },
+            if state.hotkeys { "z" } else { "" },
             label,
             lifecycle,
             theme::OVERLAY1,
@@ -469,7 +469,7 @@ pub fn panel(
     }
     if state.can_rename {
         actions.push((
-            if state.hotkeys { "N" } else { "" },
+            if state.hotkeys { "n" } else { "" },
             "Rename",
             Tap::Rename(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -477,7 +477,7 @@ pub fn panel(
     }
     if !state.standalone {
         actions.push((
-            if state.hotkeys { "P" } else { "" },
+            if state.hotkeys { "p" } else { "" },
             "Open in tab",
             Tap::OpenTab(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -485,7 +485,7 @@ pub fn panel(
     }
     if summary.unread && state.can_mark_read {
         actions.push((
-            if state.hotkeys { "V" } else { "" },
+            if state.hotkeys { "v" } else { "" },
             "Mark visible replies read",
             Tap::MarkVisibleRead(summary.id.to_owned()),
             theme::OVERLAY1,
@@ -827,5 +827,34 @@ mod tests {
             closed.lines[0].to_string(),
             "Sensor follow-up · to Atlas Builder · closed"
         );
+    }
+
+    #[test]
+    fn thread_action_keycaps_are_lowercase_like_the_footer_and_help() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Worker test",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: true,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                can_mark_read: true,
+                ..editable()
+            },
+            120,
+        );
+        let actions = doc.lines.last().unwrap().to_string();
+        for keycap in [" z ", " n ", " p ", " v "] {
+            assert!(actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+        for keycap in [" Z ", " N ", " P ", " V "] {
+            assert!(!actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
     }
 }

@@ -1188,7 +1188,7 @@ impl Threads {
                 && drafting.is_none()
             {
                 doc.buttons(&[(
-                    "T",
+                    "t",
                     "Start thread",
                     Hit::Thread(host, thread::Tap::Start(item.clone())),
                     theme::SAPPHIRE,
@@ -1637,7 +1637,7 @@ impl Threads {
             );
             doc.buttons(&[(
                 if self.hotkeys_for(host, &delivery.write.id) {
-                    "R"
+                    "r"
                 } else {
                     ""
                 },
@@ -1704,8 +1704,12 @@ impl Threads {
             self.focused = None;
         }
         if self.focused.is_none() {
-            if key.code == KeyCode::Char('t')
-                && key.modifiers.is_empty()
+            // The keycap reads `t`; Shift+T starts the thread too, as the other thread keys
+            // accept either case.
+            if matches!(key.code, KeyCode::Char('t' | 'T'))
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && let Pane::Home(Some(item)) = pane
                 && self.start_input(item).is_some()
             {
