@@ -2403,7 +2403,7 @@ fn a_transcript_user_message_receipt_is_exact_and_idempotent() {
         .unwrap();
     let receipt = json!({"type": "event_msg", "payload": {"type": "item_completed", "thread_id": "thread-main", "turn_id": "turn-live", "item": {"type": "UserMessage", "client_id": client_id}}});
     delivery
-        .accept_transcript_receipts(&[receipt.clone()], "other-thread")
+        .accept_transcript_receipts(std::slice::from_ref(&receipt), "other-thread")
         .unwrap();
     assert_eq!(
         delivery.ledger.entry(&filename).unwrap().phase,

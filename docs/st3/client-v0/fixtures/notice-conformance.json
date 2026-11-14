@@ -10,7 +10,7 @@
     "basis_claim": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "source_revision": "source-v1",
     "producer": "agent/example/producer",
-    "runtime": "agent/example/runtime",
+    "runtime": "host/example",
     "input": {
       "schema_version": 1,
       "dedupe_key": "example-report",
@@ -71,6 +71,7 @@
     {"pointer": "/id", "value": "custom/attention/snapshot/not-a-uuid"},
     {"pointer": "/basis_claim", "value": "not-a-claim"},
     {"pointer": "/runtime", "value": "person/example"},
+    {"pointer": "/runtime", "value": "agent/example/runtime"},
     {"pointer": "/updated_at", "value": "2026-02-30T10:00:00Z"},
     {"pointer": "/updated_at", "value": "2026-10-01T10:00:00+01:00"},
     {"pointer": "/input/summary", "value": "two\nlines"},
