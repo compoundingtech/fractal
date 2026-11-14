@@ -61,6 +61,12 @@ function useUpdatesPaused(stale: boolean): boolean {
   return stale || holding
 }
 
+/** Whether the gateway connection is live, or `undefined` where this source reports no gateway sync. */
+function useGatewayLive(): boolean | undefined {
+  const gateway = useGatewaySync()?.status._tag
+  return gateway === undefined ? undefined : gateway === 'Live'
+}
+
 /**
  * "Threads 2 · Updates paused", named "Threads, 2, updates paused". The name is set on the heading or summary:
  * hidden separators between flex children are read with stray spaces ("Threads , 2").
@@ -166,6 +172,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
   const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
   const draft = useAtomValue(source.draft(draftKey))
+  const gatewayLive = useGatewayLive()
   const [starting, setStarting] = React.useState(false)
   const [titleInput, setTitleInput] = React.useState<string>()
   const [focused, setFocused] = React.useState<string>()
@@ -212,7 +219,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
           <Input {...stylex.props(styles.titleInput, narrow && styles.titleInputTouch)} />
         </TextField>
         <p {...stylex.props(styles.note)}>To <AgentName id={agent} /></p>
-        <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput}
+        <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput} gatewayLive={gatewayLive}
           send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: startTitle, content })}
           onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined) }} />
       </ThreadPanel>
@@ -447,6 +454,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
   readonly timelineRef: React.Ref<HTMLDivElement>
 }) {
   const [, setDraft] = useAtom(source.draft(thread.id))
+  const gatewayLive = useGatewayLive()
   const input = React.useRef<HTMLTextAreaElement>(null)
   const didFocus = React.useRef(false)
   const attachInput = React.useCallback((element: HTMLTextAreaElement | null) => {
@@ -466,7 +474,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
     {!canReply ? <p {...stylex.props(styles.note)}>{readOnlyThread}</p> : !editable ? null : <>
       {/* Replying never changes the lifecycle; only Reopen does. */}
       {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>This thread is closed. Replying won’t reopen it.</p> : null}
-      <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
+      <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput} gatewayLive={gatewayLive}
         send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />
     </>}
   </>
