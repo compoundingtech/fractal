@@ -101,6 +101,7 @@ async fn bind_fixture_agent(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    use crate::SeatsStoreCore as _;
 
     if let Some(agent) = request.headers().get(crate::api::client_v0::LOCAL_PERSON_HEADER)
         .and_then(|value| value.to_str().ok())

@@ -585,7 +585,7 @@ fn developer_doctor_cannot_be_combined_with_performance() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_agent_attribution_is_declared_only_and_never_enabled_by_the_production_entrypoint() {
-    use fractal_daemon::{PersonWorkStore as _, model::PersonAskRequest, store::{Store, thread_metadata}};
+    use fractal_daemon::{PersonWorkStore as _, SeatsStoreCore as _, model::PersonAskRequest, store::{Store, thread_metadata}};
     use serde_json::{Value, json};
 
     if fractal_daemon::test_support::supervise_test() { return; }
