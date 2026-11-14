@@ -270,20 +270,29 @@ test('presence answers apply only between writes at the same read generation on 
   const caps = { session_actor: actor };
   const capsRef = { current: caps }, availabilityRead = { current: 1 }, availabilityWriting = { current: null };
   let value = { person: { person: 'person/demo', status: 'available' }, note: null, issue: '' };
+  let finish;
   const report = new Function('caps', 'capsRef', 'availabilityRead', 'availabilityWriting', 'setAvailability', 'client',
     `${javascript}; return report;`)(caps, capsRef, availabilityRead, availabilityWriting, update => { value = update(value); },
-    { presenceReport: async () => { ++availabilityRead.current; return { value: { availability: { person: 'person/demo', status: 'away' }, report_again_at: null } }; } });
-  await report({ state: 'active' });
+    { presenceReport: () => new Promise(resolve => { finish = () => resolve({ value: { availability: { person: 'person/demo', status: 'away' }, report_again_at: null } }); }) });
+  const beforeWrite = report({ state: 'active' });
+  ++availabilityRead.current;
+  finish();
+  await beforeWrite;
   assert.equal(value.person.status, 'available', 'a write that started while the phone was reporting wins over its answer');
   availabilityWriting.current = caps;
-  availabilityRead.current = 3;
-  await report({ state: 'active' });
+  const duringWrite = report({ state: 'active' });
+  finish();
+  await duringWrite;
   assert.equal(value.person.status, 'available', 'an edit in flight keeps its own answer the last word');
   availabilityWriting.current = null;
-  await report({ state: 'active' });
+  const betweenWrites = report({ state: 'active' });
+  finish();
+  await betweenWrites;
   assert.equal(value.person.status, 'away', 'between writes the answer still refreshes the person');
+  const oldConnection = report({ state: 'active' });
   capsRef.current = { session_actor: 'person/other/session/phone' };
-  availabilityRead.current = 4;
-  await report({ state: 'active' });
-  assert.equal(value.person.person, 'person/demo', 'a replaced connection cannot repopulate availability');
+  value = { person: { person: 'person/other', status: 'available' }, note: null, issue: '' };
+  finish();
+  await oldConnection;
+  assert.equal(value.person.person, 'person/other', 'a replaced connection cannot repopulate availability');
 });
