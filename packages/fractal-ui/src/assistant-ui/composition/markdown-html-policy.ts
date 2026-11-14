@@ -13,6 +13,9 @@
  * - remote resources (img, picture, audio, video): images become the same deferred, consent-gated placeholder Markdown
  *   images use; media elements are dropped.
  * - resource exhaustion (thousands of nested quotes, lists, tags): nesting past `maxDepth` collapses to plain text.
+ *
+ * The allowlist governs raw HTML. Markdown syntax keeps the elements it defines: a task list item's checkbox (disabled,
+ * as GitHub draws it) and the footnotes section.
  */
 
 export const HTML_POLICY = {
@@ -73,7 +76,7 @@ const TAG_MAX = 4096
  * Where the tag starting at `at` ends (its `>` outside quotes), or -1 when it is not a tag: another `<` outside quotes
  * comes first, or it runs past `TAG_MAX`. The bound keeps tokenizing linear however malformed the input.
  */
-function tagEnd(html: string, at: number): number {
+export function tagEnd(html: string, at: number): number {
   let quote: string | undefined
   for (let index = at + 1; index < html.length && index - at < TAG_MAX; index++) {
     const character = html[index]
