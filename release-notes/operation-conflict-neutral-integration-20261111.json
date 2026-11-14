@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Integrate graph-neutral conflict repair before bounded graph handling and fix its regression fixtures.",
+  "replay": {"status": "changed", "detail": "Graph-neutral operations retain their inline canonical registry repair. Reader discovery fences only graph-projecting or mixed operation histories, so a neutral-only conflict does not suppress an unrelated legitimate replay. Unproven automatic replay remains fenced by the driver."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Canonical registry and graph fold semantics are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The runtime classifies graph-neutral kinds for reader-side conflict discovery. Direct low-level replay guard decisions remain intact for uncommitted ranges not yet scanned."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Existing bounded refold and explicit degraded-repair behavior remains in place."},
+  "downtime": {"status": "none", "detail": "Also corrects the owned-set regression fixture's missing policy field so test builds compile."}
+}
