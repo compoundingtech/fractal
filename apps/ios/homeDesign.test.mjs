@@ -259,3 +259,31 @@ test('availability writes invalidate old reads, serialize edits and discard old 
   await disconnected;
   assert.equal(value.note, null, 'disconnect invalidation fences a late write even before capabilities change');
 });
+
+test('presence answers apply only between writes at the same read generation on the same connection', async () => {
+  const store = source('./store.tsx');
+  const construction = nodes(store, ts.isNewExpression).find(node => node.expression.getText().includes('PresenceReporter'));
+  const reportProperty = nodes(construction, ts.isPropertyAssignment).find(node => node.name.getText() === 'report');
+  assert.ok(reportProperty, 'the PresenceReporter report callback is found');
+  const javascript = ts.transpileModule(`const report = ${reportProperty.initializer.getText()};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const caps = { session_actor: actor };
+  const capsRef = { current: caps }, availabilityRead = { current: 1 }, availabilityWriting = { current: null };
+  let value = { person: { person: 'person/demo', status: 'available' }, note: null, issue: '' };
+  const report = new Function('caps', 'capsRef', 'availabilityRead', 'availabilityWriting', 'setAvailability', 'client',
+    `${javascript}; return report;`)(caps, capsRef, availabilityRead, availabilityWriting, update => { value = update(value); },
+    { presenceReport: async () => { ++availabilityRead.current; return { value: { availability: { person: 'person/demo', status: 'away' }, report_again_at: null } }; } });
+  await report({ state: 'active' });
+  assert.equal(value.person.status, 'available', 'a write that started while the phone was reporting wins over its answer');
+  availabilityWriting.current = caps;
+  availabilityRead.current = 3;
+  await report({ state: 'active' });
+  assert.equal(value.person.status, 'available', 'an edit in flight keeps its own answer the last word');
+  availabilityWriting.current = null;
+  await report({ state: 'active' });
+  assert.equal(value.person.status, 'away', 'between writes the answer still refreshes the person');
+  capsRef.current = { session_actor: 'person/other/session/phone' };
+  availabilityRead.current = 4;
+  await report({ state: 'active' });
+  assert.equal(value.person.person, 'person/demo', 'a replaced connection cannot repopulate availability');
+});
