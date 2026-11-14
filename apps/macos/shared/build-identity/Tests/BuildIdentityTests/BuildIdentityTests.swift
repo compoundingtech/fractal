@@ -2,8 +2,12 @@ import BuildIdentity
 import Foundation
 import XCTest
 
-// Cases mirror effect-utils `build-identity.unit.test.ts` and `cli-version.unit.test.ts`, so
-// the Swift and TypeScript implementations render the same identity identically.
+// Cases and expected vectors mirror effect-utils at the pinned flake.lock revision
+// 15ff7fa8968469c2c99a647888a999f9d62ffde5, from
+// `packages/@overeng/utils/src/build-identity.unit.test.ts` (stamps, resolution, relative time,
+// short/details forms) and `packages/@overeng/utils/src/node/cli-version.unit.test.ts`
+// (version flags/output), so the Swift and TypeScript implementations render the same identity
+// identically.
 final class BuildIdentityTests: XCTestCase {
   let placeholder = "__CLI_BUILD_STAMP__"
   let now: Double = 1_740_000_000
@@ -176,6 +180,21 @@ final class BuildIdentityTests: XCTestCase {
       buildStamp: stamp(["type": "nix", "version": "0.1.0", "rev": "a7647bb123", "commitTs": now - 2 * 86_400, "dirty": true]),
       environment: [:])
     XCTAssertEqual(dirty.short(now: date), "a7647bb* · 2d")
+  }
+
+  func testShortFormHonestlyIdentifiesMissingRevisions() {
+    // A local stamp only reaches resolve() through the runtime `CLI_BUILD_STAMP` variable (an
+    // embedded stamp is honoured only when it is a nix stamp), so deliver these via environment.
+    // `n/a · 3h`: no revision, but a known commit timestamp still renders its age.
+    let absentRev = BuildIdentity.resolve(
+      baseVersion: "0.1.0", buildStamp: placeholder,
+      environment: ["CLI_BUILD_STAMP": stamp(["type": "local", "rev": "", "ts": now - 720, "commitTs": now - 3 * 3600, "dirty": false])])
+    XCTAssertEqual(absentRev.short(now: date), "n/a · 3h")
+    // `n/a* · n/a`: empty revision stays dirty, and a missing commit time is never replaced.
+    let absentBoth = BuildIdentity.resolve(
+      baseVersion: "0.1.0", buildStamp: placeholder,
+      environment: ["CLI_BUILD_STAMP": stamp(["type": "local", "rev": "", "ts": now - 720, "dirty": true])])
+    XCTAssertEqual(absentBoth.short(now: date), "n/a* · n/a")
   }
 
   func testShortFormNeverSubstitutesBuildTimeForCommitTime() {
