@@ -24,9 +24,9 @@ const inputs = await markdownWasmInputs(resolve(kit, '../..'))
 // markdown-wasm.node-test.mjs fails if a builder home path ever returns.
 const cargoHome = process.env.CARGO_HOME || resolve(homedir(), '.cargo')
 const remapped = [
-  [cargoHome, '/cargo'],
-  [resolve(kit, '../..'), '/repository'],
-  [crate, '/crate'],
+  [cargoHome, 'cargo'],
+  [resolve(kit, '../..'), 'repository'],
+  [crate, 'crate'],
 ].map(([from, to]) => `--remap-path-prefix=${from}=${to}`)
 const inherited = process.env.CARGO_ENCODED_RUSTFLAGS !== undefined
   ? process.env.CARGO_ENCODED_RUSTFLAGS.split('\x1f').filter(Boolean)
