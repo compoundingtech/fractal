@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fixture clients can reply to threads and link asks as declared fixture agents through the normal bound-agent authorization path.",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "No stored format changes." },
+  "rules": { "status": "none", "detail": "Production authorization is unchanged. Only the fixture executable installs local declared-agent attribution in test-support builds." },
+  "compatibility": { "status": "none", "detail": "Reuses the existing local identity header and BoundAgent provenance; ordinary executable and paired transport behavior are unchanged." },
+  "downtime": { "status": "none", "detail": "No production restart is required." },
+  "manual": { "status": "none", "detail": "Fixture clients select an agent declared in the fixture; undeclared agent identities are refused." },
+  "recovery": { "status": "none", "detail": "Rolling back restores person-only fixture attribution without changing stored data." }
+}

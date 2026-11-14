@@ -7507,7 +7507,14 @@ async fn serve_reserved_unix_with_lookup_ready(
     // Install it here so directly constructed routers cannot bypass the guard.
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
-        Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
+        Some(store) => {
+            #[cfg(feature = "test-support")]
+            let fixture_store = store.clone();
+            let app = app.layer(from_fn_with_state((store, worker), guard_bound_actor));
+            #[cfg(feature = "test-support")]
+            let app = crate::test_support::fixture_agent_router(app, fixture_store);
+            app
+        }
         None => app,
     };
     let listener = socket.listen(1024)?;

@@ -19,9 +19,14 @@ fn executable(path: &Path, source: &str) {
 }
 
 fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::path::PathBuf) {
+    start_service_binary(root, home, state_home, test_bin!("fractal-fixture"), &[])
+}
+
+fn start_service_binary(
+    root: &Path, home: &Path, state_home: &Path, binary: &Path, extra: &[&str],
+) -> (Service, std::path::PathBuf) {
     let socket = root.join("daemon.sock");
     let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-    let binary = test_bin!("fractal-fixture");
     let mut service = Service(
         fractal_daemon::test_support::command(binary)
             .env_clear()
@@ -30,6 +35,7 @@ fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::
             .env("XDG_STATE_HOME", state_home)
             .env("XDG_RUNTIME_DIR", root.join("runtime"))
             .current_dir(root)
+            .args(extra)
             .args(["up", "--node", "orchid"])
             .arg("--socket")
             .arg(&socket)
@@ -575,4 +581,77 @@ fn developer_doctor_cannot_be_combined_with_performance() {
         String::from_utf8_lossy(&output.stderr).contains("cannot be used"),
         "{output:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixture_agent_attribution_is_declared_only_and_never_enabled_by_the_production_entrypoint() {
+    use fractal_daemon::{PersonWorkStore as _, model::PersonAskRequest, store::{Store, thread_metadata}};
+    use serde_json::{Value, json};
+
+    if fractal_daemon::test_support::supervise_test() { return; }
+    for (binary, fixture) in [
+        (test_bin!("fractal-fixture"), true),
+        (test_bin!("fractal-unstamped"), false),
+    ] {
+        let root = fractal_daemon::test_support::evidence_tempdir();
+        let home = root.path().join("home");
+        let state = root.path().join("node-state");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let agent = "agent/example/atlas";
+        let person = "person/operator";
+        let thread = "thread/fixture-agent";
+        let store = Store::open(&state.join("claims.sqlite3"), "orchid").unwrap();
+        let source = "version 2\nagent \"example/atlas\" { workspace \"/work/example\"; harness \"omp\" {} }\n";
+        let intent = fractal_daemon::graph::parse_intent(source, store.origin()).unwrap();
+        store.apply_internal(&intent, source).unwrap();
+        store.configure_thread_write_rollout([]);
+        thread_metadata::apply(&store, person, thread, "fixture-create",
+            thread_metadata::Edit::Create { agent, title: "Fixture agent attribution" }).unwrap();
+        let ask: PersonAskRequest = serde_json::from_value(json!({
+            "actor":agent,"person":person,"title":"Review result","reason":"May we proceed?",
+            "idempotency_key":"fixture-agent-ask",
+        })).unwrap();
+        let ask = store.ask_person(&ask).unwrap();
+        let episode = store.latest_claim(&ask.subject, Some("work.person-asked")).unwrap().unwrap().id;
+        drop(store);
+        let config = root.path().join("fixture.toml");
+        std::fs::write(&config, format!("state_dir = {:?}\nthread_writes = true\n", state)).unwrap();
+        let (_service, socket) = start_service_binary(
+            root.path(), &home, &root.path().join("state-home"), binary,
+            &["--config", config.to_str().unwrap()],
+        );
+        let client = fractal_daemon::client::Client::unix_as(&socket, agent).unwrap();
+        let snapshot = fractal_client::Client::unix_as(&socket, agent)
+            .capabilities().await.unwrap().snapshot.id;
+        for (kind, parameters) in [
+            ("thread.reply", json!({"target_id":thread,"content":"The fixture agent replied."})),
+            ("thread.link-ask", json!({"target_id":thread,"ask_id":ask.subject,"ask_episode":episode})),
+        ] {
+            let response = client.post::<Value>("/v1/client/actions", &json!({
+                "api_version":"st3.v1","id":format!("action/{kind}"),"type":kind,
+                "idempotency_key":format!("fixture-{kind}"),"fence":{"snapshot_id":snapshot},
+                "parameters":parameters,
+            })).await;
+            if fixture {
+                let response = response.unwrap_or_else(|error| panic!("{kind}: {error}"));
+                assert_eq!(response["value"]["status"], "completed", "{response}");
+            } else {
+                let error = response.expect_err("ordinary entrypoint must not bind the fixture header");
+                assert!(error.to_string().contains("403"), "{kind}: {error}");
+            }
+        }
+        if fixture {
+            let undeclared = fractal_daemon::client::Client::unix_as(&socket, "agent/example/unknown").unwrap();
+            let error = undeclared.get::<Value>("/v1/client/capabilities").await.unwrap_err();
+            assert!(error.to_string().contains("fixture identity must name a declared agent"), "{error}");
+            let store = Store::open(&state.join("claims.sqlite3"), "orchid").unwrap();
+            let summary = thread_metadata::summary(&store, person, thread).unwrap();
+            assert_eq!(summary.message_count, 1);
+            let link = fractal_daemon::store::thread_links::ask_link_subject(&ask.subject, &episode).unwrap();
+            let links = store.claims_for(&link, Some("thread.ask-linked")).unwrap();
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].actor.as_deref(), Some(agent));
+        }
+    }
 }
