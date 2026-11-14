@@ -1053,6 +1053,10 @@ fn validate_surfaces(
         "ReadPosition",
         "ReadPositionPage",
         "ReadPositionAdvanceParameters",
+        "AttentionSeenParameters",
+        "AttentionSnoozeParameters",
+        "AttentionDismissParameters",
+        "AttentionControlState",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
