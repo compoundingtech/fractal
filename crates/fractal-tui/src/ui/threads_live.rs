@@ -2301,7 +2301,7 @@ impl Threads {
                 if Self::alt_chords(&write.host) { "alt+z" } else { "z" })),
             Mutation::Reopen => self.summary(&write.id)
                 .map(|thread| format!("Reopened “{}”", thread.title)),
-            Mutation::Rename(title) => Some(format!("Renamed to “{title}”")),
+            Mutation::Rename(parameters) => Some(format!("Renamed to “{}”", parameters.title)),
             _ => None,
         };
         if let Some(key) = &write.input {
