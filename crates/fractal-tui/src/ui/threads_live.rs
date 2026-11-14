@@ -728,10 +728,16 @@ impl Threads {
             }
             _ => {
                 let id = self.selected.get(&pane.key())?;
-                if !self
-                    .open
-                    .get(&pane.key())
-                    .is_some_and(|expanded| expanded.contains(id))
+                // Expanded, or a collapsed heading Ctrl+↑/↓ focused while it is still listed.
+                let listed = self
+                    .context(pane)
+                    .and_then(|context| self.lists.get(&context))
+                    .is_some_and(|ids| ids.contains(id));
+                if !listed
+                    && !self
+                        .open
+                        .get(&pane.key())
+                        .is_some_and(|expanded| expanded.contains(id))
                 {
                     return None;
                 }
@@ -1107,31 +1113,12 @@ impl Threads {
         }
         if let Some(context) = self.context(pane) {
             let ids = self.lists.get(&context);
-            let start = match pane {
-                Pane::Home(Some(item)) if ids.is_some() => self.start_input(item),
-                _ => self.retained_origins.iter().find_map(|(item, origin)| {
-                    if context != ThreadInterest::Agent(origin.agent.clone()) {
-                        return None;
-                    }
-                    let input = self.start_input(item)?;
-                    self.drafts
-                        .get(&input.key())
-                        .and_then(|draft| draft.delivery.as_ref())
-                        .filter(|delivery| delivery.unknown || delivery.pending)
-                        .map(|_| input)
-                }),
-            };
+            let start = self.start_for(pane, &context);
             let drafting = start
                 .as_ref()
                 .filter(|input| texts.contains_key(&input.key()));
-            // Keep the new thread at the draft's position. The authoritative collection
-            // still orders the other threads and may arrive after the start receipt.
-            let pinned = self
-                .start_slot
-                .as_ref()
-                .filter(|(interest, _)| ids.is_some() && interest == &context && drafting.is_none())
-                .map(|(_, id)| id);
-            if ids.is_some_and(|ids| !ids.is_empty()) || drafting.is_some() || pinned.is_some() {
+            let rows: Vec<_> = self.row_order(&context, drafting).collect();
+            if ids.is_some_and(|ids| !ids.is_empty()) || drafting.is_some() || !rows.is_empty() {
                 doc.blank();
                 doc.section("Threads", None, width);
             }
@@ -1157,16 +1144,8 @@ impl Threads {
                     texts,
                 );
             }
-            let submitted = drafting
-                .and_then(|input| self.drafts.get(&input.key()))
-                .and_then(|draft| draft.delivery.as_ref())
-                .map(|delivery| &delivery.write.id);
-            let siblings = ids
-                .into_iter()
-                .flatten()
-                .filter(|id| Some(*id) != pinned && Some(*id) != submitted);
             let mut paused = false;
-            for id in pinned.into_iter().chain(siblings) {
+            for id in rows {
                 let open = self
                     .open
                     .get(&host)
@@ -1203,6 +1182,116 @@ impl Threads {
             }
         }
         doc
+    }
+
+    /// The start a view offers or still delivers: its Inbox item's own, or a start for this
+    /// agent whose first message is pending or unknown.
+    fn start_for(&self, pane: &Pane, context: &ThreadInterest) -> Option<Input> {
+        match pane {
+            Pane::Home(Some(item)) if self.lists.contains_key(context) => self.start_input(item),
+            _ => self.retained_origins.iter().find_map(|(item, origin)| {
+                if *context != ThreadInterest::Agent(origin.agent.clone()) {
+                    return None;
+                }
+                let input = self.start_input(item)?;
+                self.drafts
+                    .get(&input.key())
+                    .and_then(|draft| draft.delivery.as_ref())
+                    .filter(|delivery| delivery.unknown || delivery.pending)
+                    .map(|_| input)
+            }),
+        }
+    }
+
+    /// The thread headings `mount` lists for `context`, top to bottom. A new thread keeps its
+    /// draft's position; the authoritative collection still orders the other threads and may
+    /// arrive after the start receipt.
+    fn row_order<'a>(
+        &'a self,
+        context: &ThreadInterest,
+        drafting: Option<&Input>,
+    ) -> impl Iterator<Item = &'a String> {
+        let ids = self.lists.get(context);
+        let pinned = self
+            .start_slot
+            .as_ref()
+            .filter(|(interest, _)| ids.is_some() && interest == context && drafting.is_none())
+            .map(|(_, id)| id);
+        let submitted = drafting
+            .and_then(|input| self.drafts.get(&input.key()))
+            .and_then(|draft| draft.delivery.as_ref())
+            .map(|delivery| &delivery.write.id);
+        let siblings = ids
+            .into_iter()
+            .flatten()
+            .filter(move |id| Some(*id) != pinned && Some(*id) != submitted);
+        pinned.into_iter().chain(siblings)
+    }
+
+    /// The thread headings `mount` draws in a list host, top to bottom: what Ctrl+↑/↓ walk
+    /// after an agent conversation's tools.
+    pub(super) fn rows(&self, pane: &Pane, texts: &HashMap<String, String>) -> Vec<String> {
+        if !self.available
+            || matches!(pane, Pane::Thread(_))
+            || matches!(pane, Pane::Home(Some(id)) if id.starts_with("thread/"))
+        {
+            return Vec::new();
+        }
+        let Some(context) = self.context(pane) else {
+            return Vec::new();
+        };
+        let start = self.start_for(pane, &context);
+        let drafting = start
+            .as_ref()
+            .filter(|input| texts.contains_key(&input.key()));
+        self.row_order(&context, drafting)
+            .filter(|id| self.summaries.contains_key(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// The listed heading that has the keyboard in `pane`: it draws the `▌` gutter and the
+    /// thread keys act on it, expanded or not.
+    pub(super) fn focused_row(&self, pane: &Pane, texts: &HashMap<String, String>) -> Option<String> {
+        let id = self.selected.get(&pane.key())?;
+        self.rows(pane, texts).contains(id).then(|| id.clone())
+    }
+
+    /// Give the keyboard to heading `id` in `pane`, or to none of them (a tool took it).
+    pub(super) fn select_row(&mut self, pane: &Pane, id: Option<&str>) {
+        match id {
+            Some(id) => self.selected.insert(pane.key(), id.to_owned()),
+            None => self.selected.remove(&pane.key()),
+        };
+    }
+
+    /// A thread box in `pane` lets go of the keys, as Esc does; its draft stays.
+    pub(super) fn leave_input(&mut self, pane: &Pane) {
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|(host, _)| *host == pane.key())
+        {
+            self.focused = None;
+        }
+    }
+
+    /// Ctrl+Enter on the focused heading expands or collapses it in place. Unlike a click,
+    /// expanding never hands the reply box the keys, so the heading keeps them: Ctrl+Enter
+    /// again collapses it and the thread keys still act on it.
+    pub(super) fn toggle_row(&mut self, pane: &Pane, id: &str) {
+        let host = pane.key();
+        let expanded = self.open.entry(host.clone()).or_default();
+        let collapsed = expanded.remove(id);
+        if !collapsed {
+            expanded.insert(id.to_owned());
+        } else if expanded.is_empty() {
+            self.open.remove(&host);
+        }
+        if collapsed {
+            self.blur_thread(&host, id);
+        }
+        self.selected.insert(host, id.to_owned());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1274,9 +1363,9 @@ impl Threads {
                 open,
                 awaiting_history: !loaded,
                 notice,
-                // Keep the selected destination visible while its composer owns the keys.
-                selected: open
-                    && !standalone
+                // Keep the selected destination visible while its composer owns the keys, and
+                // on a collapsed heading Ctrl+↑/↓ focused.
+                selected: !standalone
                     && self.selected.get(host).is_some_and(|selected| selected == id),
                 standalone,
                 draft: draft_text,

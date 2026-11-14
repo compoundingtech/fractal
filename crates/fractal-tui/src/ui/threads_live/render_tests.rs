@@ -241,7 +241,8 @@ fn help_lists_thread_keys_in_lowercase_with_the_selection_context() {
     let joined = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
     for expected in [
         "threads",
-        "expand or collapse a thread; ▌ marks the expanded thread the keys below act on",
+        "expand or collapse a thread; ▌ marks the thread the keys below act on; ctrl+↑↓ moves it",
+        "focus the previous or next tool or thread; the message box keeps its draft",
         "Inbox item: start a thread about it",
         "open the marked thread in its own tab",
         "close the thread, or reopen a closed one",

@@ -2316,6 +2316,150 @@ fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
     assert!(button.contains(" alt+r "), "{button}");
 }
 
+/// An agent conversation with two tool blocks and, under them, two listed threads.
+fn agent_with_tools_and_threads() -> (super::super::Ui, Pane, &'static str) {
+    use super::super::view::{Body, Entry, Load, ToolState};
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    let agent = "agent/example/atlas/builder";
+    let pane = Pane::Agent(Some(agent.into()));
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    let tool = |id: &str| Entry {
+        id: id.into(),
+        at: "10:00".into(),
+        body: Body::Tool { title: id.into(), state: ToolState::Ok, output: vec![] },
+    };
+    ui.world.conversations.insert(agent.into(), Load::Ready(vec![tool("one"), tool("two")]));
+    ui.threads = observed_threads(ThreadState::Open);
+    ui.threads.window(
+        ThreadInterest::Agent(agent.into()),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![
+            summary(),
+            ThreadSummary { id: "thread/sibling".into(), title: "Sibling".into(), ..summary() },
+        ]),
+        vec![],
+        vec!["thread/worker".into(), "thread/sibling".into()],
+        false,
+    );
+    ui.content.focused.insert(agent.into(), "one".into());
+    (ui, pane, agent)
+}
+
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
+#[test]
+fn ctrl_arrows_walk_tools_then_thread_headings_in_screen_order() {
+    let (mut ui, pane, agent) = agent_with_tools_and_threads();
+    let focus = |ui: &super::super::Ui| {
+        (
+            ui.content.focused.get(agent).cloned(),
+            ui.threads.focused_row(&pane, &ui.conversation_state.drafts),
+        )
+    };
+    let tool = |id: &str| (Some(id.to_owned()), None);
+    let row = |id: &str| (None, Some(id.to_owned()));
+    let mut seen = vec![focus(&ui)];
+    for _ in 0..4 {
+        ui.key(ctrl(KeyCode::Down));
+        seen.push(focus(&ui));
+    }
+    assert_eq!(
+        seen,
+        [tool("one"), tool("two"), row("thread/worker"), row("thread/sibling"), row("thread/sibling")],
+        "tools first, then thread headings, stopping at the last"
+    );
+    assert_eq!(
+        ui.content.scroll_to.borrow().get(agent).map(String::as_str),
+        Some("thread/sibling"),
+        "a focused heading is scrolled into view like a focused tool"
+    );
+    let collapsed = ui.threads.mount(&pane, 100, &edit::Cursor::default(), &ui.world, &ui.conversation_state.drafts);
+    let lines: Vec<String> = collapsed.lines.iter().map(ToString::to_string).collect();
+    assert!(lines.iter().any(|line| line.starts_with("▌▸ Sibling")), "{lines:#?}");
+    assert_eq!(lines.iter().filter(|line| line.starts_with('▌')).count(), 1);
+    for expected in [row("thread/worker"), tool("two"), tool("one"), tool("one")] {
+        ui.key(ctrl(KeyCode::Up));
+        assert_eq!(focus(&ui), expected);
+    }
+    assert!(ui.threads.writes().is_empty(), "moving focus changes no thread");
+}
+
+#[test]
+fn ctrl_enter_toggles_the_focused_thread_and_keeps_the_heading_focused() {
+    let (mut ui, pane, _) = agent_with_tools_and_threads();
+    ui.key(ctrl(KeyCode::Down));
+    ui.key(ctrl(KeyCode::Down));
+    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/worker"));
+    ui.key(ctrl(KeyCode::Enter));
+    assert!(ui.threads.open[&pane.key()].contains("thread/worker"));
+    assert!(ui.threads.focused.is_none(), "expanding by keyboard keeps the keys off the reply box");
+    assert!(!ui.editing);
+    assert!(!ui.conversation_state.expanded.contains("two"), "the tool above stays as it was");
+    ui.key(ctrl(KeyCode::Enter));
+    assert!(!ui.threads.open.get(&pane.key()).is_some_and(|open| open.contains("thread/worker")));
+    assert_eq!(
+        ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(),
+        Some("thread/worker"),
+        "collapsing leaves the heading focused, so Ctrl+Enter expands it again"
+    );
+    assert!(ui.threads.writes().is_empty());
+}
+
+#[test]
+fn thread_chords_act_on_the_keyboard_focused_heading_even_collapsed() {
+    let (mut ui, pane, _) = agent_with_tools_and_threads();
+    for _ in 0..3 {
+        ui.key(ctrl(KeyCode::Down));
+    }
+    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/sibling"));
+    assert!(!ui.threads.open.contains_key(&pane.key()), "the focused heading is collapsed");
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+    let write = ui.threads.writes().pop().expect("alt+z closes the focused thread");
+    assert_eq!(write.id, "thread/sibling");
+    assert!(matches!(write.mutation, Mutation::Close));
+    ui.key(ctrl(KeyCode::Up));
+    ui.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
+    assert!(
+        matches!(&ui.threads.focused, Some((_, Input::Rename(id))) if id == "thread/worker"),
+        "alt+n renames the newly focused heading, not the one before it"
+    );
+}
+
+#[test]
+fn ctrl_arrows_leave_message_boxes_without_losing_their_drafts() {
+    let (mut ui, pane, agent) = agent_with_tools_and_threads();
+    ui.click(Hit::Composer);
+    ui.paste("Keep the ordinary draft".into());
+    assert!(ui.editing);
+    ui.key(ctrl(KeyCode::Down));
+    assert!(!ui.editing, "the composer lets go of the keys");
+    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft");
+    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/worker"));
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+    assert_eq!(ui.threads.writes().pop().map(|write| write.id).as_deref(), Some("thread/worker"));
+    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft", "the chord typed nothing");
+
+    // A thread reply box lets go the same way and keeps its own draft.
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.paste("Keep the reply".into());
+    assert!(ui.threads.editing_in(&pane));
+    ui.key(ctrl(KeyCode::Down));
+    assert!(!ui.threads.editing_in(&pane));
+    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/sibling"));
+    assert_eq!(ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()], "Keep the reply");
+    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft");
+
+    // A letter goes back to the ordinary composer, as before.
+    ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    assert!(ui.editing);
+    assert!(ui.conversation_state.drafts[agent].starts_with("Keep the ordinary draft"));
+    assert!(ui.conversation_state.drafts[agent].contains('z'));
+    assert!(ui.threads.writes().is_empty(), "a typed z closes nothing");
+}
+
 #[test]
 fn accepting_a_new_inbox_thread_keeps_the_existing_expanded_thread_and_its_draft() {
     let mut threads = observed_threads(ThreadState::Open);

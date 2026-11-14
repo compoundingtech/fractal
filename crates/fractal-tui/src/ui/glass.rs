@@ -3442,6 +3442,21 @@ impl Ui {
             }
             return true;
         }
+        // Ctrl+↑/↓ walk a conversation's tools and thread headings from its message boxes too:
+        // the box lets go of the keys and keeps its draft, so Ctrl+Enter and the thread keys
+        // act on what is focused instead of typing.
+        if control
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && conversation.is_some()
+            && self.find.is_none()
+            && !mission_form
+            && self.new_mission.is_none()
+            && self.confirm.is_none()
+            && self.popover.is_none()
+        {
+            self.focus_step(if key.code == KeyCode::Up { -1 } else { 1 });
+            return true;
+        }
         // While the person types, every editing key is the input's (Ctrl+W deletes a word);
         // Esc leaves the input and glasses keys work again.
         if self.editing
@@ -3505,9 +3520,7 @@ impl Ui {
             }
             // Ctrl chords, not Alt: on a Mac Option and a letter types a character (Nathan,
             // 2026-10-03).
-            KeyCode::Enter if control && quiet && conversation.is_some() => self.toggle_focused_tool(),
-            KeyCode::Up if control && quiet && conversation.is_some() => self.focus_tool(-1),
-            KeyCode::Down if control && quiet && conversation.is_some() => self.focus_tool(1),
+            KeyCode::Enter if control && quiet && conversation.is_some() => self.toggle_focused(),
             KeyCode::Char('u') if control && quiet && conversation.is_some() => self.toggle_focused_images(),
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),

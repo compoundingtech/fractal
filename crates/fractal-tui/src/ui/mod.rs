@@ -2836,13 +2836,18 @@ impl Ui {
             doc.append(self.threads.mount(&Pane::Agent(Some(agent.id.clone())), width, &self.cursor, &self.world, &self.conversation_state.drafts), 0);
         }
         let key = format!("chat:{}", agent.id);
+        // A focused tool is an entry; a focused thread heading is the line its toggle sits on.
         if let Some(entry) = self.content.scroll_to.borrow_mut().remove(&agent.id)
-            && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == entry)
+            && let Some(line) = doc.entries.iter().find(|(id, _)| *id == entry).map(|(_, line)| *line).or_else(|| {
+                doc.targets.iter().find(|target| {
+                    matches!(&target.hit, Hit::Thread(_, thread::Tap::Toggle(id)) if *id == entry)
+                }).map(|target| target.line)
+            })
         {
             self.anchors.borrow_mut().remove(&key);
             let mut panes = self.conversation_state.panes.borrow_mut();
             let state = panes.entry(key.clone()).or_default();
-            state.top = *line;
+            state.top = line;
             state.follow = false;
         }
         let matches = find
@@ -3896,8 +3901,8 @@ impl Ui {
             "threads",
             &[
                 (
-                    "click ▸ ▾",
-                    "expand or collapse a thread; ▌ marks the expanded thread the keys below act on",
+                    "click ▸▾ ctrl+enter",
+                    "expand or collapse a thread; ▌ marks the thread the keys below act on; ctrl+↑↓ moves it",
                 ),
                 ("t", "Inbox item: start a thread about it"),
                 ("p", "open the marked thread in its own tab"),
@@ -3964,8 +3969,8 @@ impl Ui {
                     "o / ctrl+e",
                     "expand all; load visible clipped output one at a time; collapse releases",
                 ),
-                ("ctrl+↑ ctrl+↓", "focus the previous or next tool"),
-                ("ctrl+enter", "expand/collapse the focused tool; read its full content"),
+                ("ctrl+↑ ctrl+↓", "focus the previous or next tool or thread; the message box keeps its draft"),
+                ("ctrl+enter", "expand/collapse the focused tool or thread; read a tool's full content"),
                 ("ctrl+u", "load/hide focused tool images inline (outside a draft)"),
                 (
                     "ctrl+p",
@@ -4876,8 +4881,8 @@ impl Ui {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Up if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_tool(-1),
-            KeyCode::Down if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_tool(1),
+            KeyCode::Up if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_step(-1),
+            KeyCode::Down if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_step(1),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.select(self.selected[self.tab()].saturating_sub(1))
             }
@@ -4897,7 +4902,7 @@ impl Ui {
                 self.freshness_panes("end_after");
             }
             KeyCode::Char('x') if self.tab() == 2 => self.system = !self.system,
-            KeyCode::Enter if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),
+            KeyCode::Enter if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused(),
             KeyCode::Char('u') if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_images(),
             KeyCode::Char('o') if self.tab() == 1 => self.toggle_all_tools(),
             KeyCode::Char('O') => self.toggle_simple(),
@@ -5012,7 +5017,12 @@ impl Ui {
         }
     }
 
+    /// The tool Ctrl+Enter and Ctrl+U act on; none while a thread heading has the keyboard.
     fn focused_tool(&self, conversation: &str) -> Option<String> {
+        let host = Pane::Agent(Some(conversation.to_owned()));
+        if self.threads.focused_row(&host, &self.conversation_state.drafts).is_some() {
+            return None;
+        }
         let entries = self.world.conversations.get(conversation)?.items();
         let focused = self.content.focused.get(conversation);
         if let Some(entry) = entries.iter().find(|entry| focused == Some(&entry.id) && matches!(entry.body, Body::Tool { .. })) {
@@ -5027,29 +5037,61 @@ impl Ui {
         })).or_else(|| entries.iter().rev().find(|entry| matches!(entry.body, Body::Tool { .. })).map(|entry| entry.id.clone()))
     }
 
-    fn focus_tool(&mut self, direction: isize) {
+    /// Ctrl+↑/↓: the previous or next of the conversation's tool blocks and then its thread
+    /// headings, in the order they are drawn. A message box the keys leave keeps its draft,
+    /// so the thread keys reach a focused heading instead of typing.
+    fn focus_step(&mut self, direction: isize) {
         let Some(conversation) = self.content_conversation() else { return };
-        let Some(entries) = self.world.conversations.get(&conversation) else { return };
-        let tools: Vec<_> = entries.items().iter().filter(|entry| matches!(entry.body, Body::Tool { .. }))
+        let pane = Pane::Agent(Some(conversation.clone()));
+        let tools: Vec<_> = self.world.conversations.get(&conversation).into_iter()
+            .flat_map(|entries| entries.items().iter())
+            .filter(|entry| matches!(entry.body, Body::Tool { .. }))
             .map(|entry| entry.id.clone()).collect();
-        if tools.is_empty() { return; }
-        let current = self.focused_tool(&conversation).and_then(|id| tools.iter().position(|tool| *tool == id));
-        let index = current.map_or(tools.len() - 1, |index| index.saturating_add_signed(direction).min(tools.len() - 1));
-        let id = tools[index].clone();
-        self.content.focused.insert(conversation.clone(), id.clone());
-        // A bundled call becomes individually reachable when keyboard-focused.
-        self.conversation_state.expanded.extend(tools.iter().map(|id| fractal_conversation_ui::bundle_id(id)));
-        self.content.scroll_to.borrow_mut().insert(conversation.clone(), id);
-        self.flash(format!("Tool {} of {} focused · Ctrl+Enter expand · Ctrl+U images", index + 1, tools.len()));
+        let threads = self.threads.rows(&pane, &self.conversation_state.drafts);
+        let count = tools.len() + threads.len();
+        if count == 0 { return; }
+        let current = match self.threads.focused_row(&pane, &self.conversation_state.drafts) {
+            Some(id) => threads.iter().position(|row| *row == id).map(|index| tools.len() + index),
+            None => self.focused_tool(&conversation).and_then(|id| tools.iter().position(|tool| *tool == id)),
+        };
+        let index = current.map_or(count - 1, |index| index.saturating_add_signed(direction).min(count - 1));
+        self.editing = false;
+        self.threads.leave_input(&pane);
+        if let Some(id) = tools.get(index).cloned() {
+            self.threads.select_row(&pane, None);
+            self.content.focused.insert(conversation.clone(), id.clone());
+            // A bundled call becomes individually reachable when keyboard-focused.
+            self.conversation_state.expanded.extend(tools.iter().map(|id| fractal_conversation_ui::bundle_id(id)));
+            self.content.scroll_to.borrow_mut().insert(conversation, id);
+            self.flash(format!("Tool {} of {} focused · Ctrl+Enter expand · Ctrl+U images", index + 1, tools.len()));
+        } else {
+            let row = index - tools.len();
+            self.threads.select_row(&pane, Some(&threads[row]));
+            self.content.focused.remove(&conversation);
+            self.content.scroll_to.borrow_mut().insert(conversation, threads[row].clone());
+            self.flash_as(Severity::Info, format!(
+                "Thread {} of {} focused · Ctrl+Enter expand/collapse · alt+p z n v act on it",
+                row + 1,
+                threads.len()
+            ));
+        }
     }
 
-    fn toggle_focused_tool(&mut self) {
+    /// Ctrl+Enter: expand or collapse the focused thread heading, else the focused tool.
+    fn toggle_focused(&mut self) {
         let Some(conversation) = self.content_conversation() else { return };
+        let pane = Pane::Agent(Some(conversation.clone()));
+        if let Some(id) = self.threads.focused_row(&pane, &self.conversation_state.drafts) {
+            self.threads.toggle_row(&pane, &id);
+            return;
+        }
         let Some(id) = self.focused_tool(&conversation) else { return };
         self.toggle_content_tool(&conversation, id);
     }
 
     fn toggle_content_tool(&mut self, conversation: &str, id: String) {
+        // A tool that takes the focus takes it from a thread heading too.
+        self.threads.select_row(&Pane::Agent(Some(conversation.to_owned())), None);
         self.content.focused.insert(conversation.to_owned(), id.clone());
         self.reveal_tool_bundles(conversation);
         self.conversation_state.expand(id.clone());
@@ -6502,6 +6544,12 @@ impl Ui {
                     self.find = None;
                     self.answering = None;
                     self.confirm = None;
+                }
+                // One focus per conversation: a selected thread heading takes it from a tool.
+                if let Some(Pane::Agent(Some(conversation))) = Pane::parse(&host)
+                    && self.threads.focused_row(&Pane::Agent(Some(conversation.clone())), &self.conversation_state.drafts).is_some()
+                {
+                    self.content.focused.remove(&conversation);
                 }
                 self.flash_thread_refusal();
             }
