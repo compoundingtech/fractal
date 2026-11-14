@@ -1,9 +1,10 @@
 import * as Native from '@fractal/client/schema/read'
 import { FractalClient } from '@fractal/client'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { expect, it, vi } from 'vitest'
+import { expect, it, vi, type MockInstance } from 'vitest'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
-import { gatewayThreads } from './threadSource.ts'
+import { credentialExpiredMessage } from '../data/source.ts'
+import { gatewayThreads, type ThreadWatches } from './threadSource.ts'
 
 const base = fixture.capabilities
 const id = 'thread/thread-one'
@@ -412,4 +413,120 @@ it('discovers original first sends by source across changed episodes and retries
     expect(registry.get(source.draft('draft/new'))).toEqual({ content: '' })
     expect(registry.get(pendingStarts())).toEqual([])
   } finally { release(); stop(); stopAccess(); registry.dispose() }
+})
+
+const readable = () => Response.json({
+  ...base, value: { ...base.value, transport: 'local-web', capabilities: [
+    ...base.value.capabilities,
+    { id: 'threads-v1', version: 2, state: 'granted' },
+    { id: 'thread-summary-feed', version: 1, state: 'granted' },
+  ] },
+})
+const page = (items: readonly object[]) => Response.json({ ...base, value: { items, next_cursor: null } })
+const refusal = (status: number, code: string, details: Record<string, unknown> = {}) => Response.json({
+  api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/thread-read',
+  code, message: 'Private server diagnostic', retryable: false, details,
+}, { status })
+
+/** One list read at a time; `reply` answers every read after capabilities. */
+const readList = (watches?: ThreadWatches) => {
+  const state: { reply: () => Response | Promise<Response> } = { reply: () => page([summary]) }
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/capabilities') ? readable() : state.reply())
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry, watches)
+  const list = source.list({ agent_id: agent })
+  const stop = registry.mount(list)
+  return { state, fetchImpl, registry, source, list, dispose: () => { stop(); registry.dispose() } }
+}
+
+/** The data layer records a failed read through the Effect logger, which writes to the console. */
+const consoleSpies = (): readonly MockInstance[] => (['log', 'info', 'warn', 'error', 'group', 'groupCollapsed'] as const)
+  .map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+const recorded = (spies: readonly MockInstance[]) =>
+  spies.some(spy => spy.mock.calls.some(call => call.some(argument => String(argument).includes('Thread read failed'))))
+
+it('replaces an observed list with the pairing notice when the browser credential is rejected, then reads again on reload', async () => {
+  const view = readList()
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+    view.state.reply = () => refusal(403, 'forbidden', { reason: 'credential-rejected' })
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toEqual({ _tag: 'Unavailable', reason: 'unauthorized', detail: credentialExpiredMessage }))
+    view.state.reply = () => page([{ ...summary, title: 'Paired again' }])
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({
+      _tag: 'Observed', freshness: 'live', value: { items: [{ id, title: 'Paired again' }] },
+    }))
+  } finally { view.dispose() }
+})
+
+it.each([
+  ['the network fails', () => { throw new TypeError('Failed to fetch') }],
+  ['the gateway cannot reach the daemon', () => refusal(502, 'http-error')],
+  ['the gateway reports the daemon unavailable', () => refusal(503, 'unavailable')],
+] as const)('keeps the observed list marked paused when %s', async (_case, lost) => {
+  const view = readList()
+  const spies = consoleSpies()
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+    view.state.reply = lost
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({
+      _tag: 'Observed', freshness: 'stale', value: { items: [{ id, title: summary.title }] },
+    }))
+    expect(recorded(spies)).toBe(false)
+  } finally { for (const spy of spies) spy.mockRestore(); view.dispose() }
+})
+
+it('marks the observed list paused, without an HTTP read, when its socket follow goes stale', async () => {
+  let receive: ((event: { readonly _tag: 'Stale' }) => void) | undefined
+  const view = readList({ summaries: () => callback => { receive = callback; return () => {} }, detail: () => () => () => {}, timeline: () => () => () => {} })
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+    const reads = view.fetchImpl.mock.calls.length
+    receive?.({ _tag: 'Stale' })
+    expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'stale', value: { items: [{ id }] } })
+    expect(view.fetchImpl).toHaveBeenCalledTimes(reads)
+  } finally { view.dispose() }
+})
+
+it.each([
+  ['a malformed page', () => Response.json({ ...base, value: { items: 'invalid', next_cursor: null } })],
+  ['a page for another agent', () => page([{ ...summary, agent_id: 'agent/workshop/other' }])],
+  ['a missing endpoint', () => refusal(404, 'not-found')],
+  ['a server error', () => refusal(500, 'internal')],
+] as const)('shows a recorded failure instead of the earlier list after %s, and recovers on reload', async (_case, broken) => {
+  const view = readList()
+  const spies = consoleSpies()
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+    view.state.reply = broken
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({
+      _tag: 'Unavailable', reason: 'failed', detail: 'Fractal could not load threads.',
+    }))
+    expect(JSON.stringify(view.registry.get(view.list))).not.toContain('Private server diagnostic')
+    expect(recorded(spies)).toBe(true)
+    view.state.reply = () => page([summary])
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+  } finally { for (const spy of spies) spy.mockRestore(); view.dispose() }
+})
+
+it('does not keep a thread observation after a later read returns a different thread', async () => {
+  let other = false
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/capabilities') ? readable()
+    : Response.json({ ...base, value: other ? { ...summary, id: 'thread/other' } : summary }))
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
+  const detail = source.detail(id)
+  const stop = registry.mount(detail)
+  const spies = consoleSpies()
+  try {
+    await vi.waitFor(() => expect(registry.get(detail)).toMatchObject({ _tag: 'Observed', value: { summary: { id } } }))
+    other = true
+    source.reload?.()
+    await vi.waitFor(() => expect(registry.get(detail)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' }))
+    expect(recorded(spies)).toBe(true)
+  } finally { for (const spy of spies) spy.mockRestore(); stop(); registry.dispose() }
 })

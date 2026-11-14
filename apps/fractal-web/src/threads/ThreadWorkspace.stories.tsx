@@ -103,7 +103,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     list: query => Atom.make(get => scenario === 'loading' ? waiting
       : scenario === 'refused' ? unavailable({ reason: 'unauthorized', detail: credentialExpiredMessage })
       : get(failing) ? unavailable({ reason: 'failed', detail: 'Fractal could not load threads.' })
-      : observed({ value: {
+      : observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: {
         items: get(summaries).filter(row => 'recently_closed' in query ? row.state === 'closed'
           : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
         next_cursor: Option.none(),
@@ -111,7 +111,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     reload: () => registry.set(failing, false),
     detail: id => Atom.make(get => {
       const row = get(summaries).find(candidate => candidate.id === id)
-      return row === undefined ? unavailable({ reason: 'failed', detail: 'Fixture thread unavailable' }) : observed({ value: { summary: row, snapshotId: 'snapshot/thread-story' } })
+      return row === undefined ? unavailable({ reason: 'failed', detail: 'Fixture thread unavailable' }) : observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { summary: row, snapshotId: 'snapshot/thread-story' } })
     }),
     timeline: id => Atom.make(get => observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { items: scenario === 'clock-skew' && ordering === 'timestamp' ? [...(get(history)[id] ?? [])].sort((a, b) => b.accepted_at_unix_ms - a.accepted_at_unix_ms) : get(history)[id] ?? [], next_cursor: Option.none() } })),
     pendingChange: () => unconfirmed,
@@ -219,7 +219,7 @@ const meta = {
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'LatestPreview:contract-fixture'] as const
+export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'AgentThreads:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'LatestPreview:contract-fixture'] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {
@@ -232,10 +232,32 @@ export const AllStates: Story = {
     await userEvent.click(await canvas.findByRole('button', { name: /^(Review PR #42|Worker report ready),/ }, { timeout: 60_000 }))
   },
 }
+/** The Inbox detail that hosts the item's threads, once AllStates has opened it. */
+const alertDetails = async (canvasElement: HTMLElement) => within(await within(canvasElement).findByTestId('alert-details', {}, { timeout: 60_000 }))
 export const DedicatedTab: Story = { args: { placement: 'tab' } }
-export const ReadOnly: Story = { args: { placement: 'tab', connection: 'read-only' } }
+/** Without the reply grant the thread keeps its timeline and states why there is no composer. */
+export const ReadOnly: Story = {
+  args: { placement: 'tab', connection: 'read-only' },
+  play: async ({ canvasElement }) => {
+    const panel = await waitFor(() => {
+      const element = canvasElement.querySelector<HTMLElement>('[data-thread-panel]')
+      if (element === null) throw new Error('no thread panel yet')
+      return element
+    }, { timeout: 60_000 })
+    await within(panel).findByText('Read-only on this device. Reply from a device with control access.')
+    await expect(panel.querySelector('textarea')).toBeNull()
+  },
+}
 
-export const EmptyStart: Story = { args: { scenario: 'empty' }, play: AllStates.play }
+export const EmptyStart: Story = {
+  args: { scenario: 'empty' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const details = await alertDetails(context.canvasElement)
+    await details.findByText('Ask Worker tests about this item without answering it.')
+    await expect(details.getByRole('button', { name: 'Start thread' })).toBeTruthy()
+  },
+}
 export const ClosedThread: Story = { args: { placement: 'tab', scenario: 'closed' } }
 export const MultipleThreads: Story = { args: { scenario: 'multiple' }, play: AllStates.play }
 export const CustomInboxSource: Story = {
@@ -244,16 +266,88 @@ export const CustomInboxSource: Story = {
     await AllStates.play?.(context)
     const canvas = within(context.canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: 'Start thread' }))
-    await within(await canvas.findByTestId('alert-details')).findByRole('textbox', { name: 'Message' })
+    const details = await alertDetails(context.canvasElement)
+    await details.findByRole('textbox', { name: 'Message' })
+    await expect(details.getByRole('textbox', { name: 'Thread title' })).toHaveValue('Worker report ready')
+    await expect(details.getByText((_content, element) => element?.tagName === 'P' && element.textContent === 'To Worker tests')).toBeTruthy()
+  },
+}
+
+/** The agent view pins one collapsed summary; a row opens the thread in its own tab instead of expanding in place. */
+export const AgentThreads: Story = {
+  play: async ({ canvasElement }) => {
+    const strip = await waitFor(() => {
+      const element = canvasElement.querySelector<HTMLDetailsElement>('details[aria-label="Threads"]')
+      if (element === null) throw new Error('no thread strip yet')
+      return element
+    }, { timeout: 60_000 })
+    await expect(strip.open).toBe(false)
+    await expect(strip.querySelector('summary')?.textContent).toBe('Threads, 2')
+    await userEvent.click(strip.querySelector('summary')!)
+    await waitFor(() => expect(strip.open).toBe(true))
+    const row = within(strip).getAllByRole('button', { name: /Worker tests/ })[0]!
+    await expect(row.hasAttribute('aria-expanded')).toBe(false)
+    await userEvent.click(row)
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-origin]')?.textContent).toBe('With Worker tests'), { timeout: 10_000 })
+    await expect(strip.querySelector('textarea')).toBeNull()
   },
 }
 
 /** Read states state only what the source reports; none of them invent agent progress. */
-export const Loading: Story = { args: { scenario: 'loading' }, play: AllStates.play }
-export const Refused: Story = { args: { scenario: 'refused' }, play: AllStates.play }
-export const RetryAfterFailure: Story = { args: { scenario: 'failed' }, play: AllStates.play }
-export const UpdatesPaused: Story = { args: { placement: 'tab', scenario: 'offline' } }
-export const UnconfirmedChange: Story = { args: { placement: 'tab', scenario: 'unconfirmed' } }
+export const Loading: Story = {
+  args: { scenario: 'loading' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const details = await alertDetails(context.canvasElement)
+    await details.findByText('Loading threads')
+    await expect(details.queryByRole('button', { name: 'Start thread' })).toBeNull()
+  },
+}
+/** A refusal names the reason only: no Start beside a list Fractal refused, and nothing to retry. */
+export const Refused: Story = {
+  args: { scenario: 'refused' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const details = await alertDetails(context.canvasElement)
+    await details.findByText(credentialExpiredMessage)
+    await expect(details.queryByRole('button', { name: 'Start thread' })).toBeNull()
+    await expect(details.queryByRole('button', { name: /^Retry/ })).toBeNull()
+  },
+}
+export const RetryAfterFailure: Story = {
+  args: { scenario: 'failed' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const details = await alertDetails(context.canvasElement)
+    await details.findByText('Fractal could not load threads.')
+    await userEvent.click(details.getByRole('button', { name: /^Retry/ }))
+    await waitFor(() => expect(context.canvasElement.querySelector('[data-testid="alert-details"] [data-thread-panel][aria-label="Worker tests"]')).not.toBeNull())
+    await expect(details.queryByText('Fractal could not load threads.')).toBeNull()
+  },
+}
+/** One marker at the section heading; the rows below it carry none of their own. */
+export const UpdatesPaused: Story = {
+  args: { scenario: 'offline' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const details = await alertDetails(context.canvasElement)
+    await expect(await details.findByRole('heading', { name: /^Threads, 2.*Updates paused$/ })).toBeTruthy()
+    const markers = () => context.canvasElement.querySelectorAll('[data-testid="alert-details"] [data-threads-paused]')
+    await expect(markers()).toHaveLength(1)
+    await userEvent.click(context.canvasElement.querySelector<HTMLElement>('[data-testid="alert-details"] [data-thread-panel][aria-label="Worker tests"] button[aria-expanded]')!)
+    await details.findByText('Worker tests pass on Linux. The macOS job is still running.')
+    await expect(markers()).toHaveLength(1)
+  },
+}
+export const UnconfirmedChange: Story = {
+  args: { placement: 'tab', scenario: 'unconfirmed' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await canvas.findByText('Fractal has not confirmed the previous rename.', {}, { timeout: 60_000 })
+    await userEvent.click(canvas.getByRole('button', { name: 'Retry rename' }))
+    await waitFor(() => expect(canvas.queryByText('Fractal has not confirmed the previous rename.')).toBeNull())
+  },
+}
 /** Close acts at once; the confirmed result names the thread, and the lifecycle button beside it now reads Reopen. */
 export const CloseConfirmation: Story = {
   args: { placement: 'tab' },

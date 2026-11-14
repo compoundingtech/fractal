@@ -2,7 +2,7 @@ import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundActio
 import * as Native from '@fractal/client/schema/read'
 import type { ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
-import { Option } from 'effect'
+import { Effect, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
@@ -54,7 +54,7 @@ export interface ThreadSource {
 }
 
 type Watch<Row> = (receive: (event: FollowEvent<ThreadWindow<Row>>) => void) => () => void
-interface ThreadWatches {
+export interface ThreadWatches {
   readonly summaries: (query: ThreadListQuery) => Watch<ThreadSummary> | undefined
   readonly detail: (id: string) => Watch<ThreadSummary>
   readonly timeline: (id: string) => Watch<ThreadTimelineEvent>
@@ -74,6 +74,7 @@ const refused = (error: unknown): Feed<never> => {
     reason,
     detail: reason === 'unauthorized' ? credentialExpiredMessage
       : reason === 'ungranted' ? 'This connection has no access to threads.' : 'Fractal could not load threads.',
+    ...(reason === 'failed' && error instanceof ClientError ? { code: error.response.code } : {}),
   })
 }
 
@@ -164,10 +165,17 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
             // A revoked read cannot be revived by a later frame from this demand.
             if (error instanceof ClientError && (error.status === 401 || error.status === 403)) active = false
             settings?.onFailure?.(error)
-            // A lost connection keeps what was observed, marked paused; only a refusal replaces it.
             const failure = refused(error)
-            get.setSelf(previous = previous._tag === 'Observed' && failure._tag === 'Unavailable' && failure.reason === 'failed'
-              ? { ...previous, freshness: 'stale' } : failure)
+            // Only a lost path to Fractal (the network, or a gateway that cannot reach the daemon) keeps what was
+            // observed, marked paused. A decode, validation or other HTTP failure is shown and recorded instead.
+            const lost = failure._tag === 'Unavailable' && failure.reason === 'failed'
+              && (error instanceof TypeError || (error instanceof ClientError && (error.status === 502 || error.status === 503 || error.status === 504)))
+            if (failure._tag === 'Unavailable' && failure.reason === 'failed' && !lost) {
+              Effect.runSync(Effect.logWarning('Thread read failed', {
+                error: error instanceof ClientError ? `${error.status} ${error.response.code}` : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+              }))
+            }
+            get.setSelf(previous = previous._tag === 'Observed' && lost ? { ...previous, freshness: 'stale' } : failure)
           }
         })
       }
@@ -219,7 +227,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     return reader(async signal => {
       const { value, snapshot } = await client.threadGet(threadId, { signal })
       const summary = Native.decodeUnknownSync(Native.ThreadSummary)(value)
-      if (summary.id !== threadId) throw new TypeError('Mismatched thread observation')
+      // Not a TypeError: that class means the network failed, and this observation is wrong, not paused.
+      if (summary.id !== threadId) throw new Error('Mismatched thread observation')
       signal.throwIfAborted()
       return { summary, snapshotId: snapshot.id }
     }, {
@@ -236,7 +245,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     return reader(async signal => {
       const { value } = await client.threadList({ limit: 40, ...query }, { signal })
       const page = Native.decodeUnknownSync(Native.ThreadSummaryPage)(value)
-      if ('agent_id' in query && page.items.some(item => item.agent_id !== query.agent_id)) throw new TypeError('Mismatched thread list')
+      if ('agent_id' in query && page.items.some(item => item.agent_id !== query.agent_id)) throw new Error('Mismatched thread list')
       signal.throwIfAborted()
       return page
     }, {

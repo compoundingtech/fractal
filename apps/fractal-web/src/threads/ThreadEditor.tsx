@@ -36,7 +36,6 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
     }
   }
   return <>
-    {pending ? <p role="status" {...stylex.props(styles.note)}>Sending…</p> : null}
     {error === undefined ? null : <p role="alert" {...stylex.props(styles.note, styles.error)}>{error}</p>}
     <DraftMessageComposer label={label} draft={draft.content} onDraftChange={content => setDraft(current => ({ ...current, content }))}
       onSubmit={() => { void submit() }} pending={pending} maxContentBytes={8192}
