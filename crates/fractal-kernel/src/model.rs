@@ -684,6 +684,23 @@ pub enum UsedMissionSpec {
 pub struct RetrySpec {
     pub attempts: u32,
     pub backoff_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule_ms: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error_tags: Vec<String>,
+}
+
+impl RetrySpec {
+    /// Delay after the given one-based failed attempt; the final scheduled delay repeats.
+    pub fn delay_ms(&self, attempt: u32) -> u64 {
+        self.schedule_ms
+            .get(attempt.saturating_sub(1) as usize)
+            .or_else(|| self.schedule_ms.last())
+            .copied()
+            .unwrap_or(self.backoff_ms)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -821,6 +838,9 @@ impl Default for RetrySpec {
         Self {
             attempts: 1,
             backoff_ms: 0,
+            schedule_ms: Vec::new(),
+            window_ms: None,
+            on_error_tags: Vec::new(),
         }
     }
 }

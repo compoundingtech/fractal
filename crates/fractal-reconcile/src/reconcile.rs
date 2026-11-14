@@ -3023,6 +3023,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             read("deadline/subscription-retries", &|| {
                 self.store.next_subscription_mission_retry_deadline()
             }),
+            read("deadline/step-retries", &|| {
+                self.store.next_step_retry_deadline(&self.host)
+            }),
             self.delayed_restarts
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -11941,7 +11944,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             changed |= self.store.retry_step(
                                 &view.subject,
                                 "the step repeat policy permits another attempt",
-                                step.spec.retry.backoff_ms,
+                                step.spec.retry.delay_ms(view.attempt),
                             )?;
                         }
                         return Ok(changed);
@@ -12048,10 +12051,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         || lane_blocked
                         || ready_missing_agent
                     {
-                        if view
-                            .not_before_unix_ms
-                            .is_some_and(|not_before| not_before > now_ms())
+                        if let Some(not_before) = view.not_before_unix_ms
+                            && not_before > now_ms()
                         {
+                            smallclaims::touched::note_due(not_before);
                             return Ok(changed);
                         }
                         if !self.step_dependencies_hold(run, &step, &views)? {
@@ -12744,6 +12747,36 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if view.attempt >= spec.retry.attempts {
             return Ok(true);
+        }
+        if let Some(window) = spec.retry.window_ms
+            && let Some(anchor) = self.store.first_step_attempt_started_at(&view.subject)?
+            && now_ms() > anchor.saturating_add(u128::from(window))
+        {
+            return Ok(true);
+        }
+        if spec.program.is_some() && !spec.retry.on_error_tags.is_empty() {
+            let mut before = None;
+            loop {
+                let journal = self.store.claims_for_subject_kind_at(
+                    &view.subject, program::JOURNAL_KIND, before, true, 64,
+                )?;
+                // Only a durable program exit is subject to the tag allowlist. Engine
+                // failures (including a host dying before reporting an exit) remain eligible.
+                if let Some(failure) = journal.claims.iter().find(|claim| {
+                    let fields = &claim.body["fields"];
+                    fields["attempt"].as_u64() == Some(u64::from(view.attempt))
+                        && fields["key"] == program::RESULT_KEY
+                        && fields["status"] == "failed"
+                }) {
+                    let tag = failure.body.pointer("/fields/error/_tag").and_then(Value::as_str);
+                    if !tag.is_some_and(|tag| spec.retry.on_error_tags.iter().any(|allowed| allowed == tag)) {
+                        return Ok(true);
+                    }
+                    break;
+                }
+                let Some(cursor) = journal.next_cursor else { break };
+                before = Some(cursor);
+            }
         }
         if spec.loop_spec.is_none() {
             return Ok(false);
